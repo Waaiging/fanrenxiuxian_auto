@@ -1,0 +1,37 @@
+{
+  "api_id": 0,
+  "api_hash": "YOUR_TELEGRAM_API_HASH",
+  "phone": "+10000000000",
+  "sessions": [
+    "telegram_cli_session"
+  ],
+  "files_directory": "./",
+  "monitor": {
+    "chat_id": 1680975844,
+    "topic_id": 7310786,
+    "keywords": [
+      "玄骨上人",
+      "极阴祖师",
+      "天道审判",
+      "天机异象",
+      "天机考验",
+      "洞府传音"
+    ],
+    "watch_bot": "fanrenxiuxian_bot",
+    "notify_users": [
+      "Waaiging",
+      "Gamling33",
+      "TitanCreeper",
+      "无咎子",
+      "缘生子",
+      "素缘子",
+      "厚土",
+      "寻真子",
+      "问心子",
+      "素心子"
+    ]
+  },
+  "notify_bot": "waaiging_bot",
+  "notify_target": "8219248252",
+  "notify_bot_token": "YOUR_TELEGRAM_BOT_TOKEN"
+}

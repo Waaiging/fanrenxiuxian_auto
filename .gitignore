@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Telegram sessions and local credentials
+*.session
+*.session-journal
+config.json
+config_sub.json
+*.pem
+*.key
+*.env
+.env
+
+# Runtime state and generated data
+*.log
+state_*.json
+status.json
+cultivation_stats_cache.json
+command_controls.json
+
+# Local backups, snapshots, and temporary scripts
+*.bak
+*.bak2
+*_remote.json
+*.remote.*
+_remote*/
+_vps*/
+_cultivation_remote_compare/
+_vps_state_before_*/
+.obsidian/
+
+# Scratch/one-off maintenance files
+check_sessions.py
+clean_log.py
+clear_history.py
+extracted_methods.py
+linux_manager.py
+manager.py
+scratch_*.py
+patch*.py
+fix*.py
+revert.py
+restore_log.py
+read_*.py
+update_*_remote.py
+gen_update_script.py
+temp_*.txt
+sftp_cmds.txt
+test_*.py
+
+# Manual/debug scripts and private operational notes
+star_gazing_manual.py
+run_star_gazing_auto.sh
+PROJECT_MEMORY.md
+PROJECT_CODE_AUDIT_*.md
+ANTY_MEMORY.md
+
+# Local editor/system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

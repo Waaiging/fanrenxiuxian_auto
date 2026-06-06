@@ -1,0 +1,9 @@
+{
+  "api_id": 0,
+  "api_hash": "YOUR_TELEGRAM_API_HASH",
+  "phone": "+10000000000",
+  "sessions": [
+    "sub_account_session"
+  ],
+  "files_directory": "./"
+}

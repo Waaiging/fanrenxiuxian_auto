@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>凡人修仙云端监控台</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0a0c10;
+            --card-bg: rgba(20, 25, 35, 0.7);
+            --accent-color: #00d2ff;
+            --accent-glow: rgba(0, 210, 255, 0.3);
+            --text-primary: #e0e6ed;
+            --text-secondary: #94a3b8;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 210, 255, 0.05) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(123, 31, 162, 0.05) 0%, transparent 20%);
+            min-height: 100vh;
+        }
+        header {
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            backdrop-filter: blur(10px);
+            position: sticky; top: 0; z-index: 100;
+        }
+        .logo { font-size: 1.5rem; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        main { padding: 2rem; max-width: 1400px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 2rem; }
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 20px; padding: 1.5rem; backdrop-filter: blur(12px); transition: all 0.3s ease; display: flex; flex-direction: column; }
+        .card:hover { border-color: var(--accent-color); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .account-name { font-size: 1.25rem; font-weight: 600; }
+        .status-badge { font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 12px; display: flex; align-items: center; gap: 4px; }
+        .status-online { background: rgba(16, 185, 129, 0.2); color: var(--success-color); }
+        .status-offline { background: rgba(239, 68, 68, 0.2); color: var(--danger-color); }
+        .status-paused { background: rgba(245, 158, 11, 0.2); color: var(--warning-color); }
+        
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-bottom: 1rem; }
+        .stat-item { background: rgba(255, 255, 255, 0.03); padding: 0.8rem; border-radius: 12px; border: 1px solid var(--border-color); }
+        .stat-label { font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
+        .stat-value { font-size: 0.95rem; font-weight: 600; }
+        .stat-value.active { color: var(--accent-color); }
+        .cultivation-panel { background: rgba(0,0,0,0.18); border: 1px solid var(--border-color); border-radius: 12px; padding: 0.8rem; margin-bottom: 1rem; }
+        .cultivation-title { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.45rem; font-weight: 600; border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; }
+        .cultivation-current { display: grid; grid-template-columns: 1fr auto; gap: 0.55rem; align-items: baseline; margin-bottom: 0.55rem; font-size: 0.82rem; }
+        .cultivation-level { color: var(--accent-color); font-weight: 700; }
+        .cultivation-value { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); font-weight: 600; }
+        .cultivation-root { grid-column: 1 / -1; color: #6ee7b7; font-size: 0.74rem; font-weight: 700; text-shadow: 0 0 10px rgba(16,185,129,0.28); }
+        .cultivation-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; margin-bottom: 0.55rem; display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+        .cultivation-days { display: grid; gap: 0.25rem; }
+        .cultivation-row { display: grid; grid-template-columns: 5.8rem 1fr 1fr 1fr; gap: 0.45rem; align-items: center; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text-secondary); }
+        .cultivation-row.today { color: var(--text-primary); font-weight: 700; }
+        .cultivation-gain { color: #34d399; text-align: right; }
+        .cultivation-loss { color: #f87171; text-align: right; }
+        .cultivation-net { color: #e5e7eb; text-align: right; }
+        .cultivation-net.positive { color: #22c55e; }
+        .cultivation-net.negative { color: #ef4444; }
+        .cultivation-empty { color: var(--text-secondary); font-size: 0.78rem; }
+
+        .cd-list { margin-top: 1rem; background: rgba(0,0,0,0.2); border-radius: 12px; padding: 0.8rem; font-size: 0.8rem; }
+        .cd-title { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.5rem; font-weight: 600; border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; }
+        .cd-item { display: flex; justify-content: space-between; margin-bottom: 0.3rem; font-family: 'JetBrains Mono', monospace; }
+        .cd-name { color: var(--text-secondary); }
+        .cd-time { color: var(--text-primary); }
+        .cd-time.ready { color: var(--success-color); font-weight: 600; }
+
+        .command-panel { margin-top: 1rem; background: rgba(0,0,0,0.22); border: 1px solid var(--border-color); border-radius: 12px; padding: 0.85rem; }
+        .command-panel-title { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.6rem; font-weight: 600; border-bottom: 1px solid var(--border-color); padding-bottom: 0.35rem; display: flex; justify-content: space-between; gap: 0.5rem; }
+        .command-launcher-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.55rem; }
+        .command-launcher { appearance: none; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.04); color: var(--text-primary); text-align: left; padding: 0.6rem 0.65rem; cursor: pointer; min-width: 0; transition: border-color 0.2s, background 0.2s, transform 0.2s; }
+        .command-launcher:hover { border-color: rgba(0,210,255,0.45); background: rgba(0,210,255,0.08); transform: translateY(-1px); }
+        .command-launcher-name { display: flex; justify-content: space-between; gap: 0.5rem; align-items: center; font-size: 0.82rem; font-weight: 700; min-width: 0; }
+        .command-launcher-name span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-launcher-count { color: var(--accent-color); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; white-space: nowrap; }
+        .command-launcher-meta { margin-top: 0.3rem; display: flex; justify-content: space-between; gap: 0.45rem; color: var(--text-secondary); font-size: 0.68rem; min-width: 0; }
+        .command-launcher-next { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-launcher-ready { color: #34d399; white-space: nowrap; }
+        .command-group { font-size: 0.78rem; color: var(--accent-color); letter-spacing: 0; padding: 0.9rem 0 0.35rem; font-weight: 800; border-top: 1px solid rgba(255,255,255,0.06); }
+        .command-group:first-child { border-top: 0; padding-top: 0; }
+        .command-row { display: grid; grid-template-columns: minmax(13rem, 1.7fr) 5.8rem 7rem minmax(9rem, 1fr) 4.8rem; gap: 0.75rem; align-items: center; padding: 0.68rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.84rem; }
+        .command-row:first-child { border-top: 0; }
+        .command-main { min-width: 0; display: flex; flex-direction: column; gap: 0.22rem; }
+        .command-name { font-weight: 800; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
+        .command-code { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-status { justify-self: start; border-radius: 999px; padding: 0.2rem 0.55rem; font-size: 0.74rem; font-weight: 800; white-space: nowrap; }
+        .command-remaining { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); white-space: nowrap; font-size: 0.82rem; }
+        .command-at { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-control { justify-self: end; display: inline-flex; align-items: center; gap: 0.34rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; }
+        .command-toggle { width: 2.35rem; height: 1.25rem; border-radius: 999px; border: 1px solid rgba(255,255,255,0.12); background: rgba(16,185,129,0.22); position: relative; cursor: pointer; transition: background 0.18s, border-color 0.18s; flex: 0 0 auto; }
+        .command-toggle::after { content: ""; position: absolute; top: 0.16rem; left: 1.18rem; width: 0.86rem; height: 0.86rem; border-radius: 50%; background: #d1fae5; transition: left 0.18s, background 0.18s; }
+        .command-toggle.paused { background: rgba(239,68,68,0.24); border-color: rgba(248,113,113,0.45); }
+        .command-toggle.paused::after { left: 0.18rem; background: #fecaca; }
+        .tone-ready .command-status { background: rgba(16,185,129,0.18); color: #34d399; }
+        .tone-cooldown .command-status { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .tone-active .command-status { background: rgba(0,210,255,0.16); color: var(--accent-color); }
+        .tone-done .command-status { background: rgba(148,163,184,0.16); color: #cbd5e1; }
+        .tone-watch .command-status { background: rgba(59,130,246,0.16); color: #93c5fd; }
+        .tone-manual .command-status { background: rgba(168,85,247,0.16); color: #c4b5fd; }
+        .tone-flow .command-status { background: rgba(236,72,153,0.16); color: #f9a8d4; }
+        .tone-paused .command-status { background: rgba(239,68,68,0.18); color: #fca5a5; }
+        .tone-unknown .command-status { background: rgba(100,116,139,0.16); color: #94a3b8; }
+        .command-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.66); backdrop-filter: blur(4px); z-index: 1100; display: none; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s ease; padding: 1rem; }
+        .command-modal-overlay.show { display: flex; opacity: 1; }
+        .command-modal { width: min(920px, 96vw); max-height: min(760px, 92vh); display: flex; flex-direction: column; background: rgba(20,25,35,0.96); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 18px 48px rgba(0,0,0,0.55); overflow: hidden; }
+        .command-modal-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 1rem 1.1rem; border-bottom: 1px solid var(--border-color); }
+        .command-modal-title { min-width: 0; }
+        .command-modal-title strong { display: block; color: var(--accent-color); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-modal-title span { display: block; color: var(--text-secondary); font-size: 0.72rem; margin-top: 0.2rem; }
+        .command-modal-close { cursor: pointer; color: var(--text-secondary); font-size: 1.35rem; line-height: 1; padding: 0.2rem 0.35rem; }
+        .command-modal-close:hover { color: var(--text-primary); }
+        .command-modal-body { overflow: auto; padding: 1rem 1.1rem 1.1rem; }
+        .command-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.8rem; align-items: center; }
+        .command-toolbar-btn { border: 1px solid var(--border-color); background: rgba(255,255,255,0.06); color: var(--text-primary); border-radius: 8px; padding: 0.42rem 0.65rem; cursor: pointer; font-size: 0.74rem; }
+        .command-toolbar-btn:hover { border-color: rgba(0,210,255,0.45); }
+        .command-visibility { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; margin-bottom: 0.85rem; background: rgba(0,0,0,0.16); }
+        .command-visibility summary { cursor: pointer; color: var(--text-secondary); font-size: 0.76rem; font-weight: 700; padding: 0.65rem 0.75rem; }
+        .command-visibility-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.4rem 0.65rem; padding: 0 0.75rem 0.75rem; }
+        .command-visibility-item { display: flex; align-items: center; gap: 0.45rem; min-width: 0; color: var(--text-secondary); font-size: 0.73rem; }
+        .command-visibility-item input { accent-color: var(--accent-color); }
+        .command-visibility-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .command-list-empty { color: var(--text-secondary); text-align: center; padding: 1.4rem 0; border: 1px dashed rgba(255,255,255,0.12); border-radius: 8px; font-size: 0.82rem; }
+
+        .controls { margin-top: auto; padding-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .btn { flex: 1 1 5.5rem; padding: 0.5rem; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        .btn-start { background: var(--success-color); color: white; }
+        .btn-stop { background: var(--danger-color); color: white; }
+        .btn-restart { background: var(--warning-color); color: white; }
+        .btn-clear { background: #334155; color: white; }
+        .btn:hover { filter: brightness(1.2); }
+
+        .log-section { grid-column: 1 / -1; background: var(--card-bg); border-radius: 20px; height: 520px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-color); }
+        .log-header { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border-color); display: flex; gap: 0.5rem; }
+        .log-tab { padding: 0.4rem 1rem; border-radius: 8px; cursor: pointer; font-size: 0.85rem; color: var(--text-secondary); }
+        .log-tab.active { background: var(--accent-color); color: white; }
+        .log-tools { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color); display: grid; grid-template-columns: minmax(180px, 260px) 1fr auto; gap: 0.75rem; align-items: end; }
+        .log-field { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+        .log-field label { color: var(--text-secondary); font-size: 0.72rem; font-weight: 600; }
+        .log-select, .log-input { width: 100%; background: rgba(0,0,0,0.32); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 0.5rem 0.65rem; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; outline: none; }
+        .log-select:focus, .log-input:focus { border-color: var(--accent-color); box-shadow: 0 0 0 2px var(--accent-glow); }
+        .log-search-row { display: flex; gap: 0.5rem; align-items: center; }
+        .log-search-row .log-input { flex: 1; }
+        .log-tool-btn { border: 1px solid var(--border-color); background: rgba(255,255,255,0.06); color: var(--text-primary); border-radius: 8px; padding: 0.5rem 0.75rem; cursor: pointer; font-size: 0.78rem; white-space: nowrap; }
+        .log-tool-btn.primary { border-color: rgba(0, 210, 255, 0.45); background: rgba(0, 210, 255, 0.16); color: var(--accent-color); }
+        .log-tool-btn:hover { filter: brightness(1.2); }
+        .log-filter-summary { color: var(--text-secondary); font-size: 0.76rem; line-height: 1.4; text-align: right; min-width: 10rem; }
+        .log-container { flex: 1; padding: 1rem; background: #000; color: #adbac7; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.55; overflow-y: auto; }
+        .log-hint { color: #64748b; margin-bottom: 0.75rem; white-space: pre-wrap; }
+        .log-entry { white-space: pre-wrap; border: 1px solid rgba(148, 163, 184, 0.12); border-left-width: 4px; border-radius: 8px; padding: 0.65rem 0.75rem; margin-bottom: 0.55rem; background: rgba(148, 163, 184, 0.06); color: #cbd5e1; }
+        .log-entry.log-out { background: rgba(16, 185, 129, 0.13); border-color: rgba(16, 185, 129, 0.34); border-left-color: #10b981; color: #bbf7d0; }
+        .log-entry.log-in { background: rgba(59, 130, 246, 0.13); border-color: rgba(59, 130, 246, 0.34); border-left-color: #3b82f6; color: #bfdbfe; }
+        .log-entry.log-warn { background: rgba(245, 158, 11, 0.14); border-color: rgba(245, 158, 11, 0.34); border-left-color: #f59e0b; color: #fde68a; }
+        .log-entry.log-error { background: rgba(239, 68, 68, 0.14); border-color: rgba(239, 68, 68, 0.38); border-left-color: #ef4444; color: #fecaca; }
+        .log-empty { color: #64748b; padding: 1rem 0; }
+        @media (max-width: 800px) {
+            main { grid-template-columns: 1fr; padding: 1rem; }
+            .log-tools { grid-template-columns: 1fr; align-items: stretch; }
+            .log-filter-summary { text-align: left; min-width: 0; }
+            .command-row { grid-template-columns: 1fr auto; gap: 0.45rem 0.65rem; font-size: 0.82rem; }
+            .command-status, .command-control { justify-self: end; }
+            .command-remaining, .command-at { grid-column: 1 / -1; }
+            .command-modal { max-height: 94vh; }
+            .command-modal-header { padding: 0.85rem; }
+            .command-modal-body { padding: 0.85rem; }
+        }
+        
+        .live-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; animation: pulse 2s infinite; }
+        .dot-online { background: var(--success-color); }
+        .dot-offline { background: var(--danger-color); }
+        .dot-paused { background: var(--warning-color); }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+
+        /* 身外化身精致面板样式 */
+        .avatar-panel {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px dashed rgba(0, 210, 255, 0.25);
+            border-radius: 14px;
+            padding: 0.9rem;
+            margin-bottom: 1rem;
+            box-shadow: inset 0 0 12px rgba(0, 210, 255, 0.03);
+            background-image: linear-gradient(135deg, rgba(0, 210, 255, 0.02) 0%, transparent 100%);
+        }
+        .avatar-title {
+            font-size: 0.76rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.65rem;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.35rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .avatar-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 0.65rem;
+        }
+        .avatar-item {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 0.55rem 0.45rem;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            transition: all 0.2s ease;
+        }
+        .avatar-item:hover {
+            border-color: rgba(0, 210, 255, 0.4);
+            box-shadow: 0 0 8px rgba(0, 210, 255, 0.1);
+            background: rgba(0, 0, 0, 0.32);
+        }
+        .avatar-name {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .avatar-level {
+            font-size: 0.74rem;
+            color: var(--accent-color);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            background: rgba(0, 210, 255, 0.08);
+            padding: 0.1rem 0.3rem;
+            border-radius: 4px;
+            display: inline-block;
+            margin: 0 auto;
+        }
+        .avatar-exp {
+            font-size: 0.68rem;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .avatar-root {
+            font-size: 0.66rem;
+            color: #6ee7b7;
+            font-weight: 700;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-shadow: 0 0 8px rgba(16,185,129,0.24);
+        }
+        .avatar-status {
+            font-size: 0.66rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+        .avatar-status-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .avatar-status-active {
+            color: var(--success-color);
+        }
+        .avatar-status-active .avatar-status-dot {
+            background: var(--success-color);
+            box-shadow: 0 0 4px var(--success-color);
+        }
+        .avatar-status-idle {
+            color: var(--text-secondary);
+        }
+        .avatar-status-idle .avatar-status-dot {
+            background: var(--text-secondary);
+        }
+
+        .avatar-item {
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .avatar-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">✨ 凡人修仙云端监控台</div>
+        <div id="server-time" style="font-family: 'JetBrains Mono'">Loading...</div>
+    </header>
+
+    <main>
+        <div id="account-cards" style="display: contents;"></div>
+        <div class="log-section">
+            <div class="log-header">
+                <div class="log-tab active" onclick="switchLog(event, 'main')">主号日志</div>
+                <div class="log-tab" onclick="switchLog(event, 'sub')">副号日志</div>
+                <div class="log-tab" onclick="switchLog(event, 'xiaohao')">小号日志</div>
+            </div>
+            <div class="log-tools">
+                <div class="log-field">
+                    <label for="log-tag-select">标签</label>
+                    <select id="log-tag-select" class="log-select" onchange="changeLogTag()">
+                        <option value="">全部标签</option>
+                    </select>
+                </div>
+                <div class="log-field">
+                    <label for="log-search-input">搜索</label>
+                    <div class="log-search-row">
+                        <input id="log-search-input" class="log-input" type="search" placeholder="输入关键词后回车或点击搜索">
+                        <button class="log-tool-btn primary" onclick="applyLogSearch()">搜索</button>
+                        <button class="log-tool-btn" onclick="resetLogFilters()">重置</button>
+                    </div>
+                </div>
+                <div id="log-filter-summary" class="log-filter-summary">全部日志</div>
+            </div>
+            <div class="log-container" id="log-content">加载中...</div>
+        </div>
+    </main>
+
+    <script>
+        let currentLogAccount = 'main';
+        let currentLogTag = '';
+        let currentLogSearch = '';
+        let logFetchController = null;
+        const LOG_PAGE_SIZE = 80;
+        let logState = {
+            lines: [],
+            before: null,
+            hasMore: false,
+            loadingOlder: false,
+            total: 0,
+            matched: 0
+        };
+        const COMMAND_VISIBILITY_PREFIX = 'xiuxian.commandVisibility.v1.';
+        let commandModalKey = '';
+
+        async function doAction(acc, act) {
+            try {
+                if (act === 'clear' && !confirm('确认清空该账号在目标群里的所有自己发言？清屏会在后台执行，期间该账号会短暂停止并自动恢复。')) return;
+                const r = await fetch(`/api/action/${acc}/${act}`, {method:'POST'});
+                const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${r.status}`);
+                    return;
+                }
+                if (act === 'clear') {
+                    alert(data.msg || '清屏已开始，后台处理中。');
+                    if (data.job_id) pollClearJob(data.job_id);
+                    return;
+                }
+                setTimeout(updateStatus, 1000);
+            } catch(e) { console.error('Action failed:', e); }
+        }
+
+        async function pollClearJob(jobId) {
+            try {
+                const r = await fetch(`/api/clear-status/${jobId}`, {cache: 'no-store'});
+                const data = await r.json();
+                if (data.status === 'running') {
+                    setTimeout(() => pollClearJob(jobId), 3000);
+                    return;
+                }
+                alert(data.msg || (data.success ? '清屏完成' : '清屏失败'));
+                updateStatus();
+                updateLogs(true);
+            } catch(e) {
+                setTimeout(() => pollClearJob(jobId), 5000);
+            }
+        }
+
+        function formatTime(t, isDate, isBool) {
+            if (isBool) {
+                return t ? "✅ 是" : "❌ 否";
+            }
+            if (!t) return "未执行";
+            if (typeof t === 'number') return t + "s";
+            try {
+                // 日期字段（YYYY-MM-DD格式）特殊处理
+                if (isDate && /^\d{4}-\d{2}-\d{2}$/.test(t)) {
+                    const today = new Date();
+                    const todayStr = today.getFullYear() + '-' + 
+                        String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+                        String(today.getDate()).padStart(2, '0');
+                    if (t === todayStr) return "✅ 已执行";
+                    return "📅 " + t;  // 显示日期
+                }
+                const target = new Date(t.replace(/-/g, '/'));
+                const diff = Math.floor((target - new Date()) / 1000);
+                if (diff <= 0) return "就绪";
+                const h = Math.floor(diff/3600);
+                const m = Math.floor((diff%3600)/60);
+                const s = diff % 60;
+                return `${h}h ${m}m ${s}s`;
+            } catch { return t; }
+        }
+
+        function formatNumber(value) {
+            const n = Number(value || 0);
+            if (!Number.isFinite(n)) return '0';
+            return n.toLocaleString('zh-CN');
+        }
+
+        function formatSigned(value) {
+            const n = Number(value || 0);
+            const sign = n > 0 ? '+' : '';
+            return `${sign}${formatNumber(n)}`;
+        }
+
+        function renderCultivation(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot) {
+            const data = cultivation || {};
+            const profile = data.profile || {};
+            const days = Array.isArray(data.days) ? data.days.slice(0, 7) : [];
+            // 优先使用 state 中的境界和修为（更准确）
+            const level = stateLevel || profile.level || '未获取';
+            const spiritRoot = stateSpiritRoot || profile.spirit_root || '未获取';
+            // 修为：state 是实时查询结果；日志 profile 只作为缺失时兜底。
+            const profileCurrent = profile.estimated_current !== null && profile.estimated_current !== undefined
+                ? profile.estimated_current : (profile.current || 0);
+            const profileRequired = profile.required || 0;
+            const stateCurrentNum = Number(stateCurrent);
+            const stateTotalNum = Number(stateTotal);
+            const hasStateFields = stateCurrent !== undefined || stateTotal !== undefined;
+            const hasValidStateExp = Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
+                && Number.isFinite(stateTotalNum) && stateTotalNum > 0;
+            const hasProfileExp = profileCurrent !== null && profileCurrent !== undefined
+                && Number.isFinite(Number(profileCurrent)) && Number(profileRequired) > 0;
+            const displayedCurrent = hasValidStateExp ? stateCurrentNum : (!hasStateFields && hasProfileExp ? profileCurrent : null);
+            const displayedRequired = hasValidStateExp ? stateTotalNum : (!hasStateFields && hasProfileExp ? profileRequired : null);
+            const hasCultivationValue = displayedCurrent !== null && displayedCurrent !== undefined && Number.isFinite(Number(displayedCurrent));
+            const currentText = hasCultivationValue
+                ? `${formatNumber(displayedCurrent)} / ${formatNumber(displayedRequired)}`
+                : '未获取';
+            const processedUntil = data.processed_until || '--';
+            const lastChangeAt = data.last_change_at || '--';
+
+            const rows = days.length ? days.map(day => {
+                const net = Number(day.net || 0);
+                const netClass = net > 0 ? 'positive' : (net < 0 ? 'negative' : '');
+                const label = day.date === (data.today || {}).date ? '今日' : day.date.slice(5);
+                return `
+                    <div class="cultivation-row ${label === '今日' ? 'today' : ''}">
+                        <span>${label}</span>
+                        <span class="cultivation-gain">+${formatNumber(day.gain)}</span>
+                        <span class="cultivation-loss">-${formatNumber(day.loss)}</span>
+                        <span class="cultivation-net ${netClass}">${formatSigned(net)}</span>
+                    </div>
+                `;
+            }).join('') : '<div class="cultivation-empty">暂无可统计的修为记录</div>';
+
+            return `
+                <div class="cultivation-panel">
+                    <div class="cultivation-title">修为统计</div>
+                    <div class="cultivation-current">
+                        <span class="cultivation-level">${level}</span>
+                        <span class="cultivation-value">${currentText}</span>
+                        <span class="cultivation-root">灵根 ${spiritRoot}</span>
+                    </div>
+                    <div class="cultivation-meta">
+                        <span>统计到 ${processedUntil}</span>
+                        <span>最新变动 ${lastChangeAt}</span>
+                    </div>
+                    <div class="cultivation-days">
+                        <div class="cultivation-row">
+                            <span>日期</span>
+                            <span class="cultivation-gain">增加</span>
+                            <span class="cultivation-loss">减少</span>
+                            <span class="cultivation-net">净值</span>
+                        </div>
+                        ${rows}
+                    </div>
+                </div>
+            `;
+        }
+
+        function mainProgressText(id, state) {
+            const s = state || {};
+            if (id !== 'main') return s.cloud_stairs_progress || s.date || '活跃';
+
+            const rawProgress = String(s.cloud_stairs_progress || '').trim();
+            const progressMatch = rawProgress.match(/(\d+)\s*\/\s*(\d+)/);
+            const progressText = progressMatch ? `${progressMatch[1]}/${progressMatch[2]}阶` : rawProgress.replace(/\s+/g, '');
+            const weeksMatch = String(s.completed_weeks || '').match(/(\d+)/);
+            if (weeksMatch && progressText) {
+                return `第${weeksMatch[1]}轮 ${progressText}`;
+            }
+            return progressText || s.date || '活跃';
+        }
+
+        function commandIdentityKey(account, identity) {
+            return `${account}:${identity || '未知身份'}`;
+        }
+
+        function commandItemKey(item) {
+            return [
+                item.group || '其他',
+                item.command || '',
+                item.label || item.command || ''
+            ].join('\u001f');
+        }
+
+        function commandVisibilityStoreKey(panelKey) {
+            return COMMAND_VISIBILITY_PREFIX + panelKey;
+        }
+
+        function loadCommandVisibility(panelKey) {
+            try {
+                return JSON.parse(localStorage.getItem(commandVisibilityStoreKey(panelKey)) || '{}') || {};
+            } catch {
+                return {};
+            }
+        }
+
+        function saveCommandVisibility(panelKey, data) {
+            localStorage.setItem(commandVisibilityStoreKey(panelKey), JSON.stringify(data || {}));
+        }
+
+        function isCommandVisible(panelKey, item) {
+            const visibility = loadCommandVisibility(panelKey);
+            return visibility[commandItemKey(item)] !== false;
+        }
+
+        function visibleCommands(panelKey, commands) {
+            return (Array.isArray(commands) ? commands : []).filter(item => isCommandVisible(panelKey, item));
+        }
+
+        function parseDashboardDate(value) {
+            if (!value || typeof value !== 'string') return null;
+            const date = new Date(value.replace(/-/g, '/'));
+            return Number.isNaN(date.getTime()) ? null : date;
+        }
+
+        function commandSummary(commands) {
+            const list = Array.isArray(commands) ? commands : [];
+            const ready = list.find(item => ['ready', 'active', 'watch'].includes(item.tone || ''));
+            if (ready) return `${ready.label || ready.command}：${ready.status || '就绪'}`;
+
+            const timed = list
+                .map(item => ({item, at: parseDashboardDate(item.at || '')}))
+                .filter(row => row.at)
+                .sort((a, b) => a.at - b.at);
+            if (timed.length) {
+                const item = timed[0].item;
+                return `${item.label || item.command}：${item.remaining || item.status || '--'}`;
+            }
+
+            const first = list[0];
+            return first ? `${first.label || first.command}：${first.status || '--'}` : '无可见指令';
+        }
+
+        function renderCommandRows(panelKey, commands) {
+            const modalData = window.commandPanelDataMap?.[panelKey] || {};
+            const account = modalData.account || '';
+            const identity = modalData.panel?.identity || '主魂';
+            let lastGroup = '';
+            return (commands || []).map(item => {
+                const group = item.group || '其他';
+                const groupHeader = group !== lastGroup ? `<div class="command-group">${escapeHtml(group)}</div>` : '';
+                lastGroup = group;
+                const tone = String(item.tone || 'unknown').replace(/[^a-z0-9_-]/gi, '') || 'unknown';
+                const detail = item.detail || '';
+                const at = item.at || '';
+                const bottomText = at || detail || '';
+                const paused = Boolean(item.control_disabled);
+                const controlKey = item.control_key || commandItemKey(item);
+                const controlLabel = paused ? '暂停' : '启用';
+                const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
+                return `
+                    ${groupHeader}
+                    <div class="command-row tone-${tone}">
+                        <div class="command-main">
+                            <span class="command-name" title="${escapeHtml(item.label || item.command || '')}">${escapeHtml(item.label || item.command || '')}</span>
+                            <span class="command-code" title="${escapeHtml(item.command || '')}">${escapeHtml(item.command || '')}</span>
+                        </div>
+                        <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
+                        <div class="command-remaining">${escapeHtml(item.remaining || '--')}</div>
+                        <div class="command-at" title="${escapeHtml(bottomText)}">${escapeHtml(bottomText || '--')}</div>
+                        <div class="command-control" title="${escapeHtml(controlTitle)}">
+                            <button class="command-toggle ${paused ? 'paused' : ''}" onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'})" aria-label="${escapeHtml(controlTitle)}"></button>
+                            <span>${controlLabel}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderCommandPanels(account, panels) {
+            const list = Array.isArray(panels) ? panels : [];
+            if (!list.length) {
+                return `
+                    <div class="command-panel">
+                        <div class="command-panel-title"><span>指令状态</span><span>暂无数据</span></div>
+                    </div>
+                `;
+            }
+            const identities = list.map(panel => {
+                const commands = Array.isArray(panel.commands) ? panel.commands : [];
+                const key = commandIdentityKey(account, panel.identity || '未知身份');
+                window.commandPanelDataMap = window.commandPanelDataMap || {};
+                window.commandPanelDataMap[key] = {account, panel};
+                const shown = visibleCommands(key, commands);
+                const readyCount = shown.filter(item => ['ready', 'active', 'watch'].includes(item.tone || '')).length;
+                return `
+                    <button class="command-launcher" onclick="showCommandModal('${escapeJs(key)}')">
+                        <div class="command-launcher-name">
+                            <span>${escapeHtml(panel.identity || '未知身份')}</span>
+                            <span class="command-launcher-count">${shown.length}/${commands.length}</span>
+                        </div>
+                        <div class="command-launcher-meta">
+                            <span class="command-launcher-next" title="${escapeHtml(commandSummary(shown))}">${escapeHtml(commandSummary(shown))}</span>
+                            <span class="command-launcher-ready">${readyCount} 就绪</span>
+                        </div>
+                    </button>
+                `;
+            }).join('');
+            return `
+                <div class="command-panel">
+                    <div class="command-panel-title">
+                        <span>指令状态</span>
+                        <span>点击身份打开</span>
+                    </div>
+                    <div class="command-launcher-grid">${identities}</div>
+                </div>
+            `;
+        }
+
+        function renderCommandModal(panelKey) {
+            const data = window.commandPanelDataMap && window.commandPanelDataMap[panelKey];
+            if (!data || !data.panel) return;
+
+            const panel = data.panel;
+            const commands = Array.isArray(panel.commands) ? panel.commands : [];
+            const shown = visibleCommands(panelKey, commands);
+            const hiddenCount = commands.length - shown.length;
+            const pausedCount = commands.filter(item => item.control_disabled).length;
+            const title = `${panel.identity || '未知身份'} 指令`;
+            const subtitle = `${shown.length} 条显示，${hiddenCount} 条隐藏，${pausedCount} 条暂停，共 ${commands.length} 条`;
+
+            const visibility = loadCommandVisibility(panelKey);
+            const switches = commands.map(item => {
+                const itemKey = commandItemKey(item);
+                const checked = visibility[itemKey] !== false;
+                const label = item.label || item.command || '未命名指令';
+                return `
+                    <label class="command-visibility-item" title="${escapeHtml(item.command || label)}">
+                        <input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleCommandVisibility('${escapeJs(panelKey)}', '${escapeJs(itemKey)}', this.checked)">
+                        <span class="command-visibility-label">${escapeHtml(label)}</span>
+                    </label>
+                `;
+            }).join('');
+
+            document.getElementById('commandModalTitle').innerHTML = `
+                <strong>${escapeHtml(title)}</strong>
+                <span>${escapeHtml(subtitle)}</span>
+            `;
+            document.getElementById('commandModalBody').innerHTML = `
+                <div class="command-toolbar">
+                    <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', true)">显示全部</button>
+                    <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', false)">隐藏全部</button>
+                </div>
+                <details class="command-visibility">
+                    <summary>显示设置</summary>
+                    <div class="command-visibility-grid">${switches || '<span class="command-visibility-item">暂无可配置指令</span>'}</div>
+                </details>
+                ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份的指令都已隐藏。</div>'}
+            `;
+        }
+
+        function showCommandModal(panelKey) {
+            commandModalKey = panelKey;
+            renderCommandModal(panelKey);
+            document.getElementById('commandModalOverlay').classList.add('show');
+        }
+
+        function closeCommandModal() {
+            commandModalKey = '';
+            document.getElementById('commandModalOverlay').classList.remove('show');
+        }
+
+        function toggleCommandVisibility(panelKey, itemKey, visible) {
+            const data = loadCommandVisibility(panelKey);
+            data[itemKey] = Boolean(visible);
+            saveCommandVisibility(panelKey, data);
+            renderCommandModal(panelKey);
+        }
+
+        function setAllCommandVisibility(panelKey, visible) {
+            const data = {};
+            const panel = window.commandPanelDataMap?.[panelKey]?.panel;
+            const commands = Array.isArray(panel?.commands) ? panel.commands : [];
+            for (const item of commands) data[commandItemKey(item)] = Boolean(visible);
+            saveCommandVisibility(panelKey, data);
+            renderCommandModal(panelKey);
+        }
+
+        async function toggleCommandPause(panelKey, account, identity, controlKey, command, label, disabled) {
+            try {
+                const r = await fetch('/api/command-control', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        account,
+                        identity,
+                        control_key: controlKey,
+                        command,
+                        label,
+                        disabled: Boolean(disabled)
+                    })
+                });
+                const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${r.status}`);
+                    return;
+                }
+                await updateStatus();
+                if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            } catch (e) {
+                console.error('Command pause toggle failed:', e);
+                alert('指令开关请求失败。');
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                const r = await fetch('/api/status', {cache: 'no-store'});
+                const data = await r.json();
+                document.getElementById('server-time').innerText = data.server_time;
+                
+                let html = '';
+                window.commandPanelDataMap = {};
+                for (const [id, acc] of Object.entries(data.accounts)) {
+                    const s = acc.state || {};
+                    const isAlive = acc.is_alive;
+                    
+                    function prettyTime(t, isDate) {
+                        if (!t || t === 0 || t === "0" || t === "---") return "未执行";
+                        try {
+                            // 日期字段（YYYY-MM-DD格式）特殊处理
+                            if (isDate && /^\d{4}-\d{2}-\d{2}$/.test(t.toString())) {
+                                const today = new Date();
+                                const todayStr = today.getFullYear() + '-' + 
+                                    String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+                                    String(today.getDate()).padStart(2, '0');
+                                if (t === todayStr) return "✅ 已执行";
+                                return "📅 " + t;
+                            }
+                            // 统一转化为 Date 对象，兼容 ISO 和 YYYY-MM-DD
+                            const date = new Date(t.toString().replace(/-/g, '/')); 
+                            if (isNaN(date.getTime())) return t; 
+                            
+                            const pad = (n) => n.toString().padStart(2, '0');
+                            const Y = date.getFullYear();
+                            const M = pad(date.getMonth() + 1);
+                            const D = pad(date.getDate());
+                            const h = pad(date.getHours());
+                            const m = pad(date.getMinutes());
+                            const s = pad(date.getSeconds());
+                            
+                            return `${Y}-${M}-${D} ${h}:${m}:${s}`;
+                        } catch(e) { return t; }
+                    }
+
+                    const commandPanelHtml = renderCommandPanels(id, acc.command_panels || []);
+
+                    let avatarHtml = '';
+                    if (s.avatars && Object.keys(s.avatars).length > 0) {
+                        const avatarItems = Object.entries(s.avatars).map(([name, val]) => {
+                            const level = val.level || '未获取';
+                            const spiritRoot = val.spirit_root || '灵根未获取';
+                            const avatarCurrent = Number(val.current_exp);
+                            const avatarTotal = Number(val.total_exp);
+                            const expText = Number.isFinite(avatarCurrent) && Number.isFinite(avatarTotal) && avatarTotal > 0
+                                ? `${formatNumber(avatarCurrent)} / ${formatNumber(avatarTotal)}`
+                                : '修为未获取';
+                            
+                            // 1. 判断是否当前附身
+                            const isAttached = s.current_identity === name;
+                            
+                            // 2. 解析分身状态：找最近到期的指令
+                            let statusText = '空闲';
+                            let statusClass = 'avatar-status-idle';
+                            const now = new Date();
+
+                            // 收集所有有倒计时的指令
+                            const timers = [];
+                            if (val.in_deep_meditation && val.deep_meditation_end_time) {
+                                try {
+                                    const t = new Date(val.deep_meditation_end_time.replace(/-/g, '/'));
+                                    if (t > now) timers.push({ label: '深度闭关', time: t });
+                                } catch(e){}
+                            }
+                            const timerFields = [
+                                ['next_field_training_time', '野外历练'],
+                                ['next_dream_map_time', '入梦寻图'],
+                                ['next_heart_trial_time', '共历心劫'],
+                                ['next_star_attraction_time', '星辰牵引'],
+                                ['next_star_gazing_time', '观星'],
+                                ['next_star_shift_time', '改换星移'],
+                            ];
+                            for (const [key, label] of timerFields) {
+                                if (val[key]) {
+                                    try {
+                                        const t = new Date(val[key].replace(/-/g, '/'));
+                                        if (t > now) timers.push({ label, time: t });
+                                    } catch(e){}
+                                }
+                            }
+
+                            if (timers.length > 0) {
+                                // 取最近到期的
+                                timers.sort((a, b) => a.time - b.time);
+                                const nearest = timers[0];
+                                const diff = Math.floor((nearest.time - now) / 1000);
+                                if (diff > 0) {
+                                    const h = Math.floor(diff/3600);
+                                    const m = Math.floor((diff%3600)/60);
+                                    const s = diff % 60;
+                                    statusText = `${nearest.label} (${h}h ${m}m ${s}s)`;
+                                    statusClass = 'avatar-status-active';
+                                }
+                            }
+                            
+                            // 附身闪烁标识
+                            const attachedTag = isAttached 
+                                ? `<div style="font-size: 0.65rem; color: #00d2ff; font-weight: 600; margin-top: 0.1rem; animation: pulse 2s infinite;">🔮 附身中</div>` 
+                                : '';
+
+                            return `
+                                <div class="avatar-item" style="${isAttached ? 'border-color: rgba(0, 210, 255, 0.6); box-shadow: 0 0 10px rgba(0, 210, 255, 0.2); background: rgba(0, 210, 255, 0.03);' : ''}">
+                                    <div class="avatar-name" title="${name}${val.nickname ? ' (' + val.nickname + ')' : ''}">👤 ${name}</div>
+                                    ${val.nickname ? `<div style="font-size: 0.68rem; color: var(--text-secondary); line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${val.nickname}">${val.nickname}</div>` : ''}
+                                    ${attachedTag}
+                                    <div class="avatar-level" style="margin-top: 0.2rem;">${level}</div>
+                                    <div class="avatar-root" title="${spiritRoot}">${spiritRoot}</div>
+                                    <div class="avatar-exp" title="${expText}">${expText}</div>
+                                    <div class="avatar-status ${statusClass}" style="margin-top: 0.1rem;">
+                                        <span class="avatar-status-dot"></span>${statusText}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('');
+                        avatarHtml = `
+                            <div class="avatar-panel">
+                                <div class="avatar-title">
+                                    <span>身外化身 (${Object.keys(s.avatars).length})</span>
+                                    <span style="color: var(--accent-color); font-size: 0.65rem;">🔮 平行挂机中</span>
+                                </div>
+                                <div class="avatar-grid">
+                                    ${avatarItems}
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    html += `
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="account-name">${acc.name}</div>
+                                <div class="status-badge ${!isAlive ? 'status-offline' : s.is_paused ? 'status-paused' : 'status-online'}">
+                                    <span class="live-dot ${!isAlive ? 'dot-offline' : s.is_paused ? 'dot-paused' : 'dot-online'}"></span>
+                                    ${!isAlive ? '已停止' : s.is_paused ? '已暂停' : '运行中'}
+                                </div>
+                            </div>
+                            <div class="stat-grid">
+                                <div class="stat-item">
+                                    <div class="stat-label">闭关状态</div>
+                                    <div class="stat-value active">${s.in_deep_meditation ? '深度闭关中' : '普通闭关'}</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-label">主要进度</div>
+                                    <div class="stat-value">${mainProgressText(id, s)}</div>
+                                </div>
+                            </div>
+                            ${renderCultivation(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
+                            ${avatarHtml}
+                            ${commandPanelHtml}
+                            <div class="controls">
+                                <button class="btn btn-start" onclick="doAction('${id}', 'start')">▶ 启动</button>
+                                <button class="btn btn-stop" onclick="doAction('${id}', 'stop')">⏹ 停止</button>
+                                <button class="btn btn-restart" onclick="doAction('${id}', 'restart')">🔄 重启</button>
+                                <button class="btn btn-clear" onclick="doAction('${id}', 'clear')">🧹 清屏</button>
+                            </div>
+                        </div>
+                    `;
+                }
+                document.getElementById('account-cards').innerHTML = html;
+            } catch(e){}
+        }
+
+        function splitLogContent(content) {
+            if (!content) return [];
+            return content.split(/\n(?=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[[A-Z]+\])/g).filter(Boolean);
+        }
+
+        function extractLogEntries(data) {
+            if (Array.isArray(data.entries)) return data.entries;
+            return splitLogContent(data.content || '');
+        }
+
+        function escapeHtml(text) {
+            return String(text || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function escapeJs(text) {
+            return String(text || '')
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'")
+                .replace(/\r/g, '')
+                .replace(/\n/g, '\\n');
+        }
+
+        function logEntryClass(text) {
+            const firstLine = String(text || '').split('\n')[0] || '';
+            if (firstLine.includes('[ERROR]') || firstLine.includes('[CRITICAL]')) return 'log-error';
+            if (firstLine.includes('[WARNING]')) return 'log-warn';
+            if (firstLine.includes('OUT')) return 'log-out';
+            if (firstLine.includes('IN')) return 'log-in';
+            return '';
+        }
+
+        function resetLogState() {
+            logState = {lines: [], before: null, hasMore: false, loadingOlder: false, total: 0, matched: 0};
+        }
+
+        function updateFilterSummary(statusText = '') {
+            const el = document.getElementById('log-filter-summary');
+            const parts = [];
+            if (currentLogTag) parts.push(`标签 ${currentLogTag}`);
+            if (currentLogSearch) parts.push(`搜索 "${currentLogSearch}"`);
+            const scope = parts.length ? parts.join('，') : '全部日志';
+            const countText = logState.total ? `匹配 ${logState.matched} / ${logState.total} 条` : '暂无记录';
+            el.innerText = statusText ? `${scope}\n${statusText}` : `${scope}\n${countText}`;
+        }
+
+        function renderLogs(statusText = '') {
+            const c = document.getElementById('log-content');
+            const topHint = logState.hasMore ? '向上滚动加载更早日志' : '已到日志开头';
+            const pieces = [`<div class="log-hint">${escapeHtml(statusText || topHint)}</div>`];
+            if (!logState.lines.length) {
+                pieces.push('<div class="log-empty">没有匹配的日志。</div>');
+            } else {
+                for (const entry of logState.lines) {
+                    pieces.push(`<div class="log-entry ${logEntryClass(entry)}">${escapeHtml(entry)}</div>`);
+                }
+            }
+            c.innerHTML = pieces.join('');
+            updateFilterSummary(statusText);
+        }
+
+        async function fetchLogPage(account, before = null, signal = null) {
+            const params = new URLSearchParams({limit: String(LOG_PAGE_SIZE)});
+            if (before !== null && before !== undefined) params.set('before', String(before));
+            if (currentLogTag) params.set('tag', currentLogTag);
+            if (currentLogSearch) params.set('q', currentLogSearch);
+            const options = {cache: 'no-store'};
+            if (signal) options.signal = signal;
+            const r = await fetch(`/api/logs/${account}?${params.toString()}`, options);
+            return await r.json();
+        }
+
+        async function loadLogTags(account) {
+            const select = document.getElementById('log-tag-select');
+            select.innerHTML = '<option value="">全部标签</option>';
+            try {
+                const r = await fetch(`/api/log-tags/${account}`, {cache: 'no-store'});
+                const data = await r.json();
+                for (const item of data.tags || []) {
+                    const option = document.createElement('option');
+                    option.value = item.tag;
+                    option.textContent = item.count ? `${item.tag} (${item.count})` : item.tag;
+                    select.appendChild(option);
+                }
+            } catch (e) {
+                console.error('Load log tags failed:', e);
+            }
+            select.value = currentLogTag;
+        }
+
+        async function loadOlderLogs() {
+            if (!logState.hasMore || logState.loadingOlder) return;
+            const account = currentLogAccount;
+            const tag = currentLogTag;
+            const search = currentLogSearch;
+            const c = document.getElementById('log-content');
+            const oldHeight = c.scrollHeight;
+            const oldTop = c.scrollTop;
+            logState.loadingOlder = true;
+            renderLogs('正在加载更早日志...');
+            try {
+                const data = await fetchLogPage(account, logState.before);
+                if (account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch) return;
+                logState.lines = extractLogEntries(data).concat(logState.lines);
+                logState.before = data.next_before;
+                logState.hasMore = Boolean(data.has_more);
+                logState.total = Number(data.total || 0);
+                logState.matched = Number(data.matched || 0);
+                renderLogs();
+                c.scrollTop = c.scrollHeight - oldHeight + oldTop;
+            } catch (e) {
+                console.error('Load older logs failed:', e);
+                renderLogs('更早日志加载失败，稍后再试');
+            } finally {
+                logState.loadingOlder = false;
+            }
+        }
+
+        async function updateLogs(force = false) {
+            try {
+                const c = document.getElementById('log-content');
+                const nearBottom = c.scrollHeight - c.scrollTop <= c.clientHeight + 80;
+                if (!force && !nearBottom) return;
+                if (logFetchController) logFetchController.abort();
+                logFetchController = new AbortController();
+                const account = currentLogAccount;
+                const tag = currentLogTag;
+                const search = currentLogSearch;
+                const data = await fetchLogPage(account, null, logFetchController.signal);
+                if (account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch) return;
+                logState.lines = extractLogEntries(data);
+                logState.before = data.next_before;
+                logState.hasMore = Boolean(data.has_more);
+                logState.total = Number(data.total || 0);
+                logState.matched = Number(data.matched || 0);
+                renderLogs();
+                if (force || nearBottom) c.scrollTop = c.scrollHeight;
+            } catch(e){
+                if (e.name !== 'AbortError') console.error('Log update failed:', e);
+            }
+        }
+
+        function changeLogTag() {
+            currentLogTag = document.getElementById('log-tag-select').value;
+            resetLogState();
+            document.getElementById('log-content').innerText = '加载中...';
+            updateLogs(true);
+        }
+
+        function applyLogSearch() {
+            currentLogSearch = document.getElementById('log-search-input').value.trim();
+            resetLogState();
+            document.getElementById('log-content').innerText = '搜索中...';
+            updateLogs(true);
+        }
+
+        function resetLogFilters() {
+            currentLogTag = '';
+            currentLogSearch = '';
+            document.getElementById('log-tag-select').value = '';
+            document.getElementById('log-search-input').value = '';
+            resetLogState();
+            document.getElementById('log-content').innerText = '加载中...';
+            updateLogs(true);
+        }
+
+        function switchLog(ev, acc) {
+            currentLogAccount = acc;
+            currentLogTag = '';
+            currentLogSearch = '';
+            resetLogState();
+            document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
+            ev.target.classList.add('active');
+            document.getElementById('log-search-input').value = '';
+            document.getElementById('log-content').innerText = '加载中...';
+            loadLogTags(acc);
+            updateLogs(true);
+        }
+
+        setInterval(updateStatus, 5000);
+        setInterval(updateLogs, 3000);
+        document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') applyLogSearch();
+        });
+        document.getElementById('log-content').addEventListener('scroll', () => {
+            const c = document.getElementById('log-content');
+            if (c.scrollTop < 60) loadOlderLogs();
+        });
+        updateStatus();
+        loadLogTags(currentLogAccount);
+        updateLogs();
+
+        function bindModalEvents() {
+            const commandOverlay = document.getElementById('commandModalOverlay');
+            if (commandOverlay) {
+                commandOverlay.addEventListener('click', function(e) {
+                    if (e.target === this) closeCommandModal();
+                });
+            }
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeCommandModal();
+                }
+            });
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bindModalEvents);
+        } else {
+            bindModalEvents();
+        }
+    </script>
+
+    <div class="command-modal-overlay" id="commandModalOverlay">
+        <div class="command-modal">
+            <div class="command-modal-header">
+                <div class="command-modal-title" id="commandModalTitle">指令状态</div>
+                <div class="command-modal-close" onclick="closeCommandModal()">×</div>
+            </div>
+            <div class="command-modal-body" id="commandModalBody"></div>
+        </div>
+    </div>
+</body>
+</html>
