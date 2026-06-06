@@ -22,6 +22,7 @@ state_*.json
 status.json
 cultivation_stats_cache.json
 command_controls.json
+dashboard_commands.json
 
 # Local backups, snapshots, and temporary scripts
 *.bak

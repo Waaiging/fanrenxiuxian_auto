@@ -56,10 +56,12 @@ CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 CLEAR_JOBS = {}                          # 清屏任务状态
 CLEAR_LOCK = threading.Lock()            # 清屏任务锁
 COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
+CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
 CULTIVATION_CACHE = {}                   # 修为统计缓存
 CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
+CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
@@ -230,6 +232,10 @@ def command_control_path():
     return os.path.join(CONFIG_DIR, COMMAND_CONTROL_FILE)
 
 
+def custom_command_path():
+    return os.path.join(CONFIG_DIR, CUSTOM_COMMAND_FILE)
+
+
 def load_command_controls():
     path = command_control_path()
     if not os.path.exists(path):
@@ -248,6 +254,67 @@ def save_command_controls(data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data or {}, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def load_custom_commands():
+    path = custom_command_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_custom_commands(data):
+    path = custom_command_path()
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def clean_custom_text(value, limit=120):
+    text = str(value or "").strip()
+    if len(text) > limit:
+        text = text[:limit].strip()
+    return text
+
+
+def custom_command_row(entry):
+    command = clean_custom_text(entry.get("command"), 160)
+    if not command:
+        return None
+    label = clean_custom_text(entry.get("label"), 64) or clean_custom_text(command, 64)
+    group = clean_custom_text(entry.get("group"), 32) or "自定义"
+    detail = clean_custom_text(entry.get("detail"), 160) or "dashboard 手动添加"
+    row = command_row(command, label, "自定义", "manual", detail=detail, group=group)
+    row["custom"] = True
+    row["custom_id"] = clean_custom_text(entry.get("id"), 64)
+    row["created_at"] = clean_custom_text(entry.get("created_at"), 32)
+    return row
+
+
+def append_custom_commands(account, panel, custom_commands):
+    account_data = custom_commands.get(account, {}) if isinstance(custom_commands, dict) else {}
+    if not isinstance(account_data, dict):
+        return panel
+    identity = panel.get("identity") or "主魂"
+    entries = account_data.get(identity, [])
+    if not isinstance(entries, list):
+        return panel
+    rows = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        row = custom_command_row(entry)
+        if row:
+            rows.append(row)
+    if rows:
+        panel.setdefault("commands", []).extend(rows)
+    return panel
 
 
 def command_control_disabled(controls, account, identity, control_key):
@@ -686,7 +753,12 @@ def build_command_panels(account, state):
             "role": "化身",
             "commands": avatar_commands(account, name, avatar_state or {}),
         })
-    return [apply_command_controls(account, panel) for panel in panels]
+    custom_commands = load_custom_commands()
+    result = []
+    for panel in panels:
+        append_custom_commands(account, panel, custom_commands)
+        result.append(apply_command_controls(account, panel))
+    return result
 
 
 # =====================================================================
@@ -1530,6 +1602,107 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "control_key": control_key,
         "disabled": disabled,
     }
+
+@app.post("/api/custom-command")
+async def upsert_custom_command(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """给 dashboard 的指定账号/身份添加或更新一条自定义指令展示项。"""
+    account = clean_custom_text(payload.get("account"), 32)
+    identity = clean_custom_text(payload.get("identity") or "主魂", 32) or "主魂"
+    command = clean_custom_text(payload.get("command"), 160)
+    label = clean_custom_text(payload.get("label"), 64) or clean_custom_text(command, 64)
+    group = clean_custom_text(payload.get("group"), 32) or "自定义"
+    detail = clean_custom_text(payload.get("detail"), 160) or "dashboard 手动添加"
+    custom_id = clean_custom_text(payload.get("id") or payload.get("custom_id"), 64)
+    if account not in WINDOW_MAP:
+        return {"success": False, "msg": "未知账号"}
+    if not command:
+        return {"success": False, "msg": "指令为空"}
+    if not command.startswith("."):
+        return {"success": False, "msg": "指令需要以 . 开头"}
+
+    now = datetime.now().strftime(TIME_FORMAT)
+    with CUSTOM_COMMAND_LOCK:
+        data = load_custom_commands()
+        account_data = data.setdefault(account, {})
+        entries = account_data.get(identity)
+        if not isinstance(entries, list):
+            entries = []
+            account_data[identity] = entries
+
+        if custom_id:
+            for idx, old in enumerate(entries):
+                if isinstance(old, dict) and str(old.get("id") or "") == custom_id:
+                    entries[idx] = {
+                        "id": custom_id,
+                        "command": command,
+                        "label": label,
+                        "group": group,
+                        "detail": detail,
+                        "created_at": old.get("created_at") or now,
+                        "created_by": old.get("created_by") or username,
+                        "updated_at": now,
+                        "updated_by": username,
+                    }
+                    save_custom_commands(data)
+                    return {"success": True, "command": entries[idx]}
+            return {"success": False, "msg": "未找到自定义指令"}
+
+        for old in entries:
+            if isinstance(old, dict) and clean_custom_text(old.get("command"), 160) == command:
+                return {"success": False, "msg": "同一身份下已存在该指令"}
+
+        entry = {
+            "id": uuid.uuid4().hex,
+            "command": command,
+            "label": label,
+            "group": group,
+            "detail": detail,
+            "created_at": now,
+            "created_by": username,
+            "updated_at": now,
+            "updated_by": username,
+        }
+        entries.append(entry)
+        save_custom_commands(data)
+    return {"success": True, "command": entry}
+
+
+@app.delete("/api/custom-command")
+async def delete_custom_command(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """删除 dashboard 的一条自定义指令展示项。"""
+    account = clean_custom_text(payload.get("account"), 32)
+    identity = clean_custom_text(payload.get("identity") or "主魂", 32) or "主魂"
+    custom_id = clean_custom_text(payload.get("id") or payload.get("custom_id"), 64)
+    if account not in WINDOW_MAP:
+        return {"success": False, "msg": "未知账号"}
+    if not custom_id:
+        return {"success": False, "msg": "缺少自定义指令 ID"}
+
+    removed = None
+    with CUSTOM_COMMAND_LOCK:
+        data = load_custom_commands()
+        account_data = data.get(account, {})
+        if not isinstance(account_data, dict):
+            return {"success": False, "msg": "未找到自定义指令"}
+        entries = account_data.get(identity, [])
+        if not isinstance(entries, list):
+            return {"success": False, "msg": "未找到自定义指令"}
+        kept = []
+        for entry in entries:
+            if isinstance(entry, dict) and str(entry.get("id") or "") == custom_id:
+                removed = entry
+            else:
+                kept.append(entry)
+        if not removed:
+            return {"success": False, "msg": "未找到自定义指令"}
+        if kept:
+            account_data[identity] = kept
+        else:
+            account_data.pop(identity, None)
+        if not account_data:
+            data.pop(account, None)
+        save_custom_commands(data)
+    return {"success": True, "removed": removed, "updated_by": username}
 
 @app.post("/api/action/{account}/{action}")
 async def account_action(account: str, action: str, username: str = Depends(authenticate)):
