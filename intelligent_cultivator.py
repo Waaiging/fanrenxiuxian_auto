@@ -305,6 +305,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             session_name: Telethon session 文件名（用于持久化登录态）
         """
         # ------ 1. 加载配置 ------
+        self.account_key = "main"
         self.config = load_config()
         self.mc = self.config.get('monitor', {})  # monitor 配置段
 
@@ -3010,9 +3011,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
     def get_identity_impending_command_wait(self, identity):
         if identity == "主魂":
-            return self._state_impending_command_wait(self.state, identity="主魂")
+            wait = self._state_impending_command_wait(self.state, identity="主魂")
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
         if identity in self.avatars:
-            return self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            wait = self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait(identity))
         return -1
 
     def get_avatar_impending_command_wait(self, avatar):
@@ -3887,6 +3890,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         asyncio.create_task(self.run_field_training_loop())
         asyncio.create_task(self.run_sect_war_loop())
+        asyncio.create_task(self.run_custom_command_loop())
 
         # ---- 化身系统 ----
         asyncio.create_task(self.run_all_avatars_sequential())

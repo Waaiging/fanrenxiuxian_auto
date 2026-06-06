@@ -676,10 +676,25 @@
                             备注
                             <input class="command-custom-input" name="detail" type="text" placeholder="冷却或用途" autocomplete="off">
                         </label>
+                        <label class="command-custom-field">
+                            间隔分钟
+                            <input class="command-custom-input" name="interval_minutes" type="number" min="1" max="43200" step="1" value="60" required>
+                        </label>
+                        <label class="command-custom-field">
+                            等待秒数
+                            <input class="command-custom-input" name="timeout_seconds" type="number" min="10" max="180" step="1" value="45">
+                        </label>
+                        <label class="command-custom-field">
+                            重试次数
+                            <input class="command-custom-input" name="max_retries" type="number" min="0" max="2" step="1" value="0">
+                        </label>
                     </div>
                     <div class="command-custom-actions">
                         <button class="command-custom-submit" type="submit">添加指令</button>
-                        <span class="command-custom-note">加入当前身份面板；自动调度需另接脚本任务。</span>
+                        <label class="command-visibility-item">
+                            <input name="schedule_enabled" type="checkbox" checked>
+                            <span class="command-visibility-label">自动调度</span>
+                        </label>
                     </div>
                 </form>
             `;
@@ -764,8 +779,16 @@
             const label = String(form.elements['label']?.value || '').trim();
             const group = String(form.elements['group']?.value || '').trim();
             const detail = String(form.elements['detail']?.value || '').trim();
+            const intervalMinutes = Number(form.elements['interval_minutes']?.value || 0);
+            const timeoutSeconds = Number(form.elements['timeout_seconds']?.value || 45);
+            const maxRetries = Number(form.elements['max_retries']?.value || 0);
+            const scheduleEnabled = Boolean(form.elements['schedule_enabled']?.checked);
             if (!command) {
                 alert('指令为空。');
+                return;
+            }
+            if (scheduleEnabled && (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0)) {
+                alert('自动调度需要填写大于 0 的间隔分钟。');
                 return;
             }
             try {
@@ -778,7 +801,11 @@
                         command,
                         label,
                         group,
-                        detail
+                        detail,
+                        schedule_enabled: scheduleEnabled,
+                        interval_minutes: intervalMinutes,
+                        timeout_seconds: timeoutSeconds,
+                        max_retries: maxRetries
                     })
                 });
                 const result = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
@@ -788,6 +815,10 @@
                 }
                 form.reset();
                 if (form.elements['group']) form.elements['group'].value = '自定义';
+                if (form.elements['interval_minutes']) form.elements['interval_minutes'].value = '60';
+                if (form.elements['timeout_seconds']) form.elements['timeout_seconds'].value = '45';
+                if (form.elements['max_retries']) form.elements['max_retries'].value = '0';
+                if (form.elements['schedule_enabled']) form.elements['schedule_enabled'].checked = true;
                 await updateStatus();
                 if (commandModalKey === panelKey) renderCommandModal(panelKey);
             } catch (e) {

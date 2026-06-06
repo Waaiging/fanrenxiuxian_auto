@@ -239,6 +239,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     def __init__(self, session_name='xiaohao_session'):
         """初始化：加载配置、连接 Telegram、初始化状态"""
+        self.account_key = "xiaohao"
         self.config = load_config()
         self.mc = self.config.get('monitor', {})
         self.session_file = os.path.join(CONFIG_DIR, session_name)
@@ -1183,9 +1184,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     def get_identity_impending_command_wait(self, identity):
         if identity == "主魂":
-            return self._state_impending_command_wait(self.state, identity="主魂")
+            wait = self._state_impending_command_wait(self.state, identity="主魂")
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
         if identity in self.avatars:
-            return self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            wait = self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait(identity))
         return 999999
 
     def get_avatar_impending_command_wait(self, avatar):
@@ -5107,6 +5110,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         asyncio.create_task(self.run_concubine_loop())
         asyncio.create_task(self.run_field_training_loop())
         asyncio.create_task(self.run_sect_war_loop())
+        asyncio.create_task(self.run_custom_command_loop())
         asyncio.create_task(self.run_treasure_touch_loop())
         asyncio.create_task(self.run_yuanying_out_loop())
         asyncio.create_task(self.run_rift_search_loop())

@@ -283,21 +283,78 @@ def clean_custom_text(value, limit=120):
     return text
 
 
-def custom_command_row(entry):
+def clean_custom_int(value, default=0, min_value=0, max_value=100000):
+    try:
+        number = int(float(value))
+    except Exception:
+        number = default
+    return max(min_value, min(max_value, number))
+
+
+def custom_command_interval_minutes(entry):
+    try:
+        minutes = float(entry.get("interval_minutes") or 0)
+    except Exception:
+        return 0
+    return max(0, minutes)
+
+
+def custom_command_enabled(entry):
+    return bool(entry.get("schedule_enabled") is not False and custom_command_interval_minutes(entry) > 0)
+
+
+def custom_command_row(entry, root_state=None):
     command = clean_custom_text(entry.get("command"), 160)
     if not command:
         return None
     label = clean_custom_text(entry.get("label"), 64) or clean_custom_text(command, 64)
     group = clean_custom_text(entry.get("group"), 32) or "自定义"
     detail = clean_custom_text(entry.get("detail"), 160) or "dashboard 手动添加"
-    row = command_row(command, label, "自定义", "manual", detail=detail, group=group)
+    custom_id = clean_custom_text(entry.get("id"), 64)
+    enabled = custom_command_enabled(entry)
+    minutes = custom_command_interval_minutes(entry)
+    runs = (root_state or {}).get("custom_command_runs", {})
+    run_state = runs.get(custom_id, {}) if isinstance(runs, dict) else {}
+    next_run_at = clean_custom_text(run_state.get("next_run_at"), 32)
+    last_status = clean_custom_text(run_state.get("last_status"), 32)
+    last_run_at = clean_custom_text(run_state.get("last_run_at"), 32)
+    last_response = clean_custom_text(run_state.get("last_response"), 80)
+    if enabled:
+        target = parse_state_time(next_run_at)
+        if target and target > datetime.now():
+            status = "冷却中"
+            tone = "cooldown"
+            remaining = format_remaining((target - datetime.now()).total_seconds())
+            at = next_run_at
+        else:
+            status = "待执行"
+            tone = "ready"
+            remaining = "0秒"
+            at = next_run_at
+        schedule_detail = f"每 {minutes:g} 分钟"
+        if last_status:
+            schedule_detail += f" · 上次 {last_status}"
+        if last_response:
+            schedule_detail += f" · {last_response}"
+        detail = f"{schedule_detail}{f' · {detail}' if detail else ''}"
+    else:
+        status = "未启用"
+        tone = "manual"
+        remaining = "--"
+        at = last_run_at
+        detail = f"未设置自动间隔{f' · {detail}' if detail else ''}"
+    row = command_row(command, label, status, tone, remaining=remaining, at=at, detail=detail, group=group)
     row["custom"] = True
-    row["custom_id"] = clean_custom_text(entry.get("id"), 64)
+    row["custom_id"] = custom_id
     row["created_at"] = clean_custom_text(entry.get("created_at"), 32)
+    row["schedule_enabled"] = enabled
+    row["interval_minutes"] = minutes
+    row["timeout_seconds"] = entry.get("timeout_seconds", 45)
+    row["max_retries"] = entry.get("max_retries", 0)
     return row
 
 
-def append_custom_commands(account, panel, custom_commands):
+def append_custom_commands(account, panel, custom_commands, root_state=None):
     account_data = custom_commands.get(account, {}) if isinstance(custom_commands, dict) else {}
     if not isinstance(account_data, dict):
         return panel
@@ -309,7 +366,7 @@ def append_custom_commands(account, panel, custom_commands):
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        row = custom_command_row(entry)
+        row = custom_command_row(entry, root_state=root_state)
         if row:
             rows.append(row)
     if rows:
@@ -756,7 +813,7 @@ def build_command_panels(account, state):
     custom_commands = load_custom_commands()
     result = []
     for panel in panels:
-        append_custom_commands(account, panel, custom_commands)
+        append_custom_commands(account, panel, custom_commands, root_state=state)
         result.append(apply_command_controls(account, panel))
     return result
 
@@ -1613,6 +1670,10 @@ async def upsert_custom_command(payload: dict = Body(...), username: str = Depen
     group = clean_custom_text(payload.get("group"), 32) or "自定义"
     detail = clean_custom_text(payload.get("detail"), 160) or "dashboard 手动添加"
     custom_id = clean_custom_text(payload.get("id") or payload.get("custom_id"), 64)
+    interval_minutes = clean_custom_int(payload.get("interval_minutes"), default=0, min_value=0, max_value=60 * 24 * 30)
+    timeout_seconds = clean_custom_int(payload.get("timeout_seconds"), default=45, min_value=10, max_value=180)
+    max_retries = clean_custom_int(payload.get("max_retries"), default=0, min_value=0, max_value=2)
+    schedule_enabled = bool(payload.get("schedule_enabled", interval_minutes > 0)) and interval_minutes > 0
     if account not in WINDOW_MAP:
         return {"success": False, "msg": "未知账号"}
     if not command:
@@ -1638,6 +1699,10 @@ async def upsert_custom_command(payload: dict = Body(...), username: str = Depen
                         "label": label,
                         "group": group,
                         "detail": detail,
+                        "schedule_enabled": schedule_enabled,
+                        "interval_minutes": interval_minutes,
+                        "timeout_seconds": timeout_seconds,
+                        "max_retries": max_retries,
                         "created_at": old.get("created_at") or now,
                         "created_by": old.get("created_by") or username,
                         "updated_at": now,
@@ -1657,6 +1722,10 @@ async def upsert_custom_command(payload: dict = Body(...), username: str = Depen
             "label": label,
             "group": group,
             "detail": detail,
+            "schedule_enabled": schedule_enabled,
+            "interval_minutes": interval_minutes,
+            "timeout_seconds": timeout_seconds,
+            "max_retries": max_retries,
             "created_at": now,
             "created_by": username,
             "updated_at": now,

@@ -328,6 +328,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             session_name: Telethon session 文件名，用于持久化登录会话。
         """
         # ---- 配置加载 ----
+        self.account_key = "sub"
         self.config = load_config()                    # 加载 config_sub.json
         self.mc = self.config.get('monitor', {})       # 监控配置子段
 
@@ -811,9 +812,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
     def get_identity_impending_command_wait(self, identity):
         if identity == "主魂":
-            return self._state_impending_command_wait(self.state, identity="主魂")
+            wait = self._state_impending_command_wait(self.state, identity="主魂")
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
         if identity in self.avatars:
-            return self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            wait = self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
+            return self.merge_impending_wait(wait, self.custom_command_impending_wait(identity))
         return -1
 
     def get_avatar_impending_command_wait(self, avatar):
@@ -5479,6 +5482,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         asyncio.create_task(self.run_concubine_loop())       # 侍妾管理（继承）
         asyncio.create_task(self.run_field_training_loop())   # 野外历练（继承）
         asyncio.create_task(self.run_sect_war_loop())         # 宗门战（继承）
+        asyncio.create_task(self.run_custom_command_loop())    # dashboard 自定义指令
         asyncio.create_task(self.run_yuanying_out_loop())     # 元婴出窍
         asyncio.create_task(self.run_rift_search_loop())      # 探寻裂缝
         asyncio.create_task(self.run_treasure_touch_loop())   # 抚摸法宝

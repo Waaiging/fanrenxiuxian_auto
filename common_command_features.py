@@ -10,19 +10,29 @@
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
 """
 import asyncio
+import json
 import logging
+import os
 import random
 import re
 import time
 from datetime import datetime, timedelta
 
-from log_utils import is_game_bot_sender, notify_unrecognized_response, text_targets_current_account
+from log_utils import (
+    actor_account_key,
+    dashboard_command_disabled,
+    is_game_bot_sender,
+    notify_unrecognized_response,
+    text_targets_current_account,
+)
 
 
 # =====================================================================
 # 常量定义
 # =====================================================================
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
@@ -88,6 +98,7 @@ def common_command_default_state():
         "last_sect_war_join_time": "",
         "next_sect_war_join_time": "",
         "last_sect_war_response": "",
+        "custom_command_runs": {},
     }
 
 
@@ -117,6 +128,207 @@ class CommonCommandMixin:
     def common_command_logger(self):
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
+
+    # ---- Dashboard 自定义指令调度 ----
+
+    def load_dashboard_custom_commands(self):
+        """读取 dashboard 自定义指令配置。"""
+        try:
+            with open(CUSTOM_COMMAND_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            self.common_command_logger().warning(f"Custom command config load failed: {exc}")
+            return {}
+
+    def dashboard_custom_command_entries(self):
+        account = actor_account_key(self)
+        if not account:
+            return []
+        account_data = self.load_dashboard_custom_commands().get(account, {})
+        if not isinstance(account_data, dict):
+            return []
+        entries = []
+        for identity, rows in account_data.items():
+            identity = str(identity or "主魂").strip() or "主魂"
+            if identity != "主魂" and identity not in getattr(self, "avatars", []):
+                continue
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    entries.append((identity, row))
+        return entries
+
+    def clean_custom_command_id(self, entry):
+        custom_id = str(entry.get("id") or "").strip()
+        if custom_id:
+            return custom_id
+        identity = str(entry.get("identity") or "").strip()
+        command = str(entry.get("command") or "").strip()
+        return f"{identity}:{command}" if command else ""
+
+    def custom_command_interval_seconds(self, entry):
+        try:
+            minutes = float(entry.get("interval_minutes") or 0)
+        except Exception:
+            minutes = 0
+        if minutes <= 0:
+            return 0
+        return max(60, int(minutes * 60))
+
+    def custom_command_timeout_seconds(self, entry):
+        try:
+            seconds = int(entry.get("timeout_seconds") or 45)
+        except Exception:
+            seconds = 45
+        return max(10, min(180, seconds))
+
+    def custom_command_max_retries(self, entry):
+        try:
+            retries = int(entry.get("max_retries") or 0)
+        except Exception:
+            retries = 0
+        return max(0, min(2, retries))
+
+    def custom_command_enabled(self, entry):
+        if entry.get("schedule_enabled") is False:
+            return False
+        return bool(str(entry.get("command") or "").strip().startswith(".") and self.custom_command_interval_seconds(entry) > 0)
+
+    def ensure_custom_command_runs(self):
+        self.ensure_common_command_state()
+        runs = self.state.get("custom_command_runs")
+        if not isinstance(runs, dict):
+            runs = {}
+            self.state["custom_command_runs"] = runs
+            self.save_state()
+        return runs
+
+    def custom_command_run_state(self, custom_id):
+        runs = self.ensure_custom_command_runs()
+        state = runs.get(custom_id)
+        if not isinstance(state, dict):
+            state = {}
+            runs[custom_id] = state
+        return state
+
+    def custom_command_next_wait(self, entry):
+        custom_id = self.clean_custom_command_id(entry)
+        if not custom_id or not self.custom_command_enabled(entry):
+            return -1
+        run_state = self.custom_command_run_state(custom_id)
+        next_run_at = run_state.get("next_run_at", "")
+        if next_run_at:
+            return seconds_until(next_run_at) if is_future(next_run_at) else 0
+        return 0
+
+    def custom_command_impending_wait(self, identity):
+        """Return seconds until a custom command is due for identity, or -1."""
+        min_wait = None
+        for entry_identity, entry in self.dashboard_custom_command_entries():
+            if entry_identity != identity:
+                continue
+            command = str(entry.get("command") or "").strip()
+            if not command or dashboard_command_disabled(self, command, entry_identity)[0]:
+                continue
+            wait = self.custom_command_next_wait(entry)
+            if wait >= 0:
+                min_wait = wait if min_wait is None else min(min_wait, wait)
+        return min_wait if min_wait is not None else -1
+
+    def merge_impending_wait(self, base_wait, extra_wait):
+        if extra_wait is None or extra_wait < 0:
+            return base_wait
+        if base_wait is None or base_wait < 0 or base_wait >= 999999:
+            return extra_wait
+        return min(base_wait, extra_wait)
+
+    def record_custom_command_result(self, entry, identity, response_text, status):
+        custom_id = self.clean_custom_command_id(entry)
+        if not custom_id:
+            return
+        interval = self.custom_command_interval_seconds(entry)
+        now = now_str()
+        state = self.custom_command_run_state(custom_id)
+        state["identity"] = identity
+        state["command"] = str(entry.get("command") or "").strip()
+        state["last_run_at"] = now
+        state["last_status"] = status
+        state["last_response"] = (response_text or "").strip()[:500]
+        delay = interval
+        if status == "no_response":
+            delay = min(interval, 10 * 60) if interval else 10 * 60
+        state["next_run_at"] = add_seconds_str(now, delay)
+        self.save_state()
+
+    async def execute_custom_command(self, identity, entry):
+        command = str(entry.get("command") or "").strip()
+        if not command:
+            return
+        log = self.common_command_logger()
+        timeout = self.custom_command_timeout_seconds(entry)
+        retries = self.custom_command_max_retries(entry)
+        label = str(entry.get("label") or command).strip()
+        log.info(f"Custom command due [{identity}] {label}: {command}")
+        if identity == "主魂":
+            resp = await self.send_and_wait_feedback(command, timeout=timeout, max_retries=retries)
+        else:
+            resp = await self.send_and_wait_feedback_identity(identity, command, timeout=timeout, max_retries=retries)
+        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+        status = "responded" if resp_text else "no_response"
+        self.record_custom_command_result(entry, identity, resp_text, status)
+        log.info(f"Custom command done [{identity}] {command}: {status}")
+
+    async def run_custom_command_loop(self):
+        """Dashboard 自定义指令调度循环。"""
+        self.ensure_common_command_state()
+        await self.startup_done.wait()
+        await asyncio.sleep(random.randint(15, 45))
+        log = self.common_command_logger()
+
+        while self.is_running:
+            try:
+                self.ensure_common_command_state()
+                next_sleep = 300
+                ran_any = False
+                for identity, entry in self.dashboard_custom_command_entries():
+                    if not self.custom_command_enabled(entry):
+                        continue
+                    command = str(entry.get("command") or "").strip()
+                    custom_id = self.clean_custom_command_id(entry)
+                    if not command or not custom_id:
+                        continue
+                    if dashboard_command_disabled(self, command, identity)[0]:
+                        state = self.custom_command_run_state(custom_id)
+                        if state.get("last_status") != "paused":
+                            state["identity"] = identity
+                            state["command"] = command
+                            state["last_status"] = "paused"
+                            self.save_state()
+                        next_sleep = min(next_sleep, 60)
+                        continue
+
+                    wait = self.custom_command_next_wait(entry)
+                    if wait > 0:
+                        next_sleep = min(next_sleep, wait)
+                        continue
+                    if wait < 0:
+                        continue
+
+                    await self.execute_custom_command(identity, entry)
+                    ran_any = True
+                    await asyncio.sleep(3)
+
+                if ran_any:
+                    await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(max(10, min(int(next_sleep), 300)))
+            except Exception as exc:
+                log.error(f"Custom command loop error: {exc}", exc_info=True)
+                await asyncio.sleep(60)
 
     # ---- 野外历练 ----
 
