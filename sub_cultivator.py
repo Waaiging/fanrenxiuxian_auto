@@ -1222,7 +1222,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             async with self.avatar_send_lock:
                 _lock_wait = time.monotonic() - lock_wait_start
                 if _lock_wait > 5:
-                    log.warning(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired after {_lock_wait:.1f}s (long wait!)")
+                    log.info(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired after {_lock_wait:.1f}s (long wait)")
                 else:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired in {_lock_wait:.1f}s")
 
