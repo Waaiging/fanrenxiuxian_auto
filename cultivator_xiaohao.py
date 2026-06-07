@@ -1313,13 +1313,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 log.info(f"[DEBUG-IDENTITY] [{identity}] yielding lock, sleeping {wait_sec_to_sleep:.1f}s")
                 await asyncio.sleep(wait_sec_to_sleep)
 
-    async def switch_back_to_main(self):
+    async def switch_back_to_main(self, force=False):
         """
-        切换回主魂（在分身任务完成后调用，确保不影响主魂业务）。
-        使用 _switch_lock 防并发重复切换。
+        兼容旧调用的主魂切换钩子。
+
+        默认不主动切回主魂；真正需要发送主魂指令时，send_and_wait_feedback()
+        会在指令预检通过后再对齐身份，避免流程收尾阶段产生无后续指令的空切换。
         """
         # 化身正在发送命令时跳过
         if self.avatar_send_lock.locked():
+            return
+        if self._main_confirmed or self.current_identity == "主魂":
+            return
+        if not force:
             return
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()

@@ -3191,10 +3191,17 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if should_yield:
                 await asyncio.sleep(wait_sec_to_sleep)
 
-    async def switch_back_to_main(self):
+    async def switch_back_to_main(self, force=False):
         """
-        切换回主魂。化身循环活跃时跳过。
+        兼容旧调用的主魂切换钩子。
+
+        默认不主动切回主魂；真正需要发送主魂指令时，send_and_wait_feedback()
+        会在指令预检通过后再对齐身份，避免流程收尾阶段产生无后续指令的空切换。
         """
+        if self._main_confirmed or self.current_identity == "主魂":
+            return
+        if not force:
+            return
         if self._avatar_loop_active or self._avatar_loop_count > 0:
             return
         # 整体任务守卫
