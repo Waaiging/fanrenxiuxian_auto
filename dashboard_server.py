@@ -92,6 +92,18 @@ ACCOUNT_PROFILE_USERNAMES = {
     },
 }
 
+def account_profile_usernames(account):
+    """Return dashboard-safe username mapping for every identity in an account."""
+    mapping = ACCOUNT_PROFILE_USERNAMES.get(account) or {}
+    return {
+        identity: sorted(
+            f"@{normalize_profile_username(name)}"
+            for name in names
+            if normalize_profile_username(name)
+        )
+        for identity, names in mapping.items()
+    }
+
 PROFILE_USERNAME_PATTERNS = (
     re.compile(r"@([A-Za-z0-9_]{2,64})\s*的天命玉牒", re.I),
     re.compile(r"修士状态\s*[·.]\s*@([A-Za-z0-9_]{2,64})", re.I),
@@ -1637,6 +1649,7 @@ async def status(username: str = Depends(authenticate)):
                 "is_alive": get_process_status(key),
                 "cultivation": get_cultivation_summary(key),
                 "command_panels": build_command_panels(key, state),
+                "profile_usernames": account_profile_usernames(key),
             }
         return {"accounts": result, "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
     except Exception as e: return {"error": str(e)}

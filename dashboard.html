@@ -44,6 +44,8 @@
         .card:hover { border-color: var(--accent-color); }
         .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
         .account-name { font-size: 1.25rem; font-weight: 600; }
+        .identity-username { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .account-username { margin-top: -0.65rem; margin-bottom: 0.8rem; }
         .status-badge { font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 12px; display: flex; align-items: center; gap: 4px; }
         .status-online { background: rgba(16, 185, 129, 0.2); color: var(--success-color); }
         .status-offline { background: rgba(239, 68, 68, 0.2); color: var(--danger-color); }
@@ -249,6 +251,15 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .avatar-username {
+            font-size: 0.62rem;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+            line-height: 1.1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .avatar-level {
             font-size: 0.74rem;
             color: var(--accent-color);
@@ -447,6 +458,13 @@
             const n = Number(value || 0);
             const sign = n > 0 ? '+' : '';
             return `${sign}${formatNumber(n)}`;
+        }
+
+        function identityUsername(accountData, identity) {
+            const mapping = (accountData || {}).profile_usernames || {};
+            const names = mapping[identity || '主魂'];
+            if (!Array.isArray(names) || names.length === 0) return '';
+            return names.join(', ');
         }
 
         function renderCultivation(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot) {
@@ -958,6 +976,7 @@
                     let avatarHtml = '';
                     if (s.avatars && Object.keys(s.avatars).length > 0) {
                         const avatarItems = Object.entries(s.avatars).map(([name, val]) => {
+                            const usernameText = identityUsername(acc, name);
                             const level = val.level || '未获取';
                             const spiritRoot = val.spirit_root || '灵根未获取';
                             const avatarCurrent = Number(val.current_exp);
@@ -1020,7 +1039,8 @@
 
                             return `
                                 <div class="avatar-item" role="button" tabindex="0" onclick="openIdentityCommands('${escapeJs(id)}', '${escapeJs(name)}')" onkeydown="openIdentityCommandsByKey(event, '${escapeJs(id)}', '${escapeJs(name)}')" style="${isAttached ? 'border-color: rgba(0, 210, 255, 0.6); box-shadow: 0 0 10px rgba(0, 210, 255, 0.2); background: rgba(0, 210, 255, 0.03);' : ''}">
-                                    <div class="avatar-name" title="${name}${val.nickname ? ' (' + val.nickname + ')' : ''}">👤 ${name}</div>
+                                    <div class="avatar-name" title="${escapeHtml(name)}${val.nickname ? ' (' + escapeHtml(val.nickname) + ')' : ''}">👤 ${escapeHtml(name)}</div>
+                                    ${usernameText ? `<div class="avatar-username" title="${escapeHtml(usernameText)}">${escapeHtml(usernameText)}</div>` : ''}
                                     ${val.nickname ? `<div style="font-size: 0.68rem; color: var(--text-secondary); line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${val.nickname}">${val.nickname}</div>` : ''}
                                     ${attachedTag}
                                     <div class="avatar-level" style="margin-top: 0.2rem;">${level}</div>
@@ -1044,6 +1064,7 @@
                             </div>
                         `;
                     }
+                    const mainUsernameText = identityUsername(acc, '主魂');
 
                     html += `
                         <div class="card">
@@ -1055,6 +1076,7 @@
                                         ${!isAlive ? '已停止' : s.is_paused ? '已暂停' : '运行中'}
                                     </div>
                                 </div>
+                                ${mainUsernameText ? `<div class="identity-username account-username" title="${escapeHtml(mainUsernameText)}">主魂 ${escapeHtml(mainUsernameText)}</div>` : ''}
                                 <div class="stat-grid">
                                     <div class="stat-item">
                                         <div class="stat-label">闭关状态</div>
