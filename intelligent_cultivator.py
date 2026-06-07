@@ -2557,6 +2557,18 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return False
         return any(k in clean for k in ["古剑门来袭", "古剑门·攻山夺枝", "突袭山门", "强夺本轮枝果", "攻山夺枝"])
 
+    def spirit_tree_text_indicates_irrigation_state(self, text):
+        clean = self.clean_spirit_tree_text(text)
+        if not clean or self.spirit_tree_text_indicates_mature(clean):
+            return False
+        if "灵树灌溉" in clean and "成熟度" in clean:
+            return True
+        return (
+            "灵眼之树" in clean
+            and "进度" in clean
+            and any(k in clean for k in ["阶段", "环境", "成熟度"])
+        )
+
     def parse_spirit_tree_mature_seconds(self, text):
         clean = self.clean_spirit_tree_text(text)
         for line in clean.splitlines():
@@ -2677,6 +2689,30 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if clean:
             notify_unrecognized_response(self, SPIRIT_TREE_HARVEST_COMMAND, clean, log, "灵树采摘")
 
+    def record_spirit_tree_irrigation_state(self, text, source=""):
+        avatar = SPIRIT_TREE_AVATAR
+        a_state = self.get_avatar_state(avatar)
+        clean = self.clean_spirit_tree_text(text)
+        previous_status = a_state.get("spirit_tree_status", "")
+        a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
+        a_state["spirit_tree_mature_until"] = ""
+        a_state["spirit_tree_harvested_in_mature_period"] = False
+        a_state["spirit_tree_harvest_attempted_in_mature_period"] = False
+        a_state["spirit_tree_harvest_pending"] = False
+        if "灵眼之树" in clean or "灵树状态" in clean:
+            a_state["spirit_tree_last_status_time"] = now_str()
+
+        cd = self.parse_wait_time(clean)
+        if cd > 0:
+            a_state["next_spirit_tree_irrigation_time"] = add_seconds_str(now_str(), cd)
+        elif "灵树灌溉" in clean and "成熟度" in clean:
+            a_state["next_spirit_tree_irrigation_time"] = add_seconds_str(now_str(), 2 * 3600)
+        elif previous_status == SPIRIT_TREE_MATURE_STATUS:
+            a_state["next_spirit_tree_irrigation_time"] = ""
+
+        self.save_state()
+        log.info(f"[{avatar}] spirit tree status -> {SPIRIT_TREE_IRRIGATION_STATUS} ({source}).")
+
     def record_spirit_tree_guard_response(self, text):
         avatar = SPIRIT_TREE_AVATAR
         a_state = self.get_avatar_state(avatar)
@@ -2710,6 +2746,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             needs_harvest = self.record_spirit_tree_mature_state(text, msg=msg, source=source)
             if needs_harvest:
                 self.schedule_spirit_tree_harvest_once(source)
+            matched = True
+        elif self.spirit_tree_text_indicates_irrigation_state(text):
+            self.record_spirit_tree_irrigation_state(text, source=source)
             matched = True
         if self.spirit_tree_text_indicates_invasion(text):
             needs_guard = self.record_spirit_tree_invasion_state(text, msg=msg, source=source)
