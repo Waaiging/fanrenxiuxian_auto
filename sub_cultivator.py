@@ -137,7 +137,7 @@ STAR_ATTRACTION_COOLDOWN_SECONDS = 36 * 3600       # 牵引冷却 36 小时（�
 STAR_PRE_APPEASE_LEAD_SECONDS = 60                 # 收集前 1 分钟安抚
 STAR_STATUS_RETRY_SECONDS = 10 * 60                # 观星台异常时 10 分钟后复查
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60          # 强行出关后仍修为不足，1 小时后重试
-STAR_ATTRACTION_AVATARS = {"寻真子"}                # 副号参与牵引循环的化身
+STAR_ATTRACTION_AVATARS = {"厚土", "缘生子", "寻真子"}  # 副号参与牵引循环的化身
 
 # -- 星辰安抚 --
 STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机器人每 6 小时可安抚一次）
@@ -3493,7 +3493,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         return max(0, min(waits))
 
     async def run_avatar_star_attraction_loop(self, avatar, initial_delay=0):
-        """寻真子的观星台牵引循环：牵引 -> 安抚 -> 收集 -> 再牵引。"""
+        """星宫化身观星台牵引循环：牵引 -> 安抚 -> 收集 -> 再牵引。"""
         await self.startup_done.wait()
         self._avatar_loop_count += 1
         if initial_delay > 0:

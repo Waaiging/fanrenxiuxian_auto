@@ -788,8 +788,7 @@ def star_avatar_commands(name, state):
     rows.extend(global_sync_commands())
     rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
     rows.extend(meditation_commands(state, include_force_exit=True))
-    if name == "寻真子":
-        rows.extend(xiaohao_star_attraction_commands(state))
+    rows.extend(xiaohao_star_attraction_commands(state))
     rows.extend([
         time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
