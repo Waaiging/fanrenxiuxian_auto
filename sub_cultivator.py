@@ -4485,6 +4485,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         if "尚无侍妾" in status_text or "还没有侍妾" in status_text:
             self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 24 * 3600))
             return True
+        voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+        if voyage_block_until:
+            self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
+            return True
         clean_status = status_text.replace("**", "")
         heart_match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
         if heart_match:
@@ -4520,6 +4524,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             False — 心劫失败（需重试或跳过）
         """
         async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
+            status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
+            voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+            if voyage_block_until:
+                self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
+                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {voyage_block_until}.")
+                return True
             # 1. 回复 .共历心劫 到侍妾状态消息
             log.info(f"Avatar [{avatar}] heart trial: replying .共历心劫 to status msg")
             trial_resp = await self.send_and_wait_feedback_identity(
@@ -4557,6 +4567,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                       add_seconds_str(now_str(), cd if cd > 0 else 3600))
                 log.info(f"Avatar [{avatar}] heart trial on cooldown.")
                 return True  # 不算失败，只是冷却中
+            if self.concubine_response_indicates_active_voyage(trial_text):
+                block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
+                self.set_avatar_state(avatar, "next_heart_trial_time", block_until)
+                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {block_until}.")
+                return True
 
             # 检查是否要求回复目标
             if self.heart_trial_requires_reply_target(trial_text):

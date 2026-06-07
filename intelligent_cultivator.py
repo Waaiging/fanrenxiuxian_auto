@@ -3201,6 +3201,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
     async def execute_avatar_heart_trial(self, avatar, status_msg):
         async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
+            status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
+            voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+            if voyage_block_until:
+                self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
+                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {voyage_block_until}.")
+                return False
             trial_resp = await self.send_and_wait_feedback_identity(avatar, ".共历心劫", reply_to=status_msg.id, timeout=90, return_response_msg=True, delete_after=False)
             trial_text = (getattr(trial_resp, "text", "") if trial_resp else "")
             if "修为不足" in trial_text:
@@ -3221,6 +3227,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             cd = self.parse_wait_time(trial_text)
             if cd > 0:
                 self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), cd))
+                return False
+            if self.concubine_response_indicates_active_voyage(trial_text):
+                block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
+                self.set_avatar_state(avatar, "next_heart_trial_time", block_until)
+                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {block_until}.")
                 return False
             if not trial_resp or not hasattr(trial_resp, "id"):
                 log.warning(f"Avatar [{avatar}] heart trial: missing .共历心劫 response message for .稳 reply target.")

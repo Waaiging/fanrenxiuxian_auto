@@ -4824,6 +4824,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     return
 
                 if status_text:
+                    voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+                    if voyage_block_until:
+                        self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
+                        log.info(f"Avatar {avatar} heart trial blocked by active voyage until {voyage_block_until}.")
+                        return
                     clean_status = status_text.replace("**", "")
                     match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
                     if match:
@@ -4851,6 +4856,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if resp_str and "冷却" in resp_str:
                     cd = self.parse_wait_time(resp_str)
                     self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), cd if cd > 0 else 1800))
+                    break
+                if self.concubine_response_indicates_active_voyage(resp_str):
+                    block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
+                    self.set_avatar_state(avatar, "next_heart_trial_time", block_until)
+                    log.info(f"Avatar {avatar} heart trial blocked by active voyage until {block_until}.")
                     break
                 if self.heart_trial_requires_reply_target(resp_str):
                     log.warning(f"Avatar {avatar} 共历心劫: bot still requires reply target (attempt {flow_attempt}/2).")
