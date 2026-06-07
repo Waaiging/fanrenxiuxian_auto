@@ -775,9 +775,6 @@ def lingxiao_avatar_commands(name, state):
     if name == "素缘子":
         rows.extend([
             manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
-            daily_done_command(state, ".开启血色试炼", "血色试炼", date_key="last_blood_trial_date", group="血色"),
-            flow_command(".进入血色试炼", "进入血色试炼", "血色试炼流程内", "血色"),
-            flow_command(".血色抉择 2/2/3/2/2/4", "血色抉择", "血色试炼流程内", "血色"),
             manual_command(".观星", "观星", group="星宫"),
             manual_command(".改换星移 @Waaiging", "改换星移", group="星宫"),
         ])
@@ -797,9 +794,6 @@ def star_avatar_commands(name, state):
         time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
-        daily_done_command(state, ".开启血色试炼", "血色试炼", date_key="last_blood_trial_date", group="血色"),
-        flow_command(".进入血色试炼", "进入血色试炼", "血色试炼流程内", "血色"),
-        flow_command(".血色抉择 2/2/3/2/2/4", "血色抉择", "血色试炼流程内", "血色"),
         time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
         time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),

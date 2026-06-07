@@ -58,24 +58,6 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
         "block_seconds": 10 * 60,
         "alert": False,
     },
-    ".血色抉择": {                           # 血色试炼抉择：6轮×最多3次重试=18次
-        "limit": 20,
-        "window": 30 * 60,
-        "block_seconds": 10 * 60,
-        "alert": False,
-    },
-    ".开启血色试炼": {                       # 血色试炼开启：每日多次检查
-        "limit": 5,
-        "window": 30 * 60,
-        "block_seconds": 10 * 60,
-        "alert": False,
-    },
-    ".进入血色试炼": {                       # 血色试炼进入：每日多次检查
-        "limit": 5,
-        "window": 30 * 60,
-        "block_seconds": 10 * 60,
-        "alert": False,
-    },
 }
 
 PARAM_COMMAND_ROOTS = {
@@ -83,7 +65,6 @@ PARAM_COMMAND_ROOTS = {
     ".探渊",
     ".灵兽出战",
     ".灵兽休息",
-    ".血色抉择",
 }
 _COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
 
@@ -372,8 +353,6 @@ def command_response_family(command):
         return "dream_map"
     if cmd in {".共历心劫", ".坠魔心劫", ".稳", ".狠", ".骗"}:
         return "heart_trial"
-    if cmd in {".开启血色试炼", ".进入血色试炼"} or cmd.startswith(".血色抉择"):
-        return "blood_trial"
     if cmd in {".启阵", ".助阵"}:
         return "formation"
     if cmd.startswith(".抚摸法宝"):
@@ -494,12 +473,6 @@ def text_response_family(text):
         return ".闯塔"
     if "元婴出窍" in clean:
         return ".元婴出窍"
-    if any(k in clean for k in ["血色试炼", "血雾", "药篓", "血色禁地", "回合结果"]):
-        return "blood_trial"
-    if "队长" in clean and any(k in clean for k in ["房间", "抉择", "已解散"]):
-        return "blood_trial"
-    if "第" in clean and "回合" in clean and any(k in clean for k in ["血雾", "药篓", "禁地", "撤离"]):
-        return "blood_trial"
     return ""
 
 
@@ -525,16 +498,6 @@ def feedback_response_matches_command(command, text):
         ]) or ("仍在远航" in clean and "寻图" in clean)
     if expected == "heart_trial":
         return any(k in clean for k in ["共历心劫", "坠魔心劫", "心劫", "侍妾/道侣", "道侣内容"])
-    if expected == "blood_trial":
-        return (
-            any(k in clean for k in [
-                "血色试炼", "血色禁地", "血雾", "药篓", "回合结果",
-                "房间ID", "召集同伴", "进入血色试炼", "血色抉择",
-                "已参加过", "最高只开放到", "准入境界",
-            ])
-            or ("队长" in clean and any(k in clean for k in ["房间", "抉择", "已解散", "并非"]))
-            or ("第" in clean and "回合" in clean and any(k in clean for k in ["血雾", "药篓", "禁地", "撤离"]))
-        )
     if expected == "formation":
         return any(k in clean for k in [
             "周天星斗大阵", "布设大阵", "启阵冷却",
@@ -1192,8 +1155,6 @@ def command_control_key(command):
         parts = text.split()
         if len(parts) >= 2:
             return f"{root} {parts[1]}"
-    if root == ".血色抉择":
-        return f"{root} *"
     return text
 
 

@@ -290,7 +290,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "主魂": ["TitanCreeper"],
         }
         self.avatar_send_lock = asyncio.Lock()
-        self.avatar_trial_lock = asyncio.Lock()  # 新增：血色试炼大任务锁，确保各分身串行跑完血色试炼
         # 化身 chat_id 映射（供 log_utils.log_manual_outgoing_if_needed 使用）
         self._avatar_chat_ids = {
             "-1003658665113": "问心子",
@@ -419,7 +418,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "nickname": "",
             "last_tower_date": "",
             "level": "",
-            "last_blood_trial_date": "",
             "next_star_attraction_time": "",
             "last_star_attraction_time": "",
             "next_star_appease_time": "",
@@ -639,15 +637,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         elif "闯塔冷却" in text or "今日已闯" in text:
             today = datetime.now().strftime("%Y-%m-%d")
             self.set_avatar_state(avatar, "last_tower_date", today)
-
-        # 5. 血色试炼
-        if "【最终结算】" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            self.set_avatar_state(avatar, "last_blood_trial_date", today)
-            log.info(f"Avatar {avatar}: passive detect Blood Trial settlement. Marked today.")
-        elif "已参加过" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            self.set_avatar_state(avatar, "last_blood_trial_date", today)
 
         # 6. 入梦寻图
         if "当前进度：" in text and "残图" in text and "拼图" in text:
@@ -1128,7 +1117,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "next_meditation_retry_time",
             "next_field_training_time",
             "next_tower_time",
-            "next_blood_trial_time",
             "next_star_palace_time",
             "next_star_gazing_time",
             "pending_star_gazing_target_time",
@@ -2185,9 +2173,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """确保六翼为休息状态；仅出战中会主动召回，其他忙碌/受伤状态延后。"""
         beast = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
         if not beast or beast.get("status", "未知") == "未知":
-            log.info(f"Beast cruise: refreshing cache before {BEAST_CRUISE_COMMAND}.")
-            if await self.update_beast_cache():
-                beast = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
+            log.info(f"Beast cruise: {BEAST_FOCUS_NAME} cache/status unknown; retry after next abyss refresh.")
+            self.schedule_beast_action_retry("next_beast_cruise_time", BEAST_ACTION_RETRY_SECONDS)
+            return False
         if not beast:
             log.warning(f"Beast cruise: {BEAST_FOCUS_NAME} not found in cache; retry later.")
             self.schedule_beast_action_retry("next_beast_cruise_time")
@@ -2489,9 +2477,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """一键放养前确保六翼出战，避免六翼被放养后无法召回。"""
         focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
         if not focus:
-            log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} not in cache, refreshing .我的灵兽.")
-            if await self.update_beast_cache():
-                focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
+            log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} not in cache; trying deploy directly without .我的灵兽 refresh.")
 
         status = (focus or {}).get("status", "")
         focus_cache_name = (focus or {}).get("full_name") or BEAST_FOCUS_NAME
@@ -4073,7 +4059,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         1. 保持最多10只灵兽
         2. 第10只为风雀时停止狩猎
         3. 满10只时放生第10只（最低战力）再继续狩猎
-        4. 灵兽袋满时刷新缓存并重试
+        4. 不主动刷新灵兽面板；灵兽缓存只在探渊前更新
         """
         await self.startup_done.wait()
         while self.is_running:
@@ -4107,7 +4093,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             self.state["beasts_cache"] = [b for b in cache if b.get("full_name") != release_target.get("full_name")]
                             self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
                             self.save_state()
-                            await self.update_beast_cache()
                         else:
                             if rel_resp: notify_unrecognized_response(self, f".放生 {release_target['full_name']}", rel_resp, log, "寻觅前放生第十只")
                             self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
@@ -4116,18 +4101,16 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     if len(self.state.get("beasts_cache", [])) >= 10: log.warning("Hunt: Still >= 10 after release; skipping .寻觅灵兽."); await asyncio.sleep(300); continue
                 resp = await self.send_and_wait_feedback(".寻觅灵兽")
                 if resp:
-                    cd = self.parse_wait_time(resp); hunt_started = False
+                    cd = self.parse_wait_time(resp)
                     if self.is_beast_bag_full_response(resp):
-                        log.warning("Hunt: Beast bag is full. Refreshing cache once and retrying later.")
-                        await self.update_beast_cache()
+                        log.warning("Hunt: Beast bag is full. Retry later; beast cache refresh is limited to abyss precheck.")
                         self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
                     elif cd > 0: self.state["last_hunt_time"] = add_seconds_str(now_str(), cd - HUNT_CD_SECONDS); self.state["next_hunt_time"] = add_seconds_str(now_str(), cd)
                     elif any(k in resp for k in ["成功", "出发", "抓到", "寻觅", "搜寻"]):
-                        hunt_started = True; self.state["last_hunt_time"] = now_str(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_CD_SECONDS)
+                        self.state["last_hunt_time"] = now_str(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_CD_SECONDS)
                         if self.is_wind_sparrow(resp): self.stop_beast_hunt("寻觅到了风雀")
                     else: notify_unrecognized_response(self, ".寻觅灵兽", resp, log, "寻觅灵兽"); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
                     self.save_state()
-                    if hunt_started: await asyncio.sleep(60); await self.update_beast_cache()
                 else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS); self.save_state()
             await asyncio.sleep(60)
 
@@ -4171,8 +4154,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 need_cruise = not next_cruise or not is_future(next_cruise)
                 if need_cruise and last_cruise:
                     need_cruise = not is_future(add_seconds_str(last_cruise, BEAST_CRUISE_CD_SECONDS))
-                status_check = self.state.get("next_beast_status_check_time", "")
-                need_status_check = bool(status_check and not is_future(status_check))
                 due_any = need_abyss or need_steal or need_pasture or need_interaction or need_cruise
                 if not due_any:
                     next_waits = []
@@ -4193,9 +4174,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 else: sleep_for = 30
                 cache = list(self.state.get("beasts_cache", []))
                 if due_any:
-                    if (need_abyss or need_steal or need_cruise or need_interaction) and (need_status_check or not cache):
-                        log.info("Beast status check due. Refreshing .我的灵兽 before actions.")
-                        if await self.update_beast_cache(): cache = list(self.state.get("beasts_cache", []))
                     if need_abyss or need_steal:
                         if cache:
                             cache.sort(key=lambda x: (x.get('power', 0), x.get('exp', 0), x.get('full_name', '')), reverse=True)
@@ -4578,7 +4556,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(300)
 
     # ============================================================
-    # 血色试炼与星宫相关循环
+    # 化身日常与星宫相关循环
     # ============================================================
 
     async def _avatar_daily_checkin(self, avatar):
@@ -4591,187 +4569,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
         if resp_text:
             self.set_avatar_state(avatar, "last_dianmao_date", today)
-
-    def is_eligible_for_blood_trial(self, level_str):
-        """判断境界是否在炼气5层到筑基后期之间"""
-        if not level_str:
-            return False
-        
-        cn_to_num = {
-            "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-            "十一": 11, "十二": 12, "十三": 13
-        }
-        
-        if "炼气" in level_str:
-            # 提取 炼气X层
-            match = re.search(r"炼气(.+?)层", level_str)
-            if match:
-                num_str = match.group(1)
-                num = cn_to_num.get(num_str)
-                if num is None:
-                    try:
-                        num = int(num_str)
-                    except ValueError:
-                        num = 0
-                if num >= 5:
-                    return True
-        elif "筑基" in level_str:
-            if any(k in level_str for k in ["初期", "中期", "后期"]):
-                # 明确不包含"圆满"
-                return True
-        return False
-
-    async def run_avatar_blood_trial_loop(self, avatar, initial_delay=0):
-        """化身血色试炼循环，每天执行一次（限定境界炼气5层-筑基后期）"""
-        await self.startup_done.wait()  # 新增：等待启动对账完成，杜绝死锁
-        self._avatar_loop_count += 1
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-            
-        while self.is_running:
-            try:
-                state = self.get_avatar_state(avatar)
-                today = datetime.now().strftime("%Y-%m-%d")
-                
-                if state.get("last_blood_trial_date") == today:
-                    await asyncio.sleep(3600)
-                    continue
-                    
-                level = state.get("level", "")
-                if not level or not self.is_eligible_for_blood_trial(level):
-                    # 境界不符，或尚未获取到境界，等待
-                    await asyncio.sleep(3600)
-                    continue
-
-                # 深度闭关结算：到期后发 .查看闭关 触发游戏结算，清除闭关状态
-                in_med = state.get("in_deep_meditation", False)
-                med_end = state.get("deep_meditation_end_time", "")
-                if in_med:
-                    if med_end and is_future(med_end):
-                        await asyncio.sleep(min(seconds_until(med_end), 600))
-                        continue
-                    # 闭关已到期，发 .查看闭关 触发游戏结算
-                    log.info(f"Avatar {avatar}: deep meditation expired, settling with .查看闭关")
-                    await self.send_and_wait_feedback_identity(avatar, ".查看闭关", timeout=30)
-                    self.set_avatar_state(avatar, "in_deep_meditation", False)
-                    self.set_avatar_state(avatar, "deep_meditation_end_time", "")
-                    await asyncio.sleep(3)
-
-                log.info(f"Avatar {avatar} starting blood trial (Level: {level})")
-                
-                self.active_atomic_task = asyncio.current_task()
-                log.info(f"🔒 [ATOMIC LOCK] Acquired by BloodTrial-{avatar}")
-                try:
-                    async with self.avatar_trial_lock:
-                        async with self.avatar_send_lock:
-                            # 身份对齐（物理管线独占期间，先切换一次身份）
-                            if self.current_identity != avatar:
-                                switch_target = "主魂" if avatar == "主魂" else avatar
-                                switch_cmd = f".切换 {switch_target}"
-                                log.info(f"🔄 Blood Trial Switch: {self.current_identity} → {avatar} (sending {switch_cmd})")
-                                switch_resp = await self._send_and_wait_feedback_raw(switch_cmd, timeout=30, max_retries=2)
-                                if switch_resp and ("成功" in switch_resp or "已切换" in switch_resp or "当前操控" in switch_resp or avatar in switch_resp):
-                                    self.current_identity = avatar
-                                    self._main_confirmed = False  # 化身已切换，主魂确认失效
-                                    log.info(f"✅ Blood Trial Switch confirmed: now {avatar}")
-                                else:
-                                    log.error(f"❌ Blood Trial Switch to {avatar} FAILED! Aborting trial. Response: {(switch_resp or '')[:120]}")
-                                    # 切换失败 → 不执行试炼，等下一轮重试
-                                    await asyncio.sleep(1)
-                                    continue
-                                await asyncio.sleep(2)
-
-                            # 1. 开启试炼
-                            resp1 = await self._send_and_wait_feedback_raw(".开启血色试炼")
-                            resp1_text = self.response_text(resp1)
-                            open_allows_continue = any(k in resp1_text for k in [
-                                "集结", "房间ID", "召集", "已经开启了一个血色试炼房间",
-                            ])
-                            done_or_limit = any(k in resp1_text for k in [
-                                "已参加", "今日已参加", "上限", "明日", "最高只开放到",
-                            ])
-                            blocked = any(k in resp1_text for k in [
-                                "冷却", "不足", "无法参加", "不符合",
-                            ])
-                            if not resp1_text:
-                                await asyncio.sleep(1)
-                                continue
-                            if done_or_limit:
-                                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                                log.info(f"Avatar {avatar} blood trial limit reached or already done today.")
-                                await asyncio.sleep(1)
-                                continue
-                            if blocked and not open_allows_continue:
-                                await asyncio.sleep(1)
-                                continue
-                            if not open_allows_continue:
-                                log.warning(f"Avatar {avatar} blood trial unexpected start response: {resp1_text[:100]}")
-                                await asyncio.sleep(1)
-                                continue
-                                
-                            await asyncio.sleep(3)
-                            
-                            # 2. 进入试炼
-                            resp2 = await self._send_and_wait_feedback_raw(".进入血色试炼")
-                            if not resp2:
-                                await asyncio.sleep(1)
-                                continue
-                                
-                            await asyncio.sleep(3)
-                            
-                            # 3. 6轮抉择（全局超时180秒，单轮超时20秒，失败即退）
-                            choices = [2, 2, 3, 2, 2, 4]
-                            trial_ended = False
-                            trial_start_time = time.monotonic()
-                            TRIAL_TIMEOUT = 180  # 3分钟全局超时
-                            for i, choice in enumerate(choices, 1):
-                                if trial_ended:
-                                    break
-                                # 全局超时检测
-                                elapsed = time.monotonic() - trial_start_time
-                                if elapsed > TRIAL_TIMEOUT:
-                                    log.warning(f"Avatar {avatar} blood trial: global timeout ({TRIAL_TIMEOUT}s) at round {i}, bailing out.")
-                                    break
-                                log.info(f"Avatar {avatar} blood trial round {i}/6: choice {choice}")
-                                # 单轮最多 2 次尝试，每次 20 秒超时无重试
-                                round_success = False
-                                for attempt in range(2):
-                                    resp = await self._send_and_wait_feedback_raw(
-                                        f".血色抉择 {choice}", timeout=20, max_retries=0, return_response_msg=True)
-                                    r = getattr(resp, "text", "") if hasattr(resp, "text") else str(resp) if isinstance(resp, str) else ""
-                                    if r:
-                                        # 成功收到该轮结果
-                                        if "第" in r and "回合" in r:
-                                            log.info(f"Avatar {avatar} blood trial round {i} success.")
-                                            round_success = True
-                                            break
-                                        # 提前结束
-                                        if any(k in r for k in ["结算", "退出", "吞没", "结束", "重伤", "上限", "已经", "撤离"]):
-                                            log.info(f"Avatar {avatar} blood trial ended early at round {i}.")
-                                            round_success = True
-                                            trial_ended = True
-                                            break
-                                    await asyncio.sleep(3)
-                                # 单轮失败 → 立即放弃整个试炼
-                                if not round_success:
-                                    log.warning(f"Avatar {avatar} blood trial round {i} failed (choice={choice}), aborting trial.")
-                                    break
-                                await asyncio.sleep(3)
-                            
-                            # 完成后记录日期
-                            self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                            log.info(f"Avatar {avatar} finished blood trial today.")
-                except Exception as e:
-                    log.error(f"Error in avatar {avatar} blood trial loop: {e}", exc_info=True)
-                finally:
-                    if self.active_atomic_task == asyncio.current_task():
-                        self.active_atomic_task = None
-                        log.info(f"🔓 [ATOMIC LOCK] Released by BloodTrial-{avatar}")
-            
-            except Exception as e:
-                log.error(f"Error in avatar {avatar} blood trial loop outer: {e}", exc_info=True)
-            await asyncio.sleep(3600)
 
     @safe_bg_task
     async def delayed_avatar_force_exit(self, avatar, delay_sec):
@@ -5219,7 +5016,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             resp = await self.send_and_wait_feedback(".寻觅灵兽")
                             if resp:
                                 cd = self.parse_wait_time(resp)
-                                if self.is_beast_bag_full_response(resp): await self.update_beast_cache(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
+                                if self.is_beast_bag_full_response(resp): self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
                                 elif cd > 0: self.state["last_hunt_time"] = add_seconds_str(now_str(), cd - HUNT_CD_SECONDS); self.state["next_hunt_time"] = add_seconds_str(now_str(), cd)
                                 elif any(k in resp for k in ["成功", "出发", "抓到", "寻觅", "搜寻"]): self.state["last_hunt_time"] = now_str(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_CD_SECONDS)
                                 else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
@@ -5229,31 +5026,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     self.state["next_abyss_time"] = add_seconds_str(last_abyss, 6*3600); self.save_state()
                     if is_future(self.state["next_abyss_time"]): log.info(f"Startup Sync: Abyss in progress, next at {self.state['next_abyss_time']}.")
                     else:
-                        cache = self.state.get("beasts_cache", [])
-                        if cache:
-                            status_check = self.state.get("next_beast_status_check_time", "")
-                            if status_check and not is_future(status_check):
-                                if await self.update_beast_cache(): cache = self.state.get("beasts_cache", [])
-                            cache.sort(key=lambda x: x['power'], reverse=True); target_name = cache[0]['full_name']
-                            self.update_best_beast_tracking(cache[0]); target_status = self.state.get("best_beast_status") or cache[0].get("status", "未知")
-                            if self.is_pastured_status(target_status): self.defer_beast_actions_while_pastured(target_name, "startup abyss sync"); resp = ""
-                            elif not self.can_attempt_abyss_status(target_status): self.schedule_abyss_retry(); resp = ""
-                            elif self.should_rest_before_abyss(target_status):
-                                rest_status, _ = await self.rest_beast_for_abyss(target_name)
-                                if rest_status: target_status = rest_status
-                                await asyncio.sleep(3)
-                                if self.is_pastured_status(target_status): self.defer_beast_actions_while_pastured(target_name, "startup abyss sync after rest"); resp = ""
-                                elif not self.can_attempt_abyss_status(target_status): self.schedule_abyss_retry(); resp = ""
-                                else: resp = await self.send_abyss_with_busy_retry(target_name)
-                            else: resp = await self.send_abyss_with_busy_retry(target_name)
-                            if resp:
-                                injury_cd = self.record_beast_injury_from_response(target_name, resp, source="abyss")
-                                cd = self.parse_wait_time(resp)
-                                if injury_cd >= 0: abyss_delay = max(21600, injury_cd); self.state["last_abyss_time"] = add_seconds_str(now_str(), abyss_delay - 21600); self.state["next_abyss_time"] = add_seconds_str(now_str(), abyss_delay)
-                                elif cd > 0: self.state["last_abyss_time"] = add_seconds_str(now_str(), cd - 21600); self.state["next_abyss_time"] = add_seconds_str(now_str(), cd)
-                                elif self.is_abyss_success_response(resp): self.state["last_abyss_time"] = now_str(); self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600); self.set_best_beast_status(target_name, "休息中")
-                                else: self.schedule_abyss_retry()
-                                self.save_state()
+                        await self.execute_abyss_with_fallback()
             end_med = self.state.get("deep_meditation_end_time", "")
             if end_med and is_future(end_med): log.info(f"Startup Sync: Local meditation time valid. Skipping.")
             else:
@@ -5284,7 +5057,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             asyncio.create_task(self.run_avatar_meditation_loop(avatar, initial_delay=0))
             asyncio.create_task(self.run_avatar_field_training_loop(avatar, initial_delay=0))
             asyncio.create_task(self.run_avatar_tower_loop(avatar, initial_delay=0))
-            asyncio.create_task(self.run_avatar_blood_trial_loop(avatar, initial_delay=0))
             # 所有分身都启动此循环，内含对星宫指令的身份判定，问心子借此执行入梦和心劫
             asyncio.create_task(self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:

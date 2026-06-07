@@ -423,7 +423,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "-1003340352216": "寻真子",
         }
         self.avatar_send_lock = asyncio.Lock()     # 化身操作串行锁
-        self.avatar_trial_lock = asyncio.Lock()    # 血色试炼串行锁，确保各化身顺序执行血色试炼
         self._current_identity = self.state.get("current_identity", "主魂")
         self._main_confirmed = (self._current_identity == "主魂")  # 启动时若上次为主魂则默认确认，否则强制对齐
         self._switch_lock = asyncio.Lock()
@@ -455,7 +454,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "in_deep_meditation": False,   # 是否处于深度闭关中
             "deep_meditation_end_time": "", # 深度闭关结束时间
             "last_tower_date": "",         # 闯塔：记录最后闯塔日期
-            "last_blood_trial_date": "",   # 血色试炼：记录最后完成日期
             "next_dream_map_time": "",     # 入梦寻图：下次可用时间
             "next_heart_trial_time": "",   # 共历心劫：下次可用时间
             "next_concubine_voyage_time": "", # 侍妾远航：下次归来/可出发时间
@@ -717,21 +715,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 self.state["last_tower_date"] = today
             else:
                 self.set_avatar_state(avatar, "last_tower_date", today)
-
-        # ---- 血色试炼 ----
-        if "【最终结算】" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            if avatar == "主魂":
-                self.state["last_blood_trial_date"] = today
-            else:
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-            log.info(f"[{avatar}] passive: blood trial settled today.")
-        elif "已参加过" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            if avatar == "主魂":
-                self.state["last_blood_trial_date"] = today
-            else:
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
 
         # ---- 入梦寻图 ----
         if "当前进度：" in text and "残图" in text and "拼图" in text:
@@ -5690,160 +5673,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 log.error(f"Avatar [{avatar}] tower loop error: {e}")
                 await asyncio.sleep(300)
 
-    # ============================================================
-    # 身外化身：血色试炼循环（每日一次）
-    # ============================================================
-
-    def is_eligible_for_blood_trial(self, level_str):
-        """判断境界是否在炼气5层到筑基后期之间"""
-        cn_to_num = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-                     "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-                     "十一": 11, "十二": 12, "十三": 13}
-        if "炼气" in level_str:
-            match = re.search(r"炼气(.+?)层", level_str)
-            if match:
-                num_str = match.group(1)
-                num = cn_to_num.get(num_str)
-                if num is None:
-                    try: num = int(num_str)
-                    except ValueError: num = 0
-                if num >= 5: return True
-        elif "筑基" in level_str:
-            if any(k in level_str for k in ["初期", "中期", "后期"]):
-                return True
-        return False
-
-    async def run_avatar_blood_trial_loop(self, avatar, initial_delay=0):
-        """
-        化身血色试炼循环，每天执行一次（限定境界炼气5层-筑基后期）。
-        命令序列：.开启血色试炼 → .进入血色试炼 → 6轮 .血色抉择 N
-        """
-        await self.startup_done.wait()
-        if initial_delay > 0:
-            log.info(f"Avatar [{avatar}] blood trial loop: waiting {initial_delay}s before start...")
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                a_state = self.get_avatar_state(avatar)
-                today = datetime.now().strftime("%Y-%m-%d")
-
-                # 每日一次检查
-                if a_state.get("last_blood_trial_date") == today:
-                    await asyncio.sleep(3600)
-                    continue
-
-                # 境界检查
-                level = a_state.get("level", "")
-                if not level or not self.is_eligible_for_blood_trial(level):
-                    await asyncio.sleep(3600)
-                    continue
-
-                log.info(f"Avatar [{avatar}] starting blood trial (Level: {level})")
-
-                # 使用 avatar_trial_lock 确保血色试炼串行执行
-                async with self.avatar_trial_lock:
-                    # 1. 开启试炼
-                    self.active_atomic_task = asyncio.current_task()
-                    log.info(f"🔒 [ATOMIC LOCK] Acquired by BloodTrial-{avatar}")
-                    try:
-                        resp1 = await self.send_and_wait_feedback_identity(avatar, ".开启血色试炼")
-                        resp1_text = getattr(resp1, "text", "") if hasattr(resp1, "text") else resp1 if isinstance(resp1, str) else str(resp1) if resp1 else ""
-
-                        # 修为不足处理
-                        if "修为不足" in resp1_text:
-                            async def retry_blood_trial_start():
-                                return await self.send_and_wait_feedback_identity(avatar, ".开启血色试炼")
-                            success, resp1_text = await self.handle_修为不足(avatar, retry_blood_trial_start, cooldown_key="last_blood_trial_date", cooldown_hours=2)
-                            if not success:
-                                log.warning(f"Avatar [{avatar}] blood trial: 修为不足 after force exit, will retry next cycle")
-                                await asyncio.sleep(3600)
-                                continue
-
-                        open_allows_continue = any(k in resp1_text for k in [
-                            "集结", "房间ID", "召集", "已经开启了一个血色试炼房间",
-                        ])
-                        done_or_limit = any(k in resp1_text for k in [
-                            "已参加", "今日已参加", "上限", "明日", "最高只开放到",
-                        ])
-                        blocked = any(k in resp1_text for k in [
-                            "冷却", "不足", "无法参加", "不符合",
-                        ])
-                        if not resp1_text:
-                            await asyncio.sleep(3600)
-                            continue
-                        if done_or_limit:
-                            self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                            await asyncio.sleep(3600)
-                            continue
-                        if blocked and not open_allows_continue:
-                            await asyncio.sleep(3600)
-                            continue
-                        if not open_allows_continue:
-                            log.warning(f"Avatar [{avatar}] blood trial unexpected start response: {resp1_text[:100]}")
-                            await asyncio.sleep(3600)
-                            continue
-
-                        await asyncio.sleep(3)
-
-                        # 2. 进入试炼
-                        resp2 = await self.send_and_wait_feedback_identity(avatar, ".进入血色试炼")
-                        resp2_text = getattr(resp2, "text", "") if hasattr(resp2, "text") else resp2 if isinstance(resp2, str) else str(resp2) if resp2 else ""
-
-                        if not resp2_text:
-                            await asyncio.sleep(600)
-                            continue
-
-                        await asyncio.sleep(3)
-
-                        # 3. 6轮抉择: 2, 2, 3, 2, 2, 4
-                        choices = [2, 2, 3, 2, 2, 4]
-                        trial_ended = False
-                        for i, choice in enumerate(choices, 1):
-                            if trial_ended:
-                                break
-                            log.info(f"Avatar [{avatar}] blood trial round {i}/6: choice {choice}")
-                            for attempt in range(3):
-                                resp = await self.send_and_wait_feedback_identity(avatar, f".血色抉择 {choice}", timeout=60)
-                                resp_str = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else str(resp) if resp else ""
-
-                                if not resp_str:
-                                    await asyncio.sleep(3)
-                                    continue
-
-                                if "第" in resp_str and "回合" in resp_str:
-                                    log.info(f"Avatar [{avatar}] blood trial round {i} success.")
-                                    break
-                                if any(k in resp_str for k in ["结算", "退出", "吞没", "结束", "重伤", "上限", "已经"]):
-                                    log.info(f"Avatar [{avatar}] blood trial ended early at round {i}.")
-                                    trial_ended = True
-                                    break
-                                await asyncio.sleep(3)
-                            else:
-                                log.warning(f"Avatar [{avatar}] blood trial round {i} failed after 3 attempts.")
-                            await asyncio.sleep(3)
-
-                        self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                        log.info(f"Avatar [{avatar}] blood trial completed for {today}.")
-
-                        # 重新开启深度闭关
-                        await asyncio.sleep(3)
-                        await self.send_and_wait_feedback_identity(avatar, ".闭关修炼")
-                        await asyncio.sleep(3)
-                        deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
-                        deep_text = getattr(deep_resp, "text", "") if hasattr(deep_resp, "text") else deep_resp if isinstance(deep_resp, str) else str(deep_resp) if deep_resp else ""
-                        await self.record_avatar_deep_meditation_start(avatar, deep_text)
-                    except Exception as e:
-                        log.error(f"Avatar [{avatar}] blood trial loop error: {e}")
-                    finally:
-                        if self.active_atomic_task == asyncio.current_task():
-                            self.active_atomic_task = None
-                            log.info(f"🔓 [ATOMIC LOCK] Released by BloodTrial-{avatar}")
-
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] blood trial loop outer error: {e}")
-            await asyncio.sleep(3600)
-
     async def start(self):
         """
         脚本主入口。启动 Telethon 客户端后执行以下步骤：
@@ -6154,7 +5983,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         for i, avatar_name in enumerate(self.avatars):
             asyncio.create_task(self.run_avatar_loop(avatar_name, initial_delay=i * 10))
             asyncio.create_task(self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
-            asyncio.create_task(self.run_avatar_blood_trial_loop(avatar_name, initial_delay=i * 30))
             if avatar_name in STAR_ATTRACTION_AVATARS:
                 asyncio.create_task(self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
 

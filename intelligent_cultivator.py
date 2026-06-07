@@ -356,9 +356,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             "主魂": ["Waaiging"],
         }
         self.avatar_features = {
-            "无咎子": {"meditation_prefix": ".推命", "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "blood_trial": False, "tower": True, "daily_checkin": True},
-            "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "blood_trial": False, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True},
-            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "blood_trial": True, "tower": True, "formation_assist": True, "star_gazing": True, "daily_checkin": True},
+            "无咎子": {"meditation_prefix": ".推命", "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True},
+            "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True},
+            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "tower": True, "formation_assist": True, "star_gazing": True, "daily_checkin": True},
         }
         # 化身 chat_id 映射（供 log_utils.log_manual_outgoing_if_needed 使用）
         self._avatar_chat_ids = {
@@ -529,7 +529,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         返回:
             int | None: 发送成功的消息 ID，失败则返回 None
         """
-        # 整体任务守卫：防止打断正在进行的共历心劫、血色试炼、观星等
+        # 整体任务守卫：防止打断正在进行的共历心劫、观星等
         current_t = asyncio.current_task()
         while self.active_atomic_task is not None and self.active_atomic_task != current_t:
             await asyncio.sleep(0.5)
@@ -755,16 +755,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 "灵眼之树", "成熟度", "灌溉", "采摘", "修为增长",
                 "协同守山", "守山", "护山", "古剑门", "加固",
             ])
-        if command in {".开启血色试炼", ".进入血色试炼"} or command.startswith(".血色抉择"):
-            return (
-                any(k in text for k in [
-                    "血色试炼", "血色禁地", "血雾", "药篓", "回合结果",
-                    "房间ID", "召集同伴", "准入境界", "已参加过",
-                    "已经开启了一个血色试炼房间", "最高只开放到",
-                ])
-                or ("队长" in text and any(k in text for k in ["房间", "抉择", "已解散", "并非"]))
-                or ("第" in text and "回合" in text and any(k in text for k in ["血雾", "药篓", "禁地", "撤离"]))
-            )
         if command in {".启阵", ".助阵"}:
             formation_keywords = [
                 "冷却", "再次启阵", "心神消耗", "参与过布阵",
@@ -2493,7 +2483,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         avatar_default = {
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "nickname": "", "in_deep_meditation": False,
-            "deep_meditation_end_time": "", "last_tower_date": "", "last_blood_trial_date": "",
+            "deep_meditation_end_time": "", "last_tower_date": "",
             "next_dream_map_time": "", "next_heart_trial_time": "",
             "next_concubine_voyage_time": "", "last_concubine_voyage_time": "",
             "concubine_voyage_active": False,
@@ -2999,21 +2989,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             else:
                 self.set_avatar_state(avatar, "last_tower_date", today)
 
-        # ---- 血色试炼（化身为主） ----
-        if "【最终结算】" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            if avatar == "主魂":
-                self.state["last_blood_trial_date"] = today
-            else:
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-            log.info(f"[{avatar}] passive: blood trial settled today.")
-        elif "已参加过" in text and "血色试炼" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            if avatar == "主魂":
-                self.state["last_blood_trial_date"] = today
-            else:
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-
         # ---- 入梦寻图（化身为主） ----
         if "当前进度：" in text and "残图" in text and "拼图" in text:
             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now, 8 * 3600))
@@ -3383,94 +3358,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return True
 
     # ============================================================
-    # 身外化身：血色试炼
-    # ============================================================
-
-    def is_eligible_for_blood_trial(self, level_str):
-        if not level_str:
-            return False
-        order = ["炼气一层","炼气二层","炼气三层","炼气四层","炼气五层","炼气六层","炼气七层","炼气八层","炼气九层","炼气十层","炼气十一层","炼气十二层","筑基初期","筑基中期","筑基后期"]
-        for i, lv in enumerate(order):
-            if lv in level_str:
-                return 4 <= i <= 14
-        return False
-
-    async def run_avatar_blood_trial_loop(self, avatar):
-        while self.is_running:
-            await self.pause_event.wait()
-            await self.startup_done.wait()
-            today = datetime.now().strftime("%Y-%m-%d")
-            a_state = self.get_avatar_state(avatar)
-            if a_state.get("last_blood_trial_date") == today:
-                await asyncio.sleep(max(60, ((datetime.now() + timedelta(days=1)).replace(hour=0, minute=5, second=0) - datetime.now()).total_seconds()))
-                continue
-            level = a_state.get("level", "")
-            if not level or not self.is_eligible_for_blood_trial(level):
-                await asyncio.sleep(3600); continue
-            self.active_atomic_task = asyncio.current_task()
-            log.info(f"🔒 [ATOMIC LOCK] Acquired by BloodTrial-{avatar}")
-            try:
-                resp1 = await self.send_and_wait_feedback_identity(avatar, ".开启血色试炼")
-                resp1_text = getattr(resp1, "text", "") if hasattr(resp1, "text") else resp1 if isinstance(resp1, str) else str(resp1) if resp1 else ""
-                open_allows_continue = any(k in resp1_text for k in [
-                    "大厅", "集结", "房间ID", "召集", "已经开启了一个血色试炼房间",
-                ])
-                done_or_limit = any(k in resp1_text for k in [
-                    "已参加", "今日已参加", "上限", "明日", "禁地试炼", "最高只开放到",
-                ])
-                blocked = any(k in resp1_text for k in [
-                    "冷却", "不足", "无法参加", "不符合",
-                ])
-                if not resp1_text:
-                    await asyncio.sleep(3600); continue
-                if done_or_limit:
-                    self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                    await asyncio.sleep(3600); continue
-                if blocked and not open_allows_continue:
-                    await asyncio.sleep(3600); continue
-                if not open_allows_continue:
-                    await asyncio.sleep(3600); continue
-                await asyncio.sleep(3)
-                resp2 = await self.send_and_wait_feedback_identity(avatar, ".进入血色试炼")
-                if not (getattr(resp2, "text", "") if hasattr(resp2, "text") else ""):
-                    await asyncio.sleep(600); continue
-                await asyncio.sleep(3)
-                for i, choice in enumerate([2,2,3,2,2,4], 1):
-                    # 单轮最多 2 次尝试，每次 20 秒超时无重试
-                    round_success = False
-                    for _ in range(2):
-                        resp = await self.send_and_wait_feedback_identity(avatar, f".血色抉择 {choice}", timeout=20, max_retries=0)
-                        r = getattr(resp, "text", "") if hasattr(resp, "text") else ""
-                        if r:
-                            if "第" in r and "回合" in r:
-                                round_success = True
-                                break
-                            if any(k in r for k in ["结算","退出","吞没","结束","重伤","上限","已经","撤离"]):
-                                round_success = True
-                                break
-                        await asyncio.sleep(3)
-                    # 单轮失败 → 立即放弃
-                    if not round_success:
-                        log.warning(f"Avatar {avatar} blood trial round {i} failed, aborting.")
-                        break
-                    await asyncio.sleep(3)
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                # 重新闭关
-                features = self.avatar_features.get(avatar, {})
-                prefix = features.get("meditation_prefix", "")
-                if prefix:
-                    await self.send_and_wait_feedback_identity(avatar, f"{prefix} 闭关")
-                    await asyncio.sleep(3)
-                await self.send_and_wait_feedback_identity(avatar, ".闭关修炼")
-                await asyncio.sleep(3)
-                dr = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
-                await self.record_avatar_deep_meditation_start(avatar, getattr(dr, "text", "") if hasattr(dr, "text") else "")
-            finally:
-                if self.active_atomic_task == asyncio.current_task():
-                    self.active_atomic_task = None
-                    log.info(f"🔓 [ATOMIC LOCK] Released by BloodTrial-{avatar}")
-
-    # ============================================================
     # 身外化身：闯塔
     # ============================================================
 
@@ -3523,8 +3410,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                             await self._avatar_assist_formation(avatar)
                         # 4. 闯塔
                         if features.get("tower"): await self._avatar_tower_check(avatar)
-                        # 4. 血色试炼
-                        if features.get("blood_trial"): await self._avatar_blood_trial_check(avatar)
                         # 5. 灵树灌溉
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
                         # 5. 入梦寻图 / 星宫道心侍妾远航绑定批次
@@ -3734,105 +3619,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         cd = self.parse_wait_time(resp_text)
         self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), cd if cd > 0 else 4*3600))
 
-    async def _avatar_blood_trial_check(self, avatar):
-        """化身血色试炼检查（单次）。含境界判断+完整6轮抉择。全局超时5分钟。"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        a_state = self.get_avatar_state(avatar)
-        if a_state.get("last_blood_trial_date") == today: return
-        level = a_state.get("level", "")
-        if not level or not self.is_eligible_for_blood_trial(level):
-            return
-
-        def _blood_open_allows_continue(text):
-            return any(k in text for k in [
-                "【血色试炼·集结】", "房间ID", "召集同伴",
-                "队长可随时使用 `.进入血色试炼`", "已经开启了一个血色试炼房间",
-            ])
-
-        def _blood_done_today(text):
-            return "血色试炼" in text and any(k in text for k in ["已参加过", "今日已参加"])
-
-        def _blood_blocked(text):
-            return any(k in text for k in [
-                "最高只开放到", "境界不足", "修为不足", "无法参加",
-                "不符合", "冷却", "明日再来",
-            ])
-
-        trial_started = False
-
-        async def _do_trial():
-            nonlocal trial_started
-            resp1 = await self.send_and_wait_feedback_identity(avatar, ".开启血色试炼")
-            resp1_text = getattr(resp1, "text", "") if hasattr(resp1, "text") else resp1 if isinstance(resp1, str) else str(resp1) if resp1 else ""
-            if not resp1_text:
-                log.warning(f"[{avatar}] 血色试炼开启无回复，暂不继续。")
-                return False
-            if _blood_done_today(resp1_text):
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                return False
-            if _blood_blocked(resp1_text) and not _blood_open_allows_continue(resp1_text):
-                log.warning(f"[{avatar}] 血色试炼开启被阻止: {resp1_text[:100]}")
-                return False
-            if not _blood_open_allows_continue(resp1_text):
-                log.warning(f"[{avatar}] 血色试炼意外响应: {resp1_text[:100]}")
-                return False
-            trial_started = True
-            await asyncio.sleep(3)
-            resp2 = await self.send_and_wait_feedback_identity(avatar, ".进入血色试炼")
-            resp2_text = getattr(resp2, "text", "") if hasattr(resp2, "text") else resp2 if isinstance(resp2, str) else str(resp2) if resp2 else ""
-            if not resp2_text:
-                log.warning(f"[{avatar}] 血色试炼进入无回复，暂不继续抉择。")
-                return True
-            if _blood_done_today(resp2_text):
-                self.set_avatar_state(avatar, "last_blood_trial_date", today)
-                return True
-            if any(k in resp2_text for k in ["并非队长", "房间已解散", "无法进入", "不在队伍"]):
-                log.warning(f"[{avatar}] 血色试炼进入失败: {resp2_text[:100]}")
-                return True
-            if not any(k in resp2_text for k in ["第一回合", "第 1 回合", "请队长使用", "血雾", "药篓"]):
-                log.warning(f"[{avatar}] 血色试炼进入意外响应: {resp2_text[:100]}")
-                return True
-            await asyncio.sleep(3)
-            for i, choice in enumerate([2,2,3,2,2,4], 1):
-                round_success = False
-                # 单轮最多 2 次尝试，每次 20 秒超时无重试
-                for _ in range(2):
-                    resp = await self.send_and_wait_feedback_identity(avatar, f".血色抉择 {choice}", timeout=30, max_retries=0)
-                    r = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else str(resp) if resp else ""
-                    if r:
-                        if ("第" in r and "回合" in r) or any(k in r for k in ["回合结果", "血雾", "药篓", "请队长继续"]):
-                            round_success = True
-                            break
-                        if any(k in r for k in ["最终结算","结算","退出","吞没","结束","重伤","上限","已参加","撤离"]):
-                            round_success = True
-                            break
-                        if any(k in r for k in ["并非队长", "房间已解散", "无法", "错误", "失败"]):
-                            log.warning(f"[{avatar}] 血色试炼第{i}轮终止: {r[:100]}")
-                            return True
-                    await asyncio.sleep(3)
-                # 单轮失败 → 立即放弃整个试炼
-                if not round_success:
-                    log.warning(f"[{avatar}] 血色试炼第{i}轮失败 (choice={choice})，放弃试炼。")
-                    break
-                await asyncio.sleep(3)
-            self.set_avatar_state(avatar, "last_blood_trial_date", today)
-            return True
-
-        try:
-            async with AtomicTaskContext(self, f"BloodTrial-{avatar}"):
-                await asyncio.wait_for(_do_trial(), timeout=300)
-        except asyncio.TimeoutError:
-            log.warning(f"[{avatar}] 血色试炼全局超时(300s)，标记今日已完成。")
-            self.set_avatar_state(avatar, "last_blood_trial_date", today)
-        # 血色试炼后重新闭关
-        if not trial_started:
-            return
-        prefix = self.avatar_features.get(avatar, {}).get("meditation_prefix", "")
-        if prefix:
-            await self.send_and_wait_feedback_identity(avatar, f"{prefix} 闭关")
-            await asyncio.sleep(3)
-        await self.send_and_wait_feedback_identity(avatar, ".闭关修炼")
-
     async def _get_avatar_min_cd_seconds(self):
         """计算所有化身中最早到期的CD时间（秒），用于替代固定30分钟sleep"""
         now = datetime.now()
@@ -3851,11 +3637,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             # 闯塔CD（23点后+今天没做过）
             if features.get("tower") and a_state.get("last_tower_date") != today and now.hour >= 23:
                 min_cd = min(min_cd, 60)
-            # 血色试炼CD
-            if features.get("blood_trial") and a_state.get("last_blood_trial_date") != today:
-                level = a_state.get("level", "")
-                if level and self.is_eligible_for_blood_trial(level):
-                    min_cd = min(min_cd, 60)
             # 野外历练CD
             ft = a_state.get("next_field_training_time", "")
             if ft and is_future(ft):
