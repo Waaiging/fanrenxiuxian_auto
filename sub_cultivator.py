@@ -131,8 +131,13 @@ STATE_FILE = os.path.join(CONFIG_DIR, 'state_sub.json')     # 持久化状态（
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"  # 所有时间字符串的统一格式
 
 # -- 星辰牵引（天雷星） --
-STAR_ATTRACTION_COMMAND = ".牵引星辰 天雷星"       # 牵引指令，绑定天雷星
+STAR_ATTRACTION_TARGET = "天雷星"
+STAR_ATTRACTION_COMMAND = f".牵引星辰 {STAR_ATTRACTION_TARGET}"  # 牵引指令，绑定天雷星
 STAR_ATTRACTION_COOLDOWN_SECONDS = 36 * 3600       # 牵引冷却 36 小时（一次牵引持续一整轮）
+STAR_PRE_APPEASE_LEAD_SECONDS = 60                 # 收集前 1 分钟安抚
+STAR_STATUS_RETRY_SECONDS = 10 * 60                # 观星台异常时 10 分钟后复查
+STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60          # 强行出关后仍修为不足，1 小时后重试
+STAR_ATTRACTION_AVATARS = {"寻真子"}                # 副号参与牵引循环的化身
 
 # -- 星辰安抚 --
 STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机器人每 6 小时可安抚一次）
@@ -457,6 +462,19 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "last_concubine_voyage_time": "",
             "concubine_voyage_active": False,
             "last_gazing_date": "",        # 观星：上次观星日期
+            "next_star_attraction_time": "",
+            "last_star_attraction_time": "",
+            "next_star_appease_time": "",
+            "last_star_appease_time": "",
+            "next_star_collect_time": "",
+            "last_star_collect_time": "",
+            "next_star_check_time": "",
+            "last_star_observatory_time": "",
+            "star_observatory_summary": "",
+            "star_observatory_needs_refresh": True,
+            "star_attraction_retry_time": "",
+            "star_attraction_force_exit_tried": False,
+            "star_target": STAR_ATTRACTION_TARGET,
             "current_exp": 0,              # 当前修为
             "total_exp": 0,                # 总修为上限
             "spirit_root": "",             # 灵根
@@ -504,6 +522,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar][key] = value
+            self.save_state()
+
+    def update_avatar_states(self, avatar, values):
+        """批量更新化身状态，避免连续写入 state 文件。"""
+        self.ensure_avatar_states()
+        if avatar in self.state["avatars"]:
+            self.state["avatars"][avatar].update(values)
             self.save_state()
 
     # ---- 消息过滤：判断是否针对本账号 ----
@@ -754,6 +779,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             else:
                 self.set_avatar_state(avatar, "last_daily_date", today)
             log.info(f"[{avatar}] passive: daily tasks completed today.")
+
+        # ---- 星宫化身：观星台 / 牵引 / 安抚 / 收集。脚本和手动回复都走这里对账。----
+        if avatar in STAR_ATTRACTION_AVATARS:
+            self.record_avatar_star_response_from_text(avatar, text, source="passive star sync")
 
         # 保存状态
         self.save_state()
@@ -1193,6 +1222,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        kwargs.pop("force_identity_check", None)
 
         _t0 = time.monotonic()
         log.info(f"[DEBUG-IDENTITY] [{identity}] ENTER send_and_wait_feedback_identity, cmd={message!r}, lock_held={self.avatar_send_lock.locked()}")
@@ -2932,6 +2962,579 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 f"Next manifest {self.state['next_star_manifest_time']}."
             )
             await asyncio.sleep(600)
+
+    # ---- 化身星辰牵引 / 安抚 / 收集 ----
+
+    def response_text(self, resp):
+        if hasattr(resp, "text"):
+            return resp.text or ""
+        if isinstance(resp, str):
+            return resp
+        return str(resp) if resp else ""
+
+    def recent_command_guard_wait(self, command="", max_age_seconds=15):
+        block = getattr(self, "_last_command_guard_block", {}) or {}
+        at = block.get("at", 0) or 0
+        if not at or time.monotonic() - at > max_age_seconds:
+            return 0
+        key = str(block.get("key", "") or "")
+        if command and not key.startswith(str(command).strip()):
+            return 0
+        wait = int(block.get("wait", 0) or 0)
+        blocked_until = float(block.get("blocked_until", 0) or 0)
+        if blocked_until > time.monotonic():
+            wait = max(wait, int(blocked_until - time.monotonic()))
+        return max(0, wait)
+
+    def apply_avatar_star_guard_backoff(self, avatar, command="", fields=None, reason="command guard"):
+        wait = self.recent_command_guard_wait(command)
+        if wait <= 0:
+            return False
+        retry_at = add_seconds_str(now_str(), max(60, wait + 5))
+        updates = {"next_star_check_time": retry_at}
+        for field in fields or []:
+            updates[field] = retry_at
+        if not command or str(command).startswith(".观星台"):
+            updates["star_observatory_needs_refresh"] = True
+        self.update_avatar_states(avatar, updates)
+        key = (getattr(self, "_last_command_guard_block", {}) or {}).get("key", command)
+        log.info(
+            f"Avatar [{avatar}] star cycle backed off by command guard [{key}] "
+            f"until {retry_at} ({reason})."
+        )
+        return True
+
+    def compact_seconds(self, seconds):
+        seconds = max(0, int(seconds or 0))
+        hours, rem = divmod(seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours}小时{minutes}分钟"
+        if minutes:
+            return f"{minutes}分钟{seconds}秒"
+        return f"{seconds}秒"
+
+    def avatar_star_due(self, avatar, key):
+        value = self.get_avatar_state(avatar).get(key, "")
+        return bool(value and not is_future(value))
+
+    def parse_avatar_star_observatory(self, text):
+        clean = (text or "").replace("**", "").replace("`", "")
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        disk_lines = [
+            line for line in lines
+            if "引星盘" in line
+            and ":" in line
+            and "观星台" not in line
+            and "总数" not in line
+            and not line.startswith("使用")
+        ]
+        valid = "【星宫 · 观星台】" in clean or ("观星台" in clean and bool(disk_lines))
+        if not valid and not disk_lines:
+            return {"valid": False}
+
+        total_match = re.search(r"总数\s*[:：]\s*(\d+)\s*座", clean)
+        total_count = int(total_match.group(1)) if total_match else len(disk_lines)
+        empty_count = 0
+        occupied_count = 0
+        collect_ready = False
+        needs_appease = False
+        remaining_values = []
+        stars = set()
+
+        for line in disk_lines:
+            status = line.split(":", 1)[1].strip()
+            if "空闲" in status:
+                empty_count += 1
+                continue
+            occupied_count += 1
+            star_match = re.search(r":\s*([^-:：\n]+?)\s*(?:-|$)", line)
+            if star_match:
+                star_name = star_match.group(1).strip()
+                if star_name and "空闲" not in star_name:
+                    stars.add(star_name)
+            if "精华已成" in status:
+                collect_ready = True
+            if any(k in status for k in ["星光黯淡", "元磁紊乱", "狂暴星力", "黯淡", "紊乱"]):
+                needs_appease = True
+            cd = self.parse_wait_time(line)
+            if cd and cd > 0 and "剩余" in line:
+                remaining_values.append(cd)
+
+        min_remaining = min(remaining_values) if remaining_values else None
+        if collect_ready:
+            summary = "精华已成"
+        elif min_remaining is not None:
+            summary = f"凝聚中，剩余{self.compact_seconds(min_remaining)}"
+        elif needs_appease:
+            summary = "需安抚"
+        elif total_count and empty_count >= total_count:
+            summary = "全部空闲"
+        elif occupied_count:
+            summary = "已占用，待复查"
+        else:
+            summary = "未知"
+
+        return {
+            "valid": True,
+            "total_count": total_count,
+            "empty_count": empty_count,
+            "occupied_count": occupied_count,
+            "collect_ready": collect_ready,
+            "needs_appease": needs_appease,
+            "min_remaining": min_remaining,
+            "stars": sorted(stars),
+            "summary": summary,
+        }
+
+    def record_avatar_star_observatory(self, avatar, text, source="观星台"):
+        info = self.parse_avatar_star_observatory(text)
+        if not info.get("valid"):
+            return False
+
+        now = now_str()
+        updates = {
+            "last_star_observatory_time": now,
+            "star_observatory_summary": info.get("summary", ""),
+            "star_observatory_needs_refresh": False,
+            "star_target": STAR_ATTRACTION_TARGET,
+        }
+
+        min_remaining = info.get("min_remaining")
+        if info.get("collect_ready"):
+            updates["next_star_collect_time"] = now
+            if info.get("needs_appease"):
+                updates["next_star_appease_time"] = now
+            updates["next_star_check_time"] = now
+        elif min_remaining is not None:
+            collect_time = add_seconds_str(now, min_remaining)
+            appease_delay = max(0, min_remaining - STAR_PRE_APPEASE_LEAD_SECONDS)
+            appease_time = add_seconds_str(now, appease_delay)
+            updates["next_star_collect_time"] = collect_time
+            updates["next_star_appease_time"] = appease_time
+            updates["next_star_attraction_time"] = collect_time
+            updates["next_star_check_time"] = appease_time
+        elif info.get("total_count") and info.get("empty_count", 0) >= info.get("total_count", 0):
+            updates["next_star_collect_time"] = ""
+            updates["next_star_appease_time"] = ""
+            if not is_future(self.get_avatar_state(avatar).get("next_star_attraction_time", "")):
+                updates["next_star_attraction_time"] = now
+                updates["next_star_check_time"] = now
+            else:
+                updates["next_star_check_time"] = self.get_avatar_state(avatar).get("next_star_attraction_time", "")
+        elif info.get("needs_appease"):
+            updates["next_star_appease_time"] = now
+            updates["next_star_check_time"] = now
+        else:
+            updates["next_star_check_time"] = add_seconds_str(now, STAR_STATUS_RETRY_SECONDS)
+
+        self.update_avatar_states(avatar, updates)
+        log.info(f"Avatar [{avatar}] star observatory synced ({source}): {info.get('summary', '')}")
+        return True
+
+    def _star_cycle_collect_time_from_now(self):
+        return add_seconds_str(now_str(), STAR_ATTRACTION_COOLDOWN_SECONDS)
+
+    def record_avatar_star_pull_response(self, avatar, text, source=STAR_ATTRACTION_COMMAND):
+        if not text:
+            retry_at = add_seconds_str(now_str(), STAR_STATUS_RETRY_SECONDS)
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": retry_at,
+                "next_star_attraction_time": retry_at,
+                "next_star_check_time": retry_at,
+            })
+            return "empty"
+
+        clean = text.replace("**", "")
+        now = now_str()
+        if "修为不足" in clean:
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": now,
+                "next_star_attraction_time": now,
+            })
+            return "insufficient"
+
+        if "已无空闲" in clean and "引星盘" in clean:
+            self.update_avatar_states(avatar, {
+                "star_observatory_needs_refresh": True,
+                "next_star_check_time": now,
+            })
+            return "no_free"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            due = add_seconds_str(now, cd)
+            appease_time = add_seconds_str(now, max(0, cd - STAR_PRE_APPEASE_LEAD_SECONDS))
+            self.update_avatar_states(avatar, {
+                "next_star_attraction_time": due,
+                "next_star_collect_time": due,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+                "star_attraction_retry_time": "",
+                "star_attraction_force_exit_tried": False,
+            })
+            return "cooldown"
+
+        if any(k in clean for k in ["牵引成功", "成功在", "牵引了", "开始牵引"]):
+            collect_time = self._star_cycle_collect_time_from_now()
+            appease_time = add_seconds_str(collect_time, -STAR_PRE_APPEASE_LEAD_SECONDS)
+            self.update_avatar_states(avatar, {
+                "last_star_attraction_time": now,
+                "next_star_attraction_time": collect_time,
+                "next_star_collect_time": collect_time,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+                "star_attraction_retry_time": "",
+                "star_attraction_force_exit_tried": False,
+                "star_observatory_needs_refresh": False,
+                "star_observatory_summary": f"{STAR_ATTRACTION_TARGET}凝聚中",
+            })
+            return "success"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+        })
+        notify_unrecognized_response(self, STAR_ATTRACTION_COMMAND, text, log, source)
+        return "unknown"
+
+    def record_avatar_star_appease_response(self, avatar, text, source=".安抚星辰"):
+        now = now_str()
+        clean = (text or "").replace("**", "")
+        if clean and any(k in clean for k in ["成功安抚", "安抚了", "没有需要安抚", "无需安抚", "不需要安抚"]):
+            state = self.get_avatar_state(avatar)
+            next_collect = state.get("next_star_collect_time", "")
+            self.update_avatar_states(avatar, {
+                "last_star_appease_time": now,
+                "next_star_appease_time": "",
+                "next_star_check_time": next_collect if next_collect else add_seconds_str(now, STAR_STATUS_RETRY_SECONDS),
+            })
+            return "success"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            due = add_seconds_str(now, cd)
+            self.update_avatar_states(avatar, {
+                "next_star_appease_time": due,
+                "next_star_check_time": due,
+            })
+            return "cooldown"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+        })
+        if text:
+            notify_unrecognized_response(self, ".安抚星辰", text, log, source)
+        return "unknown"
+
+    def record_avatar_star_collect_response(self, avatar, text, source=".收集精华"):
+        now = now_str()
+        clean = (text or "").replace("**", "")
+        if clean and any(k in clean for k in ["收集完成", "成功从", "获得了"]):
+            self.update_avatar_states(avatar, {
+                "last_star_collect_time": now,
+                "next_star_collect_time": "",
+                "next_star_appease_time": "",
+                "next_star_attraction_time": now,
+                "next_star_check_time": now,
+                "star_observatory_needs_refresh": False,
+                "star_attraction_force_exit_tried": False,
+            })
+            return "success"
+
+        if clean and any(k in clean for k in ["没有已凝聚", "没有可供收集", "暂无精华"]):
+            self.update_avatar_states(avatar, {
+                "star_observatory_needs_refresh": True,
+                "next_star_check_time": now,
+            })
+            return "not_ready"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            collect_time = add_seconds_str(now, cd)
+            appease_time = add_seconds_str(now, max(0, cd - STAR_PRE_APPEASE_LEAD_SECONDS))
+            self.update_avatar_states(avatar, {
+                "next_star_collect_time": collect_time,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+            })
+            return "cooldown"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+        })
+        if text:
+            notify_unrecognized_response(self, ".收集精华", text, log, source)
+        return "unknown"
+
+    def record_avatar_star_response_from_text(self, avatar, text, source="star sync"):
+        if avatar not in STAR_ATTRACTION_AVATARS or not text:
+            return False
+        clean = text.replace("**", "")
+        if "已无空闲" in clean and "引星盘" in clean:
+            return self.record_avatar_star_pull_response(avatar, text, source) in {"no_free"}
+        if "观星台" in clean and "引星盘" in clean:
+            return self.record_avatar_star_observatory(avatar, text, source)
+        if (
+            any(k in clean for k in ["牵引成功", "牵引了", "开始牵引", "牵引星辰"])
+            or ("修为不足" in clean and STAR_ATTRACTION_TARGET in clean)
+            or ("冷却" in clean and "牵引" in clean)
+        ):
+            return self.record_avatar_star_pull_response(avatar, text, source) in {"success", "cooldown", "no_free", "insufficient"}
+        if "安抚" in clean and ("引星盘" in clean or "星辰" in clean or "狂暴星力" in clean):
+            return self.record_avatar_star_appease_response(avatar, text, source) in {"success", "cooldown"}
+        if "收集" in clean or "精华" in clean:
+            return self.record_avatar_star_collect_response(avatar, text, source) in {"success", "cooldown", "not_ready"}
+        return False
+
+    async def refresh_avatar_star_observatory(self, avatar, reason="init"):
+        log.info(f"Avatar [{avatar}] star observatory refresh: {reason}")
+        resp = await self.send_and_wait_feedback_identity(avatar, ".观星台", timeout=45, max_retries=1)
+        text = self.response_text(resp)
+        if not text and self.apply_avatar_star_guard_backoff(
+            avatar, "", fields=["next_star_check_time"], reason=f".观星台/{reason}"
+        ):
+            return False
+        if self.record_avatar_star_observatory(avatar, text, source=f".观星台/{reason}"):
+            return True
+        retry_at = add_seconds_str(now_str(), STAR_STATUS_RETRY_SECONDS)
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": retry_at,
+        })
+        if text:
+            notify_unrecognized_response(self, ".观星台", text, log, f"观星台/{avatar}/{reason}")
+        return False
+
+    async def restart_avatar_deep_meditation_after_star(self, avatar, reason):
+        try:
+            log.info(f"Avatar [{avatar}] restarting deep meditation after star action: {reason}")
+            check_resp = await self.send_and_wait_feedback_identity(avatar, ".查看闭关", timeout=30, max_retries=1)
+            check_text = self.response_text(check_resp)
+            if is_deep_meditation_ongoing_response(check_text) or "预计还需" in check_text:
+                cd = self.parse_wait_time(check_text)
+                if cd > 0:
+                    self.update_avatar_states(avatar, {
+                        "in_deep_meditation": True,
+                        "deep_meditation_end_time": add_seconds_str(now_str(), cd),
+                    })
+                return
+            await asyncio.sleep(3)
+            await self.send_and_wait_feedback_identity(avatar, ".闭关修炼", timeout=45, max_retries=1)
+            await asyncio.sleep(3)
+            deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, max_retries=1)
+            await self.record_avatar_deep_meditation_start(avatar, self.response_text(deep_resp))
+        except Exception as e:
+            log.error(f"Avatar [{avatar}] failed to restart deep meditation after star action: {e}")
+
+    async def attempt_avatar_star_pull(self, avatar):
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, STAR_ATTRACTION_COMMAND, timeout=60, max_retries=1
+        )
+        text = self.response_text(resp)
+        if not text and self.apply_avatar_star_guard_backoff(
+            avatar, "", fields=["star_attraction_retry_time", "next_star_attraction_time"], reason=STAR_ATTRACTION_COMMAND
+        ):
+            return "guarded"
+        result = self.record_avatar_star_pull_response(avatar, text)
+
+        if result == "no_free":
+            await self.refresh_avatar_star_observatory(avatar, reason="no free disk after pull")
+        elif result in {"empty", "unknown"}:
+            await self.refresh_avatar_star_observatory(avatar, reason=f"pull {result}")
+
+        if result != "insufficient":
+            return result
+
+        state = self.get_avatar_state(avatar)
+        if state.get("star_attraction_force_exit_tried"):
+            retry_at = add_seconds_str(now_str(), STAR_INSUFFICIENT_RETRY_SECONDS)
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": retry_at,
+                "next_star_attraction_time": retry_at,
+                "next_star_check_time": retry_at,
+            })
+            log.warning(f"Avatar [{avatar}] star pull still 修为不足; retry at {retry_at}.")
+            await self.restart_avatar_deep_meditation_after_star(avatar, "star pull still insufficient")
+            return result
+
+        log.warning(f"Avatar [{avatar}] star pull 修为不足; forcing exit and retrying once.")
+        self.update_avatar_states(avatar, {"star_attraction_force_exit_tried": True})
+        await self.send_and_wait_feedback_identity(avatar, ".强行出关", timeout=45, max_retries=1)
+        self.update_avatar_states(avatar, {
+            "in_deep_meditation": False,
+            "deep_meditation_end_time": "",
+        })
+        await asyncio.sleep(3)
+
+        retry_resp = await self.send_and_wait_feedback_identity(
+            avatar, STAR_ATTRACTION_COMMAND, timeout=60, max_retries=1
+        )
+        retry_text = self.response_text(retry_resp)
+        retry_result = self.record_avatar_star_pull_response(avatar, retry_text, source=f"{STAR_ATTRACTION_COMMAND} retry")
+        if retry_result == "insufficient":
+            retry_at = add_seconds_str(now_str(), STAR_INSUFFICIENT_RETRY_SECONDS)
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": retry_at,
+                "next_star_attraction_time": retry_at,
+                "next_star_check_time": retry_at,
+            })
+            log.warning(f"Avatar [{avatar}] star pull still 修为不足 after force exit; retry at {retry_at}.")
+        elif retry_result == "no_free":
+            await self.refresh_avatar_star_observatory(avatar, reason="no free disk after forced retry")
+        elif retry_result in {"empty", "unknown"}:
+            await self.refresh_avatar_star_observatory(avatar, reason=f"forced retry {retry_result}")
+
+        await self.restart_avatar_deep_meditation_after_star(avatar, "star pull force-exit chain")
+        return retry_result
+
+    async def attempt_avatar_star_appease(self, avatar):
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, ".安抚星辰", timeout=45, max_retries=1
+        )
+        text = self.response_text(resp)
+        if not text and self.apply_avatar_star_guard_backoff(
+            avatar, "", fields=["next_star_appease_time"], reason=".安抚星辰"
+        ):
+            return "guarded"
+        result = self.record_avatar_star_appease_response(avatar, text)
+        if result == "unknown":
+            await self.refresh_avatar_star_observatory(avatar, reason="appease abnormal")
+        return result
+
+    async def attempt_avatar_star_collect(self, avatar):
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, ".收集精华", timeout=45, max_retries=1
+        )
+        text = self.response_text(resp)
+        if not text and self.apply_avatar_star_guard_backoff(
+            avatar, "", fields=["next_star_collect_time"], reason=".收集精华"
+        ):
+            return "guarded"
+        result = self.record_avatar_star_collect_response(avatar, text)
+        if result in {"not_ready", "unknown"}:
+            await self.refresh_avatar_star_observatory(avatar, reason=f"collect {result}")
+        elif result == "success":
+            await asyncio.sleep(3)
+            await self.attempt_avatar_star_pull(avatar)
+        return result
+
+    async def maybe_run_avatar_star_cycle(self, avatar):
+        if avatar not in STAR_ATTRACTION_AVATARS:
+            return
+
+        async with AtomicTaskContext(self, f"AvatarStarAttraction-{avatar}"):
+            for _ in range(5):
+                state = self.get_avatar_state(avatar)
+                retry_time = state.get("star_attraction_retry_time", "")
+                if retry_time and is_future(retry_time):
+                    return
+                check_time = state.get("next_star_check_time", "")
+                check_due = not check_time or not is_future(check_time)
+
+                needs_init = (
+                    not state.get("last_star_observatory_time")
+                    and not state.get("next_star_collect_time")
+                    and not is_future(state.get("next_star_attraction_time", ""))
+                )
+                if (
+                    (state.get("star_observatory_needs_refresh") and check_due)
+                    or (needs_init and check_due)
+                    or self.avatar_star_due(avatar, "next_star_check_time")
+                ):
+                    ok = await self.refresh_avatar_star_observatory(avatar, reason="scheduled/init")
+                    if not ok:
+                        return
+                    continue
+
+                if self.avatar_star_due(avatar, "next_star_appease_time"):
+                    await self.attempt_avatar_star_appease(avatar)
+                    continue
+
+                if self.avatar_star_due(avatar, "next_star_collect_time"):
+                    state = self.get_avatar_state(avatar)
+                    if state.get("next_star_appease_time") and not is_future(state.get("next_star_appease_time")):
+                        await self.attempt_avatar_star_appease(avatar)
+                        continue
+                    await self.attempt_avatar_star_collect(avatar)
+                    continue
+
+                if self.avatar_star_due(avatar, "next_star_attraction_time") and not is_future(state.get("next_star_collect_time", "")):
+                    await self.attempt_avatar_star_pull(avatar)
+                    continue
+
+                if not any(state.get(k) for k in [
+                    "next_star_check_time",
+                    "next_star_appease_time",
+                    "next_star_collect_time",
+                    "next_star_attraction_time",
+                ]):
+                    ok = await self.refresh_avatar_star_observatory(avatar, reason="missing schedule")
+                    if not ok:
+                        return
+                    continue
+
+                return
+
+    def next_avatar_star_wait_seconds(self, avatar):
+        state = self.get_avatar_state(avatar)
+        check_time = state.get("next_star_check_time", "")
+        if state.get("star_observatory_needs_refresh") and (not check_time or not is_future(check_time)):
+            return 0
+        if (
+            not state.get("last_star_observatory_time")
+            and not state.get("next_star_collect_time")
+            and not is_future(state.get("next_star_attraction_time", ""))
+        ):
+            return 0
+
+        waits = []
+        for key in [
+            "star_attraction_retry_time",
+            "next_star_check_time",
+            "next_star_appease_time",
+            "next_star_collect_time",
+            "next_star_attraction_time",
+        ]:
+            value = state.get(key, "")
+            if not value:
+                continue
+            if is_future(value):
+                waits.append(seconds_until(value))
+            else:
+                waits.append(0)
+        if not waits:
+            return 0
+        return max(0, min(waits))
+
+    async def run_avatar_star_attraction_loop(self, avatar, initial_delay=0):
+        """寻真子的观星台牵引循环：牵引 -> 安抚 -> 收集 -> 再牵引。"""
+        await self.startup_done.wait()
+        self._avatar_loop_count += 1
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self.is_running:
+            try:
+                await self.maybe_run_avatar_star_cycle(avatar)
+                wait_sec = self.next_avatar_star_wait_seconds(avatar)
+                if wait_sec <= 0:
+                    sleep_for = 30
+                elif wait_sec <= 180:
+                    sleep_for = max(5, wait_sec)
+                else:
+                    sleep_for = min(wait_sec, 1800)
+                log.info(f"Avatar [{avatar}] star attraction loop sleeping {int(sleep_for)}s.")
+                await asyncio.sleep(sleep_for)
+            except Exception as e:
+                log.error(f"Avatar [{avatar}] star attraction loop error: {e}", exc_info=True)
+                self.update_avatar_states(avatar, {
+                    "star_observatory_needs_refresh": True,
+                    "next_star_check_time": add_seconds_str(now_str(), STAR_STATUS_RETRY_SECONDS),
+                })
+                await asyncio.sleep(60)
 
     # ============================================================
     # 星辰牵引核心逻辑
@@ -5552,6 +6155,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             asyncio.create_task(self.run_avatar_loop(avatar_name, initial_delay=i * 10))
             asyncio.create_task(self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
             asyncio.create_task(self.run_avatar_blood_trial_loop(avatar_name, initial_delay=i * 30))
+            if avatar_name in STAR_ATTRACTION_AVATARS:
+                asyncio.create_task(self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
 
         log.info("All Sub-Account loops started.")
         # 主线程保持存活

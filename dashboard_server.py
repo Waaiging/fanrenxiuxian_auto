@@ -570,7 +570,11 @@ def force_exit_command(state, group="闭关"):
     if scheduled["tone"] == "cooldown":
         return scheduled
     if state.get("in_deep_meditation"):
-        return command_row(".强行出关", "强行出关", "可出关", "ready", remaining="0秒", detail="当前处于深度闭关", group=group, schedule_type="cooldown", next_seconds=0)
+        return command_row(
+            ".强行出关", "强行出关", "条件触发", "active",
+            detail="助阵排程到点或牵引修为不足时自动出关",
+            group=group,
+        )
     return command_row(".强行出关", "强行出关", "无需出关", "done", group=group, schedule_type="cooldown")
 
 
@@ -787,6 +791,8 @@ def star_avatar_commands(name, state):
     rows.extend(global_sync_commands())
     rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
     rows.extend(meditation_commands(state, include_force_exit=True))
+    if name == "寻真子":
+        rows.extend(xiaohao_star_attraction_commands(state))
     rows.extend([
         time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
