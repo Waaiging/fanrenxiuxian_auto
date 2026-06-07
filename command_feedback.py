@@ -103,7 +103,19 @@ async def send_and_wait_feedback_common(
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] bot active, checking guard...")
                 # 检查指令守卫（过快的发送会被阻止）
                 if not command_send_allowed(actor, message, logger):
-                    logger.warning(f"[DEBUG-FEEDBACK] [{message}] blocked by command guard")
+                    block = getattr(actor, "_last_command_guard_block", {}) or {}
+                    if block.get("reason") == "dashboard_disabled":
+                        cache = getattr(actor, "_dashboard_disabled_feedback_log_cache", None)
+                        if cache is None:
+                            cache = {}
+                            setattr(actor, "_dashboard_disabled_feedback_log_cache", cache)
+                        cache_key = f"{getattr(actor, 'current_identity', '主魂')}\u001f{message}"
+                        now_for_log = time.monotonic()
+                        if now_for_log - cache.get(cache_key, 0) > 300:
+                            logger.info(f"[DEBUG-FEEDBACK] [{message}] skipped: paused by dashboard")
+                            cache[cache_key] = now_for_log
+                    else:
+                        logger.info(f"[DEBUG-FEEDBACK] [{message}] blocked by command guard")
                     break
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组

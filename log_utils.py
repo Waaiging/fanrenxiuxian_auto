@@ -1275,12 +1275,19 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
         current_id = getattr(actor, "current_identity", "主魂")
     disabled, disabled_key, disabled_entry = dashboard_command_disabled(actor, key, current_id)
     if disabled:
-        if logger:
+        now_for_log = time.monotonic()
+        cache = getattr(actor, "_dashboard_disabled_log_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(actor, "_dashboard_disabled_log_cache", cache)
+        log_key = f"{current_id}\u001f{key}"
+        if logger and now_for_log - cache.get(log_key, 0) > 300:
             logger.info(
                 f"Command [{key}] for [{current_id}] is paused by dashboard"
                 f" (control={disabled_key}); skipping send."
             )
-        remember_command_guard_block(actor, key, 0, reason="dashboard_disabled")
+            cache[log_key] = now_for_log
+        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled")
         return False
 
     limit, window, block_seconds, should_alert = command_guard_policy(key, limit, window, block_seconds)

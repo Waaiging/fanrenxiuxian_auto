@@ -40,6 +40,36 @@ SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
 SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
 
+STATE_TIME_COMMAND_MAP = {
+    "next_rift_search_time": ".探寻裂缝",
+    "next_yuanying_out_time": ".元婴出窍",
+    "next_treasure_touch_time": ".抚摸法宝 青竹蜂云剑",
+    "next_field_training_time": ".野外历练 谨慎",
+    "next_meditation_time": ".闭关修炼",
+    "next_meditation_retry_time": ".闭关修炼",
+    "next_dream_map_time": ".入梦寻图",
+    "next_heart_trial_time": ".共历心劫",
+    "next_divination_time": ".天机代卜",
+    "next_stairs_time": ".登天阶",
+    "nine_heaven_wind_cd_time": ".引九天罡风",
+    "next_heart_time": ".问心台",
+    "next_formation_time": ".启阵",
+    "next_formation_retry_time": ".启阵",
+    "next_star_gazing_time": ".观星",
+    "pending_star_gazing_target_time": ".观星",
+    "pending_star_shift_target_time": ".改换星移",
+    "next_star_check_time": ".观星台",
+    "next_star_appease_time": ".安抚星辰",
+    "next_star_collect_time": ".收集精华",
+    "next_star_attraction_time": ".牵引星辰 天雷星",
+    "star_attraction_retry_time": ".牵引星辰 天雷星",
+    "next_steal_time": ".灵兽偷菜",
+    "next_abyss_time": ".探渊 <灵兽>",
+    "next_pasture_time": ".一键放养",
+    "next_beast_interaction_time": ".灵兽互动 六翼",
+    "next_beast_cruise_time": ".灵兽巡游 六翼",
+}
+
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
     "凌霄宫", "星宫", "万灵宗", "天星宗", "黄枫谷",
@@ -245,6 +275,54 @@ class CommonCommandMixin:
         if base_wait is None or base_wait < 0 or base_wait >= 999999:
             return extra_wait
         return min(base_wait, extra_wait)
+
+    def state_time_command_paused(self, key, identity=""):
+        command = STATE_TIME_COMMAND_MAP.get(str(key or ""))
+        if not command:
+            return False
+        return dashboard_command_disabled(self, command, identity or "主魂")[0]
+
+    def dashboard_command_paused(self, command, identity=""):
+        return dashboard_command_disabled(self, command, identity or "主魂")[0]
+
+    def latest_command_block(self, command=None, max_age=120):
+        block = getattr(self, "_last_command_guard_block", None)
+        if not isinstance(block, dict):
+            return {}
+        try:
+            if time.monotonic() - float(block.get("at") or 0) > max_age:
+                return {}
+        except Exception:
+            return {}
+        if command:
+            key = str(block.get("key") or "")
+            command = str(command or "")
+            if key and command and key != command and not key.startswith(f"{command} "):
+                return {}
+        return block
+
+    async def sleep_after_blocked_command(self, command, context="", default_seconds=300):
+        block = self.latest_command_block(command)
+        if not block:
+            return False
+        reason = str(block.get("reason") or "")
+        wait = int(block.get("wait") or 0)
+        if reason == "dashboard_disabled":
+            wait = wait or default_seconds
+        elif reason in {"command_guard", "bot_health"}:
+            wait = wait or 60
+        elif reason == "disabled":
+            wait = default_seconds
+        else:
+            return False
+        sleep_seconds = max(30, min(wait, 600))
+        log = self.common_command_logger()
+        log.info(
+            f"{context or command}: blocked by {reason}; "
+            f"backing off {sleep_seconds}s."
+        )
+        await asyncio.sleep(sleep_seconds)
+        return True
 
     def record_custom_command_result(self, entry, identity, response_text, status):
         custom_id = self.clean_custom_command_id(entry)

@@ -1975,7 +1975,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             log.info("Rift search due: sending .探寻裂缝.")
             resp_msg = await self.send_and_wait_feedback(command, timeout=120, return_response_msg=True)
             if resp_msg is None:
-                log.warning("Rift search: no response received, retrying later.")
+                if await self.sleep_after_blocked_command(command, "Rift search"):
+                    continue
+                log.info("Rift search: no response received, retrying later.")
+                await asyncio.sleep(600)
                 continue
             resp_text = resp_msg.text or ""
 
@@ -2981,6 +2984,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 or key in watch_keys
             ):
                 continue
+            if self.state_time_command_paused(key, identity):
+                continue
             try:
                 wait = seconds_until(value) if is_future(value) else 0
             except Exception:
@@ -2990,15 +2995,27 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         today = datetime.now().strftime("%Y-%m-%d")
         if identity == "主魂":
             done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            if seconds_until_daily_task_start(datetime.now()) <= 0 and (
-                ".宗门点卯" not in done or ".闯塔" not in done
-            ):
+            daily_due = (
+                (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
+                or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
+            )
+            if seconds_until_daily_task_start(datetime.now()) <= 0 and daily_due:
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
         elif identity in self.avatars:
             features = self.avatar_features.get(identity, {})
-            if features.get("daily_checkin") and state.get("last_dianmao_date") != today and seconds_until_daily_task_start(datetime.now()) <= 0:
+            if (
+                features.get("daily_checkin")
+                and state.get("last_dianmao_date") != today
+                and not self.dashboard_command_paused(".宗门点卯", identity)
+                and seconds_until_daily_task_start(datetime.now()) <= 0
+            ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
-            if features.get("tower") and state.get("last_tower_date") != today and datetime.now().hour >= 23:
+            if (
+                features.get("tower")
+                and state.get("last_tower_date") != today
+                and not self.dashboard_command_paused(".闯塔", identity)
+                and datetime.now().hour >= 23
+            ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
                 not state.get("in_deep_meditation")

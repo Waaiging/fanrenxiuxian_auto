@@ -1151,6 +1151,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         for k in keys_to_check:
             if k == "next_switch_allowed_time":
                 continue
+            if self.state_time_command_paused(k, identity):
+                continue
             t_str = state.get(k, "")
             if t_str:
                 if is_future(t_str):
@@ -1169,12 +1171,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 
         if identity == "主魂":
             done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            if seconds_until_daily_task_start(datetime.now()) <= 0 and (
-                ".宗门点卯" not in done or ".闯塔" not in done
-            ):
+            daily_due = (
+                (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
+                or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
+            )
+            if seconds_until_daily_task_start(datetime.now()) <= 0 and daily_due:
                 min_wait = min(min_wait, 0)
 
-        if identity in self.avatars and state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d") and seconds_until_daily_task_start(datetime.now()) <= 0:
+        if (
+            identity in self.avatars
+            and state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d")
+            and not self.dashboard_command_paused(".宗门点卯", identity)
+            and seconds_until_daily_task_start(datetime.now()) <= 0
+        ):
             min_wait = min(min_wait, 0)
 
         if not state.get("in_deep_meditation") and not state.get("deep_meditation_end_time") and not state.get("next_meditation_retry_time"):
@@ -1799,7 +1808,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             log.info("Rift search due: sending .探寻裂缝.")
             resp_msg = await self.send_and_wait_feedback(command, timeout=120, return_response_msg=True)
             if resp_msg is None:
-                log.warning("Rift search: no response received, retrying later.")
+                if await self.sleep_after_blocked_command(command, "Rift search"):
+                    continue
+                log.info("Rift search: no response received, retrying later.")
+                await asyncio.sleep(600)
                 continue
             resp_text = resp_msg.text or ""
             if self.is_rift_weakness_response(resp_text):
