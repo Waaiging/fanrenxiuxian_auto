@@ -1239,6 +1239,87 @@ def dashboard_command_disabled(actor, command, identity=None):
     return False, "", None
 
 
+def command_send_precheck(actor, command, logger=None, identity=None,
+                          limit=MAX_COMMAND_RETRIES,
+                          window=COMMAND_GUARD_WINDOW_SECONDS,
+                          block_seconds=COMMAND_GUARD_BLOCK_SECONDS):
+    """Check whether a command would be allowed without recording a send."""
+    key = str(command or "").strip()
+    if not key:
+        return True
+    if key in DISABLED_AUTO_COMMANDS:
+        if logger:
+            logger.info(f"Command [{key}] is disabled by local policy; skipping pre-switch.")
+        remember_command_guard_block(actor, key, 0, reason="disabled")
+        return False
+
+    current_id = str(identity or "").strip()
+    if not current_id:
+        if hasattr(actor, "get_identity_from_msg"):
+            current_id = actor.get_identity_from_msg(None) or getattr(actor, "current_identity", "主魂")
+        else:
+            current_id = getattr(actor, "current_identity", "主魂")
+    current_id = current_id or "主魂"
+
+    disabled, disabled_key, _disabled_entry = dashboard_command_disabled(actor, key, current_id)
+    if disabled:
+        now_for_log = time.monotonic()
+        cache = getattr(actor, "_dashboard_disabled_precheck_log_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(actor, "_dashboard_disabled_precheck_log_cache", cache)
+        log_key = f"{current_id}\u001f{key}"
+        if logger and now_for_log - cache.get(log_key, 0) > 300:
+            logger.info(
+                f"Command [{key}] for [{current_id}] is paused by dashboard; "
+                f"skip identity switch (control={disabled_key})."
+            )
+            cache[log_key] = now_for_log
+        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled")
+        return False
+
+    limit, window, block_seconds, _should_alert = command_guard_policy(key, limit, window, block_seconds)
+    guard_key = f"{key} ({current_id})" if current_id != "主魂" else key
+
+    if not guard_key.startswith(".自证") and is_bot_health_paused(actor):
+        wait = bot_health_pause_remaining(actor)
+        if logger:
+            logger.warning(f"Bot health paused; skip pre-switch for [{guard_key}], retry after {wait}s.")
+        remember_command_guard_block(actor, guard_key, wait, reason="bot_health")
+        return False
+
+    now = time.monotonic()
+    guard = getattr(actor, "_command_send_guard", None) or {}
+    entry = guard.get(guard_key, {"times": [], "blocked_until": 0, "last_warn": 0})
+    blocked_until = entry.get("blocked_until", 0)
+    if blocked_until > now:
+        wait = int(blocked_until - now)
+        if logger and now - entry.get("last_warn", 0) > 60:
+            logger.warning(f"Command guard would block [{guard_key}], skip identity switch; retry after {wait}s.")
+            entry["last_warn"] = now
+            guard[guard_key] = entry
+            setattr(actor, "_command_send_guard", guard)
+        remember_command_guard_block(actor, guard_key, wait, blocked_until, reason="command_guard")
+        return False
+
+    times = [ts for ts in entry.get("times", []) if now - ts <= window]
+    if len(times) >= limit:
+        entry["times"] = times
+        entry["blocked_until"] = now + block_seconds
+        entry["last_warn"] = now
+        guard[guard_key] = entry
+        setattr(actor, "_command_send_guard", guard)
+        if logger:
+            logger.warning(
+                f"Command guard would block [{guard_key}] after {limit} sends in "
+                f"{int(window)}s; skip identity switch and back off {int(block_seconds)}s."
+            )
+        remember_command_guard_block(actor, guard_key, block_seconds, entry["blocked_until"], reason="command_guard")
+        return False
+
+    return True
+
+
 def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
                           window=COMMAND_GUARD_WINDOW_SECONDS,
                           block_seconds=COMMAND_GUARD_BLOCK_SECONDS):

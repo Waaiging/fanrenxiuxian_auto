@@ -80,6 +80,7 @@ from log_utils import (
     CommandLogFilter,           # 日志过滤器：将包含指令关键词的日志行额外标记
     cap_command_retries,        # 限制重试次数，防止无限重试
     command_send_allowed,       # 检查指令发送频率是否允许
+    command_send_precheck,      # 不记录发送次数的切换前预检
     handle_anti_bot_challenge,  # 处理游戏机器人的反机器人验证
     is_deep_meditation_ongoing_response,       # 检测"闭关进行中"回复
     is_deep_meditation_settlement_response,    # 检测"闭关结算"回复
@@ -1102,16 +1103,20 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             wait_sec_to_sleep = 0
             async with self.avatar_send_lock:
                 if force_identity_check or self.current_identity != "主魂" or not self._main_confirmed:
+                    if not command_send_precheck(self, message, log, identity="主魂"):
+                        log.info(f"Skip auto-switch to 主魂: main command is not sendable now ({message}).")
+                        return None
                     if not force_identity_check and self.current_identity in self.avatars:
                         wait_sec = self.get_identity_impending_command_wait(self.current_identity)
-                        if 0 <= wait_sec <= 60 and yield_attempts < 3:
-                            log.info(
-                                f"Auto-switch to 主魂 deferred: {self.current_identity} "
-                                f"has commands due in {wait_sec:.1f}s."
-                            )
+                        if 0 <= wait_sec <= 60:
+                            if yield_attempts == 0 or yield_attempts % 12 == 0:
+                                log.info(
+                                    f"Auto-switch to 主魂 deferred: {self.current_identity} "
+                                    f"has commands due in {wait_sec:.1f}s."
+                                )
                             yield_attempts += 1
                             should_yield = True
-                            wait_sec_to_sleep = wait_sec + 2
+                            wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
 
                     if not should_yield:
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command: {message})")
@@ -1223,14 +1228,15 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 # 如果当前不在目标身份，先切换
                 if self.current_identity != identity:
                     wait_sec = self.get_identity_impending_command_wait(self.current_identity)
-                    if 0 <= wait_sec <= 60 and yield_attempts < 3:
-                        log.info(
-                            f"Avatar switch deferred: {self.current_identity} has commands due "
-                            f"in {wait_sec:.1f}s. [{identity}] waits."
-                        )
+                    if 0 <= wait_sec <= 60:
+                        if yield_attempts == 0 or yield_attempts % 12 == 0:
+                            log.info(
+                                f"Avatar switch deferred: {self.current_identity} has commands due "
+                                f"in {wait_sec:.1f}s. [{identity}] waits."
+                            )
                         yield_attempts += 1
                         should_yield = True
-                        wait_sec_to_sleep = wait_sec + 2
+                        wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
 
                     if not should_yield:
                         switch_target = "主魂" if identity == "主魂" else identity
@@ -1291,6 +1297,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         async with self._switch_lock:
             if self._main_confirmed:
                 return  # 加锁后再检查——其他任务可能已完成切换
+            if self.current_identity in self.avatars:
+                wait_sec = self.get_identity_impending_command_wait(self.current_identity)
+                if 0 <= wait_sec <= 60:
+                    log.info(
+                        f"switch_back_to_main deferred: {self.current_identity} "
+                        f"has commands due in {wait_sec:.1f}s."
+                    )
+                    return
             try:
                 async with self.avatar_send_lock:
                     resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=20, max_retries=0)
