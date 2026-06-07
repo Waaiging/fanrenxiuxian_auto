@@ -1239,6 +1239,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         _t0 = time.monotonic()
         log.info(f"[DEBUG-IDENTITY] [{identity}] ENTER send_and_wait_feedback_identity, cmd={message!r}, lock_held={self.avatar_send_lock.locked()}")
         yield_attempts = 0
+        defer_started_at = None
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
@@ -1256,11 +1257,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 elif self.current_identity and self.current_identity != identity:
                     wait_sec = self.get_identity_impending_command_wait(self.current_identity)
                     if 0 <= wait_sec <= 60:
-                        if yield_attempts == 0 or yield_attempts % 12 == 0:
-                            log.info(f"Avatar switch deferred: {self.current_identity} has commands due in {wait_sec:.1f}s. [{identity}] yields lock.")
-                        yield_attempts += 1
-                        should_yield = True
-                        wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
+                        if defer_started_at is None:
+                            defer_started_at = time.monotonic()
+                        deferred_for = time.monotonic() - defer_started_at
+                        if deferred_for < 60:
+                            if yield_attempts == 0 or yield_attempts % 12 == 0:
+                                log.info(f"Avatar switch deferred: {self.current_identity} has commands due in {wait_sec:.1f}s. [{identity}] yields lock.")
+                            yield_attempts += 1
+                            should_yield = True
+                            wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
+                        else:
+                            log.warning(
+                                f"Avatar switch to {identity} proceeds after {deferred_for:.1f}s defer; "
+                                f"{self.current_identity} still reports due commands."
+                            )
                 
                 if not should_yield:
                     if force_identity_check or self.current_identity != identity:
@@ -1422,6 +1432,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         await self.pause_event.wait()
 
         yield_attempts = 0
+        defer_started_at = None
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
@@ -1438,14 +1449,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     if not force_identity_check and self.current_identity in self.avatars:
                         wait_sec = self.get_identity_impending_command_wait(self.current_identity)
                         if 0 <= wait_sec <= 60:
-                            if yield_attempts == 0 or yield_attempts % 12 == 0:
-                                log.info(
-                                    f"Auto-switch to 主魂 deferred: {self.current_identity} "
-                                    f"has commands due in {wait_sec:.1f}s."
+                            if defer_started_at is None:
+                                defer_started_at = time.monotonic()
+                            deferred_for = time.monotonic() - defer_started_at
+                            if deferred_for < 60:
+                                if yield_attempts == 0 or yield_attempts % 12 == 0:
+                                    log.info(
+                                        f"Auto-switch to 主魂 deferred: {self.current_identity} "
+                                        f"has commands due in {wait_sec:.1f}s."
+                                    )
+                                yield_attempts += 1
+                                should_yield = True
+                                wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
+                            else:
+                                log.warning(
+                                    f"Auto-switch to 主魂 proceeds after {deferred_for:.1f}s defer; "
+                                    f"{self.current_identity} still reports due commands."
                                 )
-                            yield_attempts += 1
-                            should_yield = True
-                            wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
 
                     if not should_yield:
                         # 检查全局切换封禁是否在冷却中

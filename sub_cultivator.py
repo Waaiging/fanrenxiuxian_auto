@@ -1098,6 +1098,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         await self.pause_event.wait()
 
         yield_attempts = 0
+        defer_started_at = None
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
@@ -1109,14 +1110,23 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     if not force_identity_check and self.current_identity in self.avatars:
                         wait_sec = self.get_identity_impending_command_wait(self.current_identity)
                         if 0 <= wait_sec <= 60:
-                            if yield_attempts == 0 or yield_attempts % 12 == 0:
-                                log.info(
-                                    f"Auto-switch to 主魂 deferred: {self.current_identity} "
-                                    f"has commands due in {wait_sec:.1f}s."
+                            if defer_started_at is None:
+                                defer_started_at = time.monotonic()
+                            deferred_for = time.monotonic() - defer_started_at
+                            if deferred_for < 60:
+                                if yield_attempts == 0 or yield_attempts % 12 == 0:
+                                    log.info(
+                                        f"Auto-switch to 主魂 deferred: {self.current_identity} "
+                                        f"has commands due in {wait_sec:.1f}s."
+                                    )
+                                yield_attempts += 1
+                                should_yield = True
+                                wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
+                            else:
+                                log.warning(
+                                    f"Auto-switch to 主魂 proceeds after {deferred_for:.1f}s defer; "
+                                    f"{self.current_identity} still reports due commands."
                                 )
-                            yield_attempts += 1
-                            should_yield = True
-                            wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
 
                     if not should_yield:
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command: {message})")
@@ -1215,6 +1225,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         _t0 = time.monotonic()
         log.info(f"[DEBUG-IDENTITY] [{identity}] ENTER send_and_wait_feedback_identity, cmd={message!r}, lock_held={self.avatar_send_lock.locked()}")
         yield_attempts = 0
+        defer_started_at = None
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
@@ -1230,14 +1241,23 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 if self.current_identity != identity:
                     wait_sec = self.get_identity_impending_command_wait(self.current_identity)
                     if 0 <= wait_sec <= 60:
-                        if yield_attempts == 0 or yield_attempts % 12 == 0:
-                            log.info(
-                                f"Avatar switch deferred: {self.current_identity} has commands due "
-                                f"in {wait_sec:.1f}s. [{identity}] waits."
+                        if defer_started_at is None:
+                            defer_started_at = time.monotonic()
+                        deferred_for = time.monotonic() - defer_started_at
+                        if deferred_for < 60:
+                            if yield_attempts == 0 or yield_attempts % 12 == 0:
+                                log.info(
+                                    f"Avatar switch deferred: {self.current_identity} has commands due "
+                                    f"in {wait_sec:.1f}s. [{identity}] waits."
+                                )
+                            yield_attempts += 1
+                            should_yield = True
+                            wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
+                        else:
+                            log.warning(
+                                f"Avatar switch to {identity} proceeds after {deferred_for:.1f}s defer; "
+                                f"{self.current_identity} still reports due commands."
                             )
-                        yield_attempts += 1
-                        should_yield = True
-                        wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
 
                     if not should_yield:
                         switch_target = "主魂" if identity == "主魂" else identity
