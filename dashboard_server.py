@@ -65,6 +65,11 @@ CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
+STAR_CONCUBINE_VOYAGE_IDENTITIES = {
+    "main": {"素缘子"},
+    "sub": {"厚土", "缘生子", "寻真子"},
+    "xiaohao": {"素心子", "缘生子"},
+}
 
 ACCOUNT_PROFILE_USERNAMES = {
     "main": {
@@ -131,7 +136,7 @@ ACCOUNT_LOG_TAGS = {
         ".召回侍妾", ".安置侍妾", ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".抚摸法宝 青竹蜂云剑",
         ".野外历练 谨慎", ".宗门战况", ".参战", ".我的侍妾",
-        ".入梦寻图", ".共历心劫", ".稳", ".天机代卜",
+        ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
     "sub": [
@@ -143,7 +148,7 @@ ACCOUNT_LOG_TAGS = {
         ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".抚摸法宝 青竹蜂云剑",
         ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
-        ".入梦寻图", ".共历心劫", ".稳", ".天机代卜",
+        ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
     "xiaohao": [
@@ -154,7 +159,7 @@ ACCOUNT_LOG_TAGS = {
         ".野外历练 谨慎", ".宗门战况", ".参战", ".抚摸法宝 青竹蜂云剑",
         ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰",
-        ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜",
+        ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
 }
@@ -635,7 +640,6 @@ def global_sync_commands():
 def meditation_commands(state, include_force_exit=False):
     rows = [
         manual_command(".查看闭关", "查看闭关", "查询闭关状态", "闭关"),
-        meditation_train_command(state),
         deep_meditation_command(state),
     ]
     if include_force_exit:
@@ -651,13 +655,22 @@ def sect_war_commands(state):
     ]
 
 
-def concubine_commands(state, include_divination=True):
+def concubine_voyage_enabled(account, identity):
+    return (identity or "主魂") in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
+
+
+def concubine_commands(state, include_divination=True, include_voyage=False):
     rows = [
         manual_command(".我的侍妾", "我的侍妾", "查询侍妾/冷却", "侍妾"),
         time_command(state, "next_dream_map_time", ".入梦寻图", "入梦寻图", group="侍妾"),
         time_command(state, "next_heart_trial_time", ".共历心劫", "共历心劫", group="侍妾"),
         flow_command(".稳", "稳", "必须 reply 共历心劫回合消息", "侍妾"),
     ]
+    if include_voyage:
+        rows.insert(2, time_command(
+            state, "next_concubine_voyage_time", ".侍妾远航 均衡", "侍妾远航",
+            waiting="8小时冷却", group="侍妾",
+        ))
     if include_divination:
         rows.append(time_command(state, "next_divination_time", ".天机代卜", "天机代卜", group="侍妾"))
     rows.append(manual_command(".拼图", "拼图", "残图满足时发送", "侍妾"))
@@ -687,7 +700,7 @@ def main_soul_panel(account, state):
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
-        rows.extend(concubine_commands(state, include_divination=True))
+        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "sub":
         rows.extend([
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
@@ -711,7 +724,7 @@ def main_soul_panel(account, state):
             manual_command(".每日问安", "每日问安", "按日问安", "侍妾"),
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
-        rows.extend(concubine_commands(state, include_divination=True))
+        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
@@ -736,7 +749,7 @@ def main_soul_panel(account, state):
             time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
             time_command(state, "next_beast_cruise_time", ".灵兽巡游 六翼", "灵兽巡游", group="灵兽"),
         ])
-        rows.extend(concubine_commands(state, include_divination=True))
+        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     return {"identity": "主魂", "role": "主魂", "commands": rows}
 
 
@@ -764,7 +777,7 @@ def lingxiao_avatar_commands(name, state):
             manual_command(".观星", "观星", group="星宫"),
             manual_command(".改换星移 @Waaiging", "改换星移", group="星宫"),
         ])
-    rows.extend(concubine_commands(state, include_divination=False))
+    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("main", name)))
     rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
     return rows
 
@@ -786,7 +799,7 @@ def star_avatar_commands(name, state):
         time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
-    rows.extend(concubine_commands(state, include_divination=False))
+    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("sub", name)))
     return rows
 
 
@@ -816,7 +829,7 @@ def xiaohao_avatar_commands(name, state):
             time_command(state, "pending_star_shift_target_time", ".改换星移 @TitanCreeper", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
             time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         ])
-    rows.extend(concubine_commands(state, include_divination=False))
+    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("xiaohao", name)))
     return rows
 
 

@@ -453,6 +453,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "last_blood_trial_date": "",   # 血色试炼：记录最后完成日期
             "next_dream_map_time": "",     # 入梦寻图：下次可用时间
             "next_heart_trial_time": "",   # 共历心劫：下次可用时间
+            "next_concubine_voyage_time": "", # 侍妾远航：下次归来/可出发时间
+            "last_concubine_voyage_time": "",
+            "concubine_voyage_active": False,
             "last_gazing_date": "",        # 观星：上次观星日期
             "current_exp": 0,              # 当前修为
             "total_exp": 0,                # 总修为上限
@@ -739,6 +742,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 if cd > 0 and cd < 30 * 3600:
                     self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now, cd))
 
+        # ---- 侍妾远航 ----
+        if self.record_concubine_voyage_response(text, identity=avatar):
+            log.info(f"[{avatar}] passive: concubine voyage state synced.")
+
         # ---- 每日任务 ----
         if "今日任务已完成" in text or "所有任务已完成" in text:
             today = datetime.now().strftime("%Y-%m-%d")
@@ -776,6 +783,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         watch_keys = {"deep_meditation_end_time"}
         min_wait = None
         for key, value in state.items():
+            if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
+                continue
             if key in ignored_keys or not isinstance(value, str) or not value:
                 continue
             if not (
@@ -4879,6 +4888,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             log.info(f"Avatar [{avatar}] dream map on cooldown: {cd_seconds}s.")
                         else:
                             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
+                            self.mark_concubine_dream_executed(avatar)
                             log.info(f"Avatar [{avatar}] dream map success, next in 8h.")
                             # 进度 4/4 时自动发送 .拼图
                             if "4/4" in dream_text:
@@ -4888,6 +4898,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     else:
                         self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 600))
                         log.warning(f"Avatar [{avatar}] dream map empty response.")
+
+                # ---- 侍妾远航（8小时冷却，贴近入梦寻图执行） ----
+                await self.execute_avatar_concubine_voyage(avatar)
 
                 # ---- 共历心劫（10小时冷却） ----
                 a_state = self.get_avatar_state(avatar)
@@ -4949,6 +4962,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 next_force_exit = a_state.get("next_force_exit_time", "")
                 next_heart2 = a_state.get("next_heart_trial_time", "")
                 next_dream2 = a_state.get("next_dream_map_time", "")
+                next_voyage = a_state.get("next_concubine_voyage_time", "")
 
                 wait_candidates = [med_wait]
                 if a_state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d") and seconds_until_daily_task_start(datetime.now()) <= 0:
@@ -4971,6 +4985,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     wait_candidates.append(seconds_until(next_heart2))
                 if next_dream2 and is_future(next_dream2):
                     wait_candidates.append(seconds_until(next_dream2))
+                if (
+                    next_voyage
+                    and is_future(next_voyage)
+                    and self.concubine_voyage_enabled(avatar)
+                    and not self.dashboard_command_paused(".侍妾远航 均衡", avatar)
+                ):
+                    wait_candidates.append(seconds_until(next_voyage))
 
                 final_wait = min(wait_candidates)
                  # 移除4小时上限：让 med_wait 直接 sleep 到闭关结束

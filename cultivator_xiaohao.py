@@ -433,6 +433,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "star_target": STAR_ATTRACTION_TARGET,
             "next_dream_map_time": "",
             "next_heart_trial_time": "",
+            "next_concubine_voyage_time": "",
+            "last_concubine_voyage_time": "",
+            "concubine_voyage_active": False,
             "current_exp": 0,
             "total_exp": 0,
             "spirit_root": "",
@@ -677,6 +680,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 cd = self.parse_wait_time(text)
                 if cd > 0 and cd < 30 * 3600:
                     self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now, cd))
+
+        # 7.5 侍妾远航
+        if self.record_concubine_voyage_response(text, identity=avatar):
+            log.info(f"Avatar {avatar}: passive detect concubine voyage state.")
 
         # 8. 每日任务
         if "今日任务已完成" in text or "所有任务已完成" in text:
@@ -4907,6 +4914,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), cd_seconds))
                         else:
                             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
+                            self.mark_concubine_dream_executed(avatar)
                             # 入梦寻图进度 4/4 时自动发送 .拼图
                             if resp_str and "4/4" in resp_str:
                                 log.info(f"Avatar {avatar} dream map progress 4/4, sending .拼图")
@@ -4917,6 +4925,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     if forced_exit:
                         await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
                             
+                # --- 侍妾远航 (8小时冷却，贴近入梦寻图执行) ---
+                await self.execute_avatar_concubine_voyage(avatar)
+
                 # --- 共历心劫 (10小时冷却) ---
                 next_heart = state.get("next_heart_trial_time", "")
                 if not next_heart or not is_future(next_heart):

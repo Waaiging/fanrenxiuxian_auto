@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta
 
 from log_utils import (
+    actor_account_key,            # 当前脚本账号 key
     command_send_allowed,          # 指令频率守卫
     log_incoming_message,          # 记录收到的消息
     notify_unrecognized_response,  # 无法识别的回复告警
@@ -31,6 +32,14 @@ from log_utils import (
 log = logging.getLogger("Concubine")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 CONCUBINE_GRACE_SECONDS = 60  # 冷却宽容时间，避免频繁请求
+CONCUBINE_VOYAGE_COMMAND = ".侍妾远航 均衡"
+CONCUBINE_VOYAGE_RETURN_COMMAND = ".远航归来"
+CONCUBINE_VOYAGE_CD_SECONDS = 8 * 3600
+STAR_CONCUBINE_VOYAGE_IDENTITIES = {
+    "main": {"素缘子"},
+    "sub": {"厚土", "缘生子", "寻真子"},
+    "xiaohao": {"素心子", "缘生子"},
+}
 
 # =====================================================================
 # 侍妾神通配置
@@ -57,6 +66,15 @@ CONCUBINE_TASKS = {
         "state_key": "next_divination_time",
         "cooldown": 720 * 60,             # 12小时
         "status_label": "天机代卜冷却",
+    },
+    "voyage": {
+        "label": "侍妾远航",
+        "command": CONCUBINE_VOYAGE_COMMAND,
+        "settle_command": CONCUBINE_VOYAGE_RETURN_COMMAND,
+        "state_key": "next_concubine_voyage_time",
+        "cooldown": CONCUBINE_VOYAGE_CD_SECONDS,
+        "status_label": "侍妾远航冷却",
+        "status_aliases": ("远航冷却", "远航归来冷却", "远航剩余", "航行冷却"),
     },
 }
 
@@ -125,7 +143,37 @@ def concubine_default_state():
         "next_dream_map_time": "",
         "next_heart_trial_time": "",
         "next_divination_time": "",
+        "next_concubine_voyage_time": "",
+        "last_concubine_voyage_time": "",
+        "concubine_voyage_active": False,
     }
+
+
+class _ConcubineAtomicTask:
+    """Use the script-level atomic-task gate without importing each script's helper."""
+
+    def __init__(self, actor, label):
+        self.actor = actor
+        self.label = label
+        self.task = None
+        self.acquired = False
+
+    async def __aenter__(self):
+        if not hasattr(self.actor, "active_atomic_task"):
+            return self
+        self.task = asyncio.current_task()
+        while getattr(self.actor, "active_atomic_task", None) is not None and self.actor.active_atomic_task != self.task:
+            await asyncio.sleep(0.5)
+        self.actor.active_atomic_task = self.task
+        self.acquired = True
+        log.info(f"Atomic task acquired by {self.label}.")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.acquired and getattr(self.actor, "active_atomic_task", None) == self.task:
+            self.actor.active_atomic_task = None
+            log.info(f"Atomic task released by {self.label}.")
+        return False
 
 
 # =====================================================================
@@ -163,21 +211,39 @@ class ConcubineMixin:
         updated = False
         clean = text.replace("**", "")
         for task in CONCUBINE_TASKS.values():
-            line_match = re.search(rf"{re.escape(task['status_label'])}\s*[：:]\s*([^\n]+)", clean)
+            if task["state_key"] == "next_concubine_voyage_time" and not self.concubine_voyage_enabled("主魂"):
+                continue
+            labels = [task["status_label"], *task.get("status_aliases", ())]
+            line_match = None
+            matched_label = ""
+            for label in labels:
+                line_match = re.search(rf"{re.escape(label)}\s*[：:]\s*([^\n]+)", clean)
+                if line_match:
+                    matched_label = label
+                    break
             if not line_match:
                 continue
             value = line_match.group(1).strip()
-            if any(k in value for k in ["无", "可用", "可施展", "已就绪"]):
+            if any(k in value for k in ["无", "可用", "可施展", "已就绪", "可归来", "可结算"]):
                 self.state[task["state_key"]] = ""
+                if task["state_key"] == "next_concubine_voyage_time":
+                    self.state["concubine_voyage_active"] = (
+                        "归来" in matched_label
+                        or any(k in value for k in ["可归来", "可结算"])
+                    )
                 updated = True
                 continue
             cd = parse_duration_seconds(value)
             if cd == 0:
                 self.state[task["state_key"]] = ""
+                if task["state_key"] == "next_concubine_voyage_time":
+                    self.state["concubine_voyage_active"] = "归来" in matched_label
                 updated = True
                 continue
             if cd > 0:
                 self.state[task["state_key"]] = add_seconds_str(now_str(), cd + CONCUBINE_GRACE_SECONDS)
+                if task["state_key"] == "next_concubine_voyage_time":
+                    self.state["concubine_voyage_active"] = True
                 updated = True
         if updated:
             self.state["last_concubine_status_time"] = now_str()
@@ -189,6 +255,10 @@ class ConcubineMixin:
         记录侍妾任务的冷却时间。
         优先从回复文本中解析具体冷却时间，解析失败则使用默认冷却。
         """
+        if task_key == "voyage":
+            return self.record_concubine_voyage_response(
+                response_text, identity="主魂", command=CONCUBINE_VOYAGE_COMMAND
+            )
         task = CONCUBINE_TASKS[task_key]
         cd = -1
         if response_text and any(k in response_text for k in ["冷却", "后再", "尚未"]):
@@ -215,6 +285,7 @@ class ConcubineMixin:
             "成功", "获得", "完成", "机缘",
             "残图", "入梦", "寻图", "天机", "代卜", "卜算",
             "共历心劫", "心劫", "道侣", "护道",
+            "侍妾远航", "远航", "归来", "启航", "返航", "航程", "航海", "均衡",
         ]
         return any(k in clean for k in known_keywords)
 
@@ -223,6 +294,277 @@ class ConcubineMixin:
         task = CONCUBINE_TASKS[task_key]
         self.state[task["state_key"]] = add_seconds_str(now_str(), seconds)
         self.save_state()
+
+    def _concubine_state_container(self, identity="主魂"):
+        """Return the state dict for main soul or avatar identity."""
+        identity = identity or "主魂"
+        if identity != "主魂" and hasattr(self, "get_avatar_state"):
+            return self.get_avatar_state(identity)
+        return self.state
+
+    def concubine_voyage_enabled(self, identity="主魂"):
+        """Only Star Palace Dao-heart concubines can use voyage."""
+        account = actor_account_key(self)
+        identity = identity or "主魂"
+        return identity in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
+
+    def concubine_task_enabled(self, task_key, identity="主魂"):
+        if task_key != "voyage":
+            return True
+        return self.concubine_voyage_enabled(identity)
+
+    def mark_concubine_dream_executed(self, identity="主魂"):
+        """Remember that this identity just ran .入梦寻图 so 8h voyage can run alongside it."""
+        markers = getattr(self, "_concubine_recent_dream_runs", None)
+        if markers is None:
+            markers = {}
+            self._concubine_recent_dream_runs = markers
+        markers[identity or "主魂"] = time.monotonic()
+
+    def concubine_dream_recently_executed(self, identity="主魂", window_seconds=300):
+        markers = getattr(self, "_concubine_recent_dream_runs", None) or {}
+        ts = markers.get(identity or "主魂")
+        return bool(ts and time.monotonic() - ts <= window_seconds)
+
+    def align_concubine_voyage_to_dream(self, identity="主魂"):
+        """Defer voyage until .入梦寻图 is due, unless dream just ran in this cycle."""
+        identity = identity or "主魂"
+        if self.concubine_dream_recently_executed(identity):
+            return True
+        state = self._concubine_state_container(identity)
+        dream_time = state.get("next_dream_map_time", "")
+        if not dream_time or not is_future(dream_time):
+            return True
+        voyage_time = state.get("next_concubine_voyage_time", "")
+        should_align = not voyage_time or not is_future(voyage_time)
+        if not should_align:
+            try:
+                should_align = str_to_dt(voyage_time) < str_to_dt(dream_time)
+            except Exception:
+                should_align = True
+        if should_align:
+            self._update_concubine_identity_state(identity, next_concubine_voyage_time=dream_time)
+            log.info(f"Concubine voyage [{identity}]: aligned to next dream map at {dream_time}.")
+        return False
+
+    def _update_concubine_identity_state(self, identity="主魂", **values):
+        """Update concubine-related state for one identity."""
+        identity = identity or "主魂"
+        if identity != "主魂" and hasattr(self, "set_avatar_state"):
+            for key, value in values.items():
+                self.set_avatar_state(identity, key, value)
+            return
+        self.state.update(values)
+        if hasattr(self, "save_state"):
+            self.save_state()
+
+    def is_concubine_voyage_response(self, text):
+        """判断文本是否与侍妾远航/远航归来相关。"""
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        return any(k in clean for k in [
+            "侍妾远航", "远航", "归来", "启航", "返航", "航程", "航海",
+            "带回", "收获", "均衡", "远航冷却", "航行冷却",
+            "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
+        ])
+
+    def _set_concubine_voyage_backoff(self, identity, seconds, active=None):
+        values = {"next_concubine_voyage_time": add_seconds_str(now_str(), seconds)}
+        if active is not None:
+            values["concubine_voyage_active"] = bool(active)
+        self._update_concubine_identity_state(identity, **values)
+
+    def record_concubine_voyage_response(self, text, identity="主魂", command=""):
+        """同步侍妾远航/远航归来回复到主魂或化身 state。"""
+        if not self.concubine_voyage_enabled(identity):
+            return False
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        if not self.is_concubine_voyage_response(clean) and not any(k in clean for k in ["还没有侍妾", "尚无侍妾"]):
+            return False
+
+        command = str(command or "").strip()
+        now = now_str()
+        cd = parse_duration_seconds(clean)
+        if not command and any(k in clean for k in [
+            "道心侍妾", "入梦寻图冷却", "共历心劫冷却", "天机代卜冷却",
+            "侍妾远航冷却", "远航冷却",
+        ]):
+            return False
+
+        if any(k in clean for k in ["还没有侍妾", "尚无侍妾", "没有侍妾"]):
+            self._update_concubine_identity_state(
+                identity,
+                concubine_voyage_active=False,
+                next_concubine_voyage_time=add_seconds_str(now, 24 * 3600),
+            )
+            log.info(f"Concubine voyage [{identity}]: no concubine, pause 24h.")
+            return True
+
+        if any(k in clean for k in ["心神未定", "情缘值", "未随行", "无法出航", "无法远航"]):
+            self._update_concubine_identity_state(
+                identity,
+                concubine_voyage_active=False,
+                next_concubine_voyage_time=add_seconds_str(now, 24 * 3600),
+            )
+            log.info(f"Concubine voyage [{identity}]: unavailable ({clean[:60]}), pause 24h.")
+            return True
+
+        is_return_context = (
+            command == CONCUBINE_VOYAGE_RETURN_COMMAND
+            or (not command and ("远航归来" in clean or ("归来" in clean and "远航" in clean)))
+        )
+        if is_return_context:
+            if any(k in clean for k in ["尚未归来", "仍在远航", "还在远航", "尚在远航", "未归"]):
+                wait_seconds = cd + CONCUBINE_GRACE_SECONDS if cd > 0 else 1800
+                self._set_concubine_voyage_backoff(identity, wait_seconds, active=True)
+                log.info(f"Concubine voyage [{identity}]: return not ready, retry in {wait_seconds}s.")
+                return True
+            if any(k in clean for k in ["没有正在远航", "并未远航", "尚未远航", "无需归来"]):
+                self._update_concubine_identity_state(
+                    identity,
+                    concubine_voyage_active=False,
+                    next_concubine_voyage_time="",
+                )
+                log.info(f"Concubine voyage [{identity}]: no active voyage; ready to start.")
+                return True
+            if any(k in clean for k in ["归来", "返航", "结算", "带回", "获得", "收获", "完成"]):
+                self._update_concubine_identity_state(
+                    identity,
+                    concubine_voyage_active=False,
+                    next_concubine_voyage_time="",
+                )
+                log.info(f"Concubine voyage [{identity}]: return settled.")
+                return True
+
+        if command == CONCUBINE_VOYAGE_COMMAND or "侍妾远航" in clean or "远航" in clean:
+            if any(k in clean for k in ["可归来", "可结算", "可以归来", "等待归来"]):
+                self._update_concubine_identity_state(
+                    identity,
+                    concubine_voyage_active=True,
+                    next_concubine_voyage_time="",
+                )
+                log.info(f"Concubine voyage [{identity}]: voyage ready to return.")
+                return True
+            if any(k in clean for k in ["冷却", "后再", "尚未", "仍在远航", "还在远航", "已在远航", "尚在远航"]):
+                wait_seconds = cd + CONCUBINE_GRACE_SECONDS if cd > 0 else CONCUBINE_VOYAGE_CD_SECONDS
+                self._update_concubine_identity_state(
+                    identity,
+                    concubine_voyage_active=True,
+                    next_concubine_voyage_time=add_seconds_str(now, wait_seconds),
+                )
+                log.info(f"Concubine voyage [{identity}]: active/cooldown, next at {add_seconds_str(now, wait_seconds)}")
+                return True
+            if (
+                any(k in clean for k in ["出发", "启航", "开始", "派遣", "已远航", "远航中", "航程", "均衡"])
+                or (
+                    command == CONCUBINE_VOYAGE_COMMAND
+                    and "远航" in clean
+                    and not any(k in clean for k in ["无法", "失败", "错误", "不足", "尚无侍妾", "还没有侍妾"])
+                )
+            ):
+                self._update_concubine_identity_state(
+                    identity,
+                    concubine_voyage_active=True,
+                    last_concubine_voyage_time=now,
+                    next_concubine_voyage_time=add_seconds_str(now, CONCUBINE_VOYAGE_CD_SECONDS + CONCUBINE_GRACE_SECONDS),
+                )
+                log.info(f"Concubine voyage [{identity}]: started, next return at {add_seconds_str(now, CONCUBINE_VOYAGE_CD_SECONDS + CONCUBINE_GRACE_SECONDS)}")
+                return True
+
+        if cd > 0 and any(k in clean for k in ["远航", "归来"]):
+            self._set_concubine_voyage_backoff(identity, cd + CONCUBINE_GRACE_SECONDS, active=True)
+            return True
+        return False
+
+    async def execute_concubine_voyage(self):
+        """主魂侍妾远航循环：到点先归来结算，再开启下一轮均衡远航。"""
+        task = CONCUBINE_TASKS["voyage"]
+        if not self.concubine_voyage_enabled("主魂"):
+            return
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(task["command"], "主魂"):
+            return
+        if not self.align_concubine_voyage_to_dream("主魂"):
+            return
+        if hasattr(self, "switch_back_to_main"):
+            await self.switch_back_to_main()
+
+        if self.state.get("concubine_voyage_active"):
+            log.info(f"Concubine voyage: sending {CONCUBINE_VOYAGE_RETURN_COMMAND}")
+            return_resp = await self.send_and_wait_feedback(
+                CONCUBINE_VOYAGE_RETURN_COMMAND, timeout=90, max_retries=1, delete_after=False
+            )
+            return_text = getattr(return_resp, "text", "") if hasattr(return_resp, "text") else return_resp if isinstance(return_resp, str) else ""
+            if not return_text:
+                self.defer_concubine_task("voyage", 600)
+                return
+            if not self.record_concubine_voyage_response(return_text, identity="主魂", command=CONCUBINE_VOYAGE_RETURN_COMMAND):
+                notify_unrecognized_response(self, CONCUBINE_VOYAGE_RETURN_COMMAND, return_text, log, "侍妾远航归来")
+                self.defer_concubine_task("voyage", 600)
+                return
+            if self.state.get("concubine_voyage_active") and is_future(self.state.get("next_concubine_voyage_time", "")):
+                return
+            await asyncio.sleep(3)
+
+        log.info(f"Concubine voyage: sending {task['command']}")
+        start_resp = await self.send_and_wait_feedback(task["command"], timeout=90, max_retries=1, delete_after=False)
+        start_text = getattr(start_resp, "text", "") if hasattr(start_resp, "text") else start_resp if isinstance(start_resp, str) else ""
+        if not start_text:
+            self.defer_concubine_task("voyage", 600)
+            return
+        if not self.record_concubine_voyage_response(start_text, identity="主魂", command=task["command"]):
+            notify_unrecognized_response(self, task["command"], start_text, log, "侍妾远航")
+            self.defer_concubine_task("voyage", 600)
+
+    async def execute_avatar_concubine_voyage(self, avatar):
+        """化身侍妾远航循环：保持同一身份连续结算并重新出发。"""
+        task = CONCUBINE_TASKS["voyage"]
+        if not self.concubine_voyage_enabled(avatar):
+            return False
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(task["command"], avatar):
+            return False
+        if not self.align_concubine_voyage_to_dream(avatar):
+            return False
+        state = self._concubine_state_container(avatar)
+        next_time = state.get(task["state_key"], "")
+        if next_time and is_future(next_time):
+            return False
+
+        async with _ConcubineAtomicTask(self, f"ConcubineVoyage-{avatar}"):
+            state = self._concubine_state_container(avatar)
+            if state.get("concubine_voyage_active"):
+                log.info(f"Concubine voyage [{avatar}]: sending {CONCUBINE_VOYAGE_RETURN_COMMAND}")
+                return_resp = await self.send_and_wait_feedback_identity(
+                    avatar, CONCUBINE_VOYAGE_RETURN_COMMAND, timeout=90, max_retries=1, delete_after=False
+                )
+                return_text = getattr(return_resp, "text", "") if hasattr(return_resp, "text") else return_resp if isinstance(return_resp, str) else ""
+                if not return_text:
+                    self._set_concubine_voyage_backoff(avatar, 600)
+                    return False
+                if not self.record_concubine_voyage_response(return_text, identity=avatar, command=CONCUBINE_VOYAGE_RETURN_COMMAND):
+                    notify_unrecognized_response(self, CONCUBINE_VOYAGE_RETURN_COMMAND, return_text, log, f"侍妾远航归来[{avatar}]")
+                    self._set_concubine_voyage_backoff(avatar, 600)
+                    return False
+                state = self._concubine_state_container(avatar)
+                if state.get("concubine_voyage_active") and is_future(state.get(task["state_key"], "")):
+                    return True
+                await asyncio.sleep(3)
+
+            log.info(f"Concubine voyage [{avatar}]: sending {task['command']}")
+            start_resp = await self.send_and_wait_feedback_identity(
+                avatar, task["command"], timeout=90, max_retries=1, delete_after=False
+            )
+            start_text = getattr(start_resp, "text", "") if hasattr(start_resp, "text") else start_resp if isinstance(start_resp, str) else ""
+            if not start_text:
+                self._set_concubine_voyage_backoff(avatar, 600)
+                return False
+            if not self.record_concubine_voyage_response(start_text, identity=avatar, command=task["command"]):
+                notify_unrecognized_response(self, task["command"], start_text, log, f"侍妾远航[{avatar}]")
+                self._set_concubine_voyage_backoff(avatar, 600)
+                return False
+            return True
 
     # ---- 状态同步 ----
 
@@ -283,6 +625,8 @@ class ConcubineMixin:
                 self.defer_concubine_task(task_key)
                 return
             self.record_concubine_cd(task_key, resp)
+            if task_key == "dream" and not any(k in resp for k in ["冷却", "后再", "尚未", "未拥有", "不足"]):
+                self.mark_concubine_dream_executed("主魂")
             # 入梦寻图：集齐残纹后自动发送 .拼图
             if task_key == "dream" and resp and "4/4" in resp:
                 log.info("Concubine dream: progress 4/4 reached, sending .拼图")
@@ -617,7 +961,7 @@ class ConcubineMixin:
     async def run_concubine_loop(self):
         """
         侍妾功能主循环。
-        按优先级依次执行：入梦寻图 → 共历心劫 → 天机代卜
+        按优先级依次执行：入梦寻图 → 侍妾远航 → 共历心劫 → 天机代卜
         全部有冷却时等待最短的冷却时间。
         """
         await self.startup_done.wait()
@@ -631,25 +975,31 @@ class ConcubineMixin:
                 await self._wait_for_main_identity()
             try:
                 executed = False
-                for task_key in ("dream", "heart_trial", "divination"):
+                for task_key in ("dream", "voyage", "heart_trial", "divination"):
+                    if not self.concubine_task_enabled(task_key, "主魂"):
+                        continue
                     task = CONCUBINE_TASKS[task_key]
+                    if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(task["command"], "主魂"):
+                        continue
                     next_time = self.state.get(task["state_key"], "")
                     if next_time and is_future(next_time):
                         continue
                     if task_key == "heart_trial":
                         await self.execute_heart_trial()
+                    elif task_key == "voyage":
+                        await self.execute_concubine_voyage()
                     else:
                         await self.execute_concubine_direct(task_key)
                     executed = True
                     await asyncio.sleep(random.randint(8, 18))
-                    break
 
                 if executed:
                     continue
 
                 waits = [
                     seconds_until(self.state.get(task["state_key"], ""))
-                    for task in CONCUBINE_TASKS.values()
+                    for task_key, task in CONCUBINE_TASKS.items()
+                    if self.concubine_task_enabled(task_key, "主魂")
                     if self.state.get(task["state_key"], "") and is_future(self.state[task["state_key"]])
                 ]
                 sleep_for = max(60, min(waits) + random.randint(15, 45)) if waits else 300

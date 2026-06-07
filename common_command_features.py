@@ -50,6 +50,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_dream_map_time": ".入梦寻图",
     "next_heart_trial_time": ".共历心劫",
     "next_divination_time": ".天机代卜",
+    "next_concubine_voyage_time": ".侍妾远航 均衡",
     "next_stairs_time": ".登天阶",
     "nine_heaven_wind_cd_time": ".引九天罡风",
     "next_heart_time": ".问心台",

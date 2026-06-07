@@ -390,6 +390,8 @@ def command_response_family(command):
         return "spirit_root"
     if cmd == ".我的侍妾":
         return "concubine_status"
+    if cmd.startswith(".侍妾远航") or cmd == ".远航归来":
+        return "concubine_voyage"
     if cmd == ".天机代卜":
         return "divination"
     if cmd == ".宗门传功":
@@ -453,8 +455,22 @@ def text_response_family(text):
         return "status"
     if "天命玉牒" in clean and "修为" in clean:
         return "spirit_root"
-    if "道心侍妾" in clean or "【第二期机缘】" in clean or "掩月心契" in clean:
+    if (
+        "道心侍妾" in clean
+        or "【第二期机缘】" in clean
+        or "掩月心契" in clean
+        or "入梦寻图冷却" in clean
+        or "共历心劫冷却" in clean
+        or "天机代卜冷却" in clean
+        or "侍妾远航冷却" in clean
+        or "远航冷却" in clean
+    ):
         return "concubine_status"
+    if any(k in clean for k in [
+        "侍妾远航", "远航归来", "远航", "启航", "返航", "航程", "航海",
+        "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
+    ]):
+        return "concubine_voyage"
     if "卦象" in clean:
         return "divination"
     if "天机代卜" in clean:
@@ -542,7 +558,17 @@ def feedback_response_matches_command(command, text):
     if expected == "spirit_root":
         return "天命玉牒" in clean and "修为" in clean
     if expected == "concubine_status":
-        return any(k in clean for k in ["道心侍妾", "【第二期机缘】", "掩月心契", "入梦寻图冷却", "共历心劫冷却", "天机代卜冷却"])
+        return any(k in clean for k in [
+            "道心侍妾", "【第二期机缘】", "掩月心契",
+            "入梦寻图冷却", "共历心劫冷却", "天机代卜冷却",
+            "侍妾远航冷却", "远航冷却",
+        ])
+    if expected == "concubine_voyage":
+        return any(k in clean for k in [
+            "侍妾远航", "远航归来", "远航", "归来", "启航", "返航",
+            "航程", "航海", "带回", "收获", "均衡", "尚无侍妾", "还没有侍妾",
+            "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
+        ])
     if expected == "divination":
         return any(k in clean for k in ["天机代卜", "卜算", "代卜", "卦象"])
     if expected == "sect_skill":
@@ -2194,12 +2220,13 @@ def _manual_record_concubine_task_reply(actor, task_key, text, identity):
         "dream": ("next_dream_map_time", 8 * 3600),
         "heart_trial": ("next_heart_trial_time", 10 * 3600),
         "divination": ("next_divination_time", 12 * 3600),
+        "voyage": ("next_concubine_voyage_time", 8 * 3600),
     }
     state_key, default_cd = task_map[task_key]
     if identity and identity != "主魂" and hasattr(actor, "set_avatar_state"):
         cd = actor.parse_wait_time(text) if hasattr(actor, "parse_wait_time") else -1
         clean = str(text or "").replace("**", "")
-        if any(k in clean for k in ["可施展", "可用", "已就绪"]):
+        if any(k in clean for k in ["可施展", "可用", "已就绪", "可归来", "可结算"]):
             _manual_set_identity_state(actor, identity, state_key, _manual_sync_now_str())
             return True
         if cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "余波未散"]):
@@ -2223,19 +2250,30 @@ def _manual_record_concubine_status_reply(actor, text, identity):
             "入梦寻图冷却": ("next_dream_map_time", 8 * 3600),
             "共历心劫冷却": ("next_heart_trial_time", 10 * 3600),
             "天机代卜冷却": ("next_divination_time", 12 * 3600),
+            "侍妾远航冷却": ("next_concubine_voyage_time", 8 * 3600),
+            "远航冷却": ("next_concubine_voyage_time", 8 * 3600),
         }
         for label, (state_key, _) in labels.items():
             match = re.search(rf"{re.escape(label)}\s*[：:]\s*([^\n]+)", clean)
             if not match:
                 continue
             value = match.group(1).strip()
-            if any(k in value for k in ["无", "可用", "可施展", "已就绪"]):
+            if any(k in value for k in ["无", "可用", "可施展", "已就绪", "可归来", "可结算"]):
                 _manual_set_identity_state(actor, identity, state_key, "")
+                if state_key == "next_concubine_voyage_time":
+                    _manual_set_identity_state(
+                        actor,
+                        identity,
+                        "concubine_voyage_active",
+                        "归来" in label or any(k in value for k in ["可归来", "可结算"]),
+                    )
                 updated = True
                 continue
             cd = actor.parse_wait_time(value) if hasattr(actor, "parse_wait_time") else -1
             if cd > 0:
                 _manual_set_identity_state(actor, identity, state_key, _manual_sync_add_seconds(cd + 60))
+                if state_key == "next_concubine_voyage_time":
+                    _manual_set_identity_state(actor, identity, "concubine_voyage_active", True)
                 updated = True
         if updated:
             _manual_set_identity_state(actor, identity, "last_concubine_status_time", _manual_sync_now_str())
@@ -2360,6 +2398,16 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
         processed = _manual_record_concubine_task_reply(actor, "heart_trial", text, identity)
     elif cmd == ".天机代卜":
         processed = _manual_record_concubine_task_reply(actor, "divination", text, identity)
+    elif cmd.startswith(".侍妾远航"):
+        if hasattr(actor, "record_concubine_voyage_response"):
+            processed = bool(actor.record_concubine_voyage_response(text, identity=identity, command=cmd))
+        else:
+            processed = _manual_record_concubine_task_reply(actor, "voyage", text, identity)
+    elif cmd == ".远航归来":
+        if hasattr(actor, "record_concubine_voyage_response"):
+            processed = bool(actor.record_concubine_voyage_response(text, identity=identity, command=cmd))
+        else:
+            processed = _manual_record_concubine_task_reply(actor, "voyage", text, identity)
     elif cmd in {".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关"}:
         processed = _manual_record_meditation_reply(actor, text, identity) or processed
     elif cmd in {".状态", ".我的灵根"}:

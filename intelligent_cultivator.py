@@ -327,6 +327,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self.is_running = True                     # 控制所有循环的运行状态
         self.cmd_lock = asyncio.Lock()             # 异步锁，防止多个循环同时发指令导致冲突
         self.startup_done = asyncio.Event()        # 启动同步完成的信号量，所有循环等待它
+        self.meditation_state_event = asyncio.Event()  # 被动闭关状态变化时唤醒闭关循环
         self.pause_event = asyncio.Event()          # 暂停/恢复控制（set=运行中, clear=暂停中）
         self.pause_event.set()                      # 默认运行中
         # 止/启管理员名单（只有这些人发"止"才生效）
@@ -1520,7 +1521,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         wait_sec = seconds_until(end_time) + random.randint(30, 60)
         if wait_sec > 0:
             log.info(f"{label}: waiting {wait_sec:.0f}s for deep meditation settlement window.")
-            await asyncio.sleep(wait_sec)
+            try:
+                await asyncio.wait_for(self.meditation_state_event.wait(), timeout=wait_sec)
+                self.meditation_state_event.clear()
+                log.info(f"{label}: meditation state changed, rechecking.")
+            except asyncio.TimeoutError:
+                pass
 
     # ------------------------------------------------------------------
     # 问心台策略
@@ -2485,7 +2491,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "nickname": "", "in_deep_meditation": False,
             "deep_meditation_end_time": "", "last_tower_date": "", "last_blood_trial_date": "",
-            "next_dream_map_time": "", "next_heart_trial_time": "", "next_spirit_tree_irrigation_time": "",
+            "next_dream_map_time": "", "next_heart_trial_time": "",
+            "next_concubine_voyage_time": "", "last_concubine_voyage_time": "",
+            "concubine_voyage_active": False,
+            "next_spirit_tree_irrigation_time": "",
             "spirit_tree_status": SPIRIT_TREE_IRRIGATION_STATUS, "spirit_tree_mature_until": "",
             "spirit_tree_harvested_in_mature_period": False, "spirit_tree_harvest_attempted_in_mature_period": False,
             "spirit_tree_harvest_pending": False, "spirit_tree_last_harvest_time": "",
@@ -2841,11 +2850,16 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # ---- 闭关相关（主魂+化身） ----
         # 强行出关 / 出关成功 → 清除深度闭关状态
-        if any(k in text for k in ["强行出关", "出关成功", "已出关", "功成圆满", "闭关结束"]):
+        # "功成圆满" 会出现在 ".查看闭关" 正常回复中（"即可功成圆满"），必须排除仍在闭关的情况。
+        _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"]) or (
+            "功成圆满" in text and "预计还需" not in text and "还需" not in text and "正在" not in text
+        )
+        if _is_real_exit:
             if avatar == "主魂":
                 self.state["in_deep_meditation"] = False
                 self.state["deep_meditation_end_time"] = ""
                 self.state["is_closing"] = False
+                self.meditation_state_event.set()
             else:
                 self.set_avatar_state(avatar, "in_deep_meditation", False)
                 self.set_avatar_state(avatar, "deep_meditation_end_time", "")
@@ -2858,6 +2872,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 if avatar == "主魂":
                     self.state["in_deep_meditation"] = False
                     self.state["deep_meditation_end_time"] = ""
+                    self.meditation_state_event.set()
                 else:
                     self.set_avatar_state(avatar, "in_deep_meditation", False)
                     self.set_avatar_state(avatar, "deep_meditation_end_time", "")
@@ -2868,6 +2883,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     if avatar == "主魂":
                         self.state["in_deep_meditation"] = True
                         self.state["deep_meditation_end_time"] = add_seconds_str(now, cd)
+                        self.meditation_state_event.set()
                     else:
                         self.set_avatar_state(avatar, "in_deep_meditation", True)
                         self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now, cd))
@@ -2937,6 +2953,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if cd > 0:
                 self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now, cd))
 
+        # ---- 侍妾远航（仅星宫道心侍妾身份） ----
+        if self.record_concubine_voyage_response(text, identity=avatar):
+            log.info(f"[{avatar}] passive: concubine voyage state synced.")
+
         # ---- 九天罡风 ----
         if "罡风" in text and ("虚弱" in text or "元婴受创" in text):
             log.info(f"[{avatar}] passive: detected 罡风 weakness warning.")
@@ -2977,6 +2997,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         }
         min_wait = None
         for key, value in state.items():
+            if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
+                continue
             if key in ignored_keys or not isinstance(value, str) or not value:
                 continue
             if not (
@@ -3411,7 +3433,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
                         # 5. 入梦寻图
                         if features.get("dream_map"): await self._avatar_dream_map_check(avatar)
-                        # 6. 共历心劫
+                        # 6. 侍妾远航（仅星宫道心侍妾身份，和入梦寻图同为8小时冷却，贴近执行）
+                        await self.execute_avatar_concubine_voyage(avatar)
+                        # 7. 共历心劫
                         if features.get("heart_trial"): await self._avatar_heart_trial_check(avatar)
                     except Exception as e:
                         log.error(f"Avatar [{avatar}] error: {e}")
@@ -3529,6 +3553,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 86400)); return
         cd = self.parse_wait_time(resp_text)
         self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), cd if cd > 0 else 8*3600))
+        if cd <= 0 and not any(k in resp_text for k in ["冷却", "后再", "尚未", "无碎片", "碎片不足", "未拥有", "不足"]):
+            self.mark_concubine_dream_executed(avatar)
         if resp_text and "4/4" in resp_text:
             log.info(f"[{avatar}] 入梦寻图进度 4/4，发送 .拼图")
             await asyncio.sleep(3)
@@ -3746,6 +3772,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 ht = a_state.get("next_heart_trial_time", "")
                 if ht and is_future(ht):
                     min_cd = min(min_cd, seconds_until(ht))
+            # 侍妾远航CD（仅星宫道心侍妾身份）
+            if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+                voyage = a_state.get("next_concubine_voyage_time", "")
+                if voyage and is_future(voyage):
+                    min_cd = min(min_cd, seconds_until(voyage))
             # 灵树灌溉CD
             if features.get("spirit_tree_irrigation"):
                 if a_state.get("spirit_tree_status") == SPIRIT_TREE_MATURE_STATUS:
@@ -3897,6 +3928,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # 抚摸法宝循环
         asyncio.create_task(self.run_treasure_touch_loop())
+        asyncio.create_task(self.run_nurture_spirit_loop())
 
         # 闭关循环（内部会检查深度闭关状态）
         asyncio.create_task(self.run_meditation_timer())
