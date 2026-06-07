@@ -1267,7 +1267,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             should_yield = True
                             wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
                         else:
-                            log.warning(
+                            log.info(
                                 f"Avatar switch to {identity} proceeds after {deferred_for:.1f}s defer; "
                                 f"{self.current_identity} still reports due commands."
                             )
@@ -1462,7 +1462,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                                 should_yield = True
                                 wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
                             else:
-                                log.warning(
+                                log.info(
                                     f"Auto-switch to 主魂 proceeds after {deferred_for:.1f}s defer; "
                                     f"{self.current_identity} still reports due commands."
                                 )

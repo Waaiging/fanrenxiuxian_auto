@@ -800,10 +800,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 continue
             if key in ignored_keys or not isinstance(value, str) or not value:
                 continue
-            if not (
-                (key.startswith("next_") and key.endswith("_time"))
-                or key in watch_keys
-            ):
+            if key == "deep_meditation_end_time" and not state.get("in_deep_meditation"):
+                continue
+            if key not in watch_keys and not self.state_time_command_for_key(key):
                 continue
             if self.state_time_command_paused(key, identity):
                 continue
@@ -1123,7 +1122,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                 should_yield = True
                                 wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
                             else:
-                                log.warning(
+                                log.info(
                                     f"Auto-switch to 主魂 proceeds after {deferred_for:.1f}s defer; "
                                     f"{self.current_identity} still reports due commands."
                                 )
@@ -1254,7 +1253,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             should_yield = True
                             wait_sec_to_sleep = max(5, min(wait_sec + 2, 30))
                         else:
-                            log.warning(
+                            log.info(
                                 f"Avatar switch to {identity} proceeds after {deferred_for:.1f}s defer; "
                                 f"{self.current_identity} still reports due commands."
                             )

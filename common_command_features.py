@@ -51,20 +51,28 @@ STATE_TIME_COMMAND_MAP = {
     "next_heart_trial_time": ".共历心劫",
     "next_divination_time": ".天机代卜",
     "next_concubine_voyage_time": ".侍妾远航 均衡",
+    "next_tower_time": ".闯塔",
     "next_stairs_time": ".登天阶",
+    "next_heart_platform_time": ".问心台",
     "nine_heaven_wind_cd_time": ".引九天罡风",
+    "heart_platform_time": ".问心台",
     "next_heart_time": ".问心台",
     "next_formation_time": ".启阵",
     "next_formation_retry_time": ".启阵",
+    "next_force_exit_time": ".强行出关",
+    "next_nurture_spirit_time": ".温养器灵 青竹蜂云剑（神雷版）",
+    "next_spirit_tree_irrigation_time": ".灵树灌溉",
     "next_star_gazing_time": ".观星",
     "pending_star_gazing_target_time": ".观星",
     "pending_star_shift_target_time": ".改换星移",
+    "next_star_palace_time": ".观星台",
     "next_star_check_time": ".观星台",
     "next_star_appease_time": ".安抚星辰",
     "next_star_collect_time": ".收集精华",
     "next_star_attraction_time": ".牵引星辰 天雷星",
     "star_attraction_retry_time": ".牵引星辰 天雷星",
     "next_steal_time": ".灵兽偷菜",
+    "next_beast_status_check_time": ".我的灵兽",
     "next_abyss_time": ".探渊 <灵兽>",
     "next_pasture_time": ".一键放养",
     "next_beast_interaction_time": ".灵兽互动 六翼",
@@ -277,8 +285,11 @@ class CommonCommandMixin:
             return extra_wait
         return min(base_wait, extra_wait)
 
+    def state_time_command_for_key(self, key):
+        return STATE_TIME_COMMAND_MAP.get(str(key or ""))
+
     def state_time_command_paused(self, key, identity=""):
-        command = STATE_TIME_COMMAND_MAP.get(str(key or ""))
+        command = self.state_time_command_for_key(key)
         if not command:
             return False
         return dashboard_command_disabled(self, command, identity or "主魂")[0]
