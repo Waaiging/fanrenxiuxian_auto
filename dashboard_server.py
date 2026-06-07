@@ -70,6 +70,7 @@ STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "sub": {"厚土", "缘生子", "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
+CONCUBINE_VOYAGE_AUTO_START_ENABLED = False
 
 ACCOUNT_PROFILE_USERNAMES = {
     "main": {
@@ -672,7 +673,7 @@ def sect_war_commands(state):
 
 
 def concubine_voyage_enabled(account, identity):
-    return (identity or "主魂") in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
+    return CONCUBINE_VOYAGE_AUTO_START_ENABLED and (identity or "主魂") in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
 
 
 def concubine_commands(state, include_divination=True, include_voyage=False):

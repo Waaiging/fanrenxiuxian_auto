@@ -3074,6 +3074,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         for key, value in state.items():
             if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
                 continue
+            if (
+                key == "next_concubine_voyage_time"
+                and not self.concubine_voyage_auto_start_enabled(identity)
+                and not state.get("concubine_voyage_active")
+            ):
+                continue
             if key in ignored_keys or not isinstance(value, str) or not value:
                 continue
             if key == "deep_meditation_end_time" and not state.get("in_deep_meditation"):
@@ -3683,7 +3689,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 min_cd = min(min_cd, seconds_until(ft))
             # 入梦/远航绑定CD
             if features.get("dream_map"):
-                if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+                if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
                     bound_time = self.latest_concubine_dream_voyage_time(avatar)
                     if bound_time and is_future(bound_time):
                         min_cd = min(min_cd, seconds_until(bound_time))
@@ -3703,7 +3709,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 and not self.dashboard_command_paused(".侍妾远航 均衡", avatar)
             ):
                 voyage = a_state.get("next_concubine_voyage_time", "")
-                if voyage and is_future(voyage):
+                if voyage and is_future(voyage) and (
+                    self.concubine_voyage_auto_start_enabled(avatar)
+                    or a_state.get("concubine_voyage_active")
+                ):
                     min_cd = min(min_cd, seconds_until(voyage))
             # 灵树灌溉CD
             if features.get("spirit_tree_irrigation"):

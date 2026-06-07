@@ -1148,6 +1148,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         for k in keys_to_check:
             if k == "next_switch_allowed_time":
                 continue
+            if (
+                k == "next_concubine_voyage_time"
+                and not self.concubine_voyage_auto_start_enabled(identity)
+                and not state.get("concubine_voyage_active")
+            ):
+                continue
             if self.state_time_command_paused(k, identity):
                 continue
             t_str = state.get(k, "")

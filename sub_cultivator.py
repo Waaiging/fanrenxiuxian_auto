@@ -798,6 +798,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         for key, value in state.items():
             if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
                 continue
+            if (
+                key == "next_concubine_voyage_time"
+                and not self.concubine_voyage_auto_start_enabled(identity)
+                and not state.get("concubine_voyage_active")
+            ):
+                continue
             if key in ignored_keys or not isinstance(value, str) or not value:
                 continue
             if key == "deep_meditation_end_time" and not state.get("in_deep_meditation"):
@@ -5627,7 +5633,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     wait_candidates.append(seconds_until(next_force_exit))
                 if next_heart2 and is_future(next_heart2):
                     wait_candidates.append(seconds_until(next_heart2))
-                if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+                if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
                     bound_time = self.latest_concubine_dream_voyage_time(avatar)
                     if bound_time and is_future(bound_time):
                         wait_candidates.append(seconds_until(bound_time))
@@ -5637,6 +5643,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     next_voyage
                     and is_future(next_voyage)
                     and self.concubine_voyage_enabled(avatar)
+                    and (
+                        self.concubine_voyage_auto_start_enabled(avatar)
+                        or a_state.get("concubine_voyage_active")
+                    )
                     and not handled_bound_batch
                     and not self.dashboard_command_paused(".侍妾远航 均衡", avatar)
                 ):

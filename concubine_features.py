@@ -35,6 +35,7 @@ CONCUBINE_GRACE_SECONDS = 60  # 冷却宽容时间，避免频繁请求
 CONCUBINE_VOYAGE_COMMAND = ".侍妾远航 均衡"
 CONCUBINE_VOYAGE_RETURN_COMMAND = ".远航归来"
 CONCUBINE_VOYAGE_CD_SECONDS = 8 * 3600
+CONCUBINE_VOYAGE_AUTO_START_ENABLED = False
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
     "sub": {"厚土", "缘生子", "寻真子"},
@@ -240,6 +241,8 @@ class ConcubineMixin:
 
     def concubine_voyage_block_until(self, identity="主魂"):
         """远航中会阻塞入梦寻图/共历心劫/天机代卜。"""
+        if not self.concubine_voyage_enabled(identity):
+            return ""
         state = self._concubine_state_container(identity or "主魂")
         next_time = state.get("next_concubine_voyage_time", "")
         if state.get("concubine_voyage_active") and next_time and is_future(next_time):
@@ -380,10 +383,18 @@ class ConcubineMixin:
         identity = identity or "主魂"
         return identity in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
 
+    def concubine_voyage_auto_start_enabled(self, identity="主魂"):
+        return CONCUBINE_VOYAGE_AUTO_START_ENABLED and self.concubine_voyage_enabled(identity)
+
     def concubine_task_enabled(self, task_key, identity="主魂"):
         if task_key != "voyage":
             return True
-        return self.concubine_voyage_enabled(identity)
+        if not self.concubine_voyage_enabled(identity):
+            return False
+        if self.concubine_voyage_auto_start_enabled(identity):
+            return True
+        state = self._concubine_state_container(identity)
+        return bool(state.get("concubine_voyage_active"))
 
     def _concubine_command_paused(self, command, identity="主魂"):
         return hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(command, identity or "主魂")
@@ -412,6 +423,8 @@ class ConcubineMixin:
     def align_concubine_voyage_to_dream(self, identity="主魂"):
         """Defer voyage until .入梦寻图 is due, unless dream just ran in this cycle."""
         identity = identity or "主魂"
+        if not self.concubine_voyage_auto_start_enabled(identity):
+            return True
         if self.concubine_dream_recently_executed(identity):
             return True
         state = self._concubine_state_container(identity)
@@ -448,7 +461,7 @@ class ConcubineMixin:
         mirror that later time into both state fields so the dashboard and schedulers agree.
         """
         identity = identity or "主魂"
-        if not self.concubine_voyage_enabled(identity):
+        if not self.concubine_voyage_auto_start_enabled(identity):
             return True
         if self._concubine_command_paused(CONCUBINE_VOYAGE_COMMAND, identity):
             return True
@@ -528,7 +541,8 @@ class ConcubineMixin:
     async def execute_avatar_bound_dream_voyage(self, avatar, send_with_cultivation_check=None):
         """
         Execute the bound Star Palace batch:
-        .远航归来 (when active) -> .入梦寻图 -> .拼图 if complete -> .侍妾远航 均衡.
+        .远航归来 (when active) -> .入梦寻图 -> .拼图 if complete.
+        New .侍妾远航 starts are globally disabled.
 
         Returns True when this identity is managed by the bound batch, even if it only aligned
         cooldowns and skipped sending. Returns False for identities that should use normal dream logic.
@@ -536,42 +550,55 @@ class ConcubineMixin:
         avatar = avatar or "主魂"
         if not self.concubine_voyage_enabled(avatar):
             return False
+        auto_start_voyage = self.concubine_voyage_auto_start_enabled(avatar)
         if self._concubine_command_paused(CONCUBINE_VOYAGE_COMMAND, avatar):
-            return False
+            auto_start_voyage = False
         if self._concubine_command_paused(".入梦寻图", avatar):
             return True
-        if not self.align_concubine_dream_voyage_cooldowns(avatar):
+        state = self._concubine_state_container(avatar)
+        if not auto_start_voyage and not state.get("concubine_voyage_active"):
+            next_dream = state.get("next_dream_map_time", "")
+            if next_dream and is_future(next_dream):
+                return False
+        if auto_start_voyage and not self.align_concubine_dream_voyage_cooldowns(avatar):
             return True
 
         forced_exit = False
         async with _ConcubineAtomicTask(self, f"DreamVoyage-{avatar}"):
-            if not self.align_concubine_dream_voyage_cooldowns(avatar):
+            if auto_start_voyage and not self.align_concubine_dream_voyage_cooldowns(avatar):
                 return True
             try:
-                if self._concubine_command_paused(CONCUBINE_VOYAGE_RETURN_COMMAND, avatar):
-                    return True
-                log.info(f"Concubine dream/voyage [{avatar}]: sending {CONCUBINE_VOYAGE_RETURN_COMMAND} before .入梦寻图.")
-                _, return_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
-                    avatar,
-                    CONCUBINE_VOYAGE_RETURN_COMMAND,
-                    send_with_cultivation_check=send_with_cultivation_check,
-                    timeout=90,
-                    max_retries=1,
-                    delete_after=False,
-                )
-                forced_exit = forced_exit or step_forced_exit
-                if not return_text:
-                    self.defer_concubine_dream_voyage(avatar, 600)
-                    return True
-                if not self.record_concubine_voyage_response(return_text, identity=avatar, command=CONCUBINE_VOYAGE_RETURN_COMMAND):
-                    notify_unrecognized_response(self, CONCUBINE_VOYAGE_RETURN_COMMAND, return_text, log, f"侍妾远航归来[{avatar}]")
-                    self.defer_concubine_dream_voyage(avatar, 600)
-                    return True
                 state = self._concubine_state_container(avatar)
-                if state.get("concubine_voyage_active") and is_future(state.get("next_concubine_voyage_time", "")):
-                    self.align_concubine_dream_voyage_cooldowns(avatar)
-                    return True
-                await asyncio.sleep(3)
+                if state.get("concubine_voyage_active"):
+                    if state.get("next_concubine_voyage_time") and is_future(state.get("next_concubine_voyage_time", "")):
+                        if auto_start_voyage:
+                            self.align_concubine_dream_voyage_cooldowns(avatar)
+                        return True
+                    if self._concubine_command_paused(CONCUBINE_VOYAGE_RETURN_COMMAND, avatar):
+                        return True
+                    log.info(f"Concubine dream/voyage [{avatar}]: sending {CONCUBINE_VOYAGE_RETURN_COMMAND} before .入梦寻图.")
+                    _, return_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
+                        avatar,
+                        CONCUBINE_VOYAGE_RETURN_COMMAND,
+                        send_with_cultivation_check=send_with_cultivation_check,
+                        timeout=90,
+                        max_retries=1,
+                        delete_after=False,
+                    )
+                    forced_exit = forced_exit or step_forced_exit
+                    if not return_text:
+                        self.defer_concubine_dream_voyage(avatar, 600)
+                        return True
+                    if not self.record_concubine_voyage_response(return_text, identity=avatar, command=CONCUBINE_VOYAGE_RETURN_COMMAND):
+                        notify_unrecognized_response(self, CONCUBINE_VOYAGE_RETURN_COMMAND, return_text, log, f"侍妾远航归来[{avatar}]")
+                        self.defer_concubine_dream_voyage(avatar, 600)
+                        return True
+                    state = self._concubine_state_container(avatar)
+                    if state.get("concubine_voyage_active") and is_future(state.get("next_concubine_voyage_time", "")):
+                        if auto_start_voyage:
+                            self.align_concubine_dream_voyage_cooldowns(avatar)
+                        return True
+                    await asyncio.sleep(3)
 
                 log.info(f"Concubine dream/voyage [{avatar}]: sending .入梦寻图.")
                 dream_resp, dream_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
@@ -608,7 +635,11 @@ class ConcubineMixin:
                     await asyncio.sleep(3)
                     await self.send_and_wait_feedback_identity(avatar, ".拼图", timeout=60)
                 if not dream_success:
-                    self.align_concubine_dream_voyage_cooldowns(avatar)
+                    if auto_start_voyage:
+                        self.align_concubine_dream_voyage_cooldowns(avatar)
+                    return True
+
+                if not auto_start_voyage:
                     return True
 
                 await asyncio.sleep(3)
@@ -799,6 +830,9 @@ class ConcubineMixin:
                 return
             await asyncio.sleep(3)
 
+        if not self.concubine_voyage_auto_start_enabled("主魂"):
+            return
+
         log.info(f"Concubine voyage: sending {task['command']}")
         start_resp = await self.send_and_wait_feedback(task["command"], timeout=90, max_retries=1, delete_after=False)
         start_text = getattr(start_resp, "text", "") if hasattr(start_resp, "text") else start_resp if isinstance(start_resp, str) else ""
@@ -842,6 +876,9 @@ class ConcubineMixin:
                 if state.get("concubine_voyage_active") and is_future(state.get(task["state_key"], "")):
                     return True
                 await asyncio.sleep(3)
+
+            if not self.concubine_voyage_auto_start_enabled(avatar):
+                return False
 
             log.info(f"Concubine voyage [{avatar}]: sending {task['command']}")
             start_resp = await self.send_and_wait_feedback_identity(
@@ -1196,63 +1233,64 @@ class ConcubineMixin:
         # 发 .稳 前确保身份对齐
         if hasattr(self, 'switch_back_to_main'):
             await self.switch_back_to_main()
-        async with self.cmd_lock:
-            for idx in range(1, 4):
-                confirmed = False
-                current_text = ""
-                for attempt in range(1, 4):
-                    try:
-                        pause_event = getattr(self, "pause_event", None)
-                        if pause_event is not None:
-                            await pause_event.wait()
-                        if not await wait_for_bot_activity_before_send(self, ".稳", log):
-                            return
-                        if not command_send_allowed(self, ".稳", log):
-                            return
-                        remember_script_send_intent(self, ".稳")
-                        sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
-                        remember_script_sent_message(self, sent)
-                        schedule_command_auto_delete(self, sent, text=".稳", logger=log)
-                        _identity = getattr(self, "current_identity", None)
-                        _tag = f" [{_identity}]" if _identity else ""
-                        log.info(f"🟢 OUT{_tag}:\n.稳 ({idx}/3, try {attempt}/3)")
-                    except Exception as e:
-                        log.error(f"Concubine 共历心劫: failed to send .稳 ({idx}/3): {e}")
-                        return
-
-                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
-                        current_msg, sent, idx, timeout_sec=90, poll_sec=3,
-                    )
-                    if result_msg:
-                        current_msg = result_msg
-                        await log_incoming_message(self, f".稳 {idx}/3 try {attempt}/3", current_text, msg=result_msg, logger=log)
-                        if self.heart_trial_settled(current_text):
-                            self.record_concubine_cd("heart_trial")
-                            return
-                        if confirmed:
-                            break
-                        if self.heart_trial_round_prompt(current_text, idx):
-                            if attempt < 3:
-                                log.warning(f"Concubine 共历心劫: still on round {idx}; retrying.")
-                                await asyncio.sleep(3)
-                                continue
-                            if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮"):
+        async with _ConcubineAtomicTask(self, "HeartTrial-主魂"):
+            async with self.cmd_lock:
+                for idx in range(1, 4):
+                    confirmed = False
+                    current_text = ""
+                    for attempt in range(1, 4):
+                        try:
+                            pause_event = getattr(self, "pause_event", None)
+                            if pause_event is not None:
+                                await pause_event.wait()
+                            if not await wait_for_bot_activity_before_send(self, ".稳", log):
                                 return
-                        log.warning(f"Concubine 共历心劫: .稳 ({idx}/3) did not confirm.")
-                        notify_unrecognized_response(self, ".稳", current_text, log, f"共历心劫第{idx}轮")
+                            if not command_send_allowed(self, ".稳", log):
+                                return
+                            remember_script_send_intent(self, ".稳")
+                            sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
+                            remember_script_sent_message(self, sent)
+                            schedule_command_auto_delete(self, sent, text=".稳", logger=log)
+                            _identity = getattr(self, "current_identity", None)
+                            _tag = f" [{_identity}]" if _identity else ""
+                            log.info(f"🟢 OUT{_tag}:\n.稳 ({idx}/3, try {attempt}/3)")
+                        except Exception as e:
+                            log.error(f"Concubine 共历心劫: failed to send .稳 ({idx}/3): {e}")
+                            return
+
+                        result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
+                            current_msg, sent, idx, timeout_sec=90, poll_sec=3,
+                        )
+                        if result_msg:
+                            current_msg = result_msg
+                            await log_incoming_message(self, f".稳 {idx}/3 try {attempt}/3", current_text, msg=result_msg, logger=log)
+                            if self.heart_trial_settled(current_text):
+                                self.record_concubine_cd("heart_trial")
+                                return
+                            if confirmed:
+                                break
+                            if self.heart_trial_round_prompt(current_text, idx):
+                                if attempt < 3:
+                                    log.warning(f"Concubine 共历心劫: still on round {idx}; retrying.")
+                                    await asyncio.sleep(3)
+                                    continue
+                                if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮"):
+                                    return
+                            log.warning(f"Concubine 共历心劫: .稳 ({idx}/3) did not confirm.")
+                            notify_unrecognized_response(self, ".稳", current_text, log, f"共历心劫第{idx}轮")
+                            self.defer_concubine_task("heart_trial", 600)
+                            return
+                        log.warning(f"Concubine 共历心劫: missing edit after .稳 ({idx}/3, try {attempt}/3).")
+                        if attempt < 3:
+                            await asyncio.sleep(3)
+                            continue
+                        if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮无编辑"):
+                            return
                         self.defer_concubine_task("heart_trial", 600)
                         return
-                    log.warning(f"Concubine 共历心劫: missing edit after .稳 ({idx}/3, try {attempt}/3).")
-                    if attempt < 3:
-                        await asyncio.sleep(3)
-                        continue
-                    if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮无编辑"):
-                        return
-                    self.defer_concubine_task("heart_trial", 600)
-                    return
 
-                if not confirmed:
-                    return
+                    if not confirmed:
+                        return
 
         self.record_concubine_cd("heart_trial")
 
@@ -1261,7 +1299,7 @@ class ConcubineMixin:
     async def run_concubine_loop(self):
         """
         侍妾功能主循环。
-        按优先级依次执行：入梦寻图 → 侍妾远航 → 共历心劫 → 天机代卜
+        按优先级依次执行：入梦寻图 → 已有远航归来 → 共历心劫 → 天机代卜
         全部有冷却时等待最短的冷却时间。
         """
         await self.startup_done.wait()
