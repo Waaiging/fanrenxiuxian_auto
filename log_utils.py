@@ -2388,6 +2388,23 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     elif cmd.startswith(".抚摸法宝"):
         if hasattr(actor, "record_treasure_touch_response"):
             processed = bool(actor.record_treasure_touch_response(text))
+    elif cmd in {".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"}:
+        spirit_tree_avatar = getattr(actor, "spirit_tree_avatar", "缘生子")
+        if identity != spirit_tree_avatar:
+            logger.info(
+                f"Manual spirit tree sync skipped for [{cmd}]: identity {identity} "
+                f"!= {spirit_tree_avatar}."
+            )
+        elif hasattr(actor, "maybe_record_spirit_tree_passive_message") and cmd == ".灵树状态":
+            processed = bool(actor.maybe_record_spirit_tree_passive_message(msg, text, source=f"manual {cmd}"))
+        elif hasattr(actor, "maybe_record_spirit_tree_passive_message") and cmd == ".灵树灌溉":
+            processed = bool(actor.maybe_record_spirit_tree_passive_message(msg, text, source=f"manual {cmd}"))
+            if not processed and hasattr(actor, "record_spirit_tree_irrigation_state"):
+                processed = bool(actor.record_spirit_tree_irrigation_state(text, source=f"manual {cmd}"))
+        elif cmd == ".采摘灵果" and hasattr(actor, "record_spirit_tree_harvest_response"):
+            processed = bool(actor.record_spirit_tree_harvest_response(text))
+        elif cmd == ".协同守山" and hasattr(actor, "record_spirit_tree_guard_response"):
+            processed = bool(actor.record_spirit_tree_guard_response(text))
     elif cmd.startswith(".灵兽互动 "):
         if hasattr(actor, "record_beast_interaction_response"):
             processed = bool(actor.record_beast_interaction_response(text))

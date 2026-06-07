@@ -97,6 +97,7 @@ from log_utils import (
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
+    tracked_command_identity_for_reply, # 识别手动/脚本指令回复对应身份
     text_targets_current_account,       # 判定机器人文本是否明确指向当前账号
 )
 
@@ -350,6 +351,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             "kulipabp": "缘生子",
             "OldEinstein": "素缘子",
         }
+        self.spirit_tree_avatar = SPIRIT_TREE_AVATAR
         self.identity_usernames = {
             "主魂": ["Waaiging"],
         }
@@ -932,8 +934,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 # 被动身份自愈 + 手动指令状态同步
                 self.update_identity_passively(msg)
                 manual_reply = is_reply_to_manual_command(self, msg)
-                await record_manual_command_reply_state_if_needed(self, msg, text, sender_cache, log)
-                self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
+                manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender_cache, log)
+                if not manual_reply or not manual_processed:
+                    self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
                 if not manual_reply:
                     self.maybe_record_avatar_passive_states(msg)
 
@@ -2675,7 +2678,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             a_state["spirit_tree_last_harvest_time"] = now_str()
             self.save_state()
             log.info(f"[{avatar}] spirit tree harvest recorded.")
-            return
+            return True
         if any(k in clean for k in ["尚未成熟", "还未成熟", "未成熟", "采摘期未开启", "尚未进入采摘期"]):
             a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
             a_state["spirit_tree_mature_until"] = ""
@@ -2685,9 +2688,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             a_state["next_spirit_tree_irrigation_time"] = add_seconds_str(now_str(), 600)
             self.save_state()
             log.info(f"[{avatar}] spirit tree harvest rejected as not mature; resume irrigation checks.")
-            return
+            return True
         if clean:
             notify_unrecognized_response(self, SPIRIT_TREE_HARVEST_COMMAND, clean, log, "灵树采摘")
+        return False
 
     def record_spirit_tree_irrigation_state(self, text, source=""):
         avatar = SPIRIT_TREE_AVATAR
@@ -2712,6 +2716,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         self.save_state()
         log.info(f"[{avatar}] spirit tree status -> {SPIRIT_TREE_IRRIGATION_STATUS} ({source}).")
+        return True
 
     def record_spirit_tree_guard_response(self, text):
         avatar = SPIRIT_TREE_AVATAR
@@ -2727,6 +2732,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if clean and not any(k in clean for k in ["协同守山", "护山", "古剑门", "冷却", "已协同", "加固", "守山"]):
             notify_unrecognized_response(self, SPIRIT_TREE_GUARD_COMMAND, clean, log, "协同守山")
         log.info(f"[{avatar}] spirit tree guard recorded; next guard after {self.get_avatar_state(avatar).get('next_spirit_tree_guard_time', '')}.")
+        return True
 
     def schedule_spirit_tree_harvest_once(self, reason="mature"):
         task = getattr(self, "_spirit_tree_harvest_task", None)
@@ -2741,16 +2747,26 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self._spirit_tree_guard_task = asyncio.create_task(self.execute_spirit_tree_guard_once(reason))
 
     def maybe_record_spirit_tree_passive_message(self, msg, text, source="passive"):
+        indicates_mature = self.spirit_tree_text_indicates_mature(text)
+        indicates_irrigation = self.spirit_tree_text_indicates_irrigation_state(text)
+        indicates_invasion = self.spirit_tree_text_indicates_invasion(text)
+        if (
+            (indicates_mature or indicates_irrigation or indicates_invasion)
+            and not self.spirit_tree_message_targets_avatar(msg, text, source=source)
+        ):
+            log.info(f"[{SPIRIT_TREE_AVATAR}] spirit tree sync skipped ({source}): message is not targeted to this avatar.")
+            return False
+
         matched = False
-        if self.spirit_tree_text_indicates_mature(text):
+        if indicates_mature:
             needs_harvest = self.record_spirit_tree_mature_state(text, msg=msg, source=source)
             if needs_harvest:
                 self.schedule_spirit_tree_harvest_once(source)
             matched = True
-        elif self.spirit_tree_text_indicates_irrigation_state(text):
+        elif indicates_irrigation:
             self.record_spirit_tree_irrigation_state(text, source=source)
             matched = True
-        if self.spirit_tree_text_indicates_invasion(text):
+        if indicates_invasion:
             needs_guard = self.record_spirit_tree_invasion_state(text, msg=msg, source=source)
             if needs_guard:
                 self.schedule_spirit_tree_guard_once(source)
@@ -2758,6 +2774,36 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if not matched:
             self.normalize_spirit_tree_state(SPIRIT_TREE_AVATAR)
         return matched
+
+    def spirit_tree_message_targets_avatar(self, msg, text, source=""):
+        """Only accept spirit-tree bot text that can be attributed to 缘生子."""
+        avatar = SPIRIT_TREE_AVATAR
+        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", str(text or ""))
+        if marker:
+            return marker.group(1).strip() == avatar
+        if msg is None:
+            return True
+
+        reply_identity = tracked_command_identity_for_reply(self, msg)
+        if reply_identity:
+            return reply_identity == avatar
+
+        if mentions_other_user_for_identity(self, msg, text, avatar):
+            return False
+
+        lower_text = str(text or "").lower()
+        for username, identity in (self.avatar_usernames or {}).items():
+            if identity != avatar:
+                continue
+            name = str(username or "").lower().lstrip("@").strip()
+            if not name:
+                continue
+            if f"@{name}" in lower_text or f"【{name}】" in lower_text:
+                return True
+            if re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", lower_text):
+                return True
+
+        return False
 
     async def execute_spirit_tree_harvest_once(self, reason="mature"):
         avatar = SPIRIT_TREE_AVATAR
@@ -4058,8 +4104,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         log.critical(f"Rift weakness DETECTED in edited message! Stopping immediately.\n{text}")
                         await self.stop_for_rift_weakness(text)
                         return
-                    await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
-                    self.maybe_record_spirit_tree_passive_message(msg, text, source="edited message")
+                    manual_reply = is_reply_to_manual_command(self, msg)
+                    manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
+                    if not manual_reply or not manual_processed:
+                        self.maybe_record_spirit_tree_passive_message(msg, text, source="edited message")
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令）
                     is_matched = False
                     if msg.reply_to:
