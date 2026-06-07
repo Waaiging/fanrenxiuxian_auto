@@ -91,12 +91,17 @@
         .command-launcher-ready { color: #34d399; white-space: nowrap; }
         .command-group { font-size: 0.78rem; color: var(--accent-color); letter-spacing: 0; padding: 0.9rem 0 0.35rem; font-weight: 800; border-top: 1px solid rgba(255,255,255,0.06); }
         .command-group:first-child { border-top: 0; padding-top: 0; }
-        .command-row { display: grid; grid-template-columns: minmax(13rem, 1.7fr) 5.8rem 7rem minmax(9rem, 1fr) minmax(8.6rem, auto); gap: 0.75rem; align-items: center; padding: 0.68rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.84rem; }
+        .command-row { display: grid; grid-template-columns: minmax(9rem, 1.6fr) minmax(8rem, 1fr) minmax(5.5rem, auto) minmax(5.8rem, auto); gap: 0.75rem; align-items: center; padding: 0.78rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.92rem; }
         .command-row:first-child { border-top: 0; }
         .command-main { min-width: 0; display: flex; flex-direction: column; gap: 0.22rem; }
         .command-name { font-weight: 800; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
         .command-code { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .command-status { justify-self: start; border-radius: 999px; padding: 0.2rem 0.55rem; font-size: 0.74rem; font-weight: 800; white-space: nowrap; }
+        .command-status { justify-self: start; border-radius: 999px; padding: 0.22rem 0.58rem; font-size: 0.78rem; font-weight: 800; white-space: nowrap; }
+        .command-schedule { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); white-space: nowrap; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; }
+        .command-row.next-due .command-name,
+        .command-row.next-due .command-schedule,
+        .command-row.next-due .command-status { color: #f87171; }
+        .command-row.next-due .command-status { background: rgba(239,68,68,0.16); }
         .command-remaining { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); white-space: nowrap; font-size: 0.82rem; }
         .command-at { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-control { justify-self: end; display: inline-flex; align-items: center; gap: 0.34rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; }
@@ -117,7 +122,7 @@
         .tone-unknown .command-status { background: rgba(100,116,139,0.16); color: #94a3b8; }
         .command-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.66); backdrop-filter: blur(4px); z-index: 1100; display: none; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s ease; padding: 1rem; }
         .command-modal-overlay.show { display: flex; opacity: 1; }
-        .command-modal { width: min(920px, 96vw); max-height: min(760px, 92vh); display: flex; flex-direction: column; background: rgba(20,25,35,0.96); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 18px 48px rgba(0,0,0,0.55); overflow: hidden; }
+        .command-modal { width: min(760px, 96vw); max-height: min(760px, 92vh); display: flex; flex-direction: column; background: rgba(20,25,35,0.96); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 18px 48px rgba(0,0,0,0.55); overflow: hidden; }
         .command-modal-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 1rem 1.1rem; border-bottom: 1px solid var(--border-color); }
         .command-modal-title { min-width: 0; }
         .command-modal-title strong { display: block; color: var(--accent-color); font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -179,9 +184,9 @@
             main { grid-template-columns: 1fr; padding: 1rem; }
             .log-tools { grid-template-columns: 1fr; align-items: stretch; }
             .log-filter-summary { text-align: left; min-width: 0; }
-            .command-row { grid-template-columns: 1fr auto; gap: 0.45rem 0.65rem; font-size: 0.82rem; }
+            .command-row { grid-template-columns: 1fr auto; gap: 0.5rem 0.65rem; font-size: 0.88rem; }
             .command-status, .command-control { justify-self: end; }
-            .command-remaining, .command-at { grid-column: 1 / -1; }
+            .command-schedule { grid-column: 1 / -1; }
             .command-modal { max-height: 94vh; }
             .command-modal-header { padding: 0.85rem; }
             .command-modal-body { padding: 0.85rem; }
@@ -229,6 +234,7 @@
             flex-direction: column;
             gap: 0.3rem;
             transition: all 0.2s ease;
+            cursor: pointer;
         }
         .avatar-item:hover {
             border-color: rgba(0, 210, 255, 0.4);
@@ -307,6 +313,15 @@
         .avatar-item:hover {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        .main-identity-open {
+            border-radius: 12px;
+            cursor: pointer;
+            outline: none;
+        }
+        .main-identity-open:focus-visible,
+        .avatar-item:focus-visible {
+            box-shadow: 0 0 0 2px var(--accent-glow);
         }
     </style>
 </head>
@@ -551,6 +566,40 @@
             return (Array.isArray(commands) ? commands : []).filter(item => isCommandVisible(panelKey, item));
         }
 
+        function isDashboardCommand(item) {
+            return ['cooldown', 'daily'].includes(String(item?.schedule_type || ''));
+        }
+
+        function dashboardCommands(commands) {
+            return (Array.isArray(commands) ? commands : []).filter(isDashboardCommand);
+        }
+
+        function registerCommandPanels(account, panels) {
+            window.commandPanelDataMap = window.commandPanelDataMap || {};
+            for (const panel of (Array.isArray(panels) ? panels : [])) {
+                const identity = panel.identity || '未知身份';
+                const key = commandIdentityKey(account, identity);
+                window.commandPanelDataMap[key] = {
+                    account,
+                    panel: {
+                        ...panel,
+                        commands: dashboardCommands(panel.commands)
+                    }
+                };
+            }
+        }
+
+        function openIdentityCommands(account, identity) {
+            const key = commandIdentityKey(account, identity || '主魂');
+            if (window.commandPanelDataMap?.[key]) showCommandModal(key);
+        }
+
+        function openIdentityCommandsByKey(event, account, identity) {
+            if (event && event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+            if (event) event.preventDefault();
+            openIdentityCommands(account, identity);
+        }
+
         function parseDashboardDate(value) {
             if (!value || typeof value !== 'string') return null;
             const date = new Date(value.replace(/-/g, '/'));
@@ -575,41 +624,57 @@
             return first ? `${first.label || first.command}：${first.status || '--'}` : '无可见指令';
         }
 
+        function commandNextSeconds(item) {
+            if (item?.control_disabled) return null;
+            if (typeof item?.next_seconds === 'number' && Number.isFinite(item.next_seconds)) {
+                return Math.max(0, item.next_seconds);
+            }
+            const target = parseDashboardDate(item?.at || '');
+            if (target) return Math.max(0, Math.floor((target - new Date()) / 1000));
+            if (['ready', 'active'].includes(item?.tone || '') && item?.status !== '今日已执行') return 0;
+            return null;
+        }
+
+        function nextDueCommandKey(commands) {
+            const rows = (commands || [])
+                .map((item, index) => ({item, index, seconds: commandNextSeconds(item)}))
+                .filter(row => row.seconds !== null && row.item.tone !== 'done')
+                .sort((a, b) => (a.seconds - b.seconds) || (a.index - b.index));
+            return rows.length ? commandItemKey(rows[0].item) : '';
+        }
+
+        function commandScheduleText(item) {
+            if (item?.schedule_type === 'daily') {
+                return item.remaining || item.at || '今日';
+            }
+            if (item?.remaining || item?.at) return item.remaining || item.at;
+            if (['ready', 'active'].includes(item?.tone || '')) return '0秒';
+            return '--';
+        }
+
         function renderCommandRows(panelKey, commands) {
             const modalData = window.commandPanelDataMap?.[panelKey] || {};
             const account = modalData.account || '';
             const identity = modalData.panel?.identity || '主魂';
-            let lastGroup = '';
+            const dueKey = nextDueCommandKey(commands);
             return (commands || []).map(item => {
-                const group = item.group || '其他';
-                const groupHeader = group !== lastGroup ? `<div class="command-group">${escapeHtml(group)}</div>` : '';
-                lastGroup = group;
                 const tone = String(item.tone || 'unknown').replace(/[^a-z0-9_-]/gi, '') || 'unknown';
-                const detail = item.detail || '';
-                const at = item.at || '';
-                const bottomText = at || detail || '';
+                const scheduleText = commandScheduleText(item);
                 const paused = Boolean(item.control_disabled);
                 const controlKey = item.control_key || commandItemKey(item);
                 const controlLabel = paused ? '暂停' : '启用';
                 const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
-                const customId = item.custom_id || '';
-                const deleteButton = item.custom && customId
-                    ? `<button class="command-delete" onclick="deleteCustomCommand('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(customId)}')" title="删除自定义指令">删除</button>`
-                    : '';
+                const isNextDue = dueKey && commandItemKey(item) === dueKey;
                 return `
-                    ${groupHeader}
-                    <div class="command-row tone-${tone}">
+                    <div class="command-row tone-${tone} ${isNextDue ? 'next-due' : ''}">
                         <div class="command-main">
-                            <span class="command-name" title="${escapeHtml(item.label || item.command || '')}">${escapeHtml(item.label || item.command || '')}</span>
-                            <span class="command-code" title="${escapeHtml(item.command || '')}">${escapeHtml(item.command || '')}</span>
+                            <span class="command-name" title="${escapeHtml(item.command || item.label || '')}">${escapeHtml(item.label || item.command || '')}</span>
                         </div>
+                        <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
-                        <div class="command-remaining">${escapeHtml(item.remaining || '--')}</div>
-                        <div class="command-at" title="${escapeHtml(bottomText)}">${escapeHtml(bottomText || '--')}</div>
                         <div class="command-control" title="${escapeHtml(controlTitle)}">
                             <button class="command-toggle ${paused ? 'paused' : ''}" onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'})" aria-label="${escapeHtml(controlTitle)}"></button>
                             <span>${controlLabel}</span>
-                            ${deleteButton}
                         </div>
                     </div>
                 `;
@@ -617,43 +682,8 @@
         }
 
         function renderCommandPanels(account, panels) {
-            const list = Array.isArray(panels) ? panels : [];
-            if (!list.length) {
-                return `
-                    <div class="command-panel">
-                        <div class="command-panel-title"><span>指令状态</span><span>暂无数据</span></div>
-                    </div>
-                `;
-            }
-            const identities = list.map(panel => {
-                const commands = Array.isArray(panel.commands) ? panel.commands : [];
-                const key = commandIdentityKey(account, panel.identity || '未知身份');
-                window.commandPanelDataMap = window.commandPanelDataMap || {};
-                window.commandPanelDataMap[key] = {account, panel};
-                const shown = visibleCommands(key, commands);
-                const readyCount = shown.filter(item => ['ready', 'active', 'watch'].includes(item.tone || '')).length;
-                return `
-                    <button class="command-launcher" onclick="showCommandModal('${escapeJs(key)}')">
-                        <div class="command-launcher-name">
-                            <span>${escapeHtml(panel.identity || '未知身份')}</span>
-                            <span class="command-launcher-count">${shown.length}/${commands.length}</span>
-                        </div>
-                        <div class="command-launcher-meta">
-                            <span class="command-launcher-next" title="${escapeHtml(commandSummary(shown))}">${escapeHtml(commandSummary(shown))}</span>
-                            <span class="command-launcher-ready">${readyCount} 就绪</span>
-                        </div>
-                    </button>
-                `;
-            }).join('');
-            return `
-                <div class="command-panel">
-                    <div class="command-panel-title">
-                        <span>指令状态</span>
-                        <span>点击身份打开</span>
-                    </div>
-                    <div class="command-launcher-grid">${identities}</div>
-                </div>
-            `;
+            registerCommandPanels(account, panels);
+            return '';
         }
 
         function renderCustomCommandForm(panelKey) {
@@ -705,7 +735,7 @@
             if (!data || !data.panel) return;
 
             const panel = data.panel;
-            const commands = Array.isArray(panel.commands) ? panel.commands : [];
+            const commands = dashboardCommands(panel.commands);
             const shown = visibleCommands(panelKey, commands);
             const hiddenCount = commands.length - shown.length;
             const pausedCount = commands.filter(item => item.control_disabled).length;
@@ -734,12 +764,15 @@
                     <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', true)">显示全部</button>
                     <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', false)">隐藏全部</button>
                 </div>
-                ${renderCustomCommandForm(panelKey)}
+                <details class="command-visibility">
+                    <summary>添加自定义指令</summary>
+                    ${renderCustomCommandForm(panelKey)}
+                </details>
                 <details class="command-visibility">
                     <summary>显示设置</summary>
                     <div class="command-visibility-grid">${switches || '<span class="command-visibility-item">暂无可配置指令</span>'}</div>
                 </details>
-                ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份的指令都已隐藏。</div>'}
+                ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份没有可显示的冷却或每日任务。</div>'}
             `;
         }
 
@@ -764,7 +797,7 @@
         function setAllCommandVisibility(panelKey, visible) {
             const data = {};
             const panel = window.commandPanelDataMap?.[panelKey]?.panel;
-            const commands = Array.isArray(panel?.commands) ? panel.commands : [];
+            const commands = dashboardCommands(panel?.commands);
             for (const item of commands) data[commandItemKey(item)] = Boolean(visible);
             saveCommandVisibility(panelKey, data);
             renderCommandModal(panelKey);
@@ -986,7 +1019,7 @@
                                 : '';
 
                             return `
-                                <div class="avatar-item" style="${isAttached ? 'border-color: rgba(0, 210, 255, 0.6); box-shadow: 0 0 10px rgba(0, 210, 255, 0.2); background: rgba(0, 210, 255, 0.03);' : ''}">
+                                <div class="avatar-item" role="button" tabindex="0" onclick="openIdentityCommands('${escapeJs(id)}', '${escapeJs(name)}')" onkeydown="openIdentityCommandsByKey(event, '${escapeJs(id)}', '${escapeJs(name)}')" style="${isAttached ? 'border-color: rgba(0, 210, 255, 0.6); box-shadow: 0 0 10px rgba(0, 210, 255, 0.2); background: rgba(0, 210, 255, 0.03);' : ''}">
                                     <div class="avatar-name" title="${name}${val.nickname ? ' (' + val.nickname + ')' : ''}">👤 ${name}</div>
                                     ${val.nickname ? `<div style="font-size: 0.68rem; color: var(--text-secondary); line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${val.nickname}">${val.nickname}</div>` : ''}
                                     ${attachedTag}
@@ -1014,24 +1047,26 @@
 
                     html += `
                         <div class="card">
-                            <div class="card-header">
-                                <div class="account-name">${acc.name}</div>
-                                <div class="status-badge ${!isAlive ? 'status-offline' : s.is_paused ? 'status-paused' : 'status-online'}">
-                                    <span class="live-dot ${!isAlive ? 'dot-offline' : s.is_paused ? 'dot-paused' : 'dot-online'}"></span>
-                                    ${!isAlive ? '已停止' : s.is_paused ? '已暂停' : '运行中'}
+                            <div class="main-identity-open" role="button" tabindex="0" onclick="openIdentityCommands('${escapeJs(id)}', '主魂')" onkeydown="openIdentityCommandsByKey(event, '${escapeJs(id)}', '主魂')">
+                                <div class="card-header">
+                                    <div class="account-name">${acc.name}</div>
+                                    <div class="status-badge ${!isAlive ? 'status-offline' : s.is_paused ? 'status-paused' : 'status-online'}">
+                                        <span class="live-dot ${!isAlive ? 'dot-offline' : s.is_paused ? 'dot-paused' : 'dot-online'}"></span>
+                                        ${!isAlive ? '已停止' : s.is_paused ? '已暂停' : '运行中'}
+                                    </div>
                                 </div>
+                                <div class="stat-grid">
+                                    <div class="stat-item">
+                                        <div class="stat-label">闭关状态</div>
+                                        <div class="stat-value active">${s.in_deep_meditation ? '深度闭关中' : '普通闭关'}</div>
+                                    </div>
+                                    <div class="stat-item">
+                                        <div class="stat-label">主要进度</div>
+                                        <div class="stat-value">${mainProgressText(id, s)}</div>
+                                    </div>
+                                </div>
+                                ${renderCultivation(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
                             </div>
-                            <div class="stat-grid">
-                                <div class="stat-item">
-                                    <div class="stat-label">闭关状态</div>
-                                    <div class="stat-value active">${s.in_deep_meditation ? '深度闭关中' : '普通闭关'}</div>
-                                </div>
-                                <div class="stat-item">
-                                    <div class="stat-label">主要进度</div>
-                                    <div class="stat-value">${mainProgressText(id, s)}</div>
-                                </div>
-                            </div>
-                            ${renderCultivation(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
                             ${avatarHtml}
                             ${commandPanelHtml}
                             <div class="controls">
@@ -1044,6 +1079,13 @@
                     `;
                 }
                 document.getElementById('account-cards').innerHTML = html;
+                if (commandModalKey) {
+                    if (window.commandPanelDataMap?.[commandModalKey]) {
+                        renderCommandModal(commandModalKey);
+                    } else {
+                        closeCommandModal();
+                    }
+                }
             } catch(e){}
         }
 

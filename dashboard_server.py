@@ -324,13 +324,15 @@ def custom_command_row(entry, root_state=None):
         if target and target > datetime.now():
             status = "冷却中"
             tone = "cooldown"
-            remaining = format_remaining((target - datetime.now()).total_seconds())
+            next_seconds = max(0, int((target - datetime.now()).total_seconds()))
+            remaining = format_remaining(next_seconds)
             at = next_run_at
         else:
             status = "待执行"
             tone = "ready"
             remaining = "0秒"
             at = next_run_at
+            next_seconds = 0
         schedule_detail = f"每 {minutes:g} 分钟"
         if last_status:
             schedule_detail += f" · 上次 {last_status}"
@@ -344,6 +346,9 @@ def custom_command_row(entry, root_state=None):
         at = last_run_at
         detail = f"未设置自动间隔{f' · {detail}' if detail else ''}"
     row = command_row(command, label, status, tone, remaining=remaining, at=at, detail=detail, group=group)
+    if enabled:
+        row["schedule_type"] = "cooldown"
+        row["next_seconds"] = next_seconds
     row["custom"] = True
     row["custom_id"] = custom_id
     row["created_at"] = clean_custom_text(entry.get("created_at"), 32)
@@ -443,9 +448,20 @@ def format_remaining(delta_seconds):
     return f"{seconds}秒"
 
 
-def command_row(command, label=None, status="未记录", tone="unknown", remaining="", at="", detail="", group=""):
+def command_row(
+    command,
+    label=None,
+    status="未记录",
+    tone="unknown",
+    remaining="",
+    at="",
+    detail="",
+    group="",
+    schedule_type="",
+    next_seconds=None,
+):
     """Build one command-row object for the dashboard."""
-    return {
+    row = {
         "command": command,
         "label": label or command,
         "status": status,
@@ -455,24 +471,36 @@ def command_row(command, label=None, status="未记录", tone="unknown", remaini
         "detail": detail or "",
         "group": group or "",
     }
+    if schedule_type:
+        row["schedule_type"] = schedule_type
+    if next_seconds is not None:
+        row["next_seconds"] = max(0, int(next_seconds))
+    return row
 
 
 def time_command(state, key, command, label=None, waiting="冷却中", ready="就绪", missing="就绪", detail="", group=""):
     """Display a timestamp-backed command as cooldown/ready."""
     raw = state.get(key, "")
     if raw in ("就绪",):
-        return command_row(command, label, "就绪", "ready", detail=detail, group=group)
+        return command_row(command, label, "就绪", "ready", remaining="0秒", detail=detail, group=group, schedule_type="cooldown", next_seconds=0)
     if raw == "本轮已无下一次":
-        return command_row(command, label, "本轮结束", "done", at=raw, detail=detail, group=group)
+        return command_row(command, label, "本轮结束", "done", at=raw, detail=detail, group=group, schedule_type="cooldown")
     if raw == "---":
-        return command_row(command, label, "未开启", "unknown", at=raw, detail=detail, group=group)
+        return command_row(command, label, "未开启", "unknown", at=raw, detail=detail, group=group, schedule_type="cooldown")
     target = parse_state_time(raw)
     if not target:
-        return command_row(command, label, missing, "ready" if missing == "就绪" else "unknown", at=str(raw or ""), detail=detail, group=group)
+        next_seconds = 0 if missing == "就绪" else None
+        return command_row(
+            command, label, missing, "ready" if missing == "就绪" else "unknown",
+            remaining="0秒" if missing == "就绪" else "",
+            at=str(raw or ""), detail=detail, group=group,
+            schedule_type="cooldown", next_seconds=next_seconds,
+        )
     now = datetime.now()
     if target > now:
-        return command_row(command, label, waiting, "cooldown", format_remaining((target - now).total_seconds()), str(raw), detail, group)
-    return command_row(command, label, ready, "ready", "0秒", str(raw), detail, group)
+        next_seconds = max(0, int((target - now).total_seconds()))
+        return command_row(command, label, waiting, "cooldown", format_remaining(next_seconds), str(raw), detail, group, schedule_type="cooldown", next_seconds=next_seconds)
+    return command_row(command, label, ready, "ready", "0秒", str(raw), detail, group, schedule_type="cooldown", next_seconds=0)
 
 
 def active_until_command(state, key, command, label=None, active="生效中", ready="未生效", detail="", group=""):
@@ -491,14 +519,14 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
     today = datetime.now().strftime("%Y-%m-%d")
     done = set(state.get("done", []) or [])
     if done_command and done_command in done:
-        return command_row(command, label, "今日已执行", "done", at=today, detail=detail, group=group)
+        return command_row(command, label, "今日已执行", "done", remaining="今日", at=today, detail=detail, group=group, schedule_type="daily")
     if date_key:
         value = str(state.get(date_key, "") or "")
         if value == today:
-            return command_row(command, label, "今日已执行", "done", at=value, detail=detail, group=group)
+            return command_row(command, label, "今日已执行", "done", remaining="今日", at=value, detail=detail, group=group, schedule_type="daily")
         if value:
-            return command_row(command, label, "今日未执行", "ready", at=value, detail=detail, group=group)
-    return command_row(command, label, "今日未执行", "ready", detail=detail, group=group)
+            return command_row(command, label, "今日未执行", "ready", remaining="待执行", at=value, detail=detail, group=group, schedule_type="daily", next_seconds=0)
+    return command_row(command, label, "今日未执行", "ready", remaining="待执行", detail=detail, group=group, schedule_type="daily", next_seconds=0)
 
 
 def watch_command(command, label=None, detail="同步/记录回复", group=""):
@@ -517,10 +545,11 @@ def deep_meditation_command(state, command=".深度闭关", label="深度闭关"
     raw = state.get("deep_meditation_end_time", "")
     target = parse_state_time(raw)
     if state.get("in_deep_meditation") and target and target > datetime.now():
-        return command_row(command, label, "闭关中", "active", format_remaining((target - datetime.now()).total_seconds()), str(raw), group=group)
+        next_seconds = max(0, int((target - datetime.now()).total_seconds()))
+        return command_row(command, label, "闭关中", "active", format_remaining(next_seconds), str(raw), group=group, schedule_type="cooldown", next_seconds=next_seconds)
     if state.get("in_deep_meditation"):
-        return command_row(command, label, "待结算", "active", at=str(raw or ""), group=group)
-    return command_row(command, label, "就绪", "ready", at=str(raw or ""), group=group)
+        return command_row(command, label, "待结算", "active", remaining="0秒", at=str(raw or ""), group=group, schedule_type="cooldown", next_seconds=0)
+    return command_row(command, label, "就绪", "ready", remaining="0秒", at=str(raw or ""), group=group, schedule_type="cooldown", next_seconds=0)
 
 
 def meditation_train_command(state, group="闭关"):
@@ -536,8 +565,8 @@ def force_exit_command(state, group="闭关"):
     if scheduled["tone"] == "cooldown":
         return scheduled
     if state.get("in_deep_meditation"):
-        return command_row(".强行出关", "强行出关", "可出关", "ready", detail="当前处于深度闭关", group=group)
-    return command_row(".强行出关", "强行出关", "无需出关", "done", group=group)
+        return command_row(".强行出关", "强行出关", "可出关", "ready", remaining="0秒", detail="当前处于深度闭关", group=group, schedule_type="cooldown", next_seconds=0)
+    return command_row(".强行出关", "强行出关", "无需出关", "done", group=group, schedule_type="cooldown")
 
 
 def xiaohao_star_pull_command(state):
@@ -576,6 +605,7 @@ def spirit_tree_command(state):
             ".采摘灵果", "灵树状态", "成熟采摘期", "active",
             format_remaining((mature_until - datetime.now()).total_seconds()),
             str(state.get("spirit_tree_mature_until", "")), detail, "凌霄宫",
+            schedule_type="cooldown", next_seconds=(mature_until - datetime.now()).total_seconds(),
         )
     irrigation = time_command(state, "next_spirit_tree_irrigation_time", ".灵树灌溉", "灵树灌溉", group="凌霄宫")
     irrigation["detail"] = status or irrigation.get("detail", "")
