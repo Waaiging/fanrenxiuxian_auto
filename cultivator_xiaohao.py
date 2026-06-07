@@ -122,6 +122,7 @@ BEAST_INTERACTION_CD_SECONDS = 90 * 60
 BEAST_CRUISE_COMMAND = f".灵兽巡游 {BEAST_FOCUS_NAME}"
 BEAST_CRUISE_CD_SECONDS = 120 * 60
 BEAST_ACTION_RETRY_SECONDS = 10 * 60
+BEAST_ABYSS_MIN_STAMINA = 30
 DAILY_TASK_START_HOUR = 7                      # 每日任务开始时间
 DAILY_TASK_START_MINUTE = 30
 SECT_SKILL_MAX_DAILY = 3                       # 宗门传功每日上限
@@ -354,7 +355,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "last_pasture_return_time": "", "next_meditation_retry_time": "",
             "best_beast_injured_time": "", "next_beast_status_check_time": "",
             "best_beast_name": "", "best_beast_power": 0,
-            "best_beast_status": "", "best_beast_injury_source": "",
+            "best_beast_status": "", "best_beast_stamina": -1, "best_beast_injury_source": "",
             "beast_hunt_stopped": False, "beast_hunt_stopped_reason": "",
             "beasts_cache": [],
             "last_treasure_touch_time": "", "next_treasure_touch_time": "",
@@ -389,6 +390,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         s["best_beast_name"] = best.get("full_name", "")
                         s["best_beast_power"] = best.get("power", 0)
                         s["best_beast_status"] = best.get("status", "未知")
+                        s["best_beast_stamina"] = best.get("stamina", -1)
                     return s
             except:
                 pass
@@ -1870,12 +1872,22 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     # ---- 灵兽：缓存与跟踪 ----
 
+    def sorted_beasts_by_power(self, cache=None):
+        """按战力、经验、名称稳定排序灵兽缓存。"""
+        beasts = list(cache if cache is not None else self.state.get("beasts_cache", []))
+        beasts.sort(key=lambda x: (x.get('power', 0), x.get('exp', 0), x.get('full_name', '')), reverse=True)
+        return beasts
+
+    def beast_stamina_value(self, beast):
+        try:
+            return int(beast.get("stamina", -1))
+        except Exception:
+            return -1
+
     def get_best_beast(self):
         """从缓存中获取战力最高的灵兽"""
-        cache = list(self.state.get("beasts_cache", []))
-        if not cache: return None
-        cache.sort(key=lambda x: (x.get('power', 0), x.get('exp', 0), x.get('full_name', '')), reverse=True)
-        return cache[0]
+        cache = self.sorted_beasts_by_power()
+        return cache[0] if cache else None
 
     def update_best_beast_tracking(self, best=None):
         """更新最佳灵兽跟踪信息"""
@@ -1885,6 +1897,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         self.state["best_beast_name"] = best.get("full_name", "")
         self.state["best_beast_power"] = best.get("power", 0)
         self.state["best_beast_status"] = best.get("status", "未知")
+        self.state["best_beast_stamina"] = self.beast_stamina_value(best)
         self.record_best_beast_status_timing(best.get("status", ""), best.get("status_cd", -1))
         if old_name and old_name != self.state["best_beast_name"]:
             log.info(f"Best beast changed: {old_name} -> {self.state['best_beast_name']}.")
@@ -1917,6 +1930,22 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.record_best_beast_status_timing(status)
         for beast in self.state.get("beasts_cache", []):
             if beast.get("full_name") == name: beast["status"] = status; break
+        self.save_state()
+
+    def set_cached_beast_stamina(self, name, stamina):
+        """更新缓存中某只灵兽的体力。"""
+        if not name:
+            return
+        try:
+            stamina = int(stamina)
+        except Exception:
+            return
+        for beast in self.state.get("beasts_cache", []):
+            if beast.get("full_name") == name:
+                beast["stamina"] = stamina
+                break
+        if self.state.get("best_beast_name") == name:
+            self.state["best_beast_stamina"] = stamina
         self.save_state()
 
     def is_injury_status(self, status):
@@ -2677,7 +2706,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         resp_msg = await self.send_and_wait_feedback(f".探渊 {beast_name}", timeout=60, return_response_msg=True)
         if not resp_msg: return ""
         text = resp_msg.text or ""
-        if self.is_abyss_busy_response(text) or self.parse_wait_time(text) > 0: return text
+        if self.is_beast_stamina_insufficient_response(text) or self.is_abyss_busy_response(text) or self.parse_wait_time(text) > 0:
+            return text
         await asyncio.sleep(25)
         try:
             latest = await self.client.get_messages(self.target_chat_id, ids=resp_msg.id)
@@ -2705,6 +2735,122 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             elif self.is_abyss_busy_response(resp): log.warning(f"Abyss still blocked by busy status for {beast_name}; retry later."); self.schedule_abyss_retry(600)
         return resp
 
+    def is_beast_stamina_insufficient_response(self, text):
+        clean = str(text or "").replace("**", "")
+        return "灵兽" in clean and "体力不足" in clean
+
+    def parse_required_beast_stamina(self, text, default=BEAST_ABYSS_MIN_STAMINA):
+        clean = str(text or "").replace("**", "")
+        match = re.search(r"至少需要\s*(\d+)\s*点体力", clean)
+        return int(match.group(1)) if match else default
+
+    def record_beast_stamina_shortage(self, beast_name, text, action="abyss"):
+        required = self.parse_required_beast_stamina(text)
+        inferred_stamina = max(0, required - 1)
+        self.set_cached_beast_stamina(beast_name, inferred_stamina)
+        if action == "abyss":
+            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+        log.info(f"Beast {action}: {beast_name} stamina below {required}; trying fallback candidate.")
+        self.save_state()
+        return required
+
+    def abyss_candidate_beasts(self, cache=None):
+        candidates = []
+        for beast in self.sorted_beasts_by_power(cache):
+            status = beast.get("status", "未知")
+            stamina = self.beast_stamina_value(beast)
+            if stamina >= 0 and stamina < BEAST_ABYSS_MIN_STAMINA:
+                log.info(
+                    f"Abyss candidate skipped: {beast.get('full_name')} stamina {stamina} < {BEAST_ABYSS_MIN_STAMINA}."
+                )
+                continue
+            if not self.can_attempt_abyss_status(status):
+                log.info(f"Abyss candidate skipped: {beast.get('full_name')} status is {status}.")
+                continue
+            candidates.append(beast)
+        return candidates
+
+    async def execute_abyss_with_fallback(self):
+        """探渊前刷新.我的灵兽；按战力候选，体力不足时自动换下一只。"""
+        log.info("Abyss: refreshing .我的灵兽 before selecting candidate.")
+        if not await self.update_beast_cache():
+            log.warning("Abyss: failed to refresh beast cache; retry later.")
+            self.schedule_abyss_retry(600)
+            return False
+
+        candidates = self.abyss_candidate_beasts(self.state.get("beasts_cache", []))
+        if not candidates:
+            log.warning("Abyss: no beast candidate has enough stamina/status; retry after status refresh.")
+            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+            self.schedule_abyss_retry(1800)
+            self.save_state()
+            return False
+
+        last_response = ""
+        for beast in candidates:
+            best_name = beast.get("full_name", "")
+            best_status = beast.get("status", "未知")
+            if not best_name:
+                continue
+            self.update_best_beast_tracking(beast)
+            self.save_state()
+            if self.should_rest_before_abyss(best_status):
+                rest_status, rest_resp = await self.rest_beast_for_abyss(best_name)
+                if rest_status:
+                    best_status = rest_status
+                else:
+                    log.warning(f"Abyss: {best_name} rest failed before abyss; trying next candidate.")
+                    if self.is_beast_stamina_insufficient_response(rest_resp):
+                        self.record_beast_stamina_shortage(best_name, rest_resp, "abyss")
+                    elif rest_resp and self.is_beast_pastured_response(rest_resp, best_name):
+                        self.set_best_beast_status(best_name, "放养中")
+                    continue
+                await asyncio.sleep(3)
+                if not self.can_attempt_abyss_status(best_status):
+                    log.warning(f"Abyss: {best_name} cannot enter after recall; status is {best_status}.")
+                    continue
+
+            a_resp = await self.send_abyss_with_busy_retry(best_name)
+            last_response = a_resp or last_response
+            if not a_resp:
+                self.schedule_abyss_retry(600)
+                return False
+            if self.is_beast_stamina_insufficient_response(a_resp):
+                self.record_beast_stamina_shortage(best_name, a_resp, "abyss")
+                await asyncio.sleep(3)
+                continue
+
+            injury_cd = self.record_beast_injury_from_response(best_name, a_resp, source="abyss")
+            if injury_cd >= 0:
+                abyss_delay = max(21600, injury_cd)
+                self.state["last_abyss_time"] = add_seconds_str(now_str(), abyss_delay - 21600)
+                self.state["next_abyss_time"] = add_seconds_str(now_str(), abyss_delay)
+                self.save_state()
+                return True
+
+            a_cd = self.parse_wait_time(a_resp)
+            if a_cd > 0:
+                self.state["last_abyss_time"] = add_seconds_str(now_str(), a_cd - 21600)
+                self.state["next_abyss_time"] = add_seconds_str(now_str(), a_cd)
+                self.save_state()
+                return True
+
+            if self.is_abyss_success_response(a_resp):
+                self.state["last_abyss_time"] = now_str()
+                self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600)
+                self.set_best_beast_status(best_name, "休息中")
+                self.save_state()
+                return True
+
+            notify_unrecognized_response(self, ".灵兽探渊", a_resp, log, f"灵兽探渊[{best_name}]")
+            self.schedule_abyss_retry()
+            return False
+
+        log.warning(f"Abyss: all candidates failed or lacked stamina. Last response: {last_response[:80]}")
+        self.schedule_abyss_retry(1800)
+        self.save_state()
+        return False
+
     # ---- 灵兽：缓存解析 ----
 
     def parse_beasts_info(self, text):
@@ -2729,14 +2875,16 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             species_match = re.search(r'种类[:：]\s*([^\n]+)', block)
             exp_match = re.search(r'经验[:：]\s*(\d+)', block)
             power_match = re.search(r'战力[:：]\s*(\d+)', block)
+            stamina_match = re.search(r'体力[:：]\s*(\d+)', block)
             beasts.append({
                 'full_name': full_name, 'status': status,
                 'status_cd': self.parse_wait_time(block) if any(k in status for k in ["受伤", "治疗"]) else -1,
                 'species': species_match.group(1).strip() if species_match else name_base,
                 'exp': int(exp_match.group(1)) if exp_match else 0,
-                'power': int(power_match.group(1)) if power_match else 0
+                'power': int(power_match.group(1)) if power_match else 0,
+                'stamina': int(stamina_match.group(1)) if stamina_match else -1,
             })
-        return beasts
+        return self.sorted_beasts_by_power(beasts)
 
     async def update_beast_cache(self):
         """刷新灵兽缓存（发送.我的灵兽并解析结果）"""
@@ -2748,7 +2896,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.update_best_beast_tracking()
             self.should_stop_hunt_by_tenth_beast(beasts)
             self.save_state()
-            summary = ", ".join(f"{b['full_name']}({b['power']})" for b in beasts)
+            summary = ", ".join(f"{b['full_name']}({b['power']},体力{b.get('stamina', -1)})" for b in beasts)
             log.info(f"Beast Cache: {len(beasts)} parsed: {summary}")
             return True
         return False
@@ -4054,36 +4202,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             best = cache[0]; best_name = best['full_name']
                             if self.state.get("best_beast_name") != best_name: self.update_best_beast_tracking(best); self.save_state()
                             best_status = self.state.get("best_beast_status") or best.get("status", "未知")
-                            if self.is_pastured_status(best_status):
-                                self.defer_beast_actions_while_pastured(best_name, "best beast status before abyss/steal")
-                                need_abyss = False
-                                need_steal = False
                             if need_abyss:
-                                if not self.can_attempt_abyss_status(best_status):
-                                    log.warning(f"Task: {best_name} cannot enter Abyss while status is {best_status}.")
-                                    if self.is_pastured_status(best_status): self.defer_beast_actions_while_pastured(best_name, "abyss status")
-                                    else: self.schedule_abyss_retry()
-                                elif self.should_rest_before_abyss(best_status):
-                                    rest_status, rest_resp = await self.rest_beast_for_abyss(best_name)
-                                    if rest_status: best_status = rest_status
-                                    else: log.warning(f"Task: {best_name} rest failed before abyss; retrying later."); self.schedule_abyss_retry(300); await asyncio.sleep(3); continue
-                                    await asyncio.sleep(3)
-                                    if not self.can_attempt_abyss_status(best_status):
-                                        log.warning(f"Task: {best_name} cannot enter Abyss after recall; status is {best_status}.")
-                                        if self.is_pastured_status(best_status): self.defer_beast_actions_while_pastured(best_name, "abyss status after rest")
-                                        else: self.schedule_abyss_retry()
-                                if self.can_attempt_abyss_status(best_status):
-                                    a_resp = await self.send_abyss_with_busy_retry(best_name)
-                                    if a_resp:
-                                        injury_cd = self.record_beast_injury_from_response(best_name, a_resp, source="abyss")
-                                        if injury_cd >= 0:
-                                            abyss_delay = max(21600, injury_cd); self.state["last_abyss_time"] = add_seconds_str(now_str(), abyss_delay - 21600); self.state["next_abyss_time"] = add_seconds_str(now_str(), abyss_delay); best_status = self.state.get("best_beast_status") or "重伤"
-                                        else:
-                                            a_cd = self.parse_wait_time(a_resp)
-                                            if a_cd > 0: self.state["last_abyss_time"] = add_seconds_str(now_str(), a_cd - 21600); self.state["next_abyss_time"] = add_seconds_str(now_str(), a_cd)
-                                            elif self.is_abyss_success_response(a_resp): self.state["last_abyss_time"] = now_str(); self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600); self.set_best_beast_status(best_name, "休息中"); best_status = "休息中"
-                                            else: notify_unrecognized_response(self, ".灵兽探渊", a_resp, log, "灵兽探渊"); self.schedule_abyss_retry()
-                                        self.save_state()
+                                await self.execute_abyss_with_fallback()
+                                tracked_name = self.state.get("best_beast_name", "")
+                                tracked = self.get_cached_beast_by_name(tracked_name) if tracked_name else None
+                                if tracked:
+                                    best = tracked
+                                    best_name = tracked_name
+                                best_status = self.state.get("best_beast_status") or best.get("status", "未知")
                                 await asyncio.sleep(3)
                             if need_steal:
                                 if not self.can_attempt_steal_status(best_status):
@@ -4143,7 +4269,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                                             self.save_state()
                         else:
                             log.warning("Beast action due but cache is empty; scheduling abyss/steal retry.")
-                            if need_abyss: self.schedule_abyss_retry()
+                            if need_abyss: await self.execute_abyss_with_fallback()
                             if need_steal: self.set_next_steal_not_before(add_seconds_str(now_str(), 600)); self.save_state()
                     if need_pasture:
                         best_name_for_pasture = self.state.get("best_beast_name", "")
