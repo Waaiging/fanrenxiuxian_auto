@@ -3431,10 +3431,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         if features.get("blood_trial"): await self._avatar_blood_trial_check(avatar)
                         # 5. 灵树灌溉
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
-                        # 5. 入梦寻图
-                        if features.get("dream_map"): await self._avatar_dream_map_check(avatar)
-                        # 6. 侍妾远航（仅星宫道心侍妾身份，和入梦寻图同为8小时冷却，贴近执行）
-                        await self.execute_avatar_concubine_voyage(avatar)
+                        # 5. 入梦寻图 / 星宫道心侍妾远航绑定批次
+                        if features.get("dream_map"):
+                            handled_bound_batch = await self.execute_avatar_bound_dream_voyage(avatar)
+                            if not handled_bound_batch:
+                                await self._avatar_dream_map_check(avatar)
+                                await self.execute_avatar_concubine_voyage(avatar)
                         # 7. 共历心劫
                         if features.get("heart_trial"): await self._avatar_heart_trial_check(avatar)
                     except Exception as e:
@@ -3762,18 +3764,27 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             ft = a_state.get("next_field_training_time", "")
             if ft and is_future(ft):
                 min_cd = min(min_cd, seconds_until(ft))
-            # 入梦CD
+            # 入梦/远航绑定CD
             if features.get("dream_map"):
-                dm = a_state.get("next_dream_map_time", "")
-                if dm and is_future(dm):
-                    min_cd = min(min_cd, seconds_until(dm))
+                if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+                    bound_time = self.latest_concubine_dream_voyage_time(avatar)
+                    if bound_time and is_future(bound_time):
+                        min_cd = min(min_cd, seconds_until(bound_time))
+                else:
+                    dm = a_state.get("next_dream_map_time", "")
+                    if dm and is_future(dm):
+                        min_cd = min(min_cd, seconds_until(dm))
             # 心劫CD
             if features.get("heart_trial"):
                 ht = a_state.get("next_heart_trial_time", "")
                 if ht and is_future(ht):
                     min_cd = min(min_cd, seconds_until(ht))
-            # 侍妾远航CD（仅星宫道心侍妾身份）
-            if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+            # 侍妾远航CD（非绑定路径兜底）
+            if (
+                self.concubine_voyage_enabled(avatar)
+                and not features.get("dream_map")
+                and not self.dashboard_command_paused(".侍妾远航 均衡", avatar)
+            ):
                 voyage = a_state.get("next_concubine_voyage_time", "")
                 if voyage and is_future(voyage):
                     min_cd = min(min_cd, seconds_until(voyage))

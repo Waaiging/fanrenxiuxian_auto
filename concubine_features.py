@@ -313,6 +313,17 @@ class ConcubineMixin:
             return True
         return self.concubine_voyage_enabled(identity)
 
+    def _concubine_command_paused(self, command, identity="主魂"):
+        return hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(command, identity or "主魂")
+
+    @staticmethod
+    def _concubine_response_text(response):
+        if hasattr(response, "text"):
+            return response.text or ""
+        if isinstance(response, str):
+            return response
+        return str(response) if response else ""
+
     def mark_concubine_dream_executed(self, identity="主魂"):
         """Remember that this identity just ran .入梦寻图 so 8h voyage can run alongside it."""
         markers = getattr(self, "_concubine_recent_dream_runs", None)
@@ -346,6 +357,213 @@ class ConcubineMixin:
             self._update_concubine_identity_state(identity, next_concubine_voyage_time=dream_time)
             log.info(f"Concubine voyage [{identity}]: aligned to next dream map at {dream_time}.")
         return False
+
+    def latest_concubine_dream_voyage_time(self, identity="主魂"):
+        """Return the later future time between .入梦寻图 and .侍妾远航."""
+        state = self._concubine_state_container(identity)
+        future_times = []
+        for key in ("next_dream_map_time", "next_concubine_voyage_time"):
+            value = state.get(key, "")
+            if value and is_future(value):
+                future_times.append(str_to_dt(value))
+        return dt_to_str(max(future_times)) if future_times else ""
+
+    def align_concubine_dream_voyage_cooldowns(self, identity="主魂"):
+        """
+        For Star Palace voyage identities, bind .入梦寻图 and .侍妾远航 to the later cooldown.
+
+        The batch should only run when both sides are due. If one side is still cooling down,
+        mirror that later time into both state fields so the dashboard and schedulers agree.
+        """
+        identity = identity or "主魂"
+        if not self.concubine_voyage_enabled(identity):
+            return True
+        if self._concubine_command_paused(CONCUBINE_VOYAGE_COMMAND, identity):
+            return True
+
+        target_time = self.latest_concubine_dream_voyage_time(identity)
+        if not target_time:
+            return True
+
+        target_dt = str_to_dt(target_time)
+        state = self._concubine_state_container(identity)
+        updates = {}
+        for key in ("next_dream_map_time", "next_concubine_voyage_time"):
+            value = state.get(key, "")
+            if not value or not is_future(value) or str_to_dt(value) < target_dt:
+                updates[key] = target_time
+        if updates:
+            self._update_concubine_identity_state(identity, **updates)
+            log.info(f"Concubine dream/voyage [{identity}]: aligned cooldowns to {target_time}.")
+        return False
+
+    def defer_concubine_dream_voyage(self, identity="主魂", seconds=600):
+        target_time = add_seconds_str(now_str(), seconds)
+        self._update_concubine_identity_state(
+            identity or "主魂",
+            next_dream_map_time=target_time,
+            next_concubine_voyage_time=target_time,
+        )
+        return target_time
+
+    def _record_avatar_dream_map_response(self, avatar, text):
+        """Record .入梦寻图 response for an avatar and return True on successful execution."""
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 600))
+            return False
+        if "修为不足" in clean:
+            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 3600))
+            return False
+        if any(k in clean for k in ["仍在远航", "还在远航", "尚在远航"]) and any(k in clean for k in ["同梦寻图", "入梦寻图", "寻图"]):
+            self._update_concubine_identity_state(
+                avatar,
+                concubine_voyage_active=True,
+                next_dream_map_time=add_seconds_str(now_str(), 600),
+                next_concubine_voyage_time=add_seconds_str(now_str(), 600),
+            )
+            log.info(f"Avatar [{avatar}] dream map blocked by active voyage, retry after return.")
+            return False
+        if any(k in clean for k in ["未拥有", "碎片不足", "无碎片"]):
+            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 24 * 3600))
+            log.info(f"Avatar [{avatar}] dream map: no fragments, pause 24h.")
+            return False
+        if any(k in clean for k in ["冷却", "后再", "尚未", "梦图感应尚未重启"]):
+            cd = self.parse_wait_time(clean) if hasattr(self, "parse_wait_time") else parse_duration_seconds(clean)
+            cd_seconds = cd if cd > 0 else 1800
+            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), cd_seconds))
+            log.info(f"Avatar [{avatar}] dream map on cooldown: {cd_seconds}s.")
+            return False
+
+        self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
+        self.mark_concubine_dream_executed(avatar)
+        log.info(f"Avatar [{avatar}] dream map success, next in 8h.")
+        return True
+
+    async def _send_avatar_bound_concubine_command(self, avatar, command, send_with_cultivation_check=None, **kwargs):
+        forced_exit = False
+        if send_with_cultivation_check:
+            result = await send_with_cultivation_check(command, **kwargs)
+            if isinstance(result, tuple):
+                response, forced_exit = result
+            else:
+                response = result
+        else:
+            response = await self.send_and_wait_feedback_identity(avatar, command, **kwargs)
+        return response, self._concubine_response_text(response), forced_exit
+
+    async def execute_avatar_bound_dream_voyage(self, avatar, send_with_cultivation_check=None):
+        """
+        Execute the bound Star Palace batch:
+        .远航归来 (when active) -> .入梦寻图 -> .拼图 if complete -> .侍妾远航 均衡.
+
+        Returns True when this identity is managed by the bound batch, even if it only aligned
+        cooldowns and skipped sending. Returns False for identities that should use normal dream logic.
+        """
+        avatar = avatar or "主魂"
+        if not self.concubine_voyage_enabled(avatar):
+            return False
+        if self._concubine_command_paused(CONCUBINE_VOYAGE_COMMAND, avatar):
+            return False
+        if self._concubine_command_paused(".入梦寻图", avatar):
+            return True
+        if not self.align_concubine_dream_voyage_cooldowns(avatar):
+            return True
+
+        forced_exit = False
+        async with _ConcubineAtomicTask(self, f"DreamVoyage-{avatar}"):
+            if not self.align_concubine_dream_voyage_cooldowns(avatar):
+                return True
+            try:
+                if self._concubine_command_paused(CONCUBINE_VOYAGE_RETURN_COMMAND, avatar):
+                    return True
+                log.info(f"Concubine dream/voyage [{avatar}]: sending {CONCUBINE_VOYAGE_RETURN_COMMAND} before .入梦寻图.")
+                _, return_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
+                    avatar,
+                    CONCUBINE_VOYAGE_RETURN_COMMAND,
+                    send_with_cultivation_check=send_with_cultivation_check,
+                    timeout=90,
+                    max_retries=1,
+                    delete_after=False,
+                )
+                forced_exit = forced_exit or step_forced_exit
+                if not return_text:
+                    self.defer_concubine_dream_voyage(avatar, 600)
+                    return True
+                if not self.record_concubine_voyage_response(return_text, identity=avatar, command=CONCUBINE_VOYAGE_RETURN_COMMAND):
+                    notify_unrecognized_response(self, CONCUBINE_VOYAGE_RETURN_COMMAND, return_text, log, f"侍妾远航归来[{avatar}]")
+                    self.defer_concubine_dream_voyage(avatar, 600)
+                    return True
+                state = self._concubine_state_container(avatar)
+                if state.get("concubine_voyage_active") and is_future(state.get("next_concubine_voyage_time", "")):
+                    self.align_concubine_dream_voyage_cooldowns(avatar)
+                    return True
+                await asyncio.sleep(3)
+
+                log.info(f"Concubine dream/voyage [{avatar}]: sending .入梦寻图.")
+                dream_resp, dream_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
+                    avatar,
+                    ".入梦寻图",
+                    send_with_cultivation_check=send_with_cultivation_check,
+                    timeout=90,
+                    max_retries=1,
+                    delete_after=False,
+                )
+                forced_exit = forced_exit or step_forced_exit
+                if dream_text == "PAUSE_1H":
+                    self.defer_concubine_dream_voyage(avatar, 3600)
+                    return True
+                if "修为不足" in dream_text and hasattr(self, "handle_修为不足") and not send_with_cultivation_check:
+                    async def retry_dream_map():
+                        return await self.send_and_wait_feedback_identity(avatar, ".入梦寻图", timeout=90, max_retries=1, delete_after=False)
+
+                    success, retry_text = await self.handle_修为不足(
+                        avatar, retry_dream_map, cooldown_key="next_dream_map_time", cooldown_hours=8
+                    )
+                    dream_text = self._concubine_response_text(retry_text)
+                    if not success:
+                        self.align_concubine_dream_voyage_cooldowns(avatar)
+                        return True
+                if not dream_text:
+                    self.defer_concubine_dream_voyage(avatar, 600)
+                    log.warning(f"Concubine dream/voyage [{avatar}]: .入梦寻图 empty response.")
+                    return True
+
+                dream_success = self._record_avatar_dream_map_response(avatar, dream_text)
+                if dream_success and dream_text and "4/4" in dream_text:
+                    log.info(f"Avatar [{avatar}] dream map progress 4/4, sending .拼图")
+                    await asyncio.sleep(3)
+                    await self.send_and_wait_feedback_identity(avatar, ".拼图", timeout=60)
+                if not dream_success:
+                    self.align_concubine_dream_voyage_cooldowns(avatar)
+                    return True
+
+                await asyncio.sleep(3)
+                log.info(f"Concubine dream/voyage [{avatar}]: sending {CONCUBINE_VOYAGE_COMMAND}.")
+                _, start_text, step_forced_exit = await self._send_avatar_bound_concubine_command(
+                    avatar,
+                    CONCUBINE_VOYAGE_COMMAND,
+                    send_with_cultivation_check=send_with_cultivation_check,
+                    timeout=90,
+                    max_retries=1,
+                    delete_after=False,
+                )
+                forced_exit = forced_exit or step_forced_exit
+                if not start_text:
+                    self.defer_concubine_dream_voyage(avatar, 600)
+                    return True
+                if not self.record_concubine_voyage_response(start_text, identity=avatar, command=CONCUBINE_VOYAGE_COMMAND):
+                    notify_unrecognized_response(self, CONCUBINE_VOYAGE_COMMAND, start_text, log, f"侍妾远航[{avatar}]")
+                    self.defer_concubine_dream_voyage(avatar, 600)
+                    return True
+                self.align_concubine_dream_voyage_cooldowns(avatar)
+                return True
+            finally:
+                if forced_exit:
+                    try:
+                        await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, return_response_msg=False)
+                    except Exception as exc:
+                        log.warning(f"Concubine dream/voyage [{avatar}]: failed to restore deep meditation: {exc}")
 
     def _update_concubine_identity_state(self, identity="主魂", **values):
         """Update concubine-related state for one identity."""

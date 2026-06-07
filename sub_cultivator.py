@@ -4860,47 +4860,49 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
                         med_wait = 600
 
-                # ---- 入梦寻图（8小时冷却） ----
-                a_state = self.get_avatar_state(avatar)
-                next_dream = a_state.get("next_dream_map_time", "")
-                if not next_dream or not is_future(next_dream):
-                    log.info(f"Avatar [{avatar}] sending .入梦寻图")
-                    dream_resp = await self.send_and_wait_feedback_identity(avatar, ".入梦寻图")
-                    dream_text = getattr(dream_resp, "text", "") if hasattr(dream_resp, "text") else dream_resp if isinstance(dream_resp, str) else str(dream_resp) if dream_resp else ""
+                # ---- 入梦寻图 / 星宫道心侍妾远航绑定批次 ----
+                handled_bound_batch = await self.execute_avatar_bound_dream_voyage(avatar)
+                if not handled_bound_batch:
+                    a_state = self.get_avatar_state(avatar)
+                    next_dream = a_state.get("next_dream_map_time", "")
+                    if not next_dream or not is_future(next_dream):
+                        log.info(f"Avatar [{avatar}] sending .入梦寻图")
+                        dream_resp = await self.send_and_wait_feedback_identity(avatar, ".入梦寻图")
+                        dream_text = getattr(dream_resp, "text", "") if hasattr(dream_resp, "text") else dream_resp if isinstance(dream_resp, str) else str(dream_resp) if dream_resp else ""
 
-                    # 修为不足处理
-                    if "修为不足" in dream_text:
-                        async def retry_dream_map():
-                            return await self.send_and_wait_feedback_identity(avatar, ".入梦寻图")
-                        success, dream_text = await self.handle_修为不足(avatar, retry_dream_map, cooldown_key="next_dream_map_time", cooldown_hours=8)
-                        if not success:
-                            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
+                        # 修为不足处理
+                        if "修为不足" in dream_text:
+                            async def retry_dream_map():
+                                return await self.send_and_wait_feedback_identity(avatar, ".入梦寻图")
+                            success, dream_text = await self.handle_修为不足(avatar, retry_dream_map, cooldown_key="next_dream_map_time", cooldown_hours=8)
+                            if not success:
+                                self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
 
-                    if dream_text:
-                        if any(k in dream_text for k in ["未拥有", "不足"]):
-                            # 无碎片，暂停24小时
-                            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 24 * 3600))
-                            log.info(f"Avatar [{avatar}] dream map: no fragments, pause 24h.")
-                        elif "冷却" in dream_text:
-                            cd = self.parse_wait_time(dream_text)
-                            cd_seconds = cd if cd > 0 else 1800
-                            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), cd_seconds))
-                            log.info(f"Avatar [{avatar}] dream map on cooldown: {cd_seconds}s.")
+                        if dream_text:
+                            if any(k in dream_text for k in ["未拥有", "不足"]):
+                                # 无碎片，暂停24小时
+                                self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 24 * 3600))
+                                log.info(f"Avatar [{avatar}] dream map: no fragments, pause 24h.")
+                            elif "冷却" in dream_text:
+                                cd = self.parse_wait_time(dream_text)
+                                cd_seconds = cd if cd > 0 else 1800
+                                self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), cd_seconds))
+                                log.info(f"Avatar [{avatar}] dream map on cooldown: {cd_seconds}s.")
+                            else:
+                                self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
+                                self.mark_concubine_dream_executed(avatar)
+                                log.info(f"Avatar [{avatar}] dream map success, next in 8h.")
+                                # 进度 4/4 时自动发送 .拼图
+                                if "4/4" in dream_text:
+                                    log.info(f"Avatar [{avatar}] dream map progress 4/4, sending .拼图")
+                                    await asyncio.sleep(3)
+                                    await self.send_and_wait_feedback_identity(avatar, ".拼图")
                         else:
-                            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 8 * 3600))
-                            self.mark_concubine_dream_executed(avatar)
-                            log.info(f"Avatar [{avatar}] dream map success, next in 8h.")
-                            # 进度 4/4 时自动发送 .拼图
-                            if "4/4" in dream_text:
-                                log.info(f"Avatar [{avatar}] dream map progress 4/4, sending .拼图")
-                                await asyncio.sleep(3)
-                                await self.send_and_wait_feedback_identity(avatar, ".拼图")
-                    else:
-                        self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 600))
-                        log.warning(f"Avatar [{avatar}] dream map empty response.")
+                            self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now_str(), 600))
+                            log.warning(f"Avatar [{avatar}] dream map empty response.")
 
-                # ---- 侍妾远航（8小时冷却，贴近入梦寻图执行） ----
-                await self.execute_avatar_concubine_voyage(avatar)
+                    # ---- 侍妾远航（非绑定路径兜底） ----
+                    await self.execute_avatar_concubine_voyage(avatar)
 
                 # ---- 共历心劫（10小时冷却） ----
                 a_state = self.get_avatar_state(avatar)
@@ -4983,12 +4985,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     wait_candidates.append(seconds_until(next_force_exit))
                 if next_heart2 and is_future(next_heart2):
                     wait_candidates.append(seconds_until(next_heart2))
-                if next_dream2 and is_future(next_dream2):
+                if self.concubine_voyage_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 均衡", avatar):
+                    bound_time = self.latest_concubine_dream_voyage_time(avatar)
+                    if bound_time and is_future(bound_time):
+                        wait_candidates.append(seconds_until(bound_time))
+                elif next_dream2 and is_future(next_dream2):
                     wait_candidates.append(seconds_until(next_dream2))
                 if (
                     next_voyage
                     and is_future(next_voyage)
                     and self.concubine_voyage_enabled(avatar)
+                    and not handled_bound_batch
                     and not self.dashboard_command_paused(".侍妾远航 均衡", avatar)
                 ):
                     wait_candidates.append(seconds_until(next_voyage))

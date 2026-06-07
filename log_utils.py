@@ -428,6 +428,8 @@ def text_response_family(text):
         or "残图线路" in clean
         or "梦图感应" in clean
         or "共梦寻图" in clean
+        or "同梦寻图" in clean
+        or ("仍在远航" in clean and "寻图" in clean)
     ):
         return "dream_map"
     if "坠魔心劫" in clean:
@@ -437,7 +439,7 @@ def text_response_family(text):
     if any(k in clean for k in [
         "周天星斗大阵", "布设大阵", "启阵冷却", "再次启阵",
         "心神消耗", "参与过布阵", "同门相助", "正在布阵",
-        "已在阵中", "请勿重复操作",
+        "已在阵中", "请勿重复操作", "没有找到正在召集的大阵", "阵法已过期",
     ]):
         return "formation"
     if "【星宫 · 观星台】" in clean or "引星盘" in clean or "星光黯淡" in clean or "元磁紊乱" in clean or "狂暴星力" in clean:
@@ -449,6 +451,7 @@ def text_response_family(text):
     if any(k in clean for k in [
         "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
         "未处于深度闭关", "并未处于深度闭关", "灵气尚未平复", "打坐调息",
+        "强行中断了神魂神游", "强行出关惩罚", "中断修行", "清点所得",
     ]):
         return "meditation"
     if "修士状态" in clean and "境界" in clean:
@@ -516,7 +519,10 @@ def feedback_response_matches_command(command, text):
     if expected == "field_training":
         return "野外历练" in clean or "山中灵机未复" in clean or ("卦象" in clean and "修为增加" in clean)
     if expected == "dream_map":
-        return any(k in clean for k in ["入梦寻图", "梦兆", "残图", "寻图冷却", "梦图感应", "共梦寻图"])
+        return any(k in clean for k in [
+            "入梦寻图", "梦兆", "残图", "寻图冷却", "梦图感应", "共梦寻图",
+            "同梦寻图",
+        ]) or ("仍在远航" in clean and "寻图" in clean)
     if expected == "heart_trial":
         return any(k in clean for k in ["共历心劫", "坠魔心劫", "心劫", "侍妾/道侣", "道侣内容"])
     if expected == "blood_trial":
@@ -534,7 +540,7 @@ def feedback_response_matches_command(command, text):
             "周天星斗大阵", "布设大阵", "启阵冷却",
             "再次启阵", "心神消耗", "参与过布阵", "助阵",
             "同门相助", "60秒", "正在布阵", "已在阵中",
-            "请勿重复操作",
+            "请勿重复操作", "没有找到正在召集的大阵", "阵法已过期",
         ]) or ("修为不足" in clean and any(k in clean for k in ["启阵", "布阵", "阵法"]))
     if expected == "treasure_touch":
         return any(k in clean for k in [
@@ -551,7 +557,8 @@ def feedback_response_matches_command(command, text):
         return any(k in clean for k in [
             "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
             "未处于深度闭关", "并未处于深度闭关", "灵气尚未平复",
-            "打坐调息", "当前修为",
+            "打坐调息", "当前修为", "强行中断了神魂神游",
+            "强行出关惩罚", "中断修行", "清点所得",
         ])
     if expected == "status":
         return "修士状态" in clean and "境界" in clean
