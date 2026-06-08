@@ -153,7 +153,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "sub": [
-        ".闯塔", ".宗门点卯", ".宗门传功",
+        ".闯塔", ".宗门点卯", ".宗门传功", ".问道",
         ".启阵", ".助阵", ".强行出关",
         ".查看闭关", ".闭关修炼", ".深度闭关",
         ".召回侍妾", ".安置侍妾", ".每日问安",
@@ -726,22 +726,10 @@ def main_soul_panel(account, state):
             time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", ".抚摸法宝 青竹蜂云剑", "抚摸法宝", group="法宝"),
             time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"),
+            time_command(state, "next_ask_dao_time", ".问道", "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
         ])
         rows.extend(sect_war_commands(state))
-        rows.extend(meditation_commands(state, include_force_exit=True))
-        rows.extend([
-            time_command(state, "next_star_check_time", ".观星台", "观星台", group="星宫"),
-            time_command(state, "next_star_check_time", ".安抚星辰", "安抚星辰", group="星宫"),
-            manual_command(".收集精华", "收集精华", "随观星台状态触发", "星宫"),
-            time_command(state, "display_next_star_attraction_time", ".牵引星辰 天雷星", "牵引星辰", group="星宫"),
-            time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
-            time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
-            time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
-            manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
-            manual_command(".每日问安", "每日问安", "按日问安", "侍妾"),
-            manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
-        ])
-        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
+        rows.extend(meditation_commands(state))
     elif account == "xiaohao":
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
@@ -1597,7 +1585,7 @@ def clear_account_history(account):
     return {"success": True, "msg": output or "清屏完成"}
 
 def account_display_name(account):
-    return {"main": "凌霄宫（主号）", "sub": "星宫（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
+    return {"main": "凌霄宫（主号）", "sub": "副号（主魂元婴宗）", "xiaohao": "万灵宗（小号）"}.get(account, account)
 
 def run_clear_job(job_id, account):
     """后台执行清屏任务"""
@@ -1642,7 +1630,7 @@ async def status(username: str = Depends(authenticate)):
     """获取所有账号的实时状态"""
     try:
         result = {}
-        for key, info in {"main": "凌霄宫 (主号)", "sub": "星宫 (副号)", "xiaohao": "万灵宗 (小号)"}.items():
+        for key, info in {"main": "凌霄宫 (主号)", "sub": "副号 (主魂元婴宗)", "xiaohao": "万灵宗 (小号)"}.items():
             state = get_state(key)
             result[key] = {
                 "name": info,

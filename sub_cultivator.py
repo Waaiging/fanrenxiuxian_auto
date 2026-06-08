@@ -157,6 +157,27 @@ STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异�
 # 以上关键字表示 Good 级别的观星结果，只有 Good 才触发观星和改换星移
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59  # 活跃抢占期缩短为 59 秒。超过这个时间收到消息直接排期到下一轮
 STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
+MAIN_STAR_PALACE_STATE_KEYS = {
+    "next_star_check_time",
+    "next_star_attraction_time",
+    "star_attraction_retry_time",
+    "next_star_gazing_time",
+    "pending_star_gazing_target_time",
+    "pending_star_shift_target_time",
+    "next_star_appease_time",
+    "next_star_collect_time",
+}
+MAIN_FORMATION_STATE_KEYS = {
+    "next_formation_time",
+    "next_formation_retry_time",
+    "next_force_exit_time",
+}
+MAIN_CONCUBINE_STATE_KEYS = {
+    "next_dream_map_time",
+    "next_heart_trial_time",
+    "next_divination_time",
+    "next_concubine_voyage_time",
+}
 
 # -- 元婴出窍 --
 YUANYING_OUT_CD_SECONDS = 8 * 3600                  # 元婴出窍冷却 8 小时
@@ -167,6 +188,12 @@ RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小�
 # -- 抚摸法宝 --
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"      # 抚摸本命法宝指令
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600                # 抚摸冷却 2 小时
+
+# -- 元婴宗 --
+MAIN_SECT_NAME = "元婴宗"
+ASK_DAO_COMMAND = ".问道"
+ASK_DAO_CD_SECONDS = 12 * 3600
+ASK_DAO_RETRY_SECONDS = 10 * 60
 
 # -- 改换星移目标用户名 --
 STAR_GAZING_SHIFT_TARGET = "@Gamling33"             # 将星辰转移给此用户（主号或盟友）
@@ -353,8 +380,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         # ---- 游戏机器人用户名 ----
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
 
-        # ---- 星宫专属配置 ----
-        self.sect_name = "星宫"
+        # ---- 主魂宗门配置 ----
+        self.sect_name = MAIN_SECT_NAME
+        self.main_star_palace_enabled = False
+        self.main_formation_enabled = False
+        self.main_concubine_enabled = False
         self.field_training_command = ".野外历练 谨慎"  # 野外历练指令，谨慎模式
 
         # ---- 运行状态 ----
@@ -397,6 +427,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         # ---- 持久化状态 ----
         self.state_file = STATE_FILE
         self.state = self.load_state()  # 从 state_sub.json 加载或创建默认状态
+        self.migrate_main_soul_sect_state()
         # startup: restore paused state
         if self.state.get("is_paused", False):
             self.pause_event.clear()
@@ -436,6 +467,63 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         self.formation_self_pending_until = "2000-01-01 00:00:00"  # 防止自己启阵期间去助阵别人（使用字符串保持类型一致）
         self.pending_formation_invite_msg = None            # 化身间助阵：存储待助阵的邀请消息
         self.active_atomic_task = None             # 整体任务独占锁持有任务
+
+
+    def migrate_main_soul_sect_state(self):
+        """副号主魂从星宫迁入元婴宗后，清理主魂星宫专属排程。"""
+        changed = False
+        if self.state.get("sect_name") != self.sect_name:
+            self.state["sect_name"] = self.sect_name
+            changed = True
+        for key in ("last_ask_dao_time", "next_ask_dao_time"):
+            if key not in self.state:
+                self.state[key] = ""
+                changed = True
+        if not self.main_star_palace_enabled:
+            for key in (
+                "next_star_check_time",
+                "next_star_attraction_time",
+                "next_star_gazing_time",
+                "next_star_manifest_time",
+                "pending_star_shift_date",
+                "pending_star_shift_target_time",
+                "pending_star_shift_msg_id",
+                "pending_star_gazing_time",
+                "pending_star_gazing_date",
+                "pending_star_gazing_target_time",
+                "pending_star_gazing_scheduled_time",
+                "pending_star_gazing_manifest_time",
+                "star_gazing_claimed_manifest_time",
+                "star_gazing_claimed_avatar",
+            ):
+                empty_value = 0 if key == "pending_star_shift_msg_id" else ""
+                if self.state.get(key) != empty_value:
+                    self.state[key] = empty_value
+                    changed = True
+        if not self.main_formation_enabled:
+            for key in (
+                "next_formation_time",
+                "next_formation_retry_time",
+                "next_force_exit_time",
+                "formation_active_until",
+            ):
+                if self.state.get(key):
+                    self.state[key] = ""
+                    changed = True
+        if not self.main_concubine_enabled:
+            for key in (
+                "concubine_recalled_for_meditation",
+                "concubine_recalled_for_force_exit",
+                "concubine_recalled_for_star_collection",
+                "concubine_recalled_time",
+                "concubine_voyage_active",
+            ):
+                empty_value = False if key.startswith("concubine_recalled") or key == "concubine_voyage_active" else ""
+                if self.state.get(key) != empty_value:
+                    self.state[key] = empty_value
+                    changed = True
+        if changed:
+            self.save_state()
 
 
     # ============================================================
@@ -558,7 +646,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             for u in self.notify_users
         )
 
-    async def send_keyword_alert(self, msg, text, title="星宫关键词提醒"):
+    async def send_keyword_alert(self, msg, text, title="副号关键词提醒"):
         """发送关键词告警给用户，并按消息 ID 去重。"""
         msg_id = getattr(msg, "id", None)
         if msg_id in self.notified_alert_ids:
@@ -796,6 +884,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         watch_keys = {"deep_meditation_end_time"}
         min_wait = None
         for key, value in state.items():
+            if identity == "主魂":
+                if not self.main_star_palace_enabled and key in MAIN_STAR_PALACE_STATE_KEYS:
+                    continue
+                if not self.main_formation_enabled and key in MAIN_FORMATION_STATE_KEYS:
+                    continue
+                if not self.main_concubine_enabled and key in MAIN_CONCUBINE_STATE_KEYS:
+                    continue
             if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
                 continue
             if (
@@ -931,6 +1026,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "next_rift_search_time": "",          # 下次探寻裂缝时间
             "last_treasure_touch_time": "",       # 上次抚摸法宝时间
             "next_treasure_touch_time": "",       # 下次抚摸法宝时间
+            "last_ask_dao_time": "",              # 上次问道时间
+            "next_ask_dao_time": "",              # 下次问道时间
             "level": "",
             "current_exp": None,
             "total_exp": None,
@@ -1498,6 +1595,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 "修为不足", "正在布阵",
             ]
             return any(k in text for k in formation_keywords)
+        if command == ASK_DAO_COMMAND:
+            return self.is_ask_dao_response(text)
         # 层级2：通用冷却/响应关键词兜底（所有 . 指令）
         if command.startswith("."):
             general_keywords = [
@@ -2028,6 +2127,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         返回 True 表示执行了操作（包括无响应的情况），False 表示未到时间或条件不满足。
         """
         now = now or datetime.now()
+        if not self.main_star_palace_enabled:
+            return False
         fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
         if not fallback_dt or now < fallback_dt:
             return False
@@ -2270,7 +2371,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             self.state["is_paused"] = True
                             self.save_state()
                             log.info("⏸️ PAUSE command received. All loops paused.")
-                            await self.client.send_message(8219248252, "⏸️ 星宫脚本已暂停。发送「1」恢复运行。")
+                            await self.client.send_message(8219248252, "⏸️ 副号脚本已暂停。发送「1」恢复运行。")
                         try: await self.client.delete_messages(self.target_chat_id, msg)
                         except: pass
                         return
@@ -2280,7 +2381,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             self.state["is_paused"] = False
                             self.save_state()
                             log.info("▶️ RESUME command received. All loops resumed.")
-                            await self.client.send_message(8219248252, "▶️ 星宫脚本已恢复运行。")
+                            await self.client.send_message(8219248252, "▶️ 副号脚本已恢复运行。")
                         try: await self.client.delete_messages(self.target_chat_id, msg)
                         except: pass
                         return
@@ -2302,14 +2403,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
             # 反机器人验证：如果机器人发来验证提示，自动处理
             if await handle_anti_bot_challenge(
-                self, msg, text, sender, log, title="星宫自证告警"
+                self, msg, text, sender, log, title="副号自证告警"
             ):
                 return
 
             # 低价天雷竹监控
             await self.maybe_alert_low_price_tianleizhu(msg, text, sender)
             if is_game_bot_sender(self, sender) and self.should_send_keyword_alert(msg, text):
-                await self.send_keyword_alert(msg, text, title="星宫关键词提醒")
+                await self.send_keyword_alert(msg, text, title="副号关键词提醒")
             # 被动记录野外历练和宗门战消息
             self.maybe_record_field_training_passive(msg, text)
             self.maybe_handle_sect_war_message(msg, text, sender)
@@ -2689,7 +2790,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         self.save_state()
         await send_text_alert(
             self,
-            "星宫探寻裂缝告警",
+            "副号探寻裂缝告警",
             "探寻裂缝触发元婴虚弱期，脚本已停止，请手动处理。\n\n"
             f"机器人回复：\n{response}",
             log,
@@ -2896,6 +2997,86 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             await asyncio.sleep(min(wait_time, 600))
 
     # ============================================================
+    # 元婴宗问道循环
+    # ============================================================
+
+    def is_ask_dao_response(self, text):
+        """判断文本是否像 .问道 的机器人反馈。"""
+        clean = (text or "").replace("**", "")
+        if not clean:
+            return False
+        direct_keywords = ["问道", "元婴宗", "悟道", "论道", "道韵", "大道", "参悟"]
+        if any(k in clean for k in direct_keywords):
+            return True
+        if any(k in clean for k in ["冷却", "后再", "尚需", "剩余", "不足", "无法", "尚未", "未加入"]):
+            return True
+        return "获得" in clean and any(k in clean for k in ["感悟", "道心", "贡献"])
+
+    def record_ask_dao_response(self, resp, source=ASK_DAO_COMMAND):
+        """记录 .问道 反馈；成功按 12 小时冷却，冷却回复按剩余时间排程。"""
+        now = now_str()
+        next_key = "next_ask_dao_time"
+        last_key = "last_ask_dao_time"
+        if not resp:
+            self.state[next_key] = add_seconds_str(now, ASK_DAO_RETRY_SECONDS)
+            log.info(f"{source}: no response; retry at {self.state[next_key]}.")
+            return False
+
+        cd = self.parse_wait_time(resp)
+        if any(k in resp for k in ["冷却", "后再", "尚需", "剩余", "请在"]):
+            delay = cd if cd > 0 else ASK_DAO_RETRY_SECONDS
+            self.state[next_key] = add_seconds_str(now, delay)
+            log.info(f"{source}: cooldown from response {delay}s, next at {self.state[next_key]}.")
+            return True
+
+        if any(k in resp for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
+            self.state[next_key] = add_seconds_str(now, 60 * 60)
+            self.state["last_ask_dao_error"] = resp[:200]
+            self.state["last_ask_dao_error_time"] = now
+            log.info(f"{source}: unavailable; retry at {self.state[next_key]}.")
+            return True
+
+        if self.is_ask_dao_response(resp):
+            self.state[last_key] = now
+            self.state[next_key] = add_seconds_str(now, ASK_DAO_CD_SECONDS)
+            self.state["last_ask_dao_error"] = ""
+            log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
+            return True
+
+        self.state[next_key] = add_seconds_str(now, ASK_DAO_RETRY_SECONDS)
+        notify_unrecognized_response(self, ASK_DAO_COMMAND, resp, log, source)
+        log.info(f"{source}: unrecognized response; retry at {self.state[next_key]}.")
+        return False
+
+    async def run_ask_dao_loop(self):
+        """元婴宗主魂 .问道 循环，每 12 小时一次。"""
+        await self.startup_done.wait()
+        await asyncio.sleep(random.randint(20, 80))
+        while self.is_running:
+            await self._wait_for_main_identity()
+            if self.dashboard_command_paused(ASK_DAO_COMMAND, "主魂"):
+                await asyncio.sleep(300)
+                continue
+
+            next_time = self.state.get("next_ask_dao_time", "")
+            if next_time and is_future(next_time):
+                await asyncio.sleep(min(seconds_until(next_time), 600))
+                continue
+
+            log.info(f"Ask Dao due: sending {ASK_DAO_COMMAND}.")
+            resp = await self.send_and_wait_feedback(
+                ASK_DAO_COMMAND,
+                timeout=90,
+                max_retries=1,
+                force_identity_check=True,
+            )
+            if resp is None and await self.sleep_after_blocked_command(ASK_DAO_COMMAND, "Ask Dao"):
+                continue
+            self.record_ask_dao_response(resp, ASK_DAO_COMMAND)
+            self.save_state()
+            await asyncio.sleep(5)
+
+    # ============================================================
     # 观星监听循环（全天候）
     # ============================================================
 
@@ -2953,7 +3134,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             target_dt = self.next_star_manifest_dt(now)
             pending_gazing_target = self.state.get("pending_star_gazing_target_time", "")
             pending_gazing_scheduled = self.state.get("pending_star_gazing_scheduled_time", "")
-            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
+            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now) if self.main_star_palace_enabled else None
 
             if pending_gazing_target and pending_gazing_scheduled:
                 # 排期已过期：清除，避免 dashboard 一直显示旧日期
@@ -3724,6 +3905,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             reason: 安置原因（仅日志）。
             force: 是否强制安置（无视已有状态）。
         """
+        if not self.main_concubine_enabled:
+            log.info(f"{reason}: main concubine flow disabled; skipping .安置侍妾.")
+            for key in self.concubine_recall_flags():
+                self.state[key] = False
+            self.state["concubine_recalled_time"] = ""
+            self.save_state()
+            return
         has_recall_flag = any(self.state.get(k) for k in self.concubine_recall_flags())
         if self.state.get("concubine_placed_in_cave") and not has_recall_flag and not force:
             return
@@ -3743,6 +3931,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         每日问安每日只做一次。
         """
         today = datetime.now().strftime("%Y-%m-%d")
+        if not self.main_concubine_enabled:
+            return
         if self.state.get("last_daily_greeting_date") == today:
             return
         if self.state.get("date") == today and ".每日问安" in self.state.get("done", []):
@@ -4085,6 +4275,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
           1. 不在自己的阵法待执行窗口内（formation_self_pending_until）。
           2. 阵法冷却未激活（距上次成功不到 12 小时不参与助阵）。
         """
+        if not self.main_formation_enabled:
+            return False
         # 使用字符串时间比较，与代码库其他时间字段保持一致
         if is_future(self.formation_self_pending_until):
             return False
@@ -4419,15 +4611,16 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             await self._wait_for_main_identity()
 
             # ---- 尝试启阵 ----
-            last_formation = self.state.get("last_formation_time", "")
-            next_retry = self.state.get("next_formation_retry_time", "")
-
             can_try_formation = False
-            if not last_formation or not is_future(
-                add_seconds_str(last_formation, 12 * 3600)
-            ):
-                if not next_retry or not is_future(next_retry):
-                    can_try_formation = True
+            if self.main_formation_enabled:
+                last_formation = self.state.get("last_formation_time", "")
+                next_retry = self.state.get("next_formation_retry_time", "")
+
+                if not last_formation or not is_future(
+                    add_seconds_str(last_formation, 12 * 3600)
+                ):
+                    if not next_retry or not is_future(next_retry):
+                        can_try_formation = True
 
             if can_try_formation:
                 log.info("Attempting Star Formation (.启阵)...")
@@ -4675,14 +4868,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
             # ---- 计算本次循环最终睡眠时间 ----
             # 考虑启阵 CD 和重试时间，取所有等待时间的最小值
-            form_cd = seconds_until(
-                add_seconds_str(
-                    self.state.get("last_formation_time", now_str()), 12 * 3600
+            form_cd = 0
+            retry_cd = 0
+            if self.main_formation_enabled:
+                form_cd = seconds_until(
+                    add_seconds_str(
+                        self.state.get("last_formation_time", now_str()), 12 * 3600
+                    )
                 )
-            )
-            retry_cd = seconds_until(
-                self.state.get("next_formation_retry_time", "")
-            )
+                retry_cd = seconds_until(
+                    self.state.get("next_formation_retry_time", "")
+                )
 
             wait_list = [med_wait]
             if form_cd > 0:
@@ -5840,7 +6036,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         )
                 await self.maybe_alert_low_price_tianleizhu(msg, text, sender)
                 if is_game_bot_sender(self, sender) and self.should_send_keyword_alert(msg, text):
-                    await self.send_keyword_alert(msg, text, title="星宫关键词提醒")
+                    await self.send_keyword_alert(msg, text, title="副号关键词提醒")
                 self.maybe_record_field_training_passive(msg, text)
             except Exception as e:
                 log.error(f"Edited message market alert error: {e}")
@@ -5852,39 +6048,40 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(15)
                 log.info("Startup Sync: Smart check for stale data...")
 
-                # 1. 观星台状态校验
-                last_check = self.state.get("last_star_check_time", "")
-                next_attr = self.state.get("next_star_attraction_time", "")
-                if next_attr and is_future(next_attr):
-                    log.info(
-                        f"Startup Sync: Star Attraction 36h CD not ready, next at {next_attr}."
-                    )
-                elif last_check and is_future(
-                    add_seconds_str(last_check, STAR_CALM_INTERVAL_SECONDS)
-                ):
-                    log.info("Startup Sync: Star Attraction check not ready. Skipping.")
-                else:
-                    resp = await self.send_and_wait_feedback(".观星台")
-                    if resp:
-                        if self.star_observatory_needs_calm(resp):
-                            log.info(
-                                "Startup Sync: Star flow unstable (黯淡/紊乱). Calming immediately."
-                            )
-                            calm_resp = await self.send_and_wait_feedback(".安抚星辰")
-                            self.record_star_calm_response(calm_resp, "启动观星台安抚")
-                        cd = self.parse_wait_time(resp)
-                        if cd > 0:
-                            self.state["last_star_check_time"] = add_seconds_str(
-                                now_str(), cd - STAR_CALM_INTERVAL_SECONDS
-                            )
-                            self.state["next_star_check_time"] = add_seconds_str(
-                                now_str(), cd
-                            )
-                        else:
-                            self.state["last_star_check_time"] = now_str()
-                            self.state["next_star_check_time"] = add_seconds_str(
-                                now_str(), STAR_CALM_INTERVAL_SECONDS
-                            )
+                # 1. 观星台状态校验（副号主魂已迁入元婴宗，默认不再执行星宫观星台）
+                if self.main_star_palace_enabled:
+                    last_check = self.state.get("last_star_check_time", "")
+                    next_attr = self.state.get("next_star_attraction_time", "")
+                    if next_attr and is_future(next_attr):
+                        log.info(
+                            f"Startup Sync: Star Attraction 36h CD not ready, next at {next_attr}."
+                        )
+                    elif last_check and is_future(
+                        add_seconds_str(last_check, STAR_CALM_INTERVAL_SECONDS)
+                    ):
+                        log.info("Startup Sync: Star Attraction check not ready. Skipping.")
+                    else:
+                        resp = await self.send_and_wait_feedback(".观星台")
+                        if resp:
+                            if self.star_observatory_needs_calm(resp):
+                                log.info(
+                                    "Startup Sync: Star flow unstable (黯淡/紊乱). Calming immediately."
+                                )
+                                calm_resp = await self.send_and_wait_feedback(".安抚星辰")
+                                self.record_star_calm_response(calm_resp, "启动观星台安抚")
+                            cd = self.parse_wait_time(resp)
+                            if cd > 0:
+                                self.state["last_star_check_time"] = add_seconds_str(
+                                    now_str(), cd - STAR_CALM_INTERVAL_SECONDS
+                                )
+                                self.state["next_star_check_time"] = add_seconds_str(
+                                    now_str(), cd
+                                )
+                            else:
+                                self.state["last_star_check_time"] = now_str()
+                                self.state["next_star_check_time"] = add_seconds_str(
+                                    now_str(), STAR_CALM_INTERVAL_SECONDS
+                                )
 
                 # 2. 深度闭关状态对账
                 old_med = self.state.get("next_deep_meditation_time", "")
@@ -5912,66 +6109,67 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             self.state["in_deep_meditation"] = False
                             self.state["deep_meditation_end_time"] = ""
 
-                # 3. 阵法 CD 对账
+                # 3. 阵法 CD 对账（副号主魂不再执行星宫阵法）
                 last_form = self.state.get("last_formation_time", "")
-                retry_form = self.state.get("next_formation_retry_time", "")
-                if retry_form and is_future(retry_form):
-                    self.state["next_formation_time"] = retry_form
-                    log.info(f"Startup Sync: Formation retry scheduled at {retry_form}.")
-                elif last_form:
-                    self.state["next_formation_time"] = add_seconds_str(
-                        last_form, 12 * 3600
-                    )
-                    self.state["formation_active_until"] = add_seconds_str(
-                        last_form, 6 * 3600
-                    )
-                    if not is_future(self.state["next_formation_time"]):
-                        log.info("Startup Sync: Formation ready. Waiting for main loop to trigger...")
-                    else:
-                        log.info(
-                            f"Startup Sync: Formation on CD, next at "
-                            f"{self.state['next_formation_time']}."
+                if self.main_formation_enabled:
+                    retry_form = self.state.get("next_formation_retry_time", "")
+                    if retry_form and is_future(retry_form):
+                        self.state["next_formation_time"] = retry_form
+                        log.info(f"Startup Sync: Formation retry scheduled at {retry_form}.")
+                    elif last_form:
+                        self.state["next_formation_time"] = add_seconds_str(
+                            last_form, 12 * 3600
                         )
+                        self.state["formation_active_until"] = add_seconds_str(
+                            last_form, 6 * 3600
+                        )
+                        if not is_future(self.state["next_formation_time"]):
+                            log.info("Startup Sync: Formation ready. Waiting for main loop to trigger...")
+                        else:
+                            log.info(
+                                f"Startup Sync: Formation on CD, next at "
+                                f"{self.state['next_formation_time']}."
+                            )
 
-                # 4. 恢复阵法强行出关计时器
-                #    脚本重启后 asyncio task 会丢，需要从状态重建
-                force_exit_at = self.state.get("next_force_exit_time", "")
-                if force_exit_at and is_future(force_exit_at):
-                    force_delay = seconds_until(force_exit_at)
-                    log.info(
-                        f"Startup Sync: Restoring force-exit timer at {force_exit_at} "
-                        f"({int(force_delay)}s)."
-                    )
-                    asyncio.create_task(self.delayed_force_exit(force_delay))
-                elif force_exit_at:
-                    formation_active_until = (
-                        add_seconds_str(last_form, 6 * 3600) if last_form else ""
-                    )
-                    if formation_active_until and is_future(formation_active_until):
-                        log.warning(
-                            f"Startup Sync: force-exit time {force_exit_at} is overdue "
-                            f"but formation is still active. Triggering now."
-                        )
-                        self.state["next_force_exit_time"] = ""
-                        self.save_state()
-                        asyncio.create_task(self.delayed_force_exit(0))
-                    else:
+                    # 4. 恢复阵法强行出关计时器
+                    #    脚本重启后 asyncio task 会丢，需要从状态重建
+                    force_exit_at = self.state.get("next_force_exit_time", "")
+                    if force_exit_at and is_future(force_exit_at):
+                        force_delay = seconds_until(force_exit_at)
                         log.info(
-                            f"Startup Sync: clearing expired force-exit time {force_exit_at}."
-                        )
-                        self.state["next_force_exit_time"] = ""
-                elif last_form:
-                    inferred_force_exit = add_seconds_str(
-                        last_form, 5 * 3600 + 55 * 60
-                    )
-                    if is_future(inferred_force_exit):
-                        self.state["next_force_exit_time"] = inferred_force_exit
-                        force_delay = seconds_until(inferred_force_exit)
-                        log.info(
-                            f"Startup Sync: Inferred force-exit timer at "
-                            f"{inferred_force_exit} ({int(force_delay)}s)."
+                            f"Startup Sync: Restoring force-exit timer at {force_exit_at} "
+                            f"({int(force_delay)}s)."
                         )
                         asyncio.create_task(self.delayed_force_exit(force_delay))
+                    elif force_exit_at:
+                        formation_active_until = (
+                            add_seconds_str(last_form, 6 * 3600) if last_form else ""
+                        )
+                        if formation_active_until and is_future(formation_active_until):
+                            log.warning(
+                                f"Startup Sync: force-exit time {force_exit_at} is overdue "
+                                f"but formation is still active. Triggering now."
+                            )
+                            self.state["next_force_exit_time"] = ""
+                            self.save_state()
+                            asyncio.create_task(self.delayed_force_exit(0))
+                        else:
+                            log.info(
+                                f"Startup Sync: clearing expired force-exit time {force_exit_at}."
+                            )
+                            self.state["next_force_exit_time"] = ""
+                    elif last_form:
+                        inferred_force_exit = add_seconds_str(
+                            last_form, 5 * 3600 + 55 * 60
+                        )
+                        if is_future(inferred_force_exit):
+                            self.state["next_force_exit_time"] = inferred_force_exit
+                            force_delay = seconds_until(inferred_force_exit)
+                            log.info(
+                                f"Startup Sync: Inferred force-exit timer at "
+                                f"{inferred_force_exit} ({int(force_delay)}s)."
+                            )
+                            asyncio.create_task(self.delayed_force_exit(force_delay))
 
                 # 4b. 恢复化身强行出关计时器
                 for avatar_name in self.avatars:
@@ -6001,10 +6199,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             )
                             self.set_avatar_state(avatar_name, "next_force_exit_time", "")
 
-                # 5. 确保侍妾处于洞府（默认状态）
-                await self.ensure_concubine_home_default(
-                    "Startup Sync default concubine placement"
-                )
+                # 5. 确保侍妾处于洞府（仅主魂启用侍妾流程时执行）
+                if self.main_concubine_enabled:
+                    await self.ensure_concubine_home_default(
+                        "Startup Sync default concubine placement"
+                    )
 
                 self.save_state()
                 self.startup_done.set()
@@ -6021,12 +6220,15 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         # 启动所有后台循环
         asyncio.create_task(self.run_daily_tasks())           # 每日任务（点卯/闯塔/传功）
         asyncio.create_task(self.run_star_gazing_loop())      # 全天观星监听
-        asyncio.create_task(self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
+        if self.main_star_palace_enabled:
+            asyncio.create_task(self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
         asyncio.create_task(self.run_formation_meditation_loop())  # 阵法 & 深度闭关
-        asyncio.create_task(self.run_concubine_loop())       # 侍妾管理（继承）
+        if self.main_concubine_enabled:
+            asyncio.create_task(self.run_concubine_loop())       # 侍妾管理（继承）
         asyncio.create_task(self.run_field_training_loop())   # 野外历练（继承）
         asyncio.create_task(self.run_sect_war_loop())         # 宗门战（继承）
         asyncio.create_task(self.run_custom_command_loop())    # dashboard 自定义指令
+        asyncio.create_task(self.run_ask_dao_loop())           # 元婴宗问道
         asyncio.create_task(self.run_yuanying_out_loop())     # 元婴出窍
         asyncio.create_task(self.run_rift_search_loop())      # 探寻裂缝
         asyncio.create_task(self.run_treasure_touch_loop())   # 抚摸法宝

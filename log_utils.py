@@ -2456,6 +2456,9 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     elif cmd == ".元婴出窍":
         if hasattr(actor, "record_yuanying_out_start_response"):
             processed = bool(actor.record_yuanying_out_start_response(text))
+    elif cmd == ".问道":
+        if hasattr(actor, "record_ask_dao_response"):
+            processed = bool(actor.record_ask_dao_response(text, source="manual .问道"))
     elif cmd == ".我的侍妾":
         processed = _manual_record_concubine_status_reply(actor, text, identity)
     elif cmd == ".入梦寻图":

@@ -77,11 +77,12 @@ STATE_TIME_COMMAND_MAP = {
     "next_pasture_time": ".一键放养",
     "next_beast_interaction_time": ".灵兽互动 六翼",
     "next_beast_cruise_time": ".灵兽巡游 六翼",
+    "next_ask_dao_time": ".问道",
 }
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
-    "凌霄宫", "星宫", "万灵宗", "天星宗", "黄枫谷",
+    "凌霄宫", "星宫", "万灵宗", "元婴宗", "天星宗", "黄枫谷",
     "掩月宗", "落云宗", "古剑门", "百巧院", "鬼灵门",
     "合欢宗", "御灵宗", "天道盟", "九国盟",
 )
