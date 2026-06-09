@@ -359,6 +359,8 @@ def command_response_family(command):
         return "treasure_touch"
     if cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰") or cmd.startswith(".掌天瓶"):
         return "star"
+    if cmd in {".天阶状态", ".登天阶", ".引九天罡风", ".问心台"}:
+        return "cloud_stairs"
     if cmd == ".探寻裂缝":
         return "rift"
     if cmd in {".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关"}:
@@ -423,6 +425,12 @@ def text_response_family(text):
         return "formation"
     if "【星宫 · 观星台】" in clean or "引星盘" in clean or "星光黯淡" in clean or "元磁紊乱" in clean or "狂暴星力" in clean:
         return "star"
+    if any(k in clean for k in [
+        "凌霄云阶", "云阶进度", "当前云阶进度", "登阶冷却",
+        "踏上了第", "罡风淬体", "九天罡风", "问心台",
+        "云阶禁制不会为你显现", "你并非凌霄宫弟子",
+    ]):
+        return "cloud_stairs"
     if "裂缝" in clean or "时空异兽" in clean or "元婴遁逃" in clean:
         return "rift"
     if any(k in clean for k in [
@@ -471,7 +479,7 @@ def text_response_family(text):
         return ".宗门点卯"
     if any(k in clean for k in ["闯塔", "塔钥", "试炼古塔", "重置古塔", "道心受挫", "挑战失败"]):
         return ".闯塔"
-    if "元婴出窍" in clean:
+    if any(k in clean for k in ["元婴出窍", "元神回响", "元神归窍总结", "元婴归窍总结"]):
         return ".元婴出窍"
     return ""
 
@@ -519,6 +527,13 @@ def feedback_response_matches_command(command, text):
         return any(k in clean for k in ["观星台", "引星盘", "牵引星辰", "安抚星辰", "狂暴星力", "星光", "精华"]) or (
             "修为不足" in clean and any(k in clean for k in ["牵引", "星辰"])
         )
+    if expected == "cloud_stairs":
+        return any(k in clean for k in [
+            "凌霄云阶", "云阶进度", "当前云阶进度", "登阶冷却",
+            "踏上了第", "罡风淬体", "九天罡风", "问心台",
+            "云阶禁制不会为你显现", "你并非凌霄宫弟子",
+            "可立即登阶", "未再聚", "后再试",
+        ])
     if expected == "rift":
         return any(k in clean for k in ["裂缝", "探寻成功", "法则碎片", "法则本源", "元婴遁逃"])
     if expected == "meditation":
@@ -576,7 +591,8 @@ def feedback_response_matches_command(command, text):
     if expected == ".元婴出窍":
         return any(k in clean for k in [
             "元婴出窍", "神游", "云游", "出窍", "自动结算",
-            "尚未凝聚元婴", "无法施展此术",
+            "尚未凝聚元婴", "无法施展此术", "元神回响",
+            "元神归窍总结", "元婴归窍总结",
         ])
     return False
 
