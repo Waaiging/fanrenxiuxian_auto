@@ -940,7 +940,7 @@ def incoming_log_sender_text(header):
 
 def is_outgoing_log_entry(entry):
     header = entry["lines"][0] if entry.get("lines") else ""
-    return "OUT" in header
+    return bool(re.search(r"\bOUT\s+\[", header or ""))
 
 def outgoing_log_identity(header):
     """从 OUT 日志头提取发送身份。"""

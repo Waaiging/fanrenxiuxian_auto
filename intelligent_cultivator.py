@@ -3829,7 +3829,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         resp = await self.send_and_wait_feedback_identity(
             avatar, f"{training_cmd} {training_level}", timeout=90, force_identity_check=True
         )
-        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else ""
+        resp_text = self.response_text(resp)
         if "修为不足" in resp_text:
             async def rt(): return await self.send_and_wait_feedback_identity(
                 avatar, f"{training_cmd} {training_level}", timeout=90, force_identity_check=True
