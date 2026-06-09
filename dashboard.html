@@ -157,22 +157,28 @@
         .record-tools { display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(9rem, 13rem) 1fr auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
         .record-field { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; color: var(--text-secondary); font-size: 0.72rem; font-weight: 700; }
         .record-select, .record-input { width: 100%; background: rgba(0,0,0,0.32); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 0.48rem 0.6rem; font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; outline: none; }
+        .record-select option { background: #0b1120; color: var(--text-primary); }
+        .record-select.identity-selected { color: var(--identity-color); border-color: rgba(var(--identity-rgb),0.52); font-weight: 800; background: linear-gradient(90deg, rgba(var(--identity-rgb),0.22) 0 0.48rem, rgba(0,0,0,0.32) 0); }
         .record-toggle { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; padding-bottom: 0.5rem; }
         .record-toggle input { accent-color: var(--accent-color); }
         .record-table-wrap { max-height: 360px; overflow: auto; }
         .record-table { width: 100%; border-collapse: collapse; min-width: 940px; font-size: 0.76rem; }
         .record-table th { position: sticky; top: 0; z-index: 1; background: rgba(15, 23, 42, 0.96); color: var(--text-secondary); text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-color); font-size: 0.7rem; }
+        .record-table tbody tr { --identity-color: #93c5fd; --identity-rgb: 147,197,253; }
         .record-table td { padding: 0.6rem 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.055); vertical-align: top; }
-        .record-table tr:hover td { background: rgba(0,210,255,0.045); }
-        .record-account, .record-identity, .record-command { font-weight: 800; color: var(--text-primary); white-space: nowrap; }
-        .record-username, .record-muted { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; }
+        .record-table tbody td:first-child { border-left: 3px solid rgba(var(--identity-rgb), 0.68); }
+        .record-table tr:hover td { background: rgba(var(--identity-rgb),0.055); }
+        .record-account, .record-command { font-weight: 800; color: var(--text-primary); white-space: nowrap; }
+        .record-identity { display: inline-flex; align-items: center; max-width: 100%; font-weight: 900; color: var(--identity-color); background: rgba(var(--identity-rgb),0.13); border: 1px solid rgba(var(--identity-rgb),0.34); border-radius: 7px; padding: 0.12rem 0.42rem; white-space: nowrap; }
+        .record-username { color: var(--identity-color); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; margin-top: 0.18rem; opacity: 0.86; }
+        .record-muted { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; }
         .record-time, .record-count { font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
         .record-recent { display: flex; flex-wrap: wrap; gap: 0.28rem; max-width: 24rem; }
-        .record-pill { font-family: 'JetBrains Mono', monospace; color: #bfdbfe; background: rgba(59,130,246,0.13); border: 1px solid rgba(59,130,246,0.2); border-radius: 6px; padding: 0.16rem 0.34rem; white-space: nowrap; }
+        .record-pill { font-family: 'JetBrains Mono', monospace; color: var(--identity-color); background: rgba(var(--identity-rgb),0.13); border: 1px solid rgba(var(--identity-rgb),0.28); border-radius: 6px; padding: 0.16rem 0.34rem; white-space: nowrap; }
         .record-empty { color: var(--text-secondary); text-align: center; padding: 1.25rem; font-size: 0.82rem; }
         .identity-records { margin-top: 0.9rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.14); }
         .identity-record-title { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 800; padding: 0.65rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
-        .identity-record-row { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(8rem, auto) minmax(4.5rem, auto); gap: 0.6rem; align-items: center; padding: 0.55rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); font-size: 0.78rem; }
+        .identity-record-row { --identity-color: #93c5fd; --identity-rgb: 147,197,253; display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(8rem, auto) minmax(4.5rem, auto); gap: 0.6rem; align-items: center; padding: 0.55rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); border-left: 3px solid rgba(var(--identity-rgb),0.65); font-size: 0.78rem; background: rgba(var(--identity-rgb),0.035); }
         .identity-record-row:first-of-type { border-top: 0; }
 
         .controls { margin-top: auto; padding-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
@@ -757,6 +763,110 @@
             return sameDay ? text.slice(6) : text;
         }
 
+        const identityColorPalette = [
+            {color: '#60a5fa', rgb: '96,165,250'},
+            {color: '#34d399', rgb: '52,211,153'},
+            {color: '#fbbf24', rgb: '251,191,36'},
+            {color: '#f472b6', rgb: '244,114,182'},
+            {color: '#a78bfa', rgb: '167,139,250'},
+            {color: '#22d3ee', rgb: '34,211,238'},
+            {color: '#fb7185', rgb: '251,113,133'},
+            {color: '#c084fc', rgb: '192,132,252'},
+            {color: '#2dd4bf', rgb: '45,212,191'},
+            {color: '#f97316', rgb: '249,115,22'},
+            {color: '#84cc16', rgb: '132,204,22'},
+            {color: '#e879f9', rgb: '232,121,249'},
+            {color: '#38bdf8', rgb: '56,189,248'},
+            {color: '#4ade80', rgb: '74,222,128'},
+            {color: '#facc15', rgb: '250,204,21'},
+            {color: '#fb923c', rgb: '251,146,60'},
+            {color: '#818cf8', rgb: '129,140,248'},
+            {color: '#14b8a6', rgb: '20,184,166'},
+            {color: '#f43f5e', rgb: '244,63,94'}
+        ];
+        let identityColorAssignments = new Map();
+        let identityColorSourceKey = '';
+
+        function hashText(key) {
+            let hash = 0;
+            for (let i = 0; i < key.length; i += 1) {
+                hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+            }
+            return Math.abs(hash);
+        }
+
+        function identityPairKey(account, identity) {
+            return `${account || ''}\u001f${identity || '主魂'}`;
+        }
+
+        function sortIdentities(list) {
+            return [...list].sort((a, b) => (
+                a === '主魂' ? -1 : b === '主魂' ? 1 : a.localeCompare(b, 'zh-Hans-CN')
+            ));
+        }
+
+        function ensureIdentityColorAssignments() {
+            const byAccount = new Map();
+            for (const row of commandRecordRows) {
+                const account = row.account || '';
+                const identity = row.identity || '主魂';
+                if (!byAccount.has(account)) byAccount.set(account, new Set());
+                byAccount.get(account).add(identity);
+            }
+            const sourceParts = [...byAccount.entries()]
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([account, identities]) => `${account}:${sortIdentities(identities).join(',')}`);
+            const sourceKey = sourceParts.join('|');
+            if (sourceKey === identityColorSourceKey) return;
+
+            const nextAssignments = new Map();
+            const usedByAccount = new Map();
+            const usedByIdentity = new Map();
+            for (const account of [...byAccount.keys()].sort((a, b) => a.localeCompare(b))) {
+                if (!usedByAccount.has(account)) usedByAccount.set(account, new Set());
+                for (const identity of sortIdentities(byAccount.get(account))) {
+                    const base = hashText(`${account}:${identity}`) % identityColorPalette.length;
+                    let chosen = null;
+                    const accountUsed = usedByAccount.get(account);
+                    const identityUsed = usedByIdentity.get(identity) || new Set();
+                    for (let attempt = 0; attempt < identityColorPalette.length; attempt += 1) {
+                        const index = (base + attempt * 5) % identityColorPalette.length;
+                        if (!accountUsed.has(index) && !identityUsed.has(index)) {
+                            chosen = index;
+                            break;
+                        }
+                    }
+                    if (chosen === null) {
+                        for (let attempt = 0; attempt < identityColorPalette.length; attempt += 1) {
+                            const index = (base + attempt * 5) % identityColorPalette.length;
+                            if (!accountUsed.has(index)) {
+                                chosen = index;
+                                break;
+                            }
+                        }
+                    }
+                    if (chosen === null) chosen = base;
+                    nextAssignments.set(identityPairKey(account, identity), identityColorPalette[chosen]);
+                    accountUsed.add(chosen);
+                    if (!usedByIdentity.has(identity)) usedByIdentity.set(identity, new Set());
+                    usedByIdentity.get(identity).add(chosen);
+                }
+            }
+            identityColorAssignments = nextAssignments;
+            identityColorSourceKey = sourceKey;
+        }
+
+        function identityColor(account, identity) {
+            ensureIdentityColorAssignments();
+            return identityColorAssignments.get(identityPairKey(account, identity))
+                || identityColorPalette[hashText(`${account || ''}:${identity || '主魂'}`) % identityColorPalette.length];
+        }
+
+        function identityColorStyle(account, identity) {
+            const tone = identityColor(account, identity);
+            return `--identity-color:${tone.color};--identity-rgb:${tone.rgb};`;
+        }
+
         function recordsForIdentity(account, identity) {
             return commandRecordRows
                 .filter(row => row.account === account && (row.identity || '主魂') === (identity || '主魂') && !row.is_switch)
@@ -788,7 +898,7 @@
                         <span>${rows.length} / ${recordsForIdentity(account, identity).length} 条</span>
                     </div>
                     ${rows.map(row => `
-                        <div class="identity-record-row">
+                        <div class="identity-record-row" style="${identityColorStyle(row.account, row.identity || identity || '主魂')}">
                             <div class="record-command" title="${escapeHtml(row.command)}">${escapeHtml(row.command)}</div>
                             <div class="record-time" title="${escapeHtml(row.last_time || '')}">${escapeHtml(recordDateText(row.last_time))}</div>
                             <div class="record-count">今日 ${Number(row.today_count || 0)}</div>
@@ -954,8 +1064,47 @@
             return document.getElementById('record-account-select')?.value || '';
         }
 
+        function recordIdentityFilterValue(account, identity) {
+            return `${encodeURIComponent(account || '')}|${encodeURIComponent(identity || '主魂')}`;
+        }
+
+        function parseRecordIdentityFilterValue(value) {
+            if (!value) return {account: '', identity: ''};
+            const splitAt = value.indexOf('|');
+            if (splitAt < 0) return {account: '', identity: value};
+            try {
+                return {
+                    account: decodeURIComponent(value.slice(0, splitAt)),
+                    identity: decodeURIComponent(value.slice(splitAt + 1)) || '主魂'
+                };
+            } catch (err) {
+                return {account: '', identity: value};
+            }
+        }
+
         function selectedRecordIdentity() {
-            return document.getElementById('record-identity-select')?.value || '';
+            return parseRecordIdentityFilterValue(document.getElementById('record-identity-select')?.value || '');
+        }
+
+        function identityOptionStyle(account, identity) {
+            const tone = identityColor(account, identity);
+            return `color:${tone.color};background:#0b1120;font-weight:800;`;
+        }
+
+        function updateRecordIdentitySelectTone() {
+            const select = document.getElementById('record-identity-select');
+            if (!select) return;
+            const selected = parseRecordIdentityFilterValue(select.value);
+            if (!selected.identity) {
+                select.classList.remove('identity-selected');
+                select.style.removeProperty('--identity-color');
+                select.style.removeProperty('--identity-rgb');
+                return;
+            }
+            const tone = identityColor(selected.account || selectedRecordAccount(), selected.identity);
+            select.classList.add('identity-selected');
+            select.style.setProperty('--identity-color', tone.color);
+            select.style.setProperty('--identity-rgb', tone.rgb);
         }
 
         function updateRecordFilterOptions() {
@@ -964,6 +1113,7 @@
             if (!accountSelect || !identitySelect) return;
             const oldAccount = accountSelect.value;
             const oldIdentity = identitySelect.value;
+            const oldIdentityParsed = parseRecordIdentityFilterValue(oldIdentity);
             const accounts = [...new Set(commandRecordRows.map(row => row.account).filter(Boolean))];
             accountSelect.innerHTML = '<option value="">全部脚本</option>' + accounts.map(account => {
                 const label = commandRecordAccountNames[account] || account;
@@ -974,22 +1124,53 @@
             const scoped = accountSelect.value
                 ? commandRecordRows.filter(row => row.account === accountSelect.value)
                 : commandRecordRows;
-            const identities = [...new Set(scoped.map(row => row.identity || '主魂'))]
-                .sort((a, b) => (a === '主魂' ? -1 : b === '主魂' ? 1 : a.localeCompare(b, 'zh-Hans-CN')));
-            identitySelect.innerHTML = '<option value="">全部身份</option>' + identities.map(identity => (
-                `<option value="${escapeHtml(identity)}">${escapeHtml(identity)}</option>`
+            const identityPairs = new Map();
+            for (const row of scoped) {
+                const account = row.account || accountSelect.value || '';
+                const identity = row.identity || '主魂';
+                identityPairs.set(recordIdentityFilterValue(account, identity), {account, identity});
+            }
+            const identityOptions = [...identityPairs.values()].sort((a, b) => {
+                if (!accountSelect.value) {
+                    const accountOrder = (commandRecordAccountNames[a.account] || a.account)
+                        .localeCompare(commandRecordAccountNames[b.account] || b.account, 'zh-Hans-CN');
+                    if (accountOrder !== 0) return accountOrder;
+                }
+                return a.identity === '主魂' ? -1 : b.identity === '主魂' ? 1 : a.identity.localeCompare(b.identity, 'zh-Hans-CN');
+            }).map(item => {
+                const value = recordIdentityFilterValue(item.account, item.identity);
+                const accountLabel = commandRecordAccountNames[item.account] || item.account;
+                return {
+                    ...item,
+                    value,
+                    label: accountSelect.value ? item.identity : `${accountLabel} · ${item.identity}`
+                };
+            });
+            identitySelect.innerHTML = '<option value="">全部身份</option>' + identityOptions.map(item => (
+                `<option value="${escapeHtml(item.value)}" style="${identityOptionStyle(item.account, item.identity)}">${escapeHtml(item.label)}</option>`
             )).join('');
-            if (identities.includes(oldIdentity)) identitySelect.value = oldIdentity;
+            const exactOption = identityOptions.find(item => item.value === oldIdentity);
+            const sameIdentityOption = identityOptions.find(item => (
+                item.identity === oldIdentityParsed.identity
+                && (!accountSelect.value || item.account === accountSelect.value)
+            ));
+            if (exactOption) {
+                identitySelect.value = exactOption.value;
+            } else if (sameIdentityOption) {
+                identitySelect.value = sameIdentityOption.value;
+            }
+            updateRecordIdentitySelectTone();
         }
 
         function filteredCommandRecords() {
             const account = selectedRecordAccount();
-            const identity = selectedRecordIdentity();
+            const identityFilter = selectedRecordIdentity();
             const query = String(document.getElementById('record-search-input')?.value || '').trim().toLowerCase();
             const showSwitch = Boolean(document.getElementById('record-show-switch')?.checked);
             return commandRecordRows.filter(row => {
                 if (account && row.account !== account) return false;
-                if (identity && (row.identity || '主魂') !== identity) return false;
+                if (identityFilter.account && row.account !== identityFilter.account) return false;
+                if (identityFilter.identity && (row.identity || '主魂') !== identityFilter.identity) return false;
                 if (!showSwitch && row.is_switch) return false;
                 if (query) {
                     const haystack = [
@@ -1033,7 +1214,7 @@
                     </thead>
                     <tbody>
                         ${rows.map(row => `
-                            <tr>
+                            <tr style="${identityColorStyle(row.account, row.identity || '主魂')}">
                                 <td>
                                     <div class="record-account">${escapeHtml(row.account_name || row.account || '')}</div>
                                 </td>
