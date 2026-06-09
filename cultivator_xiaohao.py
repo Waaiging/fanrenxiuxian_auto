@@ -5020,7 +5020,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 # 发送历练指令
                 cmd = self.field_training_command  # ".野外历练 谨慎"
                 log.info(f"Avatar [{avatar}] field training due: sending {cmd}")
-                resp = await self.send_and_wait_feedback_identity(avatar, cmd, timeout=90)
+                resp = await self.send_and_wait_feedback_identity(
+                    avatar, cmd, timeout=90, force_identity_check=True
+                )
 
                 # 解析回复并更新分身独立冷却
                 now = now_str()

@@ -3826,10 +3826,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if prefix:
             await self.send_and_wait_feedback_identity(avatar, f"{prefix} 探索")
             await asyncio.sleep(3)
-        resp = await self.send_and_wait_feedback_identity(avatar, f"{training_cmd} {training_level}", timeout=90)
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, f"{training_cmd} {training_level}", timeout=90, force_identity_check=True
+        )
         resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else ""
         if "修为不足" in resp_text:
-            async def rt(): return await self.send_and_wait_feedback_identity(avatar, f"{training_cmd} {training_level}", timeout=90)
+            async def rt(): return await self.send_and_wait_feedback_identity(
+                avatar, f"{training_cmd} {training_level}", timeout=90, force_identity_check=True
+            )
             success, resp_text = await self.handle_修为不足(avatar, rt, cooldown_key="next_field_training_time")
             if not success: return
         self.record_identity_field_training_response(avatar, resp_text, "野外历练")
