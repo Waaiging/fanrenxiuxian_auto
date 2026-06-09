@@ -425,14 +425,14 @@ def text_response_family(text):
         return "star"
     if "裂缝" in clean or "时空异兽" in clean or "元婴遁逃" in clean:
         return "rift"
-    if "器灵" in clean or "本命法宝" in clean or "青竹蜂云剑" in clean:
-        return "treasure_touch"
     if any(k in clean for k in [
         "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
         "未处于深度闭关", "并未处于深度闭关", "灵气尚未平复", "打坐调息",
         "强行中断了神魂神游", "强行出关惩罚", "中断修行", "清点所得",
     ]):
         return "meditation"
+    if "器灵" in clean or "本命法宝" in clean or "青竹蜂云剑" in clean:
+        return "treasure_touch"
     if "修士状态" in clean and "境界" in clean:
         return "status"
     if "天命玉牒" in clean and "修为" in clean:
@@ -449,7 +449,7 @@ def text_response_family(text):
     ):
         return "concubine_status"
     if any(k in clean for k in [
-        "侍妾远航", "远航归来", "远航", "启航", "返航", "航程", "航海",
+        "侍妾远航", "远航归来", "远航", "启航", "返航", "航程", "航海", "冒险",
         "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
     ]):
         return "concubine_voyage"
@@ -506,6 +506,11 @@ def feedback_response_matches_command(command, text):
             "请勿重复操作", "没有找到正在召集的大阵", "阵法已过期",
         ]) or ("修为不足" in clean and any(k in clean for k in ["启阵", "布阵", "阵法"]))
     if expected == "treasure_touch":
+        if any(k in clean for k in [
+            "闭关成功", "闭关失败", "深度闭关", "闭关修炼",
+            "当前境界", "当前修为", "清点所得", "走火入魔",
+        ]):
+            return False
         return any(k in clean for k in [
             "器灵", "本命法宝", "青竹蜂云剑", "默契", "经验", "互动", "别摸啦",
             "拥有器灵", "名字输入错误", "没有这件",
@@ -535,7 +540,7 @@ def feedback_response_matches_command(command, text):
         ])
     if expected == "concubine_voyage":
         return any(k in clean for k in [
-            "侍妾远航", "远航归来", "远航", "归来", "启航", "返航",
+            "侍妾远航", "远航归来", "远航", "归来", "启航", "返航", "冒险",
             "航程", "航海", "带回", "收获", "均衡", "尚无侍妾", "还没有侍妾",
             "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
         ])
@@ -2269,7 +2274,7 @@ def _manual_record_concubine_task_reply(actor, task_key, text, identity):
         "dream": ("next_dream_map_time", 8 * 3600),
         "heart_trial": ("next_heart_trial_time", 10 * 3600),
         "divination": ("next_divination_time", 12 * 3600),
-        "voyage": ("next_concubine_voyage_time", 8 * 3600),
+        "voyage": ("next_concubine_voyage_time", 12 * 3600),
     }
     state_key, default_cd = task_map[task_key]
     if identity and identity != "主魂" and hasattr(actor, "set_avatar_state"):
@@ -2299,8 +2304,8 @@ def _manual_record_concubine_status_reply(actor, text, identity):
             "入梦寻图冷却": ("next_dream_map_time", 8 * 3600),
             "共历心劫冷却": ("next_heart_trial_time", 10 * 3600),
             "天机代卜冷却": ("next_divination_time", 12 * 3600),
-            "侍妾远航冷却": ("next_concubine_voyage_time", 8 * 3600),
-            "远航冷却": ("next_concubine_voyage_time", 8 * 3600),
+            "侍妾远航冷却": ("next_concubine_voyage_time", 12 * 3600),
+            "远航冷却": ("next_concubine_voyage_time", 12 * 3600),
         }
         for label, (state_key, _) in labels.items():
             match = re.search(rf"{re.escape(label)}\s*[：:]\s*([^\n]+)", clean)
@@ -2320,9 +2325,12 @@ def _manual_record_concubine_status_reply(actor, text, identity):
                 continue
             cd = actor.parse_wait_time(value) if hasattr(actor, "parse_wait_time") else -1
             if cd > 0:
-                _manual_set_identity_state(actor, identity, state_key, _manual_sync_add_seconds(cd + 60))
+                next_time = _manual_sync_add_seconds(cd + 60)
+                _manual_set_identity_state(actor, identity, state_key, next_time)
                 if state_key == "next_concubine_voyage_time":
                     _manual_set_identity_state(actor, identity, "concubine_voyage_active", True)
+                    if hasattr(actor, "bind_concubine_chain_to_time"):
+                        actor.bind_concubine_chain_to_time(identity, next_time, active=True)
                 updated = True
         if updated:
             _manual_set_identity_state(actor, identity, "last_concubine_status_time", _manual_sync_now_str())

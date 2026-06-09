@@ -169,9 +169,19 @@ async def send_and_wait_feedback_common(
                 break
             except asyncio.TimeoutError:
                 retries += 1
-                logger.warning(f"[DEBUG-FEEDBACK] [{message}] TIMEOUT after {timeout}s (retry {retries}/{max_retries})")
+                timeout_log = (
+                    f"[DEBUG-FEEDBACK] [{message}] TIMEOUT after {timeout}s "
+                    f"(retry {retries}/{max_retries})"
+                )
+                if suppress_no_response_alert:
+                    logger.info(f"{timeout_log} (suppressed)")
+                else:
+                    logger.warning(timeout_log)
                 if retries <= max_retries:
-                    logger.warning(f"Timeout [{message}] ({retries}/{max_retries}), retrying...")
+                    if suppress_no_response_alert:
+                        logger.info(f"Timeout [{message}] ({retries}/{max_retries}), retrying...")
+                    else:
+                        logger.warning(f"Timeout [{message}] ({retries}/{max_retries}), retrying...")
                     await asyncio.sleep(5)
                 else:
                     if suppress_no_response_alert:

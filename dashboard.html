@@ -150,6 +150,30 @@
         .command-visibility-item input { accent-color: var(--accent-color); }
         .command-visibility-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-list-empty { color: var(--text-secondary); text-align: center; padding: 1.4rem 0; border: 1px dashed rgba(255,255,255,0.12); border-radius: 8px; font-size: 0.82rem; }
+        .command-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
+        .record-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 0.9rem 1rem; border-bottom: 1px solid var(--border-color); }
+        .record-title { font-size: 0.95rem; font-weight: 800; color: var(--text-primary); }
+        .record-summary { color: var(--text-secondary); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; text-align: right; }
+        .record-tools { display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(9rem, 13rem) 1fr auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .record-field { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; color: var(--text-secondary); font-size: 0.72rem; font-weight: 700; }
+        .record-select, .record-input { width: 100%; background: rgba(0,0,0,0.32); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; padding: 0.48rem 0.6rem; font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; outline: none; }
+        .record-toggle { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; padding-bottom: 0.5rem; }
+        .record-toggle input { accent-color: var(--accent-color); }
+        .record-table-wrap { max-height: 360px; overflow: auto; }
+        .record-table { width: 100%; border-collapse: collapse; min-width: 940px; font-size: 0.76rem; }
+        .record-table th { position: sticky; top: 0; z-index: 1; background: rgba(15, 23, 42, 0.96); color: var(--text-secondary); text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-color); font-size: 0.7rem; }
+        .record-table td { padding: 0.6rem 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.055); vertical-align: top; }
+        .record-table tr:hover td { background: rgba(0,210,255,0.045); }
+        .record-account, .record-identity, .record-command { font-weight: 800; color: var(--text-primary); white-space: nowrap; }
+        .record-username, .record-muted { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; }
+        .record-time, .record-count { font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
+        .record-recent { display: flex; flex-wrap: wrap; gap: 0.28rem; max-width: 24rem; }
+        .record-pill { font-family: 'JetBrains Mono', monospace; color: #bfdbfe; background: rgba(59,130,246,0.13); border: 1px solid rgba(59,130,246,0.2); border-radius: 6px; padding: 0.16rem 0.34rem; white-space: nowrap; }
+        .record-empty { color: var(--text-secondary); text-align: center; padding: 1.25rem; font-size: 0.82rem; }
+        .identity-records { margin-top: 0.9rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.14); }
+        .identity-record-title { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 800; padding: 0.65rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .identity-record-row { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(8rem, auto) minmax(4.5rem, auto); gap: 0.6rem; align-items: center; padding: 0.55rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); font-size: 0.78rem; }
+        .identity-record-row:first-of-type { border-top: 0; }
 
         .controls { margin-top: auto; padding-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
         .btn { flex: 1 1 5.5rem; padding: 0.5rem; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
@@ -192,6 +216,8 @@
             .command-modal { max-height: 94vh; }
             .command-modal-header { padding: 0.85rem; }
             .command-modal-body { padding: 0.85rem; }
+            .record-tools { grid-template-columns: 1fr; align-items: stretch; }
+            .record-summary { text-align: left; }
         }
         
         .live-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; animation: pulse 2s infinite; }
@@ -344,6 +370,37 @@
 
     <main>
         <div id="account-cards" style="display: contents;"></div>
+        <section class="command-record-section">
+            <div class="record-header">
+                <div class="record-title">指令执行记录表</div>
+                <div class="record-summary" id="record-summary">加载中...</div>
+            </div>
+            <div class="record-tools">
+                <label class="record-field">
+                    脚本
+                    <select id="record-account-select" class="record-select" onchange="changeRecordFilters()">
+                        <option value="">全部脚本</option>
+                    </select>
+                </label>
+                <label class="record-field">
+                    身份
+                    <select id="record-identity-select" class="record-select" onchange="changeRecordFilters()">
+                        <option value="">全部身份</option>
+                    </select>
+                </label>
+                <label class="record-field">
+                    搜索
+                    <input id="record-search-input" class="record-input" type="search" placeholder="搜索身份、用户名或指令" oninput="changeRecordFilters()">
+                </label>
+                <label class="record-toggle">
+                    <input id="record-show-switch" type="checkbox" onchange="changeRecordFilters()">
+                    显示切换指令
+                </label>
+            </div>
+            <div class="record-table-wrap" id="command-record-content">
+                <div class="record-empty">加载中...</div>
+            </div>
+        </section>
         <div class="log-section">
             <div class="log-header">
                 <div class="log-tab active" onclick="switchLog(event, 'main')">主号日志</div>
@@ -387,10 +444,13 @@
         };
         const COMMAND_VISIBILITY_PREFIX = 'xiuxian.commandVisibility.v1.';
         let commandModalKey = '';
+        let commandRecordRows = [];
+        let commandRecordUpdatedAt = '';
+        let commandRecordAccountNames = {};
 
         async function doAction(acc, act) {
             try {
-                if (act === 'clear' && !confirm('确认清空该账号在目标群里的所有自己发言？清屏会在后台执行，期间该账号会短暂停止并自动恢复。')) return;
+                if (act === 'clear' && !confirm('确认清除该脚本 35 分钟以前的所有游戏指令（.开头的）？清屏会在后台执行，期间该账号会短暂停止并自动恢复。')) return;
                 const r = await fetch(`/api/action/${acc}/${act}`, {method:'POST'});
                 const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
                 if (!r.ok || data.success === false) {
@@ -626,10 +686,11 @@
 
         function commandSummary(commands) {
             const list = Array.isArray(commands) ? commands : [];
-            const ready = list.find(item => ['ready', 'active', 'watch'].includes(item.tone || ''));
+            const cooldownList = list.filter(item => item?.schedule_type !== 'daily');
+            const ready = cooldownList.find(item => ['ready', 'active', 'watch'].includes(item.tone || ''));
             if (ready) return `${ready.label || ready.command}：${ready.status || '就绪'}`;
 
-            const timed = list
+            const timed = cooldownList
                 .map(item => ({item, at: parseDashboardDate(item.at || '')}))
                 .filter(row => row.at)
                 .sort((a, b) => a.at - b.at);
@@ -638,7 +699,7 @@
                 return `${item.label || item.command}：${item.remaining || item.status || '--'}`;
             }
 
-            const first = list[0];
+            const first = cooldownList[0] || list[0];
             return first ? `${first.label || first.command}：${first.status || '--'}` : '无可见指令';
         }
 
@@ -656,7 +717,7 @@
         function nextDueCommandKey(commands) {
             const rows = (commands || [])
                 .map((item, index) => ({item, index, seconds: commandNextSeconds(item)}))
-                .filter(row => row.seconds !== null && row.item.tone !== 'done')
+                .filter(row => row.item?.schedule_type === 'cooldown' && row.seconds !== null && row.item.tone !== 'done')
                 .sort((a, b) => (a.seconds - b.seconds) || (a.index - b.index));
             return rows.length ? commandItemKey(rows[0].item) : '';
         }
@@ -668,6 +729,73 @@
             if (item?.remaining || item?.at) return item.remaining || item.at;
             if (['ready', 'active'].includes(item?.tone || '')) return '0秒';
             return '--';
+        }
+
+        function formatDurationShort(seconds) {
+            const value = Number(seconds);
+            if (!Number.isFinite(value) || value < 0) return '--';
+            const s = Math.floor(value);
+            const d = Math.floor(s / 86400);
+            const h = Math.floor((s % 86400) / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            if (d > 0) return `${d}天${h}小时`;
+            if (h > 0) return `${h}小时${m}分`;
+            if (m > 0) return `${m}分`;
+            return `${s}秒`;
+        }
+
+        function recordDateText(value) {
+            if (!value) return '--';
+            const now = new Date();
+            const dt = parseDashboardDate(value);
+            if (!dt) return value;
+            const pad = n => String(n).padStart(2, '0');
+            const sameDay = now.getFullYear() === dt.getFullYear()
+                && now.getMonth() === dt.getMonth()
+                && now.getDate() === dt.getDate();
+            const text = `${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+            return sameDay ? text.slice(6) : text;
+        }
+
+        function recordsForIdentity(account, identity) {
+            return commandRecordRows
+                .filter(row => row.account === account && (row.identity || '主魂') === (identity || '主魂') && !row.is_switch)
+                .sort((a, b) => String(b.last_time || '').localeCompare(String(a.last_time || '')));
+        }
+
+        function renderIdentityCommandRecords(account, identity) {
+            const rows = recordsForIdentity(account, identity).slice(0, 10);
+            if (!commandRecordRows.length) {
+                return `
+                    <div class="identity-records">
+                        <div class="identity-record-title"><span>最近执行记录</span><span>加载中</span></div>
+                        <div class="record-empty">执行记录正在加载。</div>
+                    </div>
+                `;
+            }
+            if (!rows.length) {
+                return `
+                    <div class="identity-records">
+                        <div class="identity-record-title"><span>最近执行记录</span><span>0 条</span></div>
+                        <div class="record-empty">该身份暂未记录到自动或手动指令。</div>
+                    </div>
+                `;
+            }
+            return `
+                <div class="identity-records">
+                    <div class="identity-record-title">
+                        <span>最近执行记录</span>
+                        <span>${rows.length} / ${recordsForIdentity(account, identity).length} 条</span>
+                    </div>
+                    ${rows.map(row => `
+                        <div class="identity-record-row">
+                            <div class="record-command" title="${escapeHtml(row.command)}">${escapeHtml(row.command)}</div>
+                            <div class="record-time" title="${escapeHtml(row.last_time || '')}">${escapeHtml(recordDateText(row.last_time))}</div>
+                            <div class="record-count">今日 ${Number(row.today_count || 0)}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
         }
 
         function renderCommandRows(panelKey, commands) {
@@ -791,6 +919,7 @@
                     <div class="command-visibility-grid">${switches || '<span class="command-visibility-item">暂无可配置指令</span>'}</div>
                 </details>
                 ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份没有可显示的冷却或每日任务。</div>'}
+                ${renderIdentityCommandRecords(data.account, panel.identity || '主魂')}
             `;
         }
 
@@ -819,6 +948,144 @@
             for (const item of commands) data[commandItemKey(item)] = Boolean(visible);
             saveCommandVisibility(panelKey, data);
             renderCommandModal(panelKey);
+        }
+
+        function selectedRecordAccount() {
+            return document.getElementById('record-account-select')?.value || '';
+        }
+
+        function selectedRecordIdentity() {
+            return document.getElementById('record-identity-select')?.value || '';
+        }
+
+        function updateRecordFilterOptions() {
+            const accountSelect = document.getElementById('record-account-select');
+            const identitySelect = document.getElementById('record-identity-select');
+            if (!accountSelect || !identitySelect) return;
+            const oldAccount = accountSelect.value;
+            const oldIdentity = identitySelect.value;
+            const accounts = [...new Set(commandRecordRows.map(row => row.account).filter(Boolean))];
+            accountSelect.innerHTML = '<option value="">全部脚本</option>' + accounts.map(account => {
+                const label = commandRecordAccountNames[account] || account;
+                return `<option value="${escapeHtml(account)}">${escapeHtml(label)}</option>`;
+            }).join('');
+            if (accounts.includes(oldAccount)) accountSelect.value = oldAccount;
+
+            const scoped = accountSelect.value
+                ? commandRecordRows.filter(row => row.account === accountSelect.value)
+                : commandRecordRows;
+            const identities = [...new Set(scoped.map(row => row.identity || '主魂'))]
+                .sort((a, b) => (a === '主魂' ? -1 : b === '主魂' ? 1 : a.localeCompare(b, 'zh-Hans-CN')));
+            identitySelect.innerHTML = '<option value="">全部身份</option>' + identities.map(identity => (
+                `<option value="${escapeHtml(identity)}">${escapeHtml(identity)}</option>`
+            )).join('');
+            if (identities.includes(oldIdentity)) identitySelect.value = oldIdentity;
+        }
+
+        function filteredCommandRecords() {
+            const account = selectedRecordAccount();
+            const identity = selectedRecordIdentity();
+            const query = String(document.getElementById('record-search-input')?.value || '').trim().toLowerCase();
+            const showSwitch = Boolean(document.getElementById('record-show-switch')?.checked);
+            return commandRecordRows.filter(row => {
+                if (account && row.account !== account) return false;
+                if (identity && (row.identity || '主魂') !== identity) return false;
+                if (!showSwitch && row.is_switch) return false;
+                if (query) {
+                    const haystack = [
+                        row.account_name,
+                        row.identity,
+                        row.username,
+                        row.command,
+                        row.last_time,
+                        ...(row.recent_times || [])
+                    ].join(' ').toLowerCase();
+                    if (!haystack.includes(query)) return false;
+                }
+                return true;
+            });
+        }
+
+        function renderCommandRecordTable() {
+            const box = document.getElementById('command-record-content');
+            const summary = document.getElementById('record-summary');
+            if (!box || !summary) return;
+            const rows = filteredCommandRecords();
+            const total = commandRecordRows.length;
+            const latest = commandRecordUpdatedAt ? `更新 ${commandRecordUpdatedAt}` : '未更新';
+            summary.textContent = `${latest} · 显示 ${rows.length} / ${total} 项`;
+            if (!rows.length) {
+                box.innerHTML = '<div class="record-empty">没有符合筛选条件的执行记录。</div>';
+                return;
+            }
+            box.innerHTML = `
+                <table class="record-table">
+                    <thead>
+                        <tr>
+                            <th>脚本</th>
+                            <th>身份</th>
+                            <th>指令</th>
+                            <th>最近执行</th>
+                            <th>上次间隔</th>
+                            <th>今日/总计</th>
+                            <th>最近 8 次</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(row => `
+                            <tr>
+                                <td>
+                                    <div class="record-account">${escapeHtml(row.account_name || row.account || '')}</div>
+                                </td>
+                                <td>
+                                    <div class="record-identity">${escapeHtml(row.identity || '主魂')}</div>
+                                    ${row.username ? `<div class="record-username">${escapeHtml(row.username)}</div>` : ''}
+                                </td>
+                                <td>
+                                    <div class="record-command" title="${escapeHtml(row.command || '')}">${escapeHtml(row.command || '')}</div>
+                                    <div class="record-muted">自动 ${Number(row.auto_count || 0)} / 手动 ${Number(row.manual_count || 0)}</div>
+                                </td>
+                                <td class="record-time" title="${escapeHtml(row.last_time || '')}">${escapeHtml(recordDateText(row.last_time))}</td>
+                                <td class="record-time">${escapeHtml(row.previous_time ? formatDurationShort(row.last_interval_seconds) : '--')}</td>
+                                <td class="record-count">今日 ${Number(row.today_count || 0)} / ${Number(row.count || 0)}</td>
+                                <td>
+                                    <div class="record-recent">
+                                        ${(row.recent_times || []).slice().reverse().map(t => `<span class="record-pill" title="${escapeHtml(t)}">${escapeHtml(recordDateText(t))}</span>`).join('')}
+                                    </div>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function changeRecordFilters() {
+            updateRecordFilterOptions();
+            renderCommandRecordTable();
+        }
+
+        async function updateCommandRecords() {
+            try {
+                const r = await fetch('/api/command-records', {cache: 'no-store'});
+                const data = await r.json();
+                const rows = [];
+                commandRecordAccountNames = {};
+                for (const [account, payload] of Object.entries(data.accounts || {})) {
+                    commandRecordAccountNames[account] = payload.name || account;
+                    for (const row of (payload.records || [])) rows.push(row);
+                }
+                rows.sort((a, b) => String(b.last_time || '').localeCompare(String(a.last_time || '')));
+                commandRecordRows = rows;
+                commandRecordUpdatedAt = data.server_time || '';
+                updateRecordFilterOptions();
+                renderCommandRecordTable();
+                if (commandModalKey && window.commandPanelDataMap?.[commandModalKey]) renderCommandModal(commandModalKey);
+            } catch (e) {
+                console.error('Command records update failed:', e);
+                const summary = document.getElementById('record-summary');
+                if (summary) summary.textContent = '执行记录加载失败';
+            }
         }
 
         async function submitCustomCommand(event, panelKey) {
@@ -1095,7 +1362,7 @@
                                 <button class="btn btn-start" onclick="doAction('${id}', 'start')">▶ 启动</button>
                                 <button class="btn btn-stop" onclick="doAction('${id}', 'stop')">⏹ 停止</button>
                                 <button class="btn btn-restart" onclick="doAction('${id}', 'restart')">🔄 重启</button>
-                                <button class="btn btn-clear" onclick="doAction('${id}', 'clear')">🧹 清屏</button>
+                                <button class="btn btn-clear" onclick="doAction('${id}', 'clear')" title="清除该脚本 35 分钟以前的所有游戏指令（.开头的）">🧹 清屏</button>
                             </div>
                         </div>
                     `;
@@ -1296,6 +1563,7 @@
 
         setInterval(updateStatus, 5000);
         setInterval(updateLogs, 3000);
+        setInterval(updateCommandRecords, 15000);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
         });
@@ -1304,6 +1572,7 @@
             if (c.scrollTop < 60) loadOlderLogs();
         });
         updateStatus();
+        updateCommandRecords();
         loadLogTags(currentLogAccount);
         updateLogs();
 

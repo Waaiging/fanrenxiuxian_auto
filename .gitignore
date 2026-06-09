@@ -23,6 +23,8 @@ status.json
 cultivation_stats_cache.json
 command_controls.json
 dashboard_commands.json
+star_gazing_events.jsonl
+star_gazing_events.lock
 
 # Local backups, snapshots, and temporary scripts
 *.bak

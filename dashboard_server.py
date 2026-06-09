@@ -59,18 +59,21 @@ COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
 CULTIVATION_CACHE = {}                   # 修为统计缓存
 CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
+COMMAND_RECORD_CACHE = {}                # 指令执行记录缓存
+COMMAND_RECORD_LOCK = threading.Lock()   # 指令执行记录锁
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
     "sub": {"厚土", "缘生子", "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
-CONCUBINE_VOYAGE_AUTO_START_ENABLED = False
+CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 
 ACCOUNT_PROFILE_USERNAMES = {
     "main": {
@@ -673,7 +676,16 @@ def sect_war_commands(state):
 
 
 def concubine_voyage_enabled(account, identity):
-    return CONCUBINE_VOYAGE_AUTO_START_ENABLED and (identity or "主魂") in STAR_CONCUBINE_VOYAGE_IDENTITIES.get(account, set())
+    return CONCUBINE_VOYAGE_AUTO_START_ENABLED
+
+
+def concubine_voyage_detail(state):
+    error = str(state.get("last_concubine_voyage_error", "") or "").replace("\n", " ").strip()
+    if not error:
+        return ""
+    when = str(state.get("last_concubine_voyage_error_time", "") or "").strip()
+    prefix = f"上次失败 {when}: " if when else "上次失败: "
+    return f"{prefix}{error[:80]}"
 
 
 def concubine_commands(state, include_divination=True, include_voyage=False):
@@ -685,8 +697,8 @@ def concubine_commands(state, include_divination=True, include_voyage=False):
     ]
     if include_voyage:
         rows.insert(2, time_command(
-            state, "next_concubine_voyage_time", ".侍妾远航 均衡", "侍妾远航",
-            waiting="8小时冷却", group="侍妾",
+            state, "next_concubine_voyage_time", ".侍妾远航 冒险", "侍妾远航",
+            waiting="12小时冷却", detail=concubine_voyage_detail(state), group="侍妾",
         ))
     if include_divination:
         rows.append(time_command(state, "next_divination_time", ".天机代卜", "天机代卜", group="侍妾"))
@@ -724,12 +736,13 @@ def main_soul_panel(account, state):
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
-            time_command(state, "next_treasure_touch_time", ".抚摸法宝 青竹蜂云剑", "抚摸法宝", group="法宝"),
             time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"),
             time_command(state, "next_ask_dao_time", ".问道", "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
+        rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
+        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
@@ -752,7 +765,7 @@ def main_soul_panel(account, state):
             time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
             time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
             time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
-            time_command(state, "next_beast_cruise_time", ".灵兽巡游 六翼", "灵兽巡游", group="灵兽"),
+            time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
         ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     return {"identity": "主魂", "role": "主魂", "commands": rows}
@@ -767,6 +780,14 @@ def lingxiao_avatar_commands(name, state):
             manual_command(".推命 闭关", "推命闭关", group="推命"),
             manual_command(".推命 探索", "推命探索", group="推命"),
             time_command(state, "next_field_training_time", ".野外历练 深入", "野外历练", group="通用"),
+            daily_done_command(
+                state,
+                ".观命",
+                "观命",
+                date_key="last_destiny_date",
+                detail=f"上次定命：{state.get('last_destiny_choice') or '未记录'}",
+                group="每日",
+            ),
         ])
     else:
         rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
@@ -774,12 +795,14 @@ def lingxiao_avatar_commands(name, state):
     if name == "缘生子":
         rows.extend([spirit_tree_command(state), spirit_tree_guard_command(state)])
     if name == "素缘子":
+        rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
+            time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
             manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
             manual_command(".观星", "观星", group="星宫"),
             manual_command(".改换星移 @Waaiging", "改换星移", group="星宫"),
         ])
-    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("main", name)))
+    rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
     rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
     return rows
 
@@ -799,7 +822,7 @@ def star_avatar_commands(name, state):
         time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
-    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("sub", name)))
+    rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
     return rows
 
 
@@ -829,7 +852,7 @@ def xiaohao_avatar_commands(name, state):
             time_command(state, "pending_star_shift_target_time", ".改换星移 @TitanCreeper", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
             time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         ])
-    rows.extend(concubine_commands(state, include_divination=False, include_voyage=concubine_voyage_enabled("xiaohao", name)))
+    rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("xiaohao", name)))
     return rows
 
 
@@ -940,6 +963,14 @@ def outgoing_log_command(entry):
         if command:
             return command
     return ""
+
+def outgoing_log_command_full(entry):
+    """从 OUT 日志条目提取完整指令行，保留参数。"""
+    for raw in (entry.get("lines") or [])[1:]:
+        line = str(raw or "").strip().strip("`")
+        if line.startswith("."):
+            return re.sub(r"\s+", " ", line).strip()
+    return outgoing_log_command(entry)
 
 def is_probable_bot_reply_log_entry(entry):
     """判断日志条目是否可能是游戏机器人的回复"""
@@ -1135,6 +1166,118 @@ def read_log_entries(name):
     except Exception:
         return [], "无法读取日志内容。"
     return decorate_log_entries(split_log_entries(lines)), ""
+
+
+# =====================================================================
+# 指令执行记录
+# =====================================================================
+
+def command_record_signature(name):
+    """返回日志文件签名，用于避免重复解析。"""
+    filename = get_log_filename(name)
+    path = os.path.join(CONFIG_DIR, filename)
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return {
+        "log_size": int(getattr(stat, "st_size", 0) or 0),
+        "log_mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or 0),
+    }
+
+def command_record_username(account, identity):
+    names = account_profile_usernames(account).get(identity or "主魂") or []
+    return " / ".join(names)
+
+def build_account_command_records(name, recent_limit=8):
+    """按身份+指令聚合 OUT 日志，生成执行记录表数据。"""
+    if name not in WINDOW_MAP:
+        return {"records": [], "error": "未知账号", "updated_at": datetime.now().strftime(TIME_FORMAT)}
+    signature = command_record_signature(name)
+    if not signature:
+        return {"records": [], "error": f"日志文件 {get_log_filename(name)} 不存在。", "updated_at": datetime.now().strftime(TIME_FORMAT)}
+
+    cache_key = json.dumps(signature, sort_keys=True)
+    with COMMAND_RECORD_LOCK:
+        cached = COMMAND_RECORD_CACHE.get(name)
+        if cached and cached.get("signature") == cache_key:
+            return cached.get("data") or {"records": [], "error": ""}
+
+    entries, error = read_log_entries(name)
+    today = datetime.now().strftime("%Y-%m-%d")
+    records = {}
+    for entry in entries:
+        if not is_outgoing_log_entry(entry):
+            continue
+        entry_time = parse_log_entry_time(entry)
+        if not entry_time:
+            continue
+        command = outgoing_log_command_full(entry)
+        if not command or not command.startswith("."):
+            continue
+        header = entry["lines"][0] if entry.get("lines") else ""
+        identity = outgoing_log_identity(header) or "主魂"
+        key = (identity, command)
+        row = records.setdefault(key, {
+            "account": name,
+            "account_name": ACCOUNT_DISPLAY_NAMES.get(name, name),
+            "identity": identity,
+            "username": command_record_username(name, identity),
+            "command": command,
+            "count": 0,
+            "today_count": 0,
+            "first_time": "",
+            "previous_time": "",
+            "last_time": "",
+            "last_interval_seconds": None,
+            "recent_times": [],
+            "manual_count": 0,
+            "auto_count": 0,
+            "is_switch": command.startswith(".切换"),
+        })
+        time_text = entry_time.strftime(TIME_FORMAT)
+        if not row["first_time"]:
+            row["first_time"] = time_text
+        if row["last_time"]:
+            row["previous_time"] = row["last_time"]
+            prev_dt = parse_state_time(row["last_time"])
+            if prev_dt:
+                row["last_interval_seconds"] = int(max(0, (entry_time - prev_dt).total_seconds()))
+        row["last_time"] = time_text
+        row["count"] += 1
+        if time_text.startswith(today):
+            row["today_count"] += 1
+        if "OUT [manual" in header or "[manual" in header:
+            row["manual_count"] += 1
+        else:
+            row["auto_count"] += 1
+        row["recent_times"].append(time_text)
+        if len(row["recent_times"]) > recent_limit:
+            row["recent_times"] = row["recent_times"][-recent_limit:]
+
+    rows = sorted(records.values(), key=lambda item: item.get("last_time") or "", reverse=True)
+    data = {
+        "records": rows,
+        "error": error,
+        "updated_at": datetime.now().strftime(TIME_FORMAT),
+        "log": get_log_filename(name),
+        **signature,
+    }
+    with COMMAND_RECORD_LOCK:
+        COMMAND_RECORD_CACHE[name] = {"signature": cache_key, "data": data}
+    return data
+
+def build_all_command_records():
+    return {
+        "accounts": {
+            key: {
+                "name": ACCOUNT_DISPLAY_NAMES.get(key, key),
+                **build_account_command_records(key),
+            }
+            for key in WINDOW_MAP
+        },
+        "server_time": datetime.now().strftime(TIME_FORMAT),
+    }
 
 
 # =====================================================================
@@ -1576,7 +1719,7 @@ def clear_account_history(account):
     if was_alive: stop_account(account); wait_for_status(account, False)
     script_path = os.path.join(CONFIG_DIR, "clear_history.py")
     try:
-        result = subprocess.run([sys.executable, script_path, account], cwd=CONFIG_DIR, capture_output=True, text=True, timeout=900)
+        result = subprocess.run([sys.executable, script_path, account, "--older-than-minutes", "35"], cwd=CONFIG_DIR, capture_output=True, text=True, timeout=900)
     finally:
         if was_alive: start_account(account); wait_for_status(account, True)
     output = (result.stdout or result.stderr or "").strip()
@@ -1585,13 +1728,13 @@ def clear_account_history(account):
     return {"success": True, "msg": output or "清屏完成"}
 
 def account_display_name(account):
-    return {"main": "凌霄宫（主号）", "sub": "副号（主魂元婴宗）", "xiaohao": "万灵宗（小号）"}.get(account, account)
+    return {"main": "凌霄宫（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
 
 def run_clear_job(job_id, account):
     """后台执行清屏任务"""
     with CLEAR_LOCK:
         CLEAR_JOBS[job_id]["status"] = "running"
-        CLEAR_JOBS[job_id]["msg"] = f"{account_display_name(account)}清屏中，后台正在删除自己发出的消息。"
+        CLEAR_JOBS[job_id]["msg"] = f"{account_display_name(account)}清屏中，后台正在删除 35 分钟以前的游戏指令。"
     try:
         result = clear_account_history(account)
         with CLEAR_LOCK:
@@ -1630,7 +1773,7 @@ async def status(username: str = Depends(authenticate)):
     """获取所有账号的实时状态"""
     try:
         result = {}
-        for key, info in {"main": "凌霄宫 (主号)", "sub": "副号 (主魂元婴宗)", "xiaohao": "万灵宗 (小号)"}.items():
+        for key, info in ACCOUNT_DISPLAY_NAMES.items():
             state = get_state(key)
             result[key] = {
                 "name": info,
@@ -1642,6 +1785,11 @@ async def status(username: str = Depends(authenticate)):
             }
         return {"accounts": result, "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
     except Exception as e: return {"error": str(e)}
+
+@app.get("/api/command-records")
+async def command_records(username: str = Depends(authenticate)):
+    """获取各账号按身份/指令聚合的执行记录。"""
+    return build_all_command_records()
 
 @app.get("/api/logs/{name}")
 async def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "",
