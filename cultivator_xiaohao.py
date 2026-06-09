@@ -4852,7 +4852,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         remaining = seconds_until(end_time)
         if remaining <= 0: return
         wait_sec = seconds_until(end_time) + random.randint(30, 60)
-        if wait_sec > 0: await asyncio.sleep(wait_sec)
+        if wait_sec > 0:
+            await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
 
     async def run_meditation_timer(self):
         """深度闭关循环：查看状态→结算→重新开始"""
