@@ -77,6 +77,7 @@ from log_utils import (
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
     is_reply_to_manual_command,
+    is_reply_to_untracked_message,
     mentions_other_user,
     mentions_other_user_for_identity,
     text_targets_current_account,
@@ -532,6 +533,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         text = msg.text or ""
         if not text:
             return
+        if is_reply_to_untracked_message(self, msg):
+            return
             
         # 严格过滤：如果消息有明确的接收人但不是我，一律无视（防止同群串号）
         if not self.text_targets_self(msg, text):
@@ -558,6 +561,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """解析并记录手动发送指令引发的状态变更（主魂+化身）"""
         text = msg.text or ""
         if not text: return
+        if is_reply_to_untracked_message(self, msg): return
         
         # 严格过滤：如果消息有明确的接收人但不是我，一律无视（防止同群串号）
         recent_identity = recent_profile_identity_for_text(self, text, msg_id=getattr(msg, "id", None))
@@ -5156,6 +5160,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     avatar, ".我的侍妾", return_response_msg=True, delete_after=False
                 )
                 status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else str(status_msg) if isinstance(status_msg, str) else ""
+                if status_text and not self.concubine_status_matches_identity(status_text, avatar):
+                    log.warning(f"Avatar {avatar} 共历心劫: mismatched .我的侍妾 status; retrying.")
+                    if flow_attempt < 2:
+                        await asyncio.sleep(2)
+                        continue
+                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
+                    return
                 if status_text and "还没有侍妾" in status_text:
                     log.info(f"Avatar {avatar} has no concubine. Disabling heart trial for 24 hours.")
                     self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 24 * 3600))

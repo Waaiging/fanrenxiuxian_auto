@@ -38,6 +38,26 @@ CONCUBINE_VOYAGE_CD_SECONDS = 12 * 3600
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "heart_trial", "voyage")
 CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream", "heart_trial")
+DEFAULT_CONCUBINE_NAMES = {
+    "main": {
+        "主魂": {"慕沛灵"},
+        "无咎子": {"冰魄仙子"},
+        "缘生子": {"瑶光"},
+        "素缘子": {"元瑶"},
+    },
+    "sub": {
+        "主魂": {"瑶光"},
+        "厚土": {"霓裳"},
+        "缘生子": {"元瑶"},
+        "寻真子": {"银月"},
+    },
+    "xiaohao": {
+        "主魂": {"洛神"},
+        "问心子": {"墨彩环"},
+        "素心子": {"洛神"},
+        "缘生子": {"夜姬"},
+    },
+}
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
     "sub": {"厚土", "缘生子", "寻真子"},
@@ -151,6 +171,10 @@ def concubine_default_state():
         "concubine_voyage_active": False,
         "last_concubine_voyage_error": "",
         "last_concubine_voyage_error_time": "",
+        "concubine_name": "",
+        "last_concubine_name_time": "",
+        "last_concubine_status_mismatch": "",
+        "last_concubine_status_mismatch_time": "",
     }
 
 
@@ -208,6 +232,8 @@ class ConcubineMixin:
     def parse_concubine_voyage_status_line(self, text, identity="主魂"):
         """从.我的侍妾状态里同步远航中/可归来状态，返回远航阻塞结束时间。"""
         clean = str(text or "").replace("**", "")
+        if not self.concubine_status_matches_identity(clean, identity):
+            return ""
         match = re.search(r"远航状态\s*[：:]\s*([^\n]+)", clean)
         if not match:
             return ""
@@ -325,6 +351,8 @@ class ConcubineMixin:
             return False
         updated = False
         clean = text.replace("**", "")
+        if not self.concubine_status_matches_identity(clean, "主魂"):
+            return False
         voyage_block_until = self.parse_concubine_voyage_status_line(clean, "主魂")
         if voyage_block_until:
             updated = True
@@ -432,6 +460,84 @@ class ConcubineMixin:
         if identity != "主魂" and hasattr(self, "get_avatar_state"):
             return self.get_avatar_state(identity)
         return self.state
+
+    def extract_concubine_name(self, text):
+        """Extract the concubine/partner name from a status or voyage response."""
+        clean = str(text or "").replace("**", "")
+        for pattern in (
+            r"你的(?:道心侍妾|红尘道侣)\s*[：:]\s*【([^】]+)】",
+            r"侍妾\s*【([^】]+)】",
+            r"道侣\s*【([^】]+)】",
+        ):
+            match = re.search(pattern, clean)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def expected_concubine_names(self, identity="主魂"):
+        identity = identity or "主魂"
+        names = set()
+        account = actor_account_key(self)
+        names.update(DEFAULT_CONCUBINE_NAMES.get(account, {}).get(identity, set()) or set())
+        state_name = str(self._concubine_state_container(identity).get("concubine_name", "") or "").strip()
+        if state_name:
+            names.add(state_name)
+        return {name for name in names if name}
+
+    def record_concubine_name_from_text(self, identity="主魂", text=""):
+        identity = identity or "主魂"
+        name = self.extract_concubine_name(text)
+        if not name:
+            return ""
+        expected = self.expected_concubine_names(identity)
+        state = self._concubine_state_container(identity)
+        if expected and name not in expected:
+            now = now_str()
+            state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"
+            state["last_concubine_status_mismatch_time"] = now
+            self.save_state()
+            log.warning(
+                f"Concubine status [{identity}] rejected: expected {sorted(expected)}, got {name}."
+            )
+            return ""
+        state["concubine_name"] = name
+        state["last_concubine_name_time"] = now_str()
+        state["last_concubine_status_mismatch"] = ""
+        state["last_concubine_status_mismatch_time"] = ""
+        self.save_state()
+        return name
+
+    def concubine_status_matches_identity(self, text, identity="主魂"):
+        """Reject same-avatar status panels that belong to another account's identity."""
+        clean = str(text or "")
+        if not any(k in clean for k in ["你的道心侍妾", "你的红尘道侣", "【第二期机缘】", "远航状态"]):
+            return True
+        name = self.extract_concubine_name(clean)
+        expected = self.expected_concubine_names(identity)
+        if not name:
+            return True
+        if expected and name not in expected:
+            state = self._concubine_state_container(identity or "主魂")
+            now = now_str()
+            state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"
+            state["last_concubine_status_mismatch_time"] = now
+            self.save_state()
+            log.warning(
+                f"Concubine status [{identity or '主魂'}] mismatch: expected {sorted(expected)}, got {name}."
+            )
+            return False
+        self.record_concubine_name_from_text(identity, clean)
+        return True
+
+    def recent_concubine_status_mismatch(self, identity="主魂", window_seconds=120):
+        state = self._concubine_state_container(identity or "主魂")
+        value = state.get("last_concubine_status_mismatch_time", "")
+        if not value:
+            return False
+        try:
+            return 0 <= (datetime.now() - str_to_dt(value)).total_seconds() <= window_seconds
+        except Exception:
+            return False
 
     def concubine_voyage_enabled(self, identity="主魂"):
         """All managed identities enter the bound concubine voyage chain."""
@@ -706,6 +812,7 @@ class ConcubineMixin:
         clean = str(text or "").replace("**", "")
         if not clean:
             return False
+        self.record_concubine_name_from_text(identity, clean)
         if not self.is_concubine_voyage_response(clean) and not any(k in clean for k in ["还没有侍妾", "尚无侍妾"]):
             return False
 
@@ -914,6 +1021,9 @@ class ConcubineMixin:
             return False
         if self._concubine_command_paused(task["command"], identity):
             return False
+        if self.recent_concubine_status_mismatch(identity):
+            log.info(f"Concubine chain [{identity}]: voyage start skipped after status mismatch.")
+            return False
         state = self._concubine_state_container(identity)
         next_time = state.get(task["state_key"], "")
         if state.get("concubine_voyage_active") or (next_time and is_future(next_time)):
@@ -1045,6 +1155,9 @@ class ConcubineMixin:
         status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else str(status_msg) if isinstance(status_msg, str) else ""
         if not status_text:
             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+            return False
+        if not self.concubine_status_matches_identity(status_text, avatar):
+            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 30))
             return False
         if any(k in status_text for k in ["还没有侍妾", "尚无侍妾", "没有侍妾"]):
             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 24 * 3600))
@@ -1418,6 +1531,10 @@ class ConcubineMixin:
             self.state["last_concubine_status_msg_id"] = status_msg.id
 
         status_text = status_msg.text or ""
+        if status_text and not self.concubine_status_matches_identity(status_text, "主魂"):
+            log.warning("Concubine 共历心劫: mismatched .我的侍妾 status; retrying later.")
+            self.defer_concubine_task("heart_trial", 30)
+            return
         if not self.parse_concubine_status(status_text) and status_text:
             notify_unrecognized_response(self, ".我的侍妾", status_text, log, "共历心劫前状态")
             self.defer_concubine_task("heart_trial")

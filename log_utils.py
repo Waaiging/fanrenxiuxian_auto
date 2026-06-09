@@ -1532,6 +1532,27 @@ def _reply_to_msg_id(msg):
     return getattr(reply_to, "reply_to_msg_id", None) or getattr(reply_to, "channel_post", None)
 
 
+def meaningful_reply_to_msg_id(actor, msg):
+    """
+    Return the command message a bot reply points to.
+
+    Telegram forum-topic messages can carry reply_to=<topic root>. That is
+    only a thread marker, not attribution to a game command, so do not use it
+    for ownership checks.
+    """
+    replied_id = _reply_to_msg_id(msg)
+    if not replied_id:
+        return None
+    topic_id = getattr(actor, "topic_id", None)
+    try:
+        if topic_id is not None and int(replied_id) == int(topic_id):
+            return None
+    except Exception:
+        if str(replied_id) == str(topic_id):
+            return None
+    return replied_id
+
+
 def _sender_id_variants(sender_id):
     if sender_id is None:
         return set()
@@ -1632,7 +1653,7 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
 
 def is_reply_to_manual_command(actor, msg):
     """检查消息是否是对手动指令的回复（reply_to 指向手动指令消息）"""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return False
     manual_ids = getattr(actor, "_manual_command_ids", None)
@@ -1643,7 +1664,7 @@ def is_reply_to_manual_command(actor, msg):
 
 def manual_command_text_for_reply(actor, msg):
     """返回被回复的手动指令文本；不是手动指令回复时返回空字符串。"""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
     texts = getattr(actor, "_manual_command_texts", None) or {}
@@ -1652,7 +1673,7 @@ def manual_command_text_for_reply(actor, msg):
 
 def manual_command_identity_for_reply(actor, msg):
     """返回被回复的手动指令所属身份（主魂/化身）。"""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
     identities = getattr(actor, "_manual_command_identities", None) or {}
@@ -1665,7 +1686,7 @@ def manual_command_identity_for_reply(actor, msg):
 
 def tracked_command_text_for_reply(actor, msg):
     """Return the manual or automatic command text a bot reply points to."""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
     command = manual_command_text_for_reply(actor, msg)
@@ -1677,7 +1698,7 @@ def tracked_command_text_for_reply(actor, msg):
 
 def tracked_command_identity_for_reply(actor, msg):
     """Return the identity attached to a manual or automatic command reply."""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
     identity = manual_command_identity_for_reply(actor, msg)
@@ -1693,7 +1714,7 @@ def tracked_command_identity_for_reply(actor, msg):
 
 def is_reply_to_tracked_command(actor, msg):
     """True when a message replies to one of our manual or automatic commands."""
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return False
     if is_reply_to_manual_command(actor, msg):
@@ -1703,6 +1724,16 @@ def is_reply_to_tracked_command(actor, msg):
         if replied_id in mapping:
             return True
     return False
+
+
+def is_reply_to_untracked_message(actor, msg):
+    """
+    True when a bot message explicitly replies to a non-topic message we did not
+    send/track. Such messages belong to someone else's command and must not be
+    consumed by mention/loose/passive state sync.
+    """
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    return bool(replied_id and not is_reply_to_tracked_command(actor, msg))
 
 
 def _manual_sync_now_str():
@@ -2299,6 +2330,8 @@ def _manual_record_concubine_task_reply(actor, task_key, text, identity):
 def _manual_record_concubine_status_reply(actor, text, identity):
     if identity and identity != "主魂" and hasattr(actor, "set_avatar_state"):
         clean = str(text or "").replace("**", "")
+        if hasattr(actor, "concubine_status_matches_identity") and not actor.concubine_status_matches_identity(clean, identity):
+            return False
         updated = False
         labels = {
             "入梦寻图冷却": ("next_dream_map_time", 8 * 3600),
@@ -2388,7 +2421,7 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     if not command:
         return False
     logger = logger or logging.getLogger(actor.__class__.__name__)
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     msg_id = _message_id(msg)
     cache = getattr(actor, "_manual_reply_state_sync_cache", None)
     if cache is None:
@@ -2683,6 +2716,12 @@ def match_pending_edited_feedback(
     feedback_events = getattr(actor, "feedback_events", {}) or {}
     if not feedback_events:
         return False
+    if is_reply_to_untracked_message(actor, msg):
+        if logger:
+            logger.info(
+                f"{label} Message {getattr(msg, 'id', None)} replies to an untracked command, skipping."
+            )
+        return False
     if is_reply_to_manual_command(actor, msg):
         if logger:
             logger.info(f"{label} Manual command response detected (msg {getattr(msg, 'id', None)}), skipping.")
@@ -2849,10 +2888,13 @@ def record_edited_cultivation_state_if_needed(actor, msg, text=None, sender=None
     if "修为" not in str(text or "") and "境界" not in str(text or ""):
         return False
     logger = logger or logging.getLogger(actor.__class__.__name__)
+    if is_reply_to_untracked_message(actor, msg):
+        logger.info(f"Edited cultivation sync skipped: reply_to is not tracked (msg {getattr(msg, 'id', None)}).")
+        return False
     identity = ""
     command = ""
 
-    replied_id = _reply_to_msg_id(msg)
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
     if replied_id:
         command = tracked_command_text_for_reply(actor, msg)
         identity = tracked_command_identity_for_reply(actor, msg)
@@ -2891,6 +2933,8 @@ def record_edited_cultivation_state_if_needed(actor, msg, text=None, sender=None
 
 def is_relevant_game_bot_edited_message(actor, msg, text):
     """Edited bot messages are relevant when they mention us or continue a tracked reply."""
+    if is_reply_to_untracked_message(actor, msg):
+        return False
     if mentions_self(actor, msg, text):
         return True
     if was_logged_incoming_message(actor, msg):

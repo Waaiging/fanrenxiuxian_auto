@@ -22,6 +22,7 @@ from log_utils import (
     actor_account_key,
     dashboard_command_disabled,
     is_game_bot_sender,
+    is_reply_to_untracked_message,
     notify_unrecognized_response,
     text_targets_current_account,
 )
@@ -479,6 +480,8 @@ class CommonCommandMixin:
         当群聊中出现本账号的野外历练结果时（由其他来源触发），
         直接记录冷却，避免重复发送。
         """
+        if is_reply_to_untracked_message(self, msg):
+            return False
         if not self.is_field_training_response(text):
             return False
         if not text_targets_current_account(self, msg, text):

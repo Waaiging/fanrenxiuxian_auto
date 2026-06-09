@@ -102,6 +102,7 @@ from log_utils import (
     feedback_response_conflicts, # 判定回复文本是否属于其他指令家族
     feedback_response_matches_command, # 判定回复文本是否正向匹配该指令
     feedback_response_requires_positive_match, # 已知指令需要正向内容匹配
+    is_reply_to_untracked_message, # 带 reply_to 但不属于本脚本指令的回复
     wait_for_bot_activity_before_send,  # 发送前等待机器人活动确认
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
@@ -2788,6 +2789,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self._spirit_tree_guard_task = asyncio.create_task(self.execute_spirit_tree_guard_once(reason))
 
     def maybe_record_spirit_tree_passive_message(self, msg, text, source="passive"):
+        if is_reply_to_untracked_message(self, msg):
+            return False
         indicates_mature = self.spirit_tree_text_indicates_mature(text)
         indicates_irrigation = self.spirit_tree_text_indicates_irrigation_state(text)
         indicates_invasion = self.spirit_tree_text_indicates_invasion(text)
@@ -2907,6 +2910,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         """
         text = msg.text or ""
         if not text: return
+        if is_reply_to_untracked_message(self, msg): return
         if not self.text_targets_self(msg, text): return
         # 检测切换回主魂
         if "神念重归主魂肉身" in text or ("主魂" in text and ("成功" in text or "已切换" in text or "当前操控" in text)):
@@ -2930,6 +2934,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         """解析并记录手动发送指令引发的状态变更"""
         text = msg.text or ""
         if not text: return
+        if is_reply_to_untracked_message(self, msg): return
         recent_identity = recent_profile_identity_for_text(self, text, msg_id=getattr(msg, "id", None))
         if not self.text_targets_self(msg, text) and not recent_identity:
             return
@@ -3362,6 +3367,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     async def execute_avatar_heart_trial(self, avatar, status_msg):
         async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
             status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
+            if status_text and not self.concubine_status_matches_identity(status_text, avatar):
+                log.warning(f"Avatar [{avatar}] heart trial: mismatched .我的侍妾 status; retry soon.")
+                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
+                return False
             voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
             if voyage_block_until:
                 self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)

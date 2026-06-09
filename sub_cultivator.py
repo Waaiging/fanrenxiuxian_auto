@@ -112,6 +112,7 @@ from log_utils import (
     feedback_response_matches_command, # 判定回复文本是否正向匹配该指令
     feedback_response_requires_positive_match, # 已知指令需要正向内容匹配
     is_reply_to_manual_command,              # 检查是否为手动指令回复
+    is_reply_to_untracked_message, # 带 reply_to 但不属于本脚本指令的回复
     wait_for_bot_activity_before_send,  # 等待机器人活跃后再发送（避免竞态）
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
@@ -684,6 +685,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         text = msg.text or ""
         if not text:
             return
+        if is_reply_to_untracked_message(self, msg):
+            return
         # 严格过滤：如果消息有明确的接收人但不是我，一律无视（防止同群串号）
         if not self.text_targets_self(msg, text):
             return
@@ -707,6 +710,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         """解析并记录手动发送指令引发的状态变更（主魂+化身）"""
         text = msg.text or ""
         if not text:
+            return
+        if is_reply_to_untracked_message(self, msg):
             return
 
         # 关键过滤：如果消息不针对本账号，直接忽略（防止其他玩家消息污染化身数据）
@@ -5463,6 +5468,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         if not status_text:
             self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), fallback_seconds))
             return False
+        if not self.concubine_status_matches_identity(status_text, avatar):
+            self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
+            return False
         if "尚无侍妾" in status_text or "还没有侍妾" in status_text:
             self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 24 * 3600))
             return True
@@ -5506,6 +5514,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         """
         async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
             status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
+            if status_text and not self.concubine_status_matches_identity(status_text, avatar):
+                log.warning(f"Avatar [{avatar}] heart trial: mismatched .我的侍妾 status; retry soon.")
+                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
+                return False
             voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
             if voyage_block_until:
                 self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
