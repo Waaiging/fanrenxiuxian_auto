@@ -3513,8 +3513,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         if features.get("destiny"): await self._avatar_destiny_check(avatar)
                         # 1. 闭关
                         await self._avatar_meditation_check(avatar)
-                        # 2. 野外历练
-                        await self._avatar_field_training_check(avatar)
+                        # 2. 野外历练由独立循环负责，避免被闭关/侍妾/阵法长流程拖慢。
                         # 3. 阵法 (星宫)
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg:
@@ -3535,6 +3534,45 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             cd = await self._get_avatar_min_cd_seconds()
             log.info(f"All avatars done. Next cycle in {cd}s.")
             await asyncio.sleep(cd)
+
+    async def run_avatar_field_training_loop(self):
+        """化身野外历练独立循环，按各自冷却到点执行。"""
+        await self.startup_done.wait()
+        await asyncio.sleep(10)
+        while self.is_running:
+            try:
+                await self.pause_event.wait()
+                due_avatars = []
+                next_wait = 600
+                for avatar in self.avatars:
+                    features = self.avatar_features.get(avatar, {})
+                    if not features.get("training_cmd"):
+                        continue
+                    a_state = self.get_avatar_state(avatar)
+                    next_time = a_state.get("next_field_training_time", "")
+                    if next_time and is_future(next_time):
+                        next_wait = min(next_wait, max(60, seconds_until(next_time)))
+                    else:
+                        due_avatars.append(avatar)
+
+                if not due_avatars:
+                    await asyncio.sleep(max(60, min(next_wait, 600)))
+                    continue
+
+                for avatar in due_avatars:
+                    if not self.is_running:
+                        break
+                    await self.pause_event.wait()
+                    try:
+                        await self._avatar_field_training_check(avatar)
+                    except Exception as e:
+                        log.error(f"Avatar [{avatar}] field training loop error: {e}", exc_info=True)
+                    await asyncio.sleep(3)
+
+                await asyncio.sleep(5)
+            except Exception as e:
+                log.error(f"Avatar field training scheduler error: {e}", exc_info=True)
+                await asyncio.sleep(60)
 
     async def _avatar_daily_checkin(self, avatar):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -4063,6 +4101,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # ---- 化身系统 ----
         asyncio.create_task(self.run_all_avatars_sequential())
+        asyncio.create_task(self.run_avatar_field_training_loop())
         asyncio.create_task(self.run_star_gazing_loop())
         for i, avatar_name in enumerate(self.avatars):
             if avatar_name in STAR_ATTRACTION_AVATARS:

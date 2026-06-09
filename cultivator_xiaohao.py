@@ -5025,26 +5025,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 )
 
                 # 解析回复并更新分身独立冷却
-                now = now_str()
-                if not resp:
-                    self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now, 600))
-                    log.warning(f"Avatar [{avatar}] field training: no response; retry in 10min.")
-                else:
-                    cd = self.parse_wait_time(resp)
-                    clean = (resp or "").replace("**", "")
-                    is_cooldown = any(k in clean for k in ["山中灵机未复", "冷却", "后再", "尚未", "请在"])
-                    is_success = "野外历练" in clean or "山中灵机未复" in clean or ("卦象" in clean and "修为增加" in clean)
-
-                    if is_cooldown and cd > 0:
-                        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now, cd))
-                        log.info(f"Avatar [{avatar}] field training cooldown: {cd}s")
-                    elif is_success:
-                        self.set_avatar_state(avatar, "last_field_training_time", now)
-                        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now, 7200))
-                        log.info(f"Avatar [{avatar}] field training recorded. Next in 2h.")
-                    else:
-                        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now, 600))
-                        log.warning(f"Avatar [{avatar}] field training unrecognized: {resp[:100]}")
+                self.record_identity_field_training_response(
+                    avatar, self.response_text(resp), "野外历练"
+                )
 
                 await asyncio.sleep(5)
 

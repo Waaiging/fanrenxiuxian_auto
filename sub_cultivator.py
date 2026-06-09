@@ -5720,7 +5720,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     ft_resp = await self.send_and_wait_feedback_identity(
                         avatar, ".野外历练 谨慎", force_identity_check=True
                     )
-                    ft_text = getattr(ft_resp, "text", "") if hasattr(ft_resp, "text") else ft_resp if isinstance(ft_resp, str) else str(ft_resp) if ft_resp else ""
+                    ft_text = self.response_text(ft_resp)
 
                     # 修为不足处理
                     if "修为不足" in ft_text:
@@ -5729,6 +5729,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                 avatar, ".野外历练 谨慎", force_identity_check=True
                             )
                         success, ft_text = await self.handle_修为不足(avatar, retry_field_training, cooldown_key="next_field_training_time", cooldown_hours=2)
+                        ft_text = self.response_text(ft_text)
                         if not success:
                             self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
                             await asyncio.sleep(5)
