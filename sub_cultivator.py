@@ -5727,29 +5727,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         success, ft_text = await self.handle_修为不足(avatar, retry_field_training, cooldown_key="next_field_training_time", cooldown_hours=2)
                         if not success:
                             self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
-
-                    # 等一下让被动处理器有时间处理回复
-                    await asyncio.sleep(2)
-                    # 检查被动处理器是否已记录了冷却（在顶层 state 中）
-                    top_ft = self.state.get("next_field_training_time", "")
-                    if top_ft and is_future(top_ft):
-                        # 被动处理器已记录，同步到化身 state
-                        self.set_avatar_state(avatar, "next_field_training_time", top_ft)
-                        log.info(f"Avatar [{avatar}] field training synced from passive: {top_ft}")
-                    else:
-                        # 被动处理器没记录，尝试自行解析
-                        ft_text = getattr(ft_resp, "text", "") if hasattr(ft_resp, "text") else ft_resp if isinstance(ft_resp, str) else str(ft_resp) if ft_resp else ""
-                        ft_cd = self.parse_wait_time(ft_text)
-                        if ft_cd > 0:
-                            self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), ft_cd))
-                            log.info(f"Avatar [{avatar}] field training done, cooldown {ft_cd}s.")
-                        elif ft_text and ("野外历练" in ft_text or ("卦象" in ft_text and "修为增加" in ft_text)):
-                            # 成功但没有明确冷却时间，用默认2小时
-                            self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
-                            log.info(f"Avatar [{avatar}] field training success, default 2h cooldown.")
-                        else:
-                            self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 600))
-                            log.warning(f"Avatar [{avatar}] field training unknown: {ft_text[:80]}")
+                            await asyncio.sleep(5)
+                            continue
+                    self.record_identity_field_training_response(avatar, ft_text, "野外历练")
 
                 # ---- 启阵（12小时冷却，迁移自主循环） ----
                 try:

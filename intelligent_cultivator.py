@@ -3830,10 +3830,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else ""
         if "修为不足" in resp_text:
             async def rt(): return await self.send_and_wait_feedback_identity(avatar, f"{training_cmd} {training_level}", timeout=90)
-            success, _ = await self.handle_修为不足(avatar, rt, cooldown_key="next_field_training_time")
+            success, resp_text = await self.handle_修为不足(avatar, rt, cooldown_key="next_field_training_time")
             if not success: return
-        cd = self.parse_wait_time(resp_text)
-        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), cd if cd > 0 else 4*3600))
+        self.record_identity_field_training_response(avatar, resp_text, "野外历练")
 
     async def _get_avatar_min_cd_seconds(self):
         """计算所有化身中最早到期的CD时间（秒），用于替代固定30分钟sleep"""

@@ -20,11 +20,15 @@ from datetime import datetime, timedelta
 
 from log_utils import (
     actor_account_key,
+    avatar_marker_identity_from_text,
     dashboard_command_disabled,
+    identity_plain_usernames,
     is_game_bot_sender,
     is_reply_to_untracked_message,
     notify_unrecognized_response,
     text_targets_current_account,
+    text_username_mentions,
+    tracked_command_identity_for_reply,
 )
 
 
@@ -474,6 +478,77 @@ class CommonCommandMixin:
         log.warning(f"Field training unrecognized response; skipped until {self.state['next_field_training_time']}.")
         return False
 
+    def _field_training_identity_from_text(self, text):
+        """Infer which execution identity a field-training result belongs to from @mentions."""
+        mentions = set(text_username_mentions(text or ""))
+        if not mentions:
+            return ""
+        candidates = list(getattr(self, "avatars", []) or []) + ["主魂"]
+        for identity in candidates:
+            known = identity_plain_usernames(self, identity)
+            if known and mentions.intersection(known):
+                return identity
+        return ""
+
+    def _field_training_identity_from_reply(self, msg, text):
+        """Prefer reply-to attribution, then explicit avatar marker, then @username mapping."""
+        identity = tracked_command_identity_for_reply(self, msg)
+        if identity:
+            return identity
+        identity = avatar_marker_identity_from_text(text)
+        if identity:
+            return identity
+        return self._field_training_identity_from_text(text)
+
+    def record_identity_field_training_response(self, identity, text, context="野外历练"):
+        """
+        Record field-training cooldown for a specific identity.
+
+        Avatar commands must not copy the top-level cooldown because the top-level
+        state can belong to main-soul/manual passive sync from another identity.
+        """
+        identity = str(identity or "").strip() or "主魂"
+        if identity == "主魂" or not hasattr(self, "set_avatar_state"):
+            return self.record_field_training_response(text, context)
+
+        log = self.common_command_logger()
+        now = now_str()
+
+        def update_avatar(values):
+            if hasattr(self, "update_avatar_states"):
+                self.update_avatar_states(identity, values)
+            else:
+                for key, value in values.items():
+                    self.set_avatar_state(identity, key, value)
+
+        if not text:
+            next_time = add_seconds_str(now, 600)
+            update_avatar({"next_field_training_time": next_time})
+            log.warning(f"Avatar [{identity}] field training: missing response; retry at {next_time}.")
+            return False
+
+        cd = self.parse_wait_time(text)
+        if self.is_field_training_cooldown_response(text) and cd > 0:
+            next_time = add_seconds_str(now, cd)
+            update_avatar({"next_field_training_time": next_time})
+            log.info(f"Avatar [{identity}] field training cooldown from response: {cd}s, next at {next_time}.")
+            return True
+
+        if self.is_field_training_command_result(text):
+            next_time = add_seconds_str(now, FIELD_TRAINING_CD_SECONDS)
+            update_avatar({
+                "last_field_training_time": now,
+                "next_field_training_time": next_time,
+            })
+            log.info(f"Avatar [{identity}] field training recorded. Next at {next_time}.")
+            return True
+
+        notify_unrecognized_response(self, FIELD_TRAINING_COMMAND, text, log, f"{context} ({identity})")
+        next_time = add_seconds_str(now, 600)
+        update_avatar({"next_field_training_time": next_time})
+        log.warning(f"Avatar [{identity}] field training unrecognized response; skipped until {next_time}.")
+        return False
+
     def maybe_record_field_training_passive(self, msg, text):
         """
         被动同步野外历练状态。
@@ -486,6 +561,9 @@ class CommonCommandMixin:
             return False
         if not text_targets_current_account(self, msg, text):
             return False
+        identity = self._field_training_identity_from_reply(msg, text)
+        if identity and identity != "主魂":
+            return self.record_identity_field_training_response(identity, text, "野外历练被动同步")
         return self.record_field_training_response(text, "野外历练被动同步")
 
     # ---- 宗门战 — 辅助方法 ----
