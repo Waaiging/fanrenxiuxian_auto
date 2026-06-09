@@ -124,6 +124,7 @@ STATE_FILE = os.path.join(CONFIG_DIR, 'state_main.json') # 主号状态持久化
 # =====================================================================
 # 标准时间格式，用于所有 state 中的时间字符串
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_SCHEDULER_SLEEP_SECONDS = 300
 
 # 各项活动的冷却时间（秒），这些值来自游戏设定
 CLOUD_STAIRS_CD_SECONDS = 3 * 3600          # 登天阶冷却：3 小时
@@ -205,6 +206,14 @@ def seconds_until(s):
         return max(0, diff)
     except:
         return 0
+
+def scheduler_sleep_seconds(seconds, minimum=1):
+    """Cap scheduler sleeps so loops re-check state and identity frequently."""
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = MAX_SCHEDULER_SLEEP_SECONDS
+    return max(minimum, min(seconds, MAX_SCHEDULER_SLEEP_SECONDS))
 
 def seconds_until_daily_task_start(now):
     """
@@ -1552,7 +1561,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if wait_sec > 0:
             log.info(f"{label}: waiting {wait_sec:.0f}s for deep meditation settlement window.")
             try:
-                await asyncio.wait_for(self.meditation_state_event.wait(), timeout=wait_sec)
+                await asyncio.wait_for(
+                    self.meditation_state_event.wait(),
+                    timeout=scheduler_sleep_seconds(wait_sec),
+                )
                 self.meditation_state_event.clear()
                 log.info(f"{label}: meditation state changed, rechecking.")
             except asyncio.TimeoutError:
@@ -1636,8 +1648,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         主循环身份守卫：只等待正在发送的化身指令完成。
         不在这里主动切回主魂；真正要发送主魂指令时由 send_and_wait_feedback 对齐身份。
         """
-        # 化身循环活跃时等待
-        while self._avatar_loop_active or self._avatar_loop_count > 0:
+        while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
@@ -1685,7 +1696,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
             variance = random.randint(10, 30)  # 随机抖动，防检测
             log.info(f"Nine Heaven Wind Loop Complete. Sleep {wait_time + variance}s.")
-            await asyncio.sleep(wait_time + variance)
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time + variance))
 
     # ------------------------------------------------------------------
     # 通用固定冷却指令处理
@@ -1953,7 +1964,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if active and end_time and is_future(end_time):
                 wait_time = seconds_until(end_time)
                 log.info(f"Yuanying out active. Auto-return due at {end_time}.")
-                await asyncio.sleep(min(wait_time, 600))
+                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
             # 情况2：在外活跃但归窍时间已到，执行归窍
@@ -1968,7 +1979,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             # 情况3：CD 未到
             next_time = self.state.get("next_yuanying_out_time", "")
             if next_time and is_future(next_time):
-                await asyncio.sleep(min(seconds_until(next_time), 600))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
 
             # 情况4：CD 已到，重新出窍
@@ -2005,7 +2016,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if next_time and is_future(next_time):
                 wait_time = seconds_until(next_time)
                 log.info(f"Rift search loop complete. Sleep {int(min(wait_time, 600))}s.")
-                await asyncio.sleep(min(wait_time, 600))
+                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
             log.info("Rift search due: sending .探寻裂缝.")
@@ -2014,7 +2025,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 if await self.sleep_after_blocked_command(command, "Rift search"):
                     continue
                 log.info("Rift search: no response received, retrying later.")
-                await asyncio.sleep(600)
+                await asyncio.sleep(scheduler_sleep_seconds(600))
                 continue
             resp_text = resp_msg.text or ""
 
@@ -2037,7 +2048,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             self.record_fixed_cd_command_response(resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS)
             self.save_state()
             wait_time = seconds_until(self.state.get(next_key, "")) or 600
-            await asyncio.sleep(min(wait_time, 600))
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ------------------------------------------------------------------
     # 抚摸法宝循环
@@ -2058,7 +2069,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if next_time and is_future(next_time):
                 wait_time = seconds_until(next_time)
                 log.info(f"Treasure touch loop complete. Sleep {int(min(wait_time, 600))}s.")
-                await asyncio.sleep(min(wait_time, 600))
+                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
             log.info(f"Treasure touch due: sending {TREASURE_TOUCH_COMMAND}.")
@@ -2070,7 +2081,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             self.record_treasure_touch_response(resp)
             self.save_state()
             wait_time = seconds_until(self.state.get("next_treasure_touch_time", "")) or 600
-            await asyncio.sleep(min(wait_time, 600))
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
 
     def record_nurture_spirit_response(self, resp):
@@ -2115,7 +2126,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if next_time and is_future(next_time):
                 wait_time = seconds_until(next_time)
                 log.info(f"Nurture spirit loop complete. Sleep {int(min(wait_time, 600))}s.")
-                await asyncio.sleep(min(wait_time, 600))
+                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
             log.info(f"Nurture spirit due: sending {NURTURE_SPIRIT_COMMAND}.")
@@ -2123,7 +2134,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             self.record_nurture_spirit_response(resp)
             self.save_state()
             wait_time = seconds_until(self.state.get("next_nurture_spirit_time", "")) or 600
-            await asyncio.sleep(min(wait_time, 600))
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
         # ------------------------------------------------------------------
     # 登天阶循环（主循环之一）
@@ -2231,7 +2242,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
             variance = random.randint(10, 30)
             log.info(f"Cloud Stairs Loop Complete. Sleep {wait_time + variance}s.")
-            await asyncio.sleep(wait_time + variance)
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time + variance))
 
     # ------------------------------------------------------------------
     # 每日任务循环
@@ -2256,7 +2267,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if daily_wait > 0:
                 next_run = now + timedelta(seconds=daily_wait)
                 log.info(f"Daily tasks paused before {daily_task_start_label()}. Next check at {dt_to_str(next_run)}.")
-                await asyncio.sleep(daily_wait + random.randint(0, 30))
+                await asyncio.sleep(scheduler_sleep_seconds(daily_wait + random.randint(0, 30)))
                 continue
 
             today = now.strftime('%Y-%m-%d')
@@ -2292,7 +2303,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         self.save_state()
                     await asyncio.sleep(5)
 
-            await asyncio.sleep(600)  # 等 10 分钟再检查（防止 7:00 前几秒就跳过了）
+            await asyncio.sleep(scheduler_sleep_seconds(600))  # 分段复查，防止状态变化后睡过头
 
     # ------------------------------------------------------------------
     # 闭关循环（核心玩法之一）
@@ -2327,7 +2338,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         retry_time = self.state.get("next_meditation_retry_time", "")
         if retry_time and is_future(retry_time):
             log.info(f"Meditation: deferred after unknown response until {retry_time}.")
-            await asyncio.sleep(seconds_until(retry_time))
+            await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time)))
             self.state["next_meditation_retry_time"] = ""
             self.save_state()
 
@@ -2371,7 +2382,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             retry_time = self.state.get("next_meditation_retry_time", "")
             if retry_time and is_future(retry_time):
                 log.info(f"Meditation: deferred after unknown response until {retry_time}.")
-                await asyncio.sleep(seconds_until(retry_time))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time)))
                 self.state["next_meditation_retry_time"] = ""
                 self.save_state()
                 continue
@@ -2415,7 +2426,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         self.state["in_deep_meditation"] = False
                         self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600)
                         self.save_state()
-                        await asyncio.sleep(600)
+                        await asyncio.sleep(scheduler_sleep_seconds(600))
                     continue
 
             # === Step 3 & 4: 监控与结算 ===
@@ -2449,7 +2460,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 elif is_deep_meditation_ongoing_response(check_resp):
                     # 确实在闭关，只是没给时间
                     log.info("Meditation: Ongoing but no time info. Waiting 10 minutes for sync.")
-                    await asyncio.sleep(600)
+                    await asyncio.sleep(scheduler_sleep_seconds(600))
                 else:
                     # 未知状态
                     log.warning("Meditation Step 4: Unknown status. Skipping reset and retrying later.")
@@ -3286,7 +3297,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return
         if not force:
             return
-        if self._avatar_loop_active or self._avatar_loop_count > 0:
+        if self.avatar_send_lock.locked():
             return
         # 整体任务守卫
         current_t = asyncio.current_task()
@@ -3477,11 +3488,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             today = datetime.now().strftime("%Y-%m-%d")
             a_state = self.get_avatar_state(avatar)
             if a_state.get("last_tower_date") == today:
-                await asyncio.sleep(max(60, ((datetime.now()+timedelta(days=1)).replace(hour=0,minute=0,second=0)-datetime.now()).total_seconds()))
+                await asyncio.sleep(scheduler_sleep_seconds(((datetime.now()+timedelta(days=1)).replace(hour=0,minute=0,second=0)-datetime.now()).total_seconds(), minimum=60))
                 continue
             now = datetime.now()
             if now.hour < 23:
-                await asyncio.sleep(max(60, (now.replace(hour=23,minute=0,second=0)-now).total_seconds()))
+                await asyncio.sleep(scheduler_sleep_seconds((now.replace(hour=23,minute=0,second=0)-now).total_seconds(), minimum=60))
                 continue
             if now.hour == 23 and now.minute < 30:
                 await asyncio.sleep(random.randint(0,1800))
@@ -3490,7 +3501,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 async def rt(): return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
                 await self.handle_修为不足(avatar, rt, cooldown_key="last_tower_date")
             self.set_avatar_state(avatar, "last_tower_date", today)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(scheduler_sleep_seconds(3600))
 
     # ============================================================
     # 身外化身：顺序执行主循环
@@ -3533,7 +3544,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             # 按最短CD等待，而非固定30分钟
             cd = await self._get_avatar_min_cd_seconds()
             log.info(f"All avatars done. Next cycle in {cd}s.")
-            await asyncio.sleep(cd)
+            await asyncio.sleep(scheduler_sleep_seconds(cd, minimum=60))
 
     async def run_avatar_field_training_loop(self):
         """化身野外历练独立循环，按各自冷却到点执行。"""
@@ -3556,7 +3567,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         due_avatars.append(avatar)
 
                 if not due_avatars:
-                    await asyncio.sleep(max(60, min(next_wait, 600)))
+                    await asyncio.sleep(scheduler_sleep_seconds(next_wait, minimum=60))
                     continue
 
                 for avatar in due_avatars:
@@ -5152,7 +5163,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         f"Good opportunity listener remains active for manifest "
                         f"{self.state['next_star_manifest_time']}."
                     )
-                    await asyncio.sleep(min(wait_sec, 600))
+                    await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
                     continue
 
                 log.info(
@@ -5160,7 +5171,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     f"{', '.join(STAR_GAZING_GOOD_KEYWORDS)}. "
                     f"Next manifest {self.state['next_star_manifest_time']}."
                 )
-                await asyncio.sleep(600)
+                await asyncio.sleep(scheduler_sleep_seconds(600))
 
     # ---- 化身星辰牵引 / 安抚 / 收集（素缘子，观星抢占逻辑保持独立不变）----
 

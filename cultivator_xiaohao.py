@@ -122,6 +122,7 @@ LOG_FILE = os.path.join(CONFIG_DIR, 'cultivator_xiaohao.log')
 STATE_FILE = os.path.join(CONFIG_DIR, 'state_xiaohao.json')
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_SCHEDULER_SLEEP_SECONDS = 300
 HUNT_CD_SECONDS = 6 * 3600                     # 寻觅灵兽 CD 6 小时
 HUNT_FULL_RETRY_SECONDS = 10 * 60              # 灵兽袋满重试 10 分钟
 HUNT_FAIL_RETRY_SECONDS = 60 * 60              # 寻觅失败重试 1 小时
@@ -184,6 +185,14 @@ def seconds_until(s):
         return max(0, diff)
     except:
         return 0
+
+def scheduler_sleep_seconds(seconds, minimum=1):
+    """Cap scheduler sleeps so loops re-check state and identity frequently."""
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = MAX_SCHEDULER_SLEEP_SECONDS
+    return max(minimum, min(seconds, MAX_SCHEDULER_SLEEP_SECONDS))
 
 def seconds_until_daily_task_start(now):
     target = now.replace(hour=DAILY_TASK_START_HOUR, minute=DAILY_TASK_START_MINUTE, second=0, microsecond=0)
@@ -1123,7 +1132,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
     
                 variance = random.randint(10, 30)
                 log.info(f"Cloud Stairs Loop Complete. Sleep {wait_time + variance}s.")
-                await asyncio.sleep(wait_time + variance)
+                await asyncio.sleep(scheduler_sleep_seconds(wait_time + variance))
 
     # ---- 身外化身：物理串行发送管线 ----
 
@@ -1584,7 +1593,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if daily_wait > 0:
                 next_run = now + timedelta(seconds=daily_wait)
                 log.info(f"Daily tasks paused before {daily_task_start_label()}. Next check at {dt_to_str(next_run)}.")
-                await asyncio.sleep(daily_wait + random.randint(0, 30))
+                await asyncio.sleep(scheduler_sleep_seconds(daily_wait + random.randint(0, 30)))
                 continue
 
             today = now.strftime('%Y-%m-%d')
@@ -1607,7 +1616,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         self.save_state()
                     await asyncio.sleep(5)
 
-            await asyncio.sleep(600)
+            await asyncio.sleep(scheduler_sleep_seconds(600))
 
     # ---- 指令解析工具 ----
 
@@ -1713,7 +1722,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             await self._wait_for_main_identity()
             next_time = self.state.get("next_treasure_touch_time", "")
             if next_time and is_future(next_time):
-                await asyncio.sleep(min(seconds_until(next_time), 600))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
             log.info(f"Treasure touch due: sending {TREASURE_TOUCH_COMMAND}.")
             resp = await self.send_and_wait_feedback(
@@ -1723,7 +1732,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             )
             self.record_treasure_touch_response(resp)
             self.save_state()
-            await asyncio.sleep(min(seconds_until(self.state.get("next_treasure_touch_time", "")) or 600, 600))
+            await asyncio.sleep(scheduler_sleep_seconds(seconds_until(self.state.get("next_treasure_touch_time", "")) or 600))
 
     # ---- 元婴出窍 / 探寻裂缝 ----
 
@@ -1825,7 +1834,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             # 已出窍 → 必须先自动归窍，不检查境界
             if active and end_time and is_future(end_time):
                 log.info(f"Yuanying out active. Auto-return due at {end_time}.")
-                await asyncio.sleep(min(seconds_until(end_time), 600))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(end_time)))
                 continue
             if active:
                 log.info("Yuanying out time expired. Auto-resetting state.")
@@ -1838,12 +1847,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             has_yuanying = any(k in main_level for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
             if not has_yuanying:
                 log.info(f"🚫 Main soul level [{main_level}] has no Yuanying. Yuanying out loop suspended for 1 hour.")
-                await asyncio.sleep(3600)
+                await asyncio.sleep(scheduler_sleep_seconds(3600))
                 continue
 
             next_time = self.state.get("next_yuanying_out_time", "")
             if next_time and is_future(next_time):
-                await asyncio.sleep(min(seconds_until(next_time), 600))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
             log.info("Yuanying ability due: sending .元婴出窍.")
             resp = await self.send_and_wait_feedback(".元婴出窍", timeout=120)
@@ -1869,12 +1878,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             has_yuanying = any(k in main_level for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
             if not has_yuanying:
                 log.info(f"🚫 Main soul level [{main_level}] has no Yuanying. Rift search loop suspended for 1 hour.")
-                await asyncio.sleep(3600)
+                await asyncio.sleep(scheduler_sleep_seconds(3600))
                 continue
 
             next_time = self.state.get(next_key, "")
             if next_time and is_future(next_time):
-                await asyncio.sleep(min(seconds_until(next_time), 600))
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
             log.info("Rift search due: sending .探寻裂缝.")
             resp_msg = await self.send_and_wait_feedback(command, timeout=120, return_response_msg=True)
@@ -1882,7 +1891,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if await self.sleep_after_blocked_command(command, "Rift search"):
                     continue
                 log.info("Rift search: no response received, retrying later.")
-                await asyncio.sleep(600)
+                await asyncio.sleep(scheduler_sleep_seconds(600))
                 continue
             resp_text = resp_msg.text or ""
             if self.is_rift_weakness_response(resp_text):
@@ -3757,7 +3766,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if datetime.now() > shift_dt + timedelta(seconds=5): return
         
         wait_sec = (shift_dt - datetime.now()).total_seconds()
-        if wait_sec > 0: await asyncio.sleep(wait_sec)
+        if wait_sec > 0: await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
         
         if self.get_avatar_state(avatar).get("last_star_shift_date") == today: return
 
@@ -4662,13 +4671,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         while self.is_running:
             if self.state.get("beast_hunt_stopped"):
                 log.info(f"Hunt Loop: stopped ({self.state.get('beast_hunt_stopped_reason', '')}).")
-                await asyncio.sleep(24 * 3600); continue
+                await asyncio.sleep(scheduler_sleep_seconds(24 * 3600)); continue
             next_hunt = self.state.get("next_hunt_time", "")
             if next_hunt and is_future(next_hunt):
-                await asyncio.sleep(seconds_until(next_hunt) + random.randint(10, 30)); continue
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_hunt) + random.randint(10, 30))); continue
             last_run = self.state.get("last_hunt_time", "")
             if last_run and is_future(add_seconds_str(last_run, HUNT_CD_SECONDS)):
-                await asyncio.sleep(seconds_until(add_seconds_str(last_run, HUNT_CD_SECONDS)) + random.randint(10, 30)); continue
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(add_seconds_str(last_run, HUNT_CD_SECONDS)) + random.randint(10, 30))); continue
             async with self.beast_lock:
                 next_hunt = self.state.get("next_hunt_time", ""); last_run = self.state.get("last_hunt_time", "")
                 if next_hunt and is_future(next_hunt): continue
@@ -4851,7 +4860,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         while self.is_running:
             retry_time = self.state.get("next_meditation_retry_time", "")
             if retry_time and is_future(retry_time):
-                await asyncio.sleep(seconds_until(retry_time) + random.randint(10, 30)); continue
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time) + random.randint(10, 30))); continue
             end_time = self.state.get("deep_meditation_end_time", "")
             if self.state.get("in_deep_meditation") and end_time and is_future(end_time):
                 await self.sleep_until_meditation_check(end_time); continue
@@ -4872,11 +4881,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if cd > 0: self.state["deep_meditation_end_time"] = add_seconds_str(now_str(), cd); self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.save_state(); await self.sleep_until_meditation_check(self.state["deep_meditation_end_time"]); continue
             elif is_deep_meditation_settlement_response(resp): next_sleep = await settle_and_start_deep()
             elif is_not_deep_meditation_response(resp): next_sleep = await settle_and_start_deep()
-            elif is_deep_meditation_ongoing_response(resp): self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.save_state(); await asyncio.sleep(600); continue
+            elif is_deep_meditation_ongoing_response(resp): self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.save_state(); await asyncio.sleep(scheduler_sleep_seconds(600)); continue
             else:
                 if resp: notify_unrecognized_response(self, ".查看闭关", resp, log, "闭关状态")
                 self.state["in_deep_meditation"] = False; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600); self.save_state(); next_sleep = 600
-            self.save_state(); await asyncio.sleep(next_sleep)
+            self.save_state(); await asyncio.sleep(scheduler_sleep_seconds(next_sleep))
 
     # ---- 身外化身：分身闭关循环 ----
 
@@ -4925,7 +4934,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 elif is_deep_meditation_settlement_response(resp) or is_not_deep_meditation_response(resp):
                     # 需要结算并重新开始
                     next_sleep = await self._avatar_settle_and_start_deep(avatar)
-                    await asyncio.sleep(next_sleep)
+                    await asyncio.sleep(scheduler_sleep_seconds(next_sleep))
                     continue
                 elif is_deep_meditation_ongoing_response(resp):
                     # 进行中但无法解析剩余时间
@@ -4941,7 +4950,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     else:
                         log.warning(f"Avatar [{avatar}] empty response for .查看闭关 (timeout/rate-limited). Preserving state and retrying in 10m.")
                     self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
-                    await asyncio.sleep(600)
+                    await asyncio.sleep(scheduler_sleep_seconds(600))
                     continue
 
             except Exception as e:
@@ -5014,7 +5023,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
                 if next_time and is_future(next_time):
                     wait_sec = seconds_until(next_time)
-                    await asyncio.sleep(min(wait_sec, 600))
+                    await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
                     continue
 
                 # 发送历练指令
@@ -5079,7 +5088,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         log.info(f"Avatar [{avatar}] daily tower recorded done for today.")
 
                 # 没到时间或者已完成，每 10 分钟检测一次
-                await asyncio.sleep(600)
+                await asyncio.sleep(scheduler_sleep_seconds(600))
 
             except Exception as e:
                 log.error(f"Avatar [{avatar}] tower loop error: {e}")

@@ -833,7 +833,7 @@ class CommonCommandMixin:
             next_time = self.state.get("next_field_training_time", "")
             if next_time and is_future(next_time):
                 wait_sec = seconds_until(next_time)
-                await asyncio.sleep(min(wait_sec, 600))
+                await asyncio.sleep(min(wait_sec, 300))
                 continue
 
             log = self.common_command_logger()
@@ -873,4 +873,4 @@ class CommonCommandMixin:
                 await asyncio.sleep(5)
                 continue
 
-            await asyncio.sleep(600)
+            await asyncio.sleep(300)
