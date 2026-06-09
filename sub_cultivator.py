@@ -5694,7 +5694,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         """
         化身循环（深度闭关模式，精细版）。
         按主循环 run_formation_meditation_loop 的深度闭关逻辑实现：
-        - 先执行野外历练（如果不在深度闭关中且冷却已过）
+        - 野外历练由独立循环执行，避免被闭关/侍妾流程延迟
         - 检查深度闭关缓存状态
         - 通过 .查看闭关 确认实际状态
         - 根据响应类型（进行中/未闭关/结算/冷却/未知）分别处理
@@ -5712,29 +5712,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
                 # ---- 宗门点卯（每日一次，07:15 后） ----
                 await self._avatar_daily_checkin(avatar)
-
-                # ---- 野外历练（每次都检查，不受深度闭关影响） ----
-                next_ft = a_state.get("next_field_training_time", "")
-                if not next_ft or not is_future(next_ft):
-                    log.info(f"Avatar [{avatar}] sending .野外历练 谨慎")
-                    ft_resp = await self.send_and_wait_feedback_identity(
-                        avatar, ".野外历练 谨慎", force_identity_check=True
-                    )
-                    ft_text = self.response_text(ft_resp)
-
-                    # 修为不足处理
-                    if "修为不足" in ft_text:
-                        async def retry_field_training():
-                            return await self.send_and_wait_feedback_identity(
-                                avatar, ".野外历练 谨慎", force_identity_check=True
-                            )
-                        success, ft_text = await self.handle_修为不足(avatar, retry_field_training, cooldown_key="next_field_training_time", cooldown_hours=2)
-                        ft_text = self.response_text(ft_text)
-                        if not success:
-                            self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
-                            await asyncio.sleep(5)
-                            continue
-                    self.record_identity_field_training_response(avatar, ft_text, "野外历练")
 
                 # ---- 启阵（12小时冷却，迁移自主循环） ----
                 try:
@@ -5916,6 +5893,52 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             except Exception as e:
                 log.error(f"Avatar [{avatar}] meditation loop error: {e}")
             finally:
+                await asyncio.sleep(300)
+
+    async def run_avatar_field_training_loop(self, avatar, initial_delay=0):
+        """化身野外历练独立循环，按该化身自己的冷却时间执行。"""
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            log.info(f"Avatar [{avatar}] field training loop: waiting {initial_delay}s before start...")
+            await asyncio.sleep(initial_delay)
+
+        while self.is_running:
+            try:
+                await self.pause_event.wait()
+                a_state = self.get_avatar_state(avatar)
+                next_time = a_state.get("next_field_training_time", "")
+                if next_time and is_future(next_time):
+                    await asyncio.sleep(max(60, min(seconds_until(next_time), 600)))
+                    continue
+
+                log.info(f"Avatar [{avatar}] field training due: sending .野外历练 谨慎")
+                ft_resp = await self.send_and_wait_feedback_identity(
+                    avatar, ".野外历练 谨慎", timeout=90, force_identity_check=True
+                )
+                ft_text = self.response_text(ft_resp)
+
+                if "修为不足" in ft_text:
+                    async def retry_field_training():
+                        return await self.send_and_wait_feedback_identity(
+                            avatar, ".野外历练 谨慎", timeout=90, force_identity_check=True
+                        )
+
+                    success, ft_text = await self.handle_修为不足(
+                        avatar,
+                        retry_field_training,
+                        cooldown_key="next_field_training_time",
+                        cooldown_hours=2,
+                    )
+                    ft_text = self.response_text(ft_text)
+                    if not success:
+                        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
+                        await asyncio.sleep(60)
+                        continue
+
+                self.record_identity_field_training_response(avatar, ft_text, "野外历练")
+                await asyncio.sleep(5)
+            except Exception as e:
+                log.error(f"Avatar [{avatar}] field training loop error: {e}", exc_info=True)
                 await asyncio.sleep(300)
 
     # ============================================================
@@ -6293,6 +6316,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         # 化身闭关修炼循环（深度闭关模式，各化身错开启动避免冲突）
         for i, avatar_name in enumerate(self.avatars):
             asyncio.create_task(self.run_avatar_loop(avatar_name, initial_delay=i * 10))
+            asyncio.create_task(self.run_avatar_field_training_loop(avatar_name, initial_delay=i * 10))
             asyncio.create_task(self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
             if avatar_name in STAR_ATTRACTION_AVATARS:
                 asyncio.create_task(self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
