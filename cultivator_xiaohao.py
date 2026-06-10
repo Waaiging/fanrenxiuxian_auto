@@ -3052,6 +3052,33 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         self.set_next_abyss_not_before(add_seconds_str(now_str(), retry_seconds))
         self.save_state()
 
+    def beast_action_due(self, next_key, last_key, cooldown_seconds):
+        """判断灵兽指令是否到期，显式 next_* 时间优先于历史 last_* 兜底。"""
+        next_time = self.state.get(next_key, "")
+        if next_time and is_future(next_time):
+            return False
+        last_time = self.state.get(last_key, "")
+        if last_time and is_future(add_seconds_str(last_time, cooldown_seconds)):
+            return False
+        return True
+
+    def beast_action_wait_seconds(self, next_key, last_key, cooldown_seconds):
+        """计算灵兽指令下一次可执行等待时间。"""
+        waits = []
+        next_time = self.state.get(next_key, "")
+        if next_time and is_future(next_time):
+            waits.append(seconds_until(next_time))
+        last_time = self.state.get(last_key, "")
+        if last_time:
+            fallback_next = add_seconds_str(last_time, cooldown_seconds)
+            if is_future(fallback_next):
+                waits.append(seconds_until(fallback_next))
+        return min(waits) if waits else 0
+
+    def all_cached_beasts_pastured(self, cache=None):
+        cache = list(cache if cache is not None else self.state.get("beasts_cache", []))
+        return bool(cache) and all(self.is_pastured_status(beast.get("status", "")) for beast in cache)
+
     def record_beast_injury_from_response(self, beast_name, text, source=""):
         """记录灵兽受伤及恢复时间"""
         if not self.is_beast_injury_response(text): return -1
@@ -3260,8 +3287,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         candidates = self.abyss_candidate_beasts(self.state.get("beasts_cache", []))
         if not candidates:
             log.warning("Abyss: no 一阶 beast candidate has enough stamina/status; retry after status refresh.")
-            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
-            self.schedule_abyss_retry(1800)
+            if self.all_cached_beasts_pastured(self.state.get("beasts_cache", [])):
+                retry_at = self.pasture_block_until()
+                self.state["next_beast_status_check_time"] = retry_at
+                self.set_next_abyss_not_before(retry_at)
+                log.info(f"Abyss: all cached beasts are pastured; next status refresh delayed until {retry_at}.")
+            else:
+                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+                self.schedule_abyss_retry(1800)
             self.save_state()
             return False
 
@@ -4841,9 +4874,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             sleep_for = 600
             async with self.beast_lock:
                 last_abyss = self.state.get("last_abyss_time", "")
-                need_abyss = not last_abyss or not is_future(add_seconds_str(last_abyss, 21600))
+                next_abyss = self.state.get("next_abyss_time", "")
+                need_abyss = self.beast_action_due("next_abyss_time", "last_abyss_time", 21600)
                 last_steal = self.state.get("last_steal_time", "")
-                need_steal = not last_steal or not is_future(add_seconds_str(last_steal, 14400))
+                next_steal = self.state.get("next_steal_time", "")
+                need_steal = self.beast_action_due("next_steal_time", "last_steal_time", 14400)
                 last_pasture = self.state.get("last_pasture_time", "")
                 next_pasture = self.state.get("next_pasture_time", "")
                 need_pasture = not next_pasture or not is_future(next_pasture)
@@ -4866,17 +4901,16 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 due_any = need_abyss or need_steal or need_pasture or need_interaction or need_cruise
                 if not due_any:
                     next_waits = []
-                    for last_time, cd in (
-                        (last_abyss, 21600),
-                        (last_steal, 14400),
-                        (last_pasture, PASTURE_CD_SECONDS),
-                        (last_interaction, BEAST_INTERACTION_CD_SECONDS),
-                        (last_cruise, BEAST_CRUISE_CD_SECONDS),
+                    for wait in (
+                        self.beast_action_wait_seconds("next_abyss_time", "last_abyss_time", 21600),
+                        self.beast_action_wait_seconds("next_steal_time", "last_steal_time", 14400),
+                        self.beast_action_wait_seconds("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS),
+                        self.beast_action_wait_seconds("next_beast_interaction_time", "last_beast_interaction_time", BEAST_INTERACTION_CD_SECONDS),
+                        self.beast_action_wait_seconds("next_beast_cruise_time", "last_beast_cruise_time", BEAST_CRUISE_CD_SECONDS),
                     ):
-                        if last_time:
-                            next_time = add_seconds_str(last_time, cd)
-                            if is_future(next_time): next_waits.append(seconds_until(next_time))
-                    for next_time in (next_pasture, next_interaction, next_cruise):
+                        if wait > 0:
+                            next_waits.append(wait)
+                    for next_time in (next_abyss, next_steal, next_pasture, next_interaction, next_cruise):
                         if next_time and is_future(next_time):
                             next_waits.append(seconds_until(next_time))
                     if next_waits: sleep_for = max(30, min(next_waits) + random.randint(10, 30))
