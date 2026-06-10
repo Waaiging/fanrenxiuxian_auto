@@ -1065,6 +1065,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     except Exception as e:
                         log.error(f"Notify Final Error: {e}")
 
+            if await maybe_auto_reply_exchange(self, event, text=text, sender=sender_cache):
+                return
+
             # ---- 反馈匹配（核心机制） ----
             is_matched = False
 

@@ -2572,6 +2572,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             # 如果这条消息属于自动回复链中的后续消息，交给自动回复模块处理
             if is_auto_reply_followup(self, msg, sender=sender):
                 return
+            if await maybe_auto_reply_exchange(self, event, text=text, sender=sender):
+                return
 
             is_matched = False
 

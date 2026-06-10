@@ -4,7 +4,7 @@
 
 在游戏机器人发出特定消息时，脚本自动进行被动回复。
 目前支持的自动回复场景：
-  1. 交换功法（.交换 功法）—— 当游戏机器人提到本账号且有"交换功法"关键词时，自动回复该指令
+  1. 南陇侯交换 —— 当游戏机器人提到本账号/化身且给出".交换"选项时，按身份自动回复
 """
 import asyncio
 import logging
@@ -16,7 +16,8 @@ from log_utils import command_send_allowed, format_in_log, is_game_bot_sender, r
 # =====================================================================
 # 常量定义
 # =====================================================================
-EXCHANGE_MAGIC_TREASURE_COMMAND = ".交换 功法"  # 交换功法指令
+EXCHANGE_MAIN_COMMAND = ".交换 功法"
+EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
 
 
 # =====================================================================
@@ -33,43 +34,71 @@ def _normalized_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _token_mentioned(text, token):
+    """判断文本是否明确提到某个用户名/别名。"""
+    token = str(token or "").lower().lstrip("@").strip()
+    if not token:
+        return False
+    lower_text = (text or "").lower()
+    return (
+        f"@{token}" in lower_text
+        or f"【{token}】" in lower_text
+        or re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])", lower_text)
+    )
+
+
 def _mentions_self(actor, msg, text):
     """
     判断消息是否提到了本账号或下属的化身。
-    如果提到主号（通过 username 或 ID），返回 "main"。
+    如果提到主号（通过 username 或 ID），返回 "主魂"。
     如果提到化身，返回化身名称。
     否则返回 False。
     """
     me = getattr(actor, "my_info", None)
-    lower_text = (text or "").lower()
+    text = text or ""
+    lower_text = text.lower()
     
     # 1. 检查是否提到了化身的真实名字
     avatars = getattr(actor, "avatars", [])
     for avatar in avatars:
-        if avatar in (text or ""):
+        if avatar and (avatar in text or f"【{str(avatar).lower()}】" in lower_text):
             return avatar
 
-    # 2. 检查是否提到了化身的 username（如 @hajiimiii）
+    # 2. 检查是否提到了化身的 username（如 @hajiimiii / 【hajiimiii】）
     avatar_usernames = getattr(actor, "avatar_usernames", {})
     for uname, avatar in avatar_usernames.items():
-        if f"@{uname.lower()}" in lower_text:
+        if _token_mentioned(text, uname):
             return avatar
+
+    # 3. 检查显式身份用户名映射（主魂和后续可能补充的化身别名）
+    identity_usernames = getattr(actor, "identity_usernames", {}) or {}
+    if isinstance(identity_usernames, dict):
+        for identity, values in identity_usernames.items():
+            if isinstance(values, str):
+                values = [values]
+            for value in values or []:
+                if _token_mentioned(text, value):
+                    return str(identity or "").strip() or "主魂"
 
     if not me:
         return False
 
-    lower_text = (text or "").lower()
     username = (getattr(me, "username", "") or "").lower().lstrip("@")
-    if username and f"@{username}" in lower_text:
-        return "main"
+    if _token_mentioned(text, username):
+        return "主魂"
 
     my_id = getattr(me, "id", None)
     if my_id:
         for entity in getattr(msg, "entities", None) or []:
             if getattr(entity, "user_id", None) == my_id:
-                return "main"
+                return "主魂"
 
     return False
+
+
+def exchange_command_for_identity(identity):
+    """三主魂换功法，所有化身换法宝。"""
+    return EXCHANGE_MAIN_COMMAND if (identity or "主魂") == "主魂" else EXCHANGE_AVATAR_COMMAND
 
 
 # =====================================================================
@@ -100,9 +129,9 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     交换功法/法宝的自动回复处理。
 
     触发条件：游戏机器人消息中包含".交换"关键词且提到了本账号。
-    行为：自动发送相应的指令进行交换。
-      - 星宫/万灵宗：回复 ".交换 法宝"
-      - 凌霄宫：回复 ".交换 功法"
+    行为：按执行身份发送相应指令。
+      - 三个主魂：回复 ".交换 功法"
+      - 九个分身：回复 ".交换 法宝"
 
     通过 seen_ids 去重，避免对同一条消息重复回复。
     seen_ids 最多保留 300 条，超出时裁剪到最近 150 条。
@@ -131,42 +160,28 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     if len(seen_ids) > 300:
         actor.exchange_auto_reply_seen_ids = set(list(seen_ids)[-150:])
 
-    # 动态决定自动回复的指令
-    sect = getattr(actor, "sect_name", "")
-    cmd = ".交换 法宝" if sect in ["星宫", "万灵宗"] else ".交换 功法"
+    identity = "主魂" if identity == "main" else identity
+    cmd = exchange_command_for_identity(identity)
 
     try:
         # 主人指令防封安全防线：增加 1 分钟左右的随机延迟，模拟真人行为防封
         import random
         delay = random.randint(60, 75)
-        _logger(actor).info(f"Auto exchange reply triggered for {identity} (msg {msg.id}). Waiting {delay}s for safety...")
+        _logger(actor).info(
+            f"Auto exchange reply triggered for {identity}: {cmd} "
+            f"(msg {msg.id}). Waiting {delay}s for safety..."
+        )
         await asyncio.sleep(delay)
 
-        # 指令守卫：检测是否可以发送此指令（频率限制）
-        if not command_send_allowed(actor, cmd, _logger(actor)):
-            return True
-        remember_script_send_intent(actor, cmd)
-        
-        # 发送指令，并引用原始消息作为回复
-        if identity != "main" and hasattr(actor, "send_and_wait_feedback_identity"):
-            # 如果是化身且支持带身份发送，则通过化身管线发送
-            sent = await actor.send_and_wait_feedback_identity(
-                identity, cmd, timeout=30, reply_to=msg.id, return_msg=True
+        if hasattr(actor, "send_and_wait_feedback_identity"):
+            await actor.send_and_wait_feedback_identity(
+                identity, cmd, timeout=45, reply_to=msg.id
             )
-            # send_and_wait_feedback_identity 不一定会返回 sent message 对象，所以这里需要安全处理
-            # 但我们在上一部加了 return_msg 支持（或者通过_send_and_wait_feedback_raw）
-            # 因为这里需要记录 sent.id，如果返回的是字符串，则无法记录
-            # 退化处理：如果是字符串，则无法直接 auto_delete 和 follow_up
-            if sent and hasattr(sent, "id"):
-                remember_script_sent_message(actor, sent)
-                schedule_command_auto_delete(actor, sent, text=cmd, logger=_logger(actor))
-                sent_ids = getattr(actor, "auto_reply_sent_ids", None)
-                if sent_ids is None:
-                    sent_ids = set()
-                    actor.auto_reply_sent_ids = sent_ids
-                sent_ids.add(sent.id)
         else:
-            # 原本的直接发送逻辑
+            # 兼容没有身份管线的旧脚本。
+            if not command_send_allowed(actor, cmd, _logger(actor)):
+                return True
+            remember_script_send_intent(actor, cmd)
             sent = await actor.client.send_message(
                 actor.target_chat_id,
                 cmd,

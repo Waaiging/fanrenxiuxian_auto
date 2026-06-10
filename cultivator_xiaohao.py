@@ -3866,6 +3866,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
             if log_manual_outgoing_if_needed(self, msg, text=text): return
             if is_auto_reply_followup(self, msg, sender=sender): return
+            if await maybe_auto_reply_exchange(self, event, text=text, sender=sender): return
 
             is_matched = False
             # 1. 回复匹配（最优先）
