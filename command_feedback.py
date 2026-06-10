@@ -15,7 +15,9 @@ import time
 
 from log_utils import (
     cap_command_retries,          # 限制最大重试次数
+    command_response_family,      # 指令回复类型
     command_send_allowed,         # 指令守卫：检测发送频率
+    is_passive_settlement_response, # 被动结算会截断任意指令回复
     log_incoming_message,         # 记录收到的消息到日志
     record_bot_no_response,       # 记录机器人无响应事件
     record_bot_response,          # 记录机器人有响应事件
@@ -166,6 +168,17 @@ async def send_and_wait_feedback_common(
                 record_cultivation_delta_from_text(
                     actor, resp_text, identity=_identity or "主魂", logger=logger, source=message, msg=final_resp_msg
                 )
+                if is_passive_settlement_response(resp_text):
+                    family = command_response_family(message)
+                    if family not in {"meditation", ".元婴出窍"}:
+                        logger.info(
+                            f"[DEBUG-FEEDBACK] [{message}] passive settlement consumed; "
+                            "returning empty response so command logic will not record success."
+                        )
+                        resp_text = ""
+                        final_resp_msg = None
+                        final_sent_msg = None
+                        matched_feedback = False
                 break
             except asyncio.TimeoutError:
                 retries += 1

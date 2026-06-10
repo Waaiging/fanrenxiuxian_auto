@@ -92,6 +92,7 @@ from log_utils import (
     is_deep_meditation_settlement_response, # 判断是否为"闭关结算"的回复
     is_game_bot_sender,        # 判断消息发送者是否为游戏机器人
     is_not_deep_meditation_response,        # 判断是否为"未在闭关"的回复
+    is_yuanying_out_settlement_response,    # 判断元婴/元神归窍结算
     log_edited_message_if_needed,           # 记录编辑过的消息
     log_incoming_message,      # 记录收到的消息
     is_reply_to_manual_command,              # 检查是否为手动指令回复
@@ -1773,6 +1774,18 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     # 元婴出窍响应处理
     # ------------------------------------------------------------------
 
+    def record_yuanying_out_settlement_response(self, resp, source="passive"):
+        """记录元婴/元神到期归窍结算，并安排立即重新出窍。"""
+        if not is_yuanying_out_settlement_response(resp):
+            return False
+        now = now_str()
+        self.state["last_yuanying_return_time"] = now
+        self.state["next_yuanying_out_time"] = ""
+        self.state["yuanying_out_active"] = False
+        self.state["yuanying_out_end_time"] = ""
+        log.info(f".元婴出窍: passive return settlement detected ({source}); retry start immediately.")
+        return True
+
     def record_yuanying_out_start_response(self, resp):
         """
         解析元婴出窍的回复并更新状态。
@@ -1793,6 +1806,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if not resp:
             self.state["next_yuanying_out_time"] = add_seconds_str(now_str(), 600)
             log.warning(f".元婴出窍: response missing; retry at {self.state['next_yuanying_out_time']}.")
+            return False
+
+        if self.record_yuanying_out_settlement_response(resp, source=".元婴出窍 response"):
             return False
 
         # 冷却中
@@ -3024,13 +3040,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         now = now_str()
 
+        if self.record_yuanying_out_settlement_response(text, source=f"passive {avatar}"):
+            self.save_state()
+
         # ---- 闭关相关（主魂+化身） ----
-        # 强行出关 / 出关成功 → 清除深度闭关状态
-        # "功成圆满" 会出现在 ".查看闭关" 正常回复中（"即可功成圆满"），必须排除仍在闭关的情况。
-        _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"]) or (
-            "功成圆满" in text and "预计还需" not in text and "还需" not in text and "正在" not in text
-        )
-        if _is_real_exit:
+        # 强行出关 / 明确闭关结算 → 清除深度闭关状态
+        _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"])
+        _is_deep_settlement = is_deep_meditation_settlement_response(text)
+        if _is_real_exit or _is_deep_settlement:
             if avatar == "主魂":
                 self.state["in_deep_meditation"] = False
                 self.state["deep_meditation_end_time"] = ""
@@ -3043,7 +3060,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         # 深度闭关中 / 预计还需 → 更新深度闭关结束时间
         elif any(k in text for k in ["深度闭关", "预计还需", "闭关修炼"]):
             is_ongoing = any(k in text for k in ["预计还需", "还需"])
-            if any(k in text for k in ["未处于深度闭关", "并未处于深度闭关", "结算", "归位"]) or ("功成圆满" in text and not is_ongoing):
+            if is_not_deep_meditation_response(text) or is_deep_meditation_settlement_response(text):
                 if avatar == "主魂":
                     self.state["in_deep_meditation"] = False
                     self.state["deep_meditation_end_time"] = ""
@@ -3526,6 +3543,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             await self.startup_done.wait()
             today = datetime.now().strftime("%Y-%m-%d")
             a_state = self.get_avatar_state(avatar)
+            if self.avatar_meditation_needs_attention(avatar):
+                log.info(f"Avatar [{avatar}] tower skipped: meditation needs restart first.")
+                await asyncio.sleep(60)
+                continue
             if a_state.get("last_tower_date") == today:
                 await asyncio.sleep(scheduler_sleep_seconds(((datetime.now()+timedelta(days=1)).replace(hour=0,minute=0,second=0)-datetime.now()).total_seconds(), minimum=60))
                 continue
@@ -3536,7 +3557,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if now.hour == 23 and now.minute < 30:
                 await asyncio.sleep(random.randint(0,1800))
             resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-            if "修为不足" in (getattr(resp,"text","") if hasattr(resp,"text") else ""):
+            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+            if not resp_text:
+                log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
+                await asyncio.sleep(300)
+                continue
+            if "修为不足" in resp_text:
                 async def rt(): return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
                 await self.handle_修为不足(avatar, rt, cooldown_key="last_tower_date")
             self.set_avatar_state(avatar, "last_tower_date", today)
@@ -3557,21 +3583,39 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     features = self.avatar_features.get(avatar, {})
                     log.info(f"Avatar [{avatar}] sequential cycle start")
                     try:
+                        # 被动结算可能由任意指令触发；一旦检测到闭关待续，先把闭关链路续上。
+                        await self._avatar_meditation_check(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            log.info(f"Avatar [{avatar}] still needs meditation attention; skipping other avatar tasks this cycle.")
+                            continue
                         # 0. 每日点卯
                         if features.get("daily_checkin"): await self._avatar_daily_checkin(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            await self._avatar_meditation_check(avatar)
+                            continue
                         # 0.1 无咎子每日观命/定命
                         if features.get("destiny"): await self._avatar_destiny_check(avatar)
-                        # 1. 闭关
-                        await self._avatar_meditation_check(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            await self._avatar_meditation_check(avatar)
+                            continue
                         # 2. 野外历练由独立循环负责，避免被闭关/侍妾/阵法长流程拖慢。
                         # 3. 阵法 (星宫)
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg:
                             await self._avatar_assist_formation(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            await self._avatar_meditation_check(avatar)
+                            continue
                         # 4. 闯塔
                         if features.get("tower"): await self._avatar_tower_check(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            await self._avatar_meditation_check(avatar)
+                            continue
                         # 5. 灵树灌溉
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
+                        if self.avatar_meditation_needs_attention(avatar):
+                            await self._avatar_meditation_check(avatar)
+                            continue
                         # 5. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
                         if features.get("dream_map") or features.get("heart_trial"):
                             await self.execute_avatar_concubine_chain(avatar)
@@ -3848,7 +3892,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if self.get_avatar_state(avatar).get("last_tower_date") == today: return
         if datetime.now().hour < 23: return
         resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-        if "修为不足" in (getattr(resp,"text","") if hasattr(resp,"text") else ""):
+        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+        if not resp_text:
+            log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
+            return
+        if "修为不足" in resp_text:
             async def rt(): return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
             await self.handle_修为不足(avatar, rt, cooldown_key="last_tower_date")
         self.set_avatar_state(avatar, "last_tower_date", today)
@@ -5723,9 +5771,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     async def maybe_run_avatar_star_cycle(self, avatar):
             if avatar not in STAR_ATTRACTION_AVATARS:
                 return
+            if self.avatar_meditation_needs_attention(avatar):
+                log.info(f"Avatar [{avatar}] star cycle skipped: meditation needs restart first.")
+                return
 
             async with AtomicTaskContext(self, f"AvatarStarAttraction-{avatar}"):
                 for _ in range(5):
+                    if self.avatar_meditation_needs_attention(avatar):
+                        log.info(f"Avatar [{avatar}] star cycle interrupted: meditation needs restart first.")
+                        return
                     state = self.get_avatar_state(avatar)
                     retry_time = state.get("star_attraction_retry_time", "")
                     if retry_time and is_future(retry_time):
@@ -5794,6 +5848,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
     def next_avatar_star_wait_seconds(self, avatar):
             state = self.get_avatar_state(avatar)
+            if self.avatar_meditation_needs_attention(avatar):
+                return 60
             check_time = state.get("next_star_check_time", "")
             if state.get("star_observatory_needs_refresh") and (not check_time or not is_future(check_time)):
                 return 0

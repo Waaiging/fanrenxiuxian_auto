@@ -490,6 +490,8 @@ def feedback_response_matches_command(command, text):
     clean = str(text or "").replace("**", "")
     if not expected or not clean:
         return False
+    if is_passive_settlement_response(clean):
+        return True
 
     if expected == "switch":
         cmd = str(command or "").strip()
@@ -1013,7 +1015,39 @@ def is_deep_meditation_settlement_response(text):
         "神魂将自行吐纳",
     ]):
         return False
-    return any(k in clean for k in ["神魂", "归位", "总结", "功成圆满"])
+    if any(k in compact for k in [
+        "深度闭关总结",
+        "闭关总结",
+        "闭关结算",
+        "闭关结束",
+    ]):
+        return True
+    if "功成圆满" in clean and any(k in clean for k in ["神魂", "归位", "闭关"]):
+        return True
+    if "神魂" in clean and "归位" in clean and any(k in clean for k in ["功成圆满", "闭关", "总结"]):
+        return True
+    if "清点所得" in clean and any(k in clean for k in ["闭关", "神魂", "修为"]):
+        return True
+    return False
+
+
+def is_yuanying_out_settlement_response(text):
+    """判断回复是否表示元婴/元神到期归窍结算。"""
+    clean = str(text or "").replace("**", "")
+    compact = clean.replace(" ", "")
+    if any(k in compact for k in ["尚未凝聚元婴", "无法施展此术"]):
+        return False
+    if any(k in clean for k in ["元神归窍总结", "元婴归窍总结", "元神回响"]):
+        return True
+    return (
+        "元婴" in clean
+        and any(k in clean for k in ["神游归来", "清点收获", "归窍总结", "带回了以下收获"])
+    )
+
+
+def is_passive_settlement_response(text):
+    """任何指令都可能被到期结算截断，统一识别这类被动结算。"""
+    return is_yuanying_out_settlement_response(text) or is_deep_meditation_settlement_response(text)
 
 
 def is_deep_meditation_ongoing_response(text):
