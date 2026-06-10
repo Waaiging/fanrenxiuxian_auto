@@ -161,7 +161,6 @@ STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # �
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                 # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1                  # 改换星移只发 1 次（晚发策略不需要重试）
 STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS = 3       # 重复间隔（虽然只发 1 次，但必须定义否则 schedule_star_shift 会 NameError）
-STAR_GAZING_OPPORTUNITY_START_HOUR = 1              # 凌晨 1:00 才开始监听显化消息，避免前一天延迟消息在 0:00~1:00 误触发
 STAR_GAZING_DAILY_FALLBACK_HOUR = 23                # 每日备用观星时间：23:59（当天未观星时的兜底）
 STAR_GAZING_DAILY_FALLBACK_MINUTE = 59
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
@@ -1786,6 +1785,30 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
         return self.state.get("last_gazing_date") == date_str
 
+    def star_gazing_schedule_plan(self, now, manifest_dt):
+        """计算本轮显化的观星发送时间和应占用的观星日期。"""
+        current_manifest_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
+        current_manifest_dt = now.replace(hour=current_manifest_hour, minute=0, second=0, microsecond=0)
+        window_active_until = current_manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+
+        if current_manifest_dt == manifest_dt and now <= window_active_until:
+            send_dt = now + timedelta(seconds=3)
+            immediate_shift = True
+        else:
+            send_dt = manifest_dt - timedelta(minutes=1)
+            immediate_shift = False
+            if send_dt <= now:
+                send_dt = now + timedelta(seconds=3)
+                immediate_shift = now <= manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+
+        gazing_date = send_dt.strftime("%Y-%m-%d")
+        if send_dt.date() < manifest_dt.date() and self.star_gazing_sent_on_date(gazing_date):
+            send_dt = max(manifest_dt + timedelta(seconds=3), now + timedelta(seconds=3))
+            immediate_shift = True
+            gazing_date = send_dt.strftime("%Y-%m-%d")
+
+        return send_dt, immediate_shift, gazing_date
+
     def star_gazing_send_dt(self, target_dt):
         """
         计算发送 .观星 的时间：在星盘显现前 STAR_GAZING_COMMAND_LEAD_SECONDS(30秒) 发送。
@@ -2042,7 +2065,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
     # ============================================================
 
     @safe_bg_task
-    async def schedule_star_gazing_simple(self, send_dt, immediate_shift=False, avatar=None, manifest_dt=None):
+    async def schedule_star_gazing_simple(self, send_dt, immediate_shift=False, avatar=None, manifest_dt=None, gazing_date=None):
         """
         在指定时间发送 .观星，然后根据结果决定是否触发 .改换星移。
         这是简化版调度，用于显化事件触发的情况。
@@ -2073,7 +2096,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         self.active_atomic_task = asyncio.current_task()
         log.info(f"🔒 [ATOMIC LOCK] Acquired by StarGazing-{avatar or '主魂'}")
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = gazing_date or datetime.now().strftime("%Y-%m-%d")
             if avatar:
                 # 化身模式：检查该化身今天是否已观星
                 if self.get_avatar_state(avatar).get("last_gazing_date") == today:
@@ -2156,10 +2179,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 if immediate_shift:
                     # ---- 当前窗口活跃：计算发送 .改换星移 的准确时间 ----
                     command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
-                    current_manifest_hour = (datetime.now().hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-                    current_manifest_dt = datetime.now().replace(
-                        hour=current_manifest_hour, minute=0, second=0, microsecond=0
-                    )
+                    current_manifest_dt = manifest_dt
+                    if current_manifest_dt is None:
+                        current_manifest_hour = (datetime.now().hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
+                        current_manifest_dt = datetime.now().replace(
+                            hour=current_manifest_hour, minute=0, second=0, microsecond=0
+                        )
                     shift_dt = star_gazing_shift_dt(current_manifest_dt)
                     
                     now2 = datetime.now()
@@ -2210,7 +2235,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         self.save_state()
                 else:
                     # ---- 常规模式：排期到下一个显化窗口 ----
-                    target_dt = self.next_star_manifest_dt(datetime.now())
+                    target_dt = manifest_dt or self.next_star_manifest_dt(datetime.now())
                     target_day = target_dt.strftime("%Y-%m-%d")
                     if avatar:
                         if self.get_avatar_state(avatar).get("last_star_shift_date") != target_day:
@@ -2218,7 +2243,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                 f"Star gazing [{avatar}]: GOOD result; scheduling .改换星移 before {dt_to_str(target_dt)}."
                             )
                             asyncio.create_task(
-                                self.avatar_schedule_star_shift(avatar, resp_msg.id, target_dt, today)
+                                self.avatar_schedule_star_shift(avatar, resp_msg.id, target_dt, target_day)
                             )
                     else:
                         if not self.star_shift_done_today(target_day):
@@ -2230,7 +2255,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                 f"Star gazing: GOOD result; scheduling .改换星移 before {dt_to_str(target_dt)}."
                             )
                             self.star_shift_task = asyncio.create_task(
-                                self.schedule_star_shift(resp_msg.id, target_dt, today)
+                                self.schedule_star_shift(resp_msg.id, target_dt, target_day)
                             )
             else:
                 who = avatar or "主魂"
@@ -2300,13 +2325,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     self.state["pending_star_shift_target_time"] = dt_to_str(target_dt)
                     self.state["pending_star_shift_msg_id"] = resp_msg.id
                     self.save_state()
-                    gazing_date = today
                     log.info(
                         f"Star gazing fallback: GOOD result detected; "
                         f"scheduling .改换星移 before {dt_to_str(target_dt)}."
                     )
                     self.star_shift_task = asyncio.create_task(
-                        self.schedule_star_shift(resp_msg.id, target_dt, gazing_date)
+                        self.schedule_star_shift(resp_msg.id, target_dt, target_day)
                     )
                 else:
                     log.info("Star gazing fallback: GOOD result but shift already done today.")
@@ -2328,7 +2352,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
            调度 .观星 在下一个显化窗口前 1 分钟发送。
         2. 如果文本包含其他 Good 关键词（不在我们的目标列表中），
            且当前有排期中的 .观星，则取消排期以保留每日观星机会给 23:59 兜底。
-        3. 凌晨 1:00 之前忽略，避免前一天延迟消息误触发。
+           3. 跨日显化按目标显化日/实际发送日判断，避免 0 点机会被前一天记录挡掉。
 
         返回:
             True 表示消息已被处理（是 Good 显化类事件），False 表示不是。
@@ -2344,18 +2368,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             return False
 
         now = datetime.now()
-        # 凌晨 1:00 之前忽略，避免昨天延迟消息误触发
-        if now.hour < STAR_GAZING_OPPORTUNITY_START_HOUR:
-            log.info(
-                f"Star gazing: ignoring manifest message before "
-                f"{STAR_GAZING_OPPORTUNITY_START_HOUR}:00 (likely stale)."
-            )
-            return False
-
-        today = now.strftime("%Y-%m-%d")
-        if self.star_gazing_sent_on_date(today):
-            return True  # 今天已经观星了，但仍算事件已处理
-
         # 构造发送者信息用于日志
         sender_info = (
             f"@{sender.username}"
@@ -2382,8 +2394,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             else:
                 # 当前窗口已过 → 排期到下一个窗口前 1 分钟
                 manifest_dt = self.next_star_manifest_dt(now)
-                send_dt = manifest_dt - timedelta(minutes=1)
-                immediate_shift = False
+            send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
+
+            if self.star_gazing_sent_on_date(gazing_date):
+                log.info(
+                    f"Star gazing: .观星 already sent on {gazing_date}; "
+                    f"skip manifest {dt_to_str(manifest_dt)}."
+                )
+                return True
 
             async with self.star_gazing_lock:
                 manifest_key = dt_to_str(manifest_dt)
@@ -2396,9 +2414,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     )
                     return True
 
-                selected_avatar, idx = self.choose_star_gazing_avatar_for_today(today)
+                selected_avatar, idx = self.choose_star_gazing_avatar_for_today(gazing_date)
                 if not selected_avatar:
-                    log.info("观星轮换: 今天所有化身都已观星，跳过本轮显化。")
+                    log.info(f"观星轮换: {gazing_date} 所有化身都已观星，跳过本轮显化。")
                     return True
 
                 # 清除旧的排期，并安全取消已有后台任务，防止并发多次发送
@@ -2407,7 +2425,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     self.star_gazing_task.cancel()
                     log.info("Star gazing: cancelled previous pending task to avoid concurrent runs.")
 
-                self.state["pending_star_gazing_date"] = today
+                self.state["pending_star_gazing_date"] = gazing_date
                 self.state["pending_star_gazing_target_time"] = dt_to_str(send_dt)
                 self.state["pending_star_gazing_scheduled_time"] = dt_to_str(send_dt)
                 self.state["pending_star_gazing_manifest_time"] = manifest_key
@@ -2442,6 +2460,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     immediate_shift=immediate_shift,
                     avatar=selected_avatar,
                     manifest_dt=manifest_dt,
+                    gazing_date=gazing_date,
                 )
             )
             return True
@@ -3228,9 +3247,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     f"Star gazing: restoring pending shift for {pending_target}, "
                     f"reply msg {pending_msg_id}."
                 )
-                gazing_date = self.state.get("last_gazing_date") or pending_date
                 self.star_shift_task = asyncio.create_task(
-                    self.schedule_star_shift(pending_msg_id, target_dt, gazing_date)
+                    self.schedule_star_shift(pending_msg_id, target_dt, pending_date)
                 )
             else:
                 log.info(
@@ -3264,10 +3282,23 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             manifest_dt = str_to_dt(pending_manifest)
             within_active_window = bool(manifest_dt and datetime.now() <= manifest_dt + timedelta(minutes=5))
             if not (is_future(pending_gazing_send) or within_active_window):
+                expired_send = pending_gazing_send
                 pending_gazing_send = ""
+                log.info(
+                    f"Star gazing: clearing expired pending .观星 for {pending_avatar}; "
+                    f"send={expired_send}, manifest={pending_manifest}."
+                )
+                self.clear_pending_star_gazing_schedule()
+                self.clear_star_gazing_round_claim()
+                self.save_state()
         if pending_gazing_send and pending_manifest and pending_avatar:
             pending_gazing_date = pending_gazing_date or send_dt.strftime("%Y-%m-%d")
             if self.get_avatar_state(pending_avatar).get("last_gazing_date") != pending_gazing_date:
+                restore_immediate_shift = bool(
+                    manifest_dt
+                    and send_dt >= manifest_dt
+                    and send_dt <= manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+                )
                 log.info(
                     f"Star gazing: restoring pending .观星 for {pending_avatar} "
                     f"at {pending_gazing_send}, manifest {pending_manifest}."
@@ -3275,9 +3306,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 self.star_gazing_task = asyncio.create_task(
                     self.schedule_star_gazing_simple(
                         send_dt,
-                        immediate_shift=False,
+                        immediate_shift=restore_immediate_shift,
                         avatar=pending_avatar,
                         manifest_dt=manifest_dt,
+                        gazing_date=pending_gazing_date,
                     )
                 )
             else:

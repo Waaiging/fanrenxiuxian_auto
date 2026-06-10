@@ -99,7 +99,6 @@ STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # �
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59               # 即时模式活跃窗口为 59 秒
-STAR_GAZING_OPPORTUNITY_START_HOUR = 1               # 凌晨 1:00 后才开始监听好兆头
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
 STAR_GAZING_ROTATING_AVATARS = ["素心子", "缘生子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
 STAR_ATTRACTION_TARGET = "天雷星"
@@ -4020,6 +4019,24 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             candidate += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
         return candidate
 
+    def star_gazing_schedule_plan(self, now, manifest_dt):
+        """计算本轮显化的观星发送时间和应占用的观星日期。"""
+        current_manifest_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
+        current_manifest_dt = now.replace(hour=current_manifest_hour, minute=0, second=0, microsecond=0)
+        window_active_until = current_manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+
+        if current_manifest_dt == manifest_dt and now <= window_active_until:
+            send_dt = now + timedelta(seconds=3)
+            immediate_shift = True
+        else:
+            send_dt = manifest_dt - timedelta(minutes=1)
+            immediate_shift = False
+            if send_dt <= now:
+                send_dt = now + timedelta(seconds=3)
+                immediate_shift = now <= manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+
+        return send_dt, immediate_shift, send_dt.strftime("%Y-%m-%d")
+
     def clear_star_gazing_round_claim(self):
         """清除账号级观星轮次占用。"""
         self.state["star_gazing_claimed_manifest_time"] = ""
@@ -4079,6 +4096,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 immediate_shift=immediate_shift,
                 manifest_dt=manifest_dt,
                 identity_retry=True,
+                gazing_date=today,
             )
         )
 
@@ -4118,12 +4136,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 self.active_atomic_task = None
                 log.info(f"🔓 [ATOMIC LOCK] Released by AvatarStarShift-{avatar}")
 
-    async def avatar_schedule_star_gazing_simple(self, avatar, send_dt, immediate_shift=False, manifest_dt=None, identity_retry=False):
+    async def avatar_schedule_star_gazing_simple(self, avatar, send_dt, immediate_shift=False, manifest_dt=None, identity_retry=False, gazing_date=None):
         now = datetime.now()
         wait_sec = (send_dt - now).total_seconds()
         if wait_sec > 0: await asyncio.sleep(wait_sec)
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = gazing_date or datetime.now().strftime("%Y-%m-%d")
         if self.get_avatar_state(avatar).get("last_gazing_date") == today: return
         if manifest_dt and not self.star_gazing_claim_matches(avatar, manifest_dt):
             claimed = self.state.get("star_gazing_claimed_avatar", "")
@@ -4194,10 +4212,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
             if self.star_gazing_good_opportunity(resp_text):
                 if immediate_shift:
-                    current_manifest_hour = (datetime.now().hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-                    current_manifest_dt = datetime.now().replace(
-                        hour=current_manifest_hour, minute=0, second=0, microsecond=0
-                    )
+                    current_manifest_dt = manifest_dt
+                    if current_manifest_dt is None:
+                        current_manifest_hour = (datetime.now().hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
+                        current_manifest_dt = datetime.now().replace(
+                            hour=current_manifest_hour, minute=0, second=0, microsecond=0
+                        )
                     shift_dt = star_gazing_shift_dt(current_manifest_dt)
 
                     now2 = datetime.now()
@@ -4231,11 +4251,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         self.set_avatar_state(avatar, "last_star_shift_date", today)
                         self.set_avatar_state(avatar, "last_star_shift_time", now_str())
                 else:
-                    target_dt = self.next_star_manifest_dt(datetime.now())
+                    target_dt = manifest_dt or self.next_star_manifest_dt(datetime.now())
                     target_day = target_dt.strftime("%Y-%m-%d")
                     if self.get_avatar_state(avatar).get("last_star_shift_date") != target_day:
                         log.info(f"Avatar {avatar} Star gazing: GOOD result; scheduling .改换星移 before {dt_to_str(target_dt)}.")
-                        asyncio.create_task(self.avatar_schedule_star_shift(avatar, resp_msg.id, target_dt, today))
+                        asyncio.create_task(self.avatar_schedule_star_shift(avatar, resp_msg.id, target_dt, target_day))
             else:
                 log.info(f"Avatar {avatar} Star gazing: .观星 result does not contain GOOD keyword; skipping .改换星移.")
         finally:
@@ -4251,11 +4271,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if not sender or not is_game_bot_sender(self, sender): return
 
         now = datetime.now()
-        if now.hour < STAR_GAZING_OPPORTUNITY_START_HOUR:
-            log.info(f"Avatar Star gazing: ignoring manifest message before {STAR_GAZING_OPPORTUNITY_START_HOUR}:00 (likely stale).")
-            return
-
-        today = now.strftime("%Y-%m-%d")
         current_manifest_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
         current_manifest_dt = now.replace(hour=current_manifest_hour, minute=0, second=0, microsecond=0)
         window_active_until = current_manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
@@ -4263,12 +4278,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if is_our_good:
             if now <= window_active_until:
                 manifest_dt = current_manifest_dt
-                send_dt = now + timedelta(seconds=3)
-                immediate_shift = True
             else:
                 manifest_dt = self.next_star_manifest_dt(now)
-                send_dt = manifest_dt - timedelta(minutes=1)
-                immediate_shift = False
+            send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
 
             async with self.star_gazing_lock:
                 manifest_key = dt_to_str(manifest_dt)
@@ -4284,18 +4296,30 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 selected_avatar = avatar
                 idx = 0
                 if not selected_avatar:
-                    selected_avatar, idx = self.choose_star_gazing_avatar_for_today(today)
+                    selected_avatar, idx = self.choose_star_gazing_avatar_for_today(gazing_date)
+                if not selected_avatar and send_dt.date() < manifest_dt.date():
+                    send_dt = max(manifest_dt + timedelta(seconds=3), now + timedelta(seconds=3))
+                    immediate_shift = True
+                    gazing_date = send_dt.strftime("%Y-%m-%d")
+                    selected_avatar, idx = self.choose_star_gazing_avatar_for_today(gazing_date)
                 if not selected_avatar:
-                    log.info("Avatar Star gazing: all rotating avatars already observed today; skipping.")
+                    log.info(f"Avatar Star gazing: all rotating avatars already observed on {gazing_date}; skipping.")
                     return
-                if self.get_avatar_state(selected_avatar).get("last_gazing_date") == today:
+                if (
+                    self.get_avatar_state(selected_avatar).get("last_gazing_date") == gazing_date
+                    and send_dt.date() < manifest_dt.date()
+                ):
+                    send_dt = max(manifest_dt + timedelta(seconds=3), now + timedelta(seconds=3))
+                    immediate_shift = True
+                    gazing_date = send_dt.strftime("%Y-%m-%d")
+                if self.get_avatar_state(selected_avatar).get("last_gazing_date") == gazing_date:
                     return
 
                 self.state["star_gazing_claimed_manifest_time"] = manifest_key
                 self.state["star_gazing_claimed_avatar"] = selected_avatar
                 self.state["pending_star_gazing_manifest_time"] = manifest_key
                 self.state["pending_star_gazing_fate_type"] = self.star_gazing_pending_fate_type(text)
-                self.set_avatar_state(selected_avatar, "pending_star_gazing_date", today)
+                self.set_avatar_state(selected_avatar, "pending_star_gazing_date", gazing_date)
                 self.set_avatar_state(selected_avatar, "pending_star_gazing_target_time", dt_to_str(send_dt))
                 self.set_avatar_state(selected_avatar, "next_star_gazing_time", dt_to_str(send_dt))
                 self.save_state()
@@ -4322,6 +4346,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     send_dt,
                     immediate_shift=immediate_shift,
                     manifest_dt=manifest_dt,
+                    gazing_date=gazing_date,
                 )
             )
         else:
@@ -4366,6 +4391,16 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         manifest_dt_for_restore = str_to_dt(manifest_text) if manifest_text else None
         within_active_window = bool(manifest_dt_for_restore and datetime.now() <= manifest_dt_for_restore + timedelta(minutes=5))
         if not pending_send or (not is_future(pending_send) and not within_active_window):
+            if pending_send:
+                log.info(
+                    f"Avatar {avatar} Star gazing: clearing expired pending .观星; "
+                    f"send={pending_send}, manifest={manifest_text}."
+                )
+            self.set_avatar_state(avatar, "pending_star_gazing_date", "")
+            self.set_avatar_state(avatar, "pending_star_gazing_target_time", "")
+            self.set_avatar_state(avatar, "next_star_gazing_time", "")
+            self.clear_star_gazing_round_claim()
+            self.save_state()
             return
 
         send_dt = str_to_dt(pending_send)
@@ -4387,12 +4422,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             f"Avatar {avatar} Star gazing: restoring pending .观星 at "
             f"{pending_send}, manifest {manifest_text}."
         )
+        restore_immediate_shift = bool(
+            manifest_dt
+            and send_dt >= manifest_dt
+            and send_dt <= manifest_dt + timedelta(seconds=STAR_GAZING_ACTIVE_WINDOW_SECONDS)
+        )
         asyncio.create_task(
             self.avatar_schedule_star_gazing_simple(
                 avatar,
                 send_dt,
-                immediate_shift=False,
+                immediate_shift=restore_immediate_shift,
                 manifest_dt=manifest_dt,
+                gazing_date=pending_date,
             )
         )
 
