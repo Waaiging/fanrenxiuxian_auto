@@ -40,7 +40,6 @@ _vps_state_before_*/
 # Scratch/one-off maintenance files
 check_sessions.py
 clean_log.py
-clear_history.py
 extracted_methods.py
 linux_manager.py
 manager.py

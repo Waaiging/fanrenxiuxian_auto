@@ -20,6 +20,7 @@ import sys
 import threading
 import uuid
 import re
+import signal
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
@@ -1673,12 +1674,41 @@ def get_process_status(account):
             ps_cmd = f'powershell -Command "Get-WmiObject Win32_Process -Filter \\"name=\'python.exe\' or name=\'pythonw.exe\'\\" | Where-Object {{$_.CommandLine -match \'{script}\'}}"'
             return bool(subprocess.check_output(ps_cmd, shell=True, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore').strip())
         else:
-            result = subprocess.run(["pgrep", "-af", script], capture_output=True, text=True)
-            if result.returncode != 0: return False
-            for line in result.stdout.splitlines():
-                if script in line and "python" in line and "tmux " not in line: return True
-            return False
+            return bool(account_process_pids(account))
     except: return False
+
+def account_process_pids(account):
+    """Return live python process ids for one account script."""
+    script = SCRIPT_MAP.get(account)
+    if not script:
+        return []
+    result = subprocess.run(["pgrep", "-af", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    pids = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        pid_text, cmd = parts
+        if script not in cmd or "python" not in cmd or "tmux " in cmd:
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        pids.append(pid)
+    return pids
+
+def signal_account_processes(account, sig):
+    """Signal only the python process for the selected account script."""
+    for pid in account_process_pids(account):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 def start_account(account):
     """启动账号脚本"""
@@ -1698,6 +1728,10 @@ def stop_account(account):
         subprocess.run(ps_cmd, shell=True)
     else:
         subprocess.run(["tmux", "send-keys", "-t", f"xiuxian:{idx}", "C-c"])
+        if not wait_for_status(account, False, timeout=6):
+            signal_account_processes(account, signal.SIGINT)
+        if not wait_for_status(account, False, timeout=6):
+            signal_account_processes(account, signal.SIGTERM)
 
 def wait_for_status(account, expected_alive, timeout=12):
     """等待账号进程达到预期状态"""
@@ -1716,7 +1750,11 @@ def clear_account_history(account):
     """清理由账号脚本发送的消息"""
     print(f"[clear] requested for {account}", flush=True)
     was_alive = get_process_status(account)
-    if was_alive: stop_account(account); wait_for_status(account, False)
+    if was_alive:
+        stop_account(account)
+        if not wait_for_status(account, False, timeout=20):
+            return {"success": False, "msg": f"{account_display_name(account)}停止超时，清屏未执行，避免 session 数据库锁。"}
+        time.sleep(1.5)
     script_path = os.path.join(CONFIG_DIR, "clear_history.py")
     try:
         result = subprocess.run([sys.executable, script_path, account, "--older-than-minutes", "35"], cwd=CONFIG_DIR, capture_output=True, text=True, timeout=900)
