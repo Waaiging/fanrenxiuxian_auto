@@ -50,6 +50,13 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
         )
     return credentials.username
 
+def safe_console_print(*args, **kwargs):
+    """Best-effort console output for background jobs."""
+    try:
+        print(*args, **kwargs)
+    except (BrokenPipeError, OSError):
+        pass
+
 # =====================================================================
 # 路径与常量配置
 # =====================================================================
@@ -1717,7 +1724,8 @@ def start_account(account):
         subprocess.Popen(["pythonw", script], cwd=CONFIG_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
     else:
-        cmd = f"bash -c 'cd ~/deploy && source ~/deploy/venv/bin/activate && python3 {script}'"
+        deploy_dir = os.path.expanduser("~/deploy")
+        cmd = f"bash -lc 'cd {deploy_dir} && source {deploy_dir}/venv/bin/activate && exec python3 {script}'"
         subprocess.run(["tmux", "respawn-window", "-k", "-t", f"xiuxian:{idx}", cmd])
 
 def stop_account(account):
@@ -1748,7 +1756,7 @@ def wait_for_status(account, expected_alive, timeout=12):
 
 def clear_account_history(account):
     """清理由账号脚本发送的消息"""
-    print(f"[clear] requested for {account}", flush=True)
+    safe_console_print(f"[clear] requested for {account}", flush=True)
     was_alive = get_process_status(account)
     if was_alive:
         stop_account(account)
@@ -1761,7 +1769,7 @@ def clear_account_history(account):
     finally:
         if was_alive: start_account(account); wait_for_status(account, True)
     output = (result.stdout or result.stderr or "").strip()
-    print(f"[clear] {account}: rc={result.returncode}, {output}", flush=True)
+    safe_console_print(f"[clear] {account}: rc={result.returncode}, {output}", flush=True)
     if result.returncode != 0: return {"success": False, "msg": output or "清屏失败"}
     return {"success": True, "msg": output or "清屏完成"}
 
