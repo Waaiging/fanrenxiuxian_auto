@@ -2038,9 +2038,44 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     def sorted_beasts_by_power(self, cache=None):
         """按战力、经验、名称稳定排序灵兽缓存。"""
-        beasts = list(cache if cache is not None else self.state.get("beasts_cache", []))
+        beasts = [
+            beast for beast in list(cache if cache is not None else self.state.get("beasts_cache", []))
+            if self.is_valid_beast_record(beast)
+        ]
         beasts.sort(key=lambda x: (x.get('power', 0), x.get('exp', 0), x.get('full_name', '')), reverse=True)
         return beasts
+
+    def is_valid_beast_name(self, name):
+        """过滤消息标题/道具名等被误解析成灵兽名的文本。"""
+        clean = str(name or "").replace("**", "").strip()
+        if not clean:
+            return False
+        if clean in {"【灵兽归来】", "灵兽归来"}:
+            return False
+        if clean.startswith("【") and clean.endswith("】") and "灵兽" in clean:
+            return False
+        if any(k in clean for k in ["伙伴们", "结算如下", "道友 @", "体力恢复"]):
+            return False
+        return True
+
+    def is_valid_beast_record(self, beast):
+        if not isinstance(beast, dict):
+            return False
+        name = beast.get("full_name", "")
+        if not self.is_valid_beast_name(name):
+            return False
+        species = str(beast.get("species") or "").strip()
+        power = beast.get("power", 0)
+        stamina = beast.get("stamina", -1)
+        try:
+            power = int(power or 0)
+        except Exception:
+            power = 0
+        try:
+            stamina = int(stamina)
+        except Exception:
+            stamina = -1
+        return bool(species and power > 0 and stamina >= 0)
 
     def beast_tier_value(self, beast):
         """解析灵兽阶位；返回 1/2/3...，无法识别返回 0。"""
@@ -3375,13 +3410,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         beasts = []
         if not text: return beasts
         clean = text.replace('（', '(').replace('）', ')').replace('**', '')
+        if "灵兽归来" in clean and "灵兽伙伴们" not in clean:
+            log.info("Beast cache parser ignored pasture-return settlement text.")
+            return beasts
+        if "灵兽伙伴们" not in clean and not re.search(r"\n-\s*[^\n]+\n\s*-\s*种类[:：]", clean):
+            log.info("Beast cache parser ignored non-roster text.")
+            return beasts
         blocks = re.split(r'\n-\s*', clean)
         for block in blocks:
             if not block.strip() or "灵兽伙伴们" in block: continue
             lines = block.strip().split('\n')
             header = lines[0]
+            if not self.is_valid_beast_name(header):
+                continue
             brackets = re.findall(r'\(([^)]+)\)', header)
             name_base = re.sub(r'\(.*?\)', '', header).replace('-', '').strip()
+            if not self.is_valid_beast_name(name_base):
+                continue
             status_words = ("出战中", "休息中", "放养中", "受伤", "重伤", "治疗中", "探险中", "偷菜中", "巡游中")
             status = "未知"
             suffix_parts = brackets
@@ -3390,11 +3435,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             suffix = " ".join(f"({b})" for b in suffix_parts)
             full_name = f"{name_base} {suffix}".strip()
             species_match = re.search(r'种类[:：]\s*([^\n]+)', block)
-            species = species_match.group(1).strip() if species_match else name_base
+            if not species_match:
+                continue
+            species = species_match.group(1).strip()
             exp_match = re.search(r'经验[:：]\s*(\d+)', block)
             power_match = re.search(r'战力[:：]\s*(\d+)', block)
             stamina_match = re.search(r'体力[:：]\s*(\d+)', block)
-            beasts.append({
+            if not power_match or not stamina_match:
+                continue
+            beast = {
                 'full_name': full_name, 'status': status,
                 'status_cd': self.parse_wait_time(block) if any(k in status for k in ["受伤", "治疗"]) else -1,
                 'species': species,
@@ -3402,7 +3451,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 'exp': int(exp_match.group(1)) if exp_match else 0,
                 'power': int(power_match.group(1)) if power_match else 0,
                 'stamina': int(stamina_match.group(1)) if stamina_match else -1,
-            })
+            }
+            if self.is_valid_beast_record(beast):
+                beasts.append(beast)
         return self.sorted_beasts_by_power(beasts)
 
     async def update_beast_cache(self):
@@ -3410,7 +3461,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         log.info("Refreshing Beast Cache...")
         resp = await self.send_and_wait_feedback(".我的灵兽")
         if resp and "灵兽" in resp:
+            if self.is_pasture_return_message(resp):
+                self.mark_pastured_beasts_returned(resp)
+                self.clear_pasture_pending()
+                self.state["last_pasture_return_time"] = now_str()
+                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 60)
+                self.save_state()
+                log.info("Beast Cache: .我的灵兽 was interrupted by pasture return; cache preserved and refresh deferred.")
+                return False
             beasts = self.parse_beasts_info(resp)
+            if not beasts:
+                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 300)
+                self.save_state()
+                log.warning("Beast Cache: response did not contain a valid beast roster; cache preserved.")
+                return False
             self.state["beasts_cache"] = beasts
             self.update_best_beast_tracking()
             self.should_stop_hunt_by_tenth_beast(beasts)
