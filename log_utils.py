@@ -12,10 +12,12 @@
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 导入使用。
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import urllib.request
 from urllib.parse import parse_qs, urlparse
@@ -32,6 +34,7 @@ COMMAND_AUTO_DELETE_SECONDS = 120           # 指令发送后 2 分钟自动删�
 MAX_COMMAND_RETRIES = 3                     # 最大重试次数
 DISABLED_AUTO_COMMANDS = {".召回侍妾"}      # 禁用的自动指令（防止误操作）
 COMMAND_CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command_controls.json")
+MESSAGE_EVENTS_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "message_events.sqlite3")
 USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 
 # 命令守卫参数
@@ -176,6 +179,18 @@ async def log_incoming_message(actor, label, text, msg=None, sender=None, logger
     if current_id != "主魂":
         text = f"[Avatar: {current_id}]\n{text or ''}"
     target_logger.info(format_in_log(label, text, sender=sender, msg=msg))
+    record_message_event(
+        actor,
+        msg,
+        text=text,
+        sender=sender,
+        event_kind="new",
+        direction="bot_in" if sender is not None and is_game_bot_sender(actor, sender) else "in",
+        identity=current_id,
+        command=command_from_log_label(label),
+        logger=target_logger,
+    )
+    record_command_response_for_reply(actor, msg, text=text, status="matched", logger=target_logger)
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id)
 
@@ -1672,6 +1687,15 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
         _identity = getattr(actor, "_manual_identity_label", None) or getattr(actor, "current_identity", "主魂")
     _label = f"manual {msg_id} | {_identity}" 
     logging.getLogger(actor.__class__.__name__).info(f"🟢 OUT [{_label}]:\\n{text}")
+    record_message_event(
+        actor,
+        msg,
+        text=text,
+        event_kind="new",
+        direction="manual_out",
+        identity=_identity,
+        command=_stripped if is_command_message_text(_stripped) else "",
+    )
     schedule_command_auto_delete(actor, msg, text=text, logger=logging.getLogger(actor.__class__.__name__))
     if not is_command_message_text(_stripped):
         return True
@@ -1697,6 +1721,14 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
     actor._manual_command_identities = {k: v for k, v in _manual_identities.items() if k in _active_manual_ids}
     if hasattr(actor, "command_avatar_map"):
         actor.command_avatar_map[msg_id] = _identity
+    record_command_sent(
+        actor,
+        msg,
+        _stripped,
+        identity=_identity,
+        source="manual",
+        reply_to=meaningful_reply_to_msg_id(actor, msg),
+    )
     record_recent_profile_command(actor, msg_id, _stripped, _identity, source="manual")
     return True
 
@@ -1784,6 +1816,422 @@ def is_reply_to_untracked_message(actor, msg):
     """
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     return bool(replied_id and not is_reply_to_tracked_command(actor, msg))
+
+
+# ---- 消息事件库 / 指令台账 ----
+
+_MESSAGE_EVENTS_SCHEMA_READY = False
+
+
+def _safe_message_int(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _message_text_hash(text):
+    return hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _message_db_connect():
+    global _MESSAGE_EVENTS_SCHEMA_READY
+    conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=2)
+    if not _MESSAGE_EVENTS_SCHEMA_READY:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                chat_id INTEGER,
+                msg_id INTEGER,
+                reply_to_msg_id INTEGER,
+                sender_id INTEGER,
+                sender_username TEXT,
+                sender_name TEXT,
+                is_out INTEGER NOT NULL DEFAULT 0,
+                is_game_bot INTEGER NOT NULL DEFAULT 0,
+                identity TEXT,
+                command TEXT,
+                text TEXT,
+                text_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(account, event_kind, chat_id, msg_id, text_hash)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS command_ledger (
+                account TEXT NOT NULL,
+                chat_id INTEGER,
+                command_msg_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                identity TEXT NOT NULL,
+                source TEXT NOT NULL,
+                reply_to_msg_id INTEGER,
+                status TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                response_msg_id INTEGER,
+                response_hash TEXT,
+                response_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(account, chat_id, command_msg_id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_msg ON message_events(account, chat_id, msg_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_reply ON message_events(account, chat_id, reply_to_msg_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_status ON command_ledger(account, status, updated_at)")
+        conn.commit()
+        _MESSAGE_EVENTS_SCHEMA_READY = True
+    return conn
+
+
+def record_message_event(
+    actor,
+    msg,
+    text=None,
+    sender=None,
+    event_kind="new",
+    direction="raw",
+    identity="",
+    command="",
+    logger=None,
+):
+    """Persist a lightweight raw Telegram event for replay/debugging."""
+    if msg is None:
+        return False
+    text_value = text if text is not None else (getattr(msg, "text", None) or "")
+    account = actor_account_key(actor) or actor.__class__.__name__
+    msg_id = _safe_message_int(_message_id(msg))
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    replied_id = _safe_message_int(meaningful_reply_to_msg_id(actor, msg))
+    sender_id = _safe_message_int(getattr(msg, "sender_id", None))
+    sender_username = (getattr(sender, "username", "") or "").strip().lstrip("@")
+    sender_name = sender_display_name(sender, msg)
+    is_out = 1 if _is_own_outgoing_sender(actor, msg) else 0
+    is_bot = 1 if (sender is not None and is_game_bot_sender(actor, sender)) else 0
+
+    if not identity:
+        identity = tracked_command_identity_for_reply(actor, msg) or ""
+    if not command:
+        command = tracked_command_text_for_reply(actor, msg) or ""
+
+    try:
+        with _message_db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO message_events (
+                    account, event_kind, direction, chat_id, msg_id, reply_to_msg_id,
+                    sender_id, sender_username, sender_name, is_out, is_game_bot,
+                    identity, command, text, text_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, event_kind, chat_id, msg_id, text_hash) DO UPDATE SET
+                    direction=CASE
+                        WHEN message_events.direction='raw' AND excluded.direction!='raw' THEN excluded.direction
+                        ELSE message_events.direction
+                    END,
+                    identity=CASE
+                        WHEN excluded.identity!='' THEN excluded.identity
+                        ELSE message_events.identity
+                    END,
+                    command=CASE
+                        WHEN excluded.command!='' THEN excluded.command
+                        ELSE message_events.command
+                    END,
+                    reply_to_msg_id=COALESCE(message_events.reply_to_msg_id, excluded.reply_to_msg_id),
+                    sender_id=COALESCE(message_events.sender_id, excluded.sender_id),
+                    sender_username=CASE
+                        WHEN excluded.sender_username!='' THEN excluded.sender_username
+                        ELSE message_events.sender_username
+                    END,
+                    sender_name=CASE
+                        WHEN excluded.sender_name!='unknown' THEN excluded.sender_name
+                        ELSE message_events.sender_name
+                    END,
+                    is_out=MAX(message_events.is_out, excluded.is_out),
+                    is_game_bot=MAX(message_events.is_game_bot, excluded.is_game_bot)
+                """,
+                (
+                    account,
+                    str(event_kind or "new"),
+                    str(direction or "raw"),
+                    chat_id,
+                    msg_id,
+                    replied_id,
+                    sender_id,
+                    sender_username,
+                    sender_name,
+                    is_out,
+                    is_bot,
+                    str(identity or ""),
+                    str(command or ""),
+                    str(text_value or ""),
+                    _message_text_hash(text_value),
+                    datetime.now().strftime(TIME_FORMAT),
+                ),
+            )
+        return True
+    except Exception as exc:
+        target_logger = logger or logging.getLogger(actor.__class__.__name__)
+        target_logger.debug(f"message event persist skipped: {exc}")
+        return False
+
+
+def record_command_sent(actor, msg, command, identity="", source="auto", reply_to=None, logger=None):
+    """Persist the authoritative command send row keyed by Telegram message id."""
+    msg_id = _safe_message_int(_message_id(msg))
+    if msg_id is None:
+        return False
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    reply_to_id = _safe_message_int(reply_to)
+    now = datetime.now().strftime(TIME_FORMAT)
+    try:
+        with _message_db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO command_ledger (
+                    account, chat_id, command_msg_id, command, identity, source,
+                    reply_to_msg_id, status, sent_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?)
+                ON CONFLICT(account, chat_id, command_msg_id) DO UPDATE SET
+                    command=excluded.command,
+                    identity=excluded.identity,
+                    source=excluded.source,
+                    reply_to_msg_id=excluded.reply_to_msg_id,
+                    status='sent',
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    account,
+                    chat_id,
+                    msg_id,
+                    str(command or "").strip(),
+                    str(identity or "主魂").strip() or "主魂",
+                    str(source or "auto"),
+                    reply_to_id,
+                    now,
+                    now,
+                ),
+            )
+        record_message_event(
+            actor,
+            msg,
+            text=command,
+            event_kind="new",
+            direction=f"{source or 'auto'}_out",
+            identity=identity or "主魂",
+            command=command,
+            logger=logger,
+        )
+        return True
+    except Exception as exc:
+        target_logger = logger or logging.getLogger(actor.__class__.__name__)
+        target_logger.debug(f"command ledger send persist skipped: {exc}")
+        return False
+
+
+def record_command_response_for_reply(actor, msg, text=None, status="matched", logger=None):
+    """Attach a bot response to the command row it replies to, if tracked."""
+    replied_id = _safe_message_int(meaningful_reply_to_msg_id(actor, msg))
+    if replied_id is None:
+        return False
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    response_id = _safe_message_int(_message_id(msg))
+    text_value = text if text is not None else (getattr(msg, "text", None) or "")
+    now = datetime.now().strftime(TIME_FORMAT)
+    try:
+        with _message_db_connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE command_ledger
+                SET status=?, response_msg_id=?, response_hash=?, response_at=?, updated_at=?
+                WHERE account=? AND chat_id IS ? AND command_msg_id=?
+                """,
+                (
+                    str(status or "matched"),
+                    response_id,
+                    _message_text_hash(text_value),
+                    now,
+                    now,
+                    account,
+                    chat_id,
+                    replied_id,
+                ),
+            )
+            if cur.rowcount <= 0 and chat_id is not None:
+                conn.execute(
+                    """
+                    UPDATE command_ledger
+                    SET status=?, response_msg_id=?, response_hash=?, response_at=?, updated_at=?
+                    WHERE account=? AND command_msg_id=?
+                    """,
+                    (
+                        str(status or "matched"),
+                        response_id,
+                        _message_text_hash(text_value),
+                        now,
+                        now,
+                        account,
+                        replied_id,
+                    ),
+                )
+        return True
+    except Exception as exc:
+        target_logger = logger or logging.getLogger(actor.__class__.__name__)
+        target_logger.debug(f"command ledger response persist skipped: {exc}")
+        return False
+
+
+def claim_message_version(actor, msg, text=None, purpose="process", ttl=600):
+    """Return True once for each (purpose, chat_id, msg_id, text_hash) version."""
+    msg_id = _safe_message_int(_message_id(msg))
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    if msg_id is None:
+        return True
+    cache = getattr(actor, "_message_version_claims", None)
+    if cache is None:
+        cache = {}
+        setattr(actor, "_message_version_claims", cache)
+    now = time.monotonic()
+    for key, expires_at in list(cache.items()):
+        if expires_at <= now:
+            cache.pop(key, None)
+    key = (str(purpose or "process"), chat_id, msg_id, _message_text_hash(text if text is not None else getattr(msg, "text", "")))
+    if key in cache:
+        return False
+    cache[key] = now + max(60, int(ttl or 600))
+    if len(cache) > 1000:
+        items = sorted(cache.items(), key=lambda item: item[1])
+        setattr(actor, "_message_version_claims", dict(items[-500:]))
+    return True
+
+
+def _feedback_candidate_accepts(candidate_fn, command, text):
+    if candidate_fn is None:
+        return True
+    try:
+        return bool(candidate_fn(command, text))
+    except Exception:
+        return False
+
+
+def _set_feedback_match(actor, pending_id, msg, text, command, identity, logger=None, label="[FEEDBACK]", reason="reply_to"):
+    evt = (getattr(actor, "feedback_events", None) or {}).get(pending_id)
+    if evt is None or evt.is_set():
+        return False
+    actor.last_feedback_text[pending_id] = text
+    actor.last_feedback_msg[pending_id] = msg
+    remember_incoming_message_context(actor, msg, command=command, identity=identity, text=text)
+    record_command_response_for_reply(actor, msg, text=text, status="matched", logger=logger)
+    evt.set()
+    if logger:
+        logger.info(f"{label} Matched [{command}] by {reason}: command_msg={pending_id}, response_msg={getattr(msg, 'id', None)}")
+    return True
+
+
+def match_pending_feedback_by_id(
+    actor,
+    pending_id,
+    msg,
+    text,
+    candidate_fn=None,
+    logger=None,
+    label="[REPLY-FEEDBACK]",
+    reason="reply_to",
+):
+    """Validate and match a bot message to one pending command id."""
+    feedback_events = getattr(actor, "feedback_events", {}) or {}
+    evt = feedback_events.get(pending_id)
+    if evt is None or evt.is_set():
+        return False
+    command = (getattr(actor, "feedback_commands", {}) or {}).get(pending_id, "")
+    identity = (getattr(actor, "feedback_identities", {}) or {}).get(
+        pending_id, getattr(actor, "current_identity", "主魂")
+    ) or "主魂"
+    clean_text = str(text or "").strip()
+    if not command:
+        return False
+    if not claim_message_version(actor, msg, clean_text, purpose=f"feedback:{pending_id}"):
+        return False
+    command_sender_id = (getattr(actor, "feedback_senders", {}) or {}).get(pending_id)
+    actual_sender_id = getattr(msg, "sender_id", None)
+    if command_sender_id is not None and actual_sender_id == command_sender_id:
+        return False
+    if clean_text == str(command or "").strip():
+        return False
+    if mentions_other_user_for_identity(actor, msg, clean_text, identity):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: targets another user for [{identity}] (msg {getattr(msg, 'id', None)}).")
+        return False
+    if _profile_command_key(command) and not profile_text_matches_identity(actor, clean_text, identity):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: profile username mismatches [{identity}] (msg {getattr(msg, 'id', None)}).")
+        return False
+    if feedback_response_conflicts(command, clean_text) and not feedback_response_matches_command(command, clean_text):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: response family conflict (msg {getattr(msg, 'id', None)}).")
+        return False
+    if feedback_response_requires_positive_match(command) and not feedback_response_matches_command(command, clean_text):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: content unrelated (msg {getattr(msg, 'id', None)}).")
+        return False
+    if command == ".查看闭关" and not _feedback_candidate_accepts(candidate_fn, command, clean_text):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: meditation candidate check failed (msg {getattr(msg, 'id', None)}).")
+        return False
+    return _set_feedback_match(
+        actor,
+        pending_id,
+        msg,
+        clean_text,
+        command,
+        identity,
+        logger=logger,
+        label=label,
+        reason=reason,
+    )
+
+
+def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=None, label="[REPLY-FEEDBACK]"):
+    """Prefer direct Telegram reply_to attribution for command feedback."""
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    if not replied_id:
+        return False
+    return match_pending_feedback_by_id(
+        actor,
+        replied_id,
+        msg,
+        text,
+        candidate_fn=candidate_fn,
+        logger=logger,
+        label=label,
+        reason="reply_to",
+    )
+
+
+def match_pending_feedback_by_message_id(actor, msg, text, candidate_fn=None, logger=None, label="[EDITED-FEEDBACK]"):
+    """Fallback for responses whose own msg_id was registered as pending."""
+    msg_id = _message_id(msg)
+    if msg_id is None:
+        return False
+    return match_pending_feedback_by_id(
+        actor,
+        msg_id,
+        msg,
+        text,
+        candidate_fn=candidate_fn,
+        logger=logger,
+        label=label,
+        reason="message_id",
+    )
 
 
 def _manual_sync_now_str():
@@ -2677,6 +3125,17 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
             logging.getLogger(actor.__class__.__name__).info(
                 format_in_log(f"profile {msg_id}", profile_text, sender=sender, msg=msg)
             )
+            record_message_event(
+                actor,
+                msg,
+                text=profile_text,
+                sender=sender,
+                event_kind="new",
+                direction="bot_in",
+                identity=profile_identity,
+                command="profile",
+            )
+            record_command_response_for_reply(actor, msg, text=profile_text, status="matched")
             remember_logged_incoming_message(actor, msg, text=profile_text)
             remember_incoming_message_context(actor, msg, command="profile", identity=profile_identity, text=profile_text)
             logger = logging.getLogger(actor.__class__.__name__)
@@ -2724,6 +3183,17 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
                 setattr(actor, cache_name, set(list(seen)[-250:]))
 
     logging.getLogger(actor.__class__.__name__).info(format_in_log(f"{label} {msg_id}", text, sender=sender, msg=msg))
+    record_message_event(
+        actor,
+        msg,
+        text=text,
+        sender=sender,
+        event_kind="new",
+        direction="bot_in" if sender is not None and is_game_bot_sender(actor, sender) else "in",
+        identity=current_id,
+        command=command_from_log_label(label),
+    )
+    record_command_response_for_reply(actor, msg, text=text, status="matched")
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id, text=text)
     return True
@@ -2740,9 +3210,7 @@ def is_edited_message_for_current_account(actor, msg, text):
         return True
     
     # 检查引用回复
-    replied_msg_id = None
-    if msg and getattr(msg, "reply_to", None):
-        replied_msg_id = getattr(msg.reply_to, "reply_to_msg_id", None)
+    replied_msg_id = meaningful_reply_to_msg_id(actor, msg)
     
     if replied_msg_id:
         sent_ids = getattr(actor, "_script_sent_message_ids", set())
@@ -2916,6 +3384,17 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
     """记录编辑过的消息（每条消息每个版本的文本只记录一次）"""
     text = text if text is not None else (getattr(msg, "text", None) or "")
     msg_id = _message_id(msg)
+    record_message_event(
+        actor,
+        msg,
+        text=text,
+        sender=sender,
+        event_kind="edited",
+        direction="bot_edited" if sender is not None and is_game_bot_sender(actor, sender) else "edited",
+        identity=tracked_command_identity_for_reply(actor, msg),
+        command=tracked_command_text_for_reply(actor, msg),
+    )
+    record_command_response_for_reply(actor, msg, text=text, status="edited", logger=logging.getLogger(actor.__class__.__name__))
     cache_name = "_logged_edited_message_texts"
     seen_texts = getattr(actor, cache_name, None)
     if seen_texts is None:
@@ -3010,6 +3489,15 @@ async def log_edited_message_if_needed(actor, event):
         sender = await event.get_sender()
         is_game_bot = is_game_bot_sender(actor, sender)
         logger = logging.getLogger(actor.__class__.__name__)
+        record_message_event(
+            actor,
+            msg,
+            text=text,
+            sender=sender,
+            event_kind="edited",
+            direction="bot_edited" if is_game_bot else "edited",
+            logger=logger,
+        )
         if is_game_bot:
             record_game_bot_activity(actor, sender, logger)
         if is_game_bot and is_relevant_game_bot_edited_message(actor, msg, text):

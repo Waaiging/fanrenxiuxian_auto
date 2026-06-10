@@ -68,9 +68,13 @@ from log_utils import (
     is_not_deep_meditation_response, log_edited_message_if_needed, log_incoming_message,
     log_manual_outgoing_if_needed, log_mention_if_needed, mentions_self, notify_unrecognized_response,
     match_pending_edited_feedback,
+    match_pending_feedback_by_message_id,
+    match_pending_feedback_by_reply,
     periodic_log_prune, prune_log_file, record_bot_no_response, record_bot_response,
     record_cultivation_profile_from_text,
+    record_command_sent,
     record_game_bot_activity, record_manual_command_reply_state_if_needed,
+    record_message_event,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
     schedule_command_auto_delete, send_text_alert, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
@@ -1536,6 +1540,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             remember_script_sent_message(self, msg)
             # 记录 msg_id → avatar，供回复归属判断
             self.command_avatar_map[msg.id] = self.current_identity
+            record_command_sent(self, msg, message, identity=getattr(self, "current_identity", "主魂"), source="auto", reply_to=target_reply, logger=log)
             schedule_command_auto_delete(self, msg, text=message, logger=log)
             log.info(f"🟢 OUT [{self.current_identity}]:\n{message}")
             return msg.id
@@ -3531,6 +3536,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         try:
             msg = event.message; text = (msg.text or ""); msg_text_lower = text.lower()
             sender = await event.get_sender()
+            record_message_event(self, msg, text=text, sender=sender, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("xiaohao", msg, text, sender=sender, logger=log)
             if is_game_bot_sender(self, sender):
                 record_game_bot_activity(self, sender, log)
@@ -3588,34 +3594,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
             is_matched = False
             # 1. 回复匹配（最优先）
-            if msg.reply_to:
-                replied_id = getattr(msg.reply_to, 'reply_to_msg_id', None)
-                if replied_id in self.feedback_events:
-                    # 过滤 bot 回声（bot 有时先回声再发实际回复）
-                    cmd_text = self.feedback_commands.get(replied_id, "")
-                    cmd_identity = getattr(self, "feedback_identities", {}).get(replied_id, getattr(self, "current_identity", "主魂"))
-                    if text.strip() != cmd_text.strip():
-                        # 内容校验：特定指令的 reply 必须通过内容匹配，防止游戏机器人 reply 到无关消息
-                        _skip_reply = False
-                        if mentions_other_user_for_identity(self, msg, text, cmd_identity):
-                            log.warning(f"Reply match rejected for [{cmd_text}]: targets another user (msg {msg.id}): {text[:80]}")
-                            _skip_reply = True
-                        if feedback_response_conflicts(cmd_text, text):
-                            if not feedback_response_matches_command(cmd_text, text):
-                                log.warning(f"Reply match rejected for [{cmd_text}]: response family conflict (msg {msg.id}): {text[:80]}")
-                                _skip_reply = True
-                        if (
-                            not _skip_reply
-                            and feedback_response_requires_positive_match(cmd_text)
-                            and not feedback_response_matches_command(cmd_text, text)
-                        ):
-                            log.warning(f"Reply match rejected for [{cmd_text}]: content unrelated (msg {msg.id}): {text[:80]}")
-                            _skip_reply = True
-                        if cmd_text == ".查看闭关" and not self.is_loose_meditation_feedback_candidate(cmd_text, text):
-                            log.warning(f"Reply match rejected for [{cmd_text}]: content unrelated (msg {msg.id}): {text[:80]}")
-                            _skip_reply = True
-                        if not _skip_reply:
-                            self.last_feedback_text[replied_id] = text; self.last_feedback_msg[replied_id] = msg; self.feedback_events[replied_id].set(); is_matched = True
+            is_matched = match_pending_feedback_by_reply(
+                self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[REPLY-FEEDBACK]"
+            )
             if not is_matched and await self.handle_pasture_return_event(event, text=text, sender=sender): return
             # 2. 用户名/昵称匹配
             if (
@@ -5404,6 +5385,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                                 remember_script_send_intent(self, ".稳")
                                 sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
                                 remember_script_sent_message(self, sent)
+                                record_command_sent(self, sent, ".稳", identity=avatar, source="auto", reply_to=current_msg.id, logger=log)
                                 schedule_command_auto_delete(self, sent, text=".稳", logger=log)
                                 log.info(f"🟢 OUT [{avatar}]:\n.稳 ({idx}/3, try {attempt}/3)")
 
@@ -5605,64 +5587,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                     self.maybe_record_avatar_passive_states(msg)
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令，如共历心劫）
-                    is_matched = False
-                    # 1. 回复匹配：编辑的消息是某条待处理指令的回复目标
-                    if msg.reply_to:
-                        replied_id = getattr(msg.reply_to, 'reply_to_msg_id', None)
-                        if replied_id and replied_id in self.feedback_events:
-                            evt = self.feedback_events[replied_id]
-                            if not evt.is_set():
-                                cmd_text = self.feedback_commands.get(replied_id, "")
-                                cmd_identity = getattr(self, "feedback_identities", {}).get(replied_id, getattr(self, "current_identity", "主魂"))
-                                _skip_reply = False
-                                if mentions_other_user_for_identity(self, msg, text, cmd_identity):
-                                    log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: targets another user (msg {msg.id}): {text[:80]}")
-                                    _skip_reply = True
-                                if feedback_response_conflicts(cmd_text, text) and not feedback_response_matches_command(cmd_text, text):
-                                    log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: response family conflict (msg {msg.id}): {text[:80]}")
-                                    _skip_reply = True
-                                if (
-                                    not _skip_reply
-                                    and feedback_response_requires_positive_match(cmd_text)
-                                    and not feedback_response_matches_command(cmd_text, text)
-                                ):
-                                    log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: content unrelated (msg {msg.id}): {text[:80]}")
-                                    _skip_reply = True
-                                if cmd_text == ".查看闭关" and not self.is_loose_meditation_feedback_candidate(cmd_text, text):
-                                    log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: content unrelated (msg {msg.id}): {text[:80]}")
-                                    _skip_reply = True
-                                if not _skip_reply:
-                                    self.last_feedback_text[replied_id] = text
-                                    self.last_feedback_msg[replied_id] = msg
-                                    evt.set()
-                                    is_matched = True
-                                    log.info(f"[EDITED-FEEDBACK] Matched by reply_to={replied_id}, triggered feedback event.")
-                    # 2. 消息ID匹配：编辑的消息本身就是待处理指令的响应目标
-                    if not is_matched and msg.id in self.feedback_events:
-                        evt = self.feedback_events[msg.id]
-                        if not evt.is_set():
-                            cmd_text = self.feedback_commands.get(msg.id, "")
-                            cmd_identity = getattr(self, "feedback_identities", {}).get(msg.id, getattr(self, "current_identity", "主魂"))
-                            _skip_reply = False
-                            if mentions_other_user_for_identity(self, msg, text, cmd_identity):
-                                log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: targets another user (msg {msg.id}): {text[:80]}")
-                                _skip_reply = True
-                            if feedback_response_conflicts(cmd_text, text) and not feedback_response_matches_command(cmd_text, text):
-                                log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: response family conflict (msg {msg.id}): {text[:80]}")
-                                _skip_reply = True
-                            if (
-                                not _skip_reply
-                                and feedback_response_requires_positive_match(cmd_text)
-                                and not feedback_response_matches_command(cmd_text, text)
-                            ):
-                                log.warning(f"[EDITED-FEEDBACK] Rejected [{cmd_text}]: content unrelated (msg {msg.id}): {text[:80]}")
-                                _skip_reply = True
-                            if not _skip_reply:
-                                self.last_feedback_text[msg.id] = text
-                                self.last_feedback_msg[msg.id] = msg
-                                evt.set()
-                                is_matched = True
-                                log.info(f"[EDITED-FEEDBACK] Matched by msg_id={msg.id}, triggered feedback event.")
+                    is_matched = match_pending_feedback_by_reply(
+                        self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                    )
+                    if not is_matched:
+                        is_matched = match_pending_feedback_by_message_id(
+                            self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                        )
                     # 3. 宽松匹配：有待处理事件且来自游戏bot
                     if not is_matched:
                         is_matched = match_pending_edited_feedback(

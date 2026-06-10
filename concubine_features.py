@@ -22,6 +22,7 @@ from log_utils import (
     notify_unrecognized_response,  # 无法识别的回复告警
     record_bot_no_response,        # 记录机器人无响应
     record_bot_response,           # 记录机器人有响应
+    record_command_sent,           # 指令台账
     remember_script_send_intent,   # 记录脚本即将发送
     remember_script_sent_message,  # 记录脚本已发送
     schedule_command_auto_delete,  # 安排自动删除
@@ -1618,6 +1619,15 @@ class ConcubineMixin:
                             remember_script_send_intent(self, ".稳")
                             sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
                             remember_script_sent_message(self, sent)
+                            record_command_sent(
+                                self,
+                                sent,
+                                ".稳",
+                                identity=getattr(self, "current_identity", "主魂"),
+                                source="auto",
+                                reply_to=current_msg.id,
+                                logger=log,
+                            )
                             schedule_command_auto_delete(self, sent, text=".稳", logger=log)
                             _identity = getattr(self, "current_identity", None)
                             _tag = f" [{_identity}]" if _identity else ""

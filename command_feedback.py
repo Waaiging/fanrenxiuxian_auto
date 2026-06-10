@@ -23,6 +23,7 @@ from log_utils import (
     record_bot_response,          # 记录机器人有响应事件
     record_cultivation_delta_from_text,    # 同步修为增减到 state
     record_cultivation_profile_from_text,  # 同步境界/修为资料
+    record_command_sent,       # 指令台账：记录已发送命令
     remember_script_send_intent,  # 记录脚本有发送意图
     remember_script_sent_message, # 记录脚本已发送消息
     record_recent_profile_command, # 记录可能产生无 reply 档案回复的指令
@@ -134,6 +135,15 @@ async def send_and_wait_feedback_common(
                 logger.info(f"🟢 OUT{_tag}:\n{message}")
                 if hasattr(actor, "command_avatar_map"):
                     actor.command_avatar_map[msg_id] = _identity or "主魂"
+                record_command_sent(
+                    actor,
+                    sent_msg,
+                    message,
+                    identity=_identity or "主魂",
+                    source="auto",
+                    reply_to=target_reply,
+                    logger=logger,
+                )
                 record_recent_profile_command(actor, msg_id, message, _identity or "主魂", source="auto")
             except Exception as exc:
                 logger.error(f"Send Error [{message}] reply_to={target_reply}: {exc}")
