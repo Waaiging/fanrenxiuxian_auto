@@ -2764,10 +2764,67 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
     # 元婴出窍响应解析
     # ============================================================
 
+    def _yuanying_future_from_last_start(self):
+        """Return the inferred out-end time when the last confirmed start is still active."""
+        last = self.state.get("last_yuanying_out_time", "")
+        if not last:
+            return ""
+        inferred = add_seconds_str(last, YUANYING_OUT_CD_SECONDS)
+        return inferred if inferred and is_future(inferred) else ""
+
+    def _yuanying_existing_future_time(self):
+        candidates = [
+            self.state.get("yuanying_out_end_time", ""),
+            self.state.get("next_yuanying_out_time", ""),
+            self._yuanying_future_from_last_start(),
+        ]
+        futures = [s for s in candidates if s and is_future(s)]
+        if not futures:
+            return ""
+        return max(futures, key=lambda s: str_to_dt(s))
+
+    def _recent_yuanying_start_future(self, window_seconds=180):
+        last = self.state.get("last_yuanying_out_time", "")
+        if not last:
+            return ""
+        try:
+            age = (datetime.now() - str_to_dt(last)).total_seconds()
+        except Exception:
+            return ""
+        if 0 <= age <= window_seconds:
+            return self._yuanying_future_from_last_start()
+        return ""
+
+    def _repair_yuanying_out_from_last_start(self, reason=""):
+        inferred = self._yuanying_future_from_last_start()
+        if not inferred:
+            return ""
+        changed = (
+            self.state.get("next_yuanying_out_time") != inferred
+            or self.state.get("yuanying_out_end_time") != inferred
+            or not self.state.get("yuanying_out_active")
+        )
+        self.state["next_yuanying_out_time"] = inferred
+        self.state["yuanying_out_end_time"] = inferred
+        self.state["yuanying_out_active"] = True
+        if changed:
+            log.info(f".元婴出窍: repaired active state from last start ({reason}), return due at {inferred}.")
+        return inferred
+
     def record_yuanying_out_settlement_response(self, resp, source="passive"):
         """记录元婴/元神到期归窍结算，并安排短暂缓冲后重新出窍。"""
         if not is_yuanying_out_settlement_response(resp):
             return False
+        recent_start_due = self._recent_yuanying_start_future()
+        if recent_start_due:
+            self.state["next_yuanying_out_time"] = recent_start_due
+            self.state["yuanying_out_end_time"] = recent_start_due
+            self.state["yuanying_out_active"] = True
+            log.info(
+                f".元婴出窍: ignored stale settlement after fresh start ({source}); "
+                f"return due at {recent_start_due}."
+            )
+            return True
         now = now_str()
         self.state["last_yuanying_return_time"] = now
         self.state["next_yuanying_out_time"] = add_seconds_str(now, 90)
@@ -2807,19 +2864,18 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         now = now_str()
         cd = self.parse_wait_time(clean)
-        if cd > 0:
+        start_markers = ["心念一动", "消失在天际", "将在外云游", "自动结算收获"]
+        is_confirmed_start = any(k in clean for k in start_markers)
+        if is_confirmed_start:
+            next_time = add_seconds_str(now, cd if cd > 0 else YUANYING_OUT_CD_SECONDS)
+            self.state["last_yuanying_out_time"] = now
+        elif cd > 0:
             next_time = add_seconds_str(now, cd)
         else:
-            next_time = ""
-            last = self.state.get("last_yuanying_out_time", "")
-            if last:
-                inferred = add_seconds_str(last, YUANYING_OUT_CD_SECONDS)
-                if inferred and is_future(inferred):
-                    next_time = inferred
+            next_time = self._yuanying_existing_future_time()
             if not next_time:
                 next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
 
-        self.state["last_yuanying_out_time"] = now
         self.state["next_yuanying_out_time"] = next_time
         self.state["yuanying_out_end_time"] = next_time
         self.state["yuanying_out_active"] = True
@@ -3023,6 +3079,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
             # 正在出窍但已到期 -> 自动归窍
             if active:
+                repaired = self._repair_yuanying_out_from_last_start("active expiry guard")
+                if repaired:
+                    self.save_state()
+                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
+                    continue
                 log.info("Yuanying out time expired. Auto-resetting state.")
                 # 元婴自动归窍，直接重置状态
                 self.state["yuanying_out_active"] = False
@@ -3034,6 +3095,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             next_time = self.state.get("next_yuanying_out_time", "")
             if next_time and is_future(next_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
+                continue
+
+            repaired = self._repair_yuanying_out_from_last_start("pre-send guard")
+            if repaired:
+                self.save_state()
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
                 continue
 
             # 冷却到期 -> 重新出窍
