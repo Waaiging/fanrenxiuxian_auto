@@ -1752,15 +1752,65 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     # ------------------------------------------------------------------
 
     def record_yuanying_out_settlement_response(self, resp, source="passive"):
-        """记录元婴/元神到期归窍结算，并安排立即重新出窍。"""
+        """记录元婴/元神到期归窍结算，并安排短暂缓冲后重新出窍。"""
         if not is_yuanying_out_settlement_response(resp):
             return False
         now = now_str()
         self.state["last_yuanying_return_time"] = now
-        self.state["next_yuanying_out_time"] = ""
+        self.state["next_yuanying_out_time"] = add_seconds_str(now, 90)
         self.state["yuanying_out_active"] = False
         self.state["yuanying_out_end_time"] = ""
-        log.info(f".元婴出窍: passive return settlement detected ({source}); retry start immediately.")
+        log.info(
+            f".元婴出窍: return settlement detected ({source}); "
+            f"retry after response settle at {self.state['next_yuanying_out_time']}."
+        )
+        return True
+
+    def record_yuanying_out_active_response(self, resp, source="passive"):
+        """记录元婴正在出窍/已出窍状态，防止未到归来时间重复发送。"""
+        if not resp:
+            return False
+        clean = str(resp).replace("**", "")
+        if is_yuanying_out_settlement_response(clean):
+            return False
+        compact = clean.replace(" ", "")
+        if any(k in compact for k in ["尚未凝聚元婴", "无法施展此术"]):
+            return False
+        active_markers = [
+            "元婴出窍",
+            "元神出窍",
+            "神游",
+            "云游",
+            "消失在天际",
+            "将在外云游",
+            "正在执行“元神出窍”",
+            "正在执行`元神出窍`",
+            "状态: 元神出窍",
+            "状态：元神出窍",
+            "归来倒计时",
+        ]
+        if not any(k in clean for k in active_markers):
+            return False
+
+        now = now_str()
+        cd = self.parse_wait_time(clean)
+        if cd > 0:
+            next_time = add_seconds_str(now, cd)
+        else:
+            next_time = ""
+            last = self.state.get("last_yuanying_out_time", "")
+            if last:
+                inferred = add_seconds_str(last, YUANYING_OUT_CD_SECONDS)
+                if inferred and is_future(inferred):
+                    next_time = inferred
+            if not next_time:
+                next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
+
+        self.state["last_yuanying_out_time"] = now
+        self.state["next_yuanying_out_time"] = next_time
+        self.state["yuanying_out_end_time"] = next_time
+        self.state["yuanying_out_active"] = True
+        log.info(f".元婴出窍: active state synced ({source}), return due at {next_time}.")
         return True
 
     def record_yuanying_out_start_response(self, resp):
@@ -1781,9 +1831,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             bool: 是否成功出窍
         """
         if not resp:
-            self.state["next_yuanying_out_time"] = add_seconds_str(now_str(), 600)
+            self.state["next_yuanying_out_time"] = add_seconds_str(now_str(), 3600)
             log.warning(f".元婴出窍: response missing; retry at {self.state['next_yuanying_out_time']}.")
             return False
+
+        if self.record_yuanying_out_active_response(resp, source=".元婴出窍 response"):
+            return True
 
         if self.record_yuanying_out_settlement_response(resp, source=".元婴出窍 response"):
             return False
@@ -1806,11 +1859,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return False
         # 成功出窍
         if not any(k in resp for k in ["元婴出窍", "神游", "云游", "出窍", "自动结算"]):
-            self.state["next_yuanying_out_time"] = add_seconds_str(now, 600)
+            self.state["next_yuanying_out_time"] = add_seconds_str(now, 3600)
             self.state["yuanying_out_active"] = False
             self.state["yuanying_out_end_time"] = ""
             notify_unrecognized_response(self, ".元婴出窍", resp, log, "元婴出窍")
-            log.warning(f".元婴出窍: unrecognized response; skipped until {self.state['next_yuanying_out_time']}.")
+            log.info(f".元婴出窍: unrecognized response; skipped until {self.state['next_yuanying_out_time']}.")
             return False
 
         # 使用 CD（优先用解析到的，没有则用默认 8 小时）
@@ -2096,14 +2149,20 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         next_key = "next_nurture_spirit_time"
         last_key = "last_nurture_spirit_time"
         if not resp:
-            self.state[next_key] = add_seconds_str(now_str(), 600)
-            log.warning(f"{command}: response missing; retry at {self.state[next_key]}.")
+            self.state[next_key] = add_seconds_str(now_str(), 3600)
+            log.info(f"{command}: response missing; conservative retry at {self.state[next_key]}.")
             return False
 
         cd = self.parse_wait_time(resp)
         if cd > 0 and any(k in resp for k in ["休息", "冷却", "后再", "尚需", "还需"]):
             self.state[next_key] = add_seconds_str(now_str(), cd)
             log.info(f"{command}: cooldown {cd}s, next at {self.state[next_key]}.")
+            return False
+
+        if any(k in resp for k in ["灵石", "养魂木", "材料", "不足", "不够", "没有", "无法", "错误"]):
+            now = now_str()
+            self.state[next_key] = add_seconds_str(now, 6 * 3600)
+            log.info(f"{command}: blocked by resource/validation response; next check at {self.state[next_key]}.")
             return False
 
         if any(k in resp for k in ["温养", "默契", "经验", "成功", "提升", "喜悦"]):
@@ -2114,8 +2173,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return True
 
         notify_unrecognized_response(self, command, resp, log, "温养器灵")
-        self.state[next_key] = add_seconds_str(now_str(), 600)
-        log.warning(f"{command}: unrecognized; retry at {self.state[next_key]}.")
+        self.state[next_key] = add_seconds_str(now_str(), 3600)
+        log.info(f"{command}: unrecognized; conservative retry at {self.state[next_key]}.")
         return False
 
     
@@ -3017,7 +3076,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         now = now_str()
 
-        if self.record_yuanying_out_settlement_response(text, source=f"passive {avatar}"):
+        if self.record_yuanying_out_active_response(text, source=f"passive {avatar}"):
+            self.save_state()
+        elif self.record_yuanying_out_settlement_response(text, source=f"passive {avatar}"):
             self.save_state()
 
         # ---- 闭关相关（主魂+化身） ----

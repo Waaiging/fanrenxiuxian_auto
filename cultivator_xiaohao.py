@@ -666,7 +666,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         if avatar == "主魂":
             now = now_str()
-            changed = self.record_yuanying_out_settlement_response(text, source="passive 主魂")
+            changed = self.record_yuanying_out_active_response(text, source="passive 主魂")
+            if not changed:
+                changed = self.record_yuanying_out_settlement_response(text, source="passive 主魂")
             _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"])
             _is_deep_settlement = is_deep_meditation_settlement_response(text)
             if _is_real_exit or _is_deep_settlement:
@@ -1845,8 +1847,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
     def record_yuanying_out_start_response(self, resp):
         """解析元婴出窍回复"""
         if not resp:
-            self.state["next_yuanying_out_time"] = add_seconds_str(now_str(), 600)
+            self.state["next_yuanying_out_time"] = add_seconds_str(now_str(), 3600)
             return False
+        if self.record_yuanying_out_active_response(resp, source=".元婴出窍 response"):
+            return True
         if self.record_yuanying_out_settlement_response(resp, source=".元婴出窍 response"):
             return False
         cd = self.parse_wait_time(resp)
@@ -1863,7 +1867,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             log.info(f".元婴出窍 unavailable: next check at {self.state['next_yuanying_out_time']}.")
             return False
         if not any(k in resp for k in ["元婴出窍", "神游", "云游", "出窍", "自动结算"]):
-            self.state["next_yuanying_out_time"] = add_seconds_str(now, 600)
+            self.state["next_yuanying_out_time"] = add_seconds_str(now, 3600)
             self.state["yuanying_out_active"] = False
             self.state["yuanying_out_end_time"] = ""
             notify_unrecognized_response(self, ".元婴出窍", resp, log, "元婴出窍")
@@ -1876,15 +1880,65 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         return True
 
     def record_yuanying_out_settlement_response(self, resp, source="passive"):
-        """记录元婴/元神到期归窍结算，并安排立即重新出窍。"""
+        """记录元婴/元神到期归窍结算，并安排短暂缓冲后重新出窍。"""
         if not is_yuanying_out_settlement_response(resp):
             return False
         now = now_str()
         self.state["last_yuanying_return_time"] = now
-        self.state["next_yuanying_out_time"] = ""
+        self.state["next_yuanying_out_time"] = add_seconds_str(now, 90)
         self.state["yuanying_out_active"] = False
         self.state["yuanying_out_end_time"] = ""
-        log.info(f".元婴出窍: passive return settlement detected ({source}); retry start immediately.")
+        log.info(
+            f".元婴出窍: return settlement detected ({source}); "
+            f"retry after response settle at {self.state['next_yuanying_out_time']}."
+        )
+        return True
+
+    def record_yuanying_out_active_response(self, resp, source="passive"):
+        """记录元婴正在出窍/已出窍状态，防止未到归来时间重复发送。"""
+        if not resp:
+            return False
+        clean = str(resp).replace("**", "")
+        if is_yuanying_out_settlement_response(clean):
+            return False
+        compact = clean.replace(" ", "")
+        if any(k in compact for k in ["尚未凝聚元婴", "无法施展此术"]):
+            return False
+        active_markers = [
+            "元婴出窍",
+            "元神出窍",
+            "神游",
+            "云游",
+            "消失在天际",
+            "将在外云游",
+            "正在执行“元神出窍”",
+            "正在执行`元神出窍`",
+            "状态: 元神出窍",
+            "状态：元神出窍",
+            "归来倒计时",
+        ]
+        if not any(k in clean for k in active_markers):
+            return False
+
+        now = now_str()
+        cd = self.parse_wait_time(clean)
+        if cd > 0:
+            next_time = add_seconds_str(now, cd)
+        else:
+            next_time = ""
+            last = self.state.get("last_yuanying_out_time", "")
+            if last:
+                inferred = add_seconds_str(last, YUANYING_OUT_CD_SECONDS)
+                if inferred and is_future(inferred):
+                    next_time = inferred
+            if not next_time:
+                next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
+
+        self.state["last_yuanying_out_time"] = now
+        self.state["next_yuanying_out_time"] = next_time
+        self.state["yuanying_out_end_time"] = next_time
+        self.state["yuanying_out_active"] = True
+        log.info(f".元婴出窍: active state synced ({source}), return due at {next_time}.")
         return True
 
     def is_rift_weakness_response(self, text):
@@ -2013,10 +2067,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         return sec if found else -1
 
     def is_fake_beast_status_response(self, text):
-        """检测是否为伪受伤状态（需要切换清除的假状态）"""
+        """检测是否为可通过状态切换清除的忙碌状态。"""
         if not text: return False
         clean = text.replace("**", "")
-        return ("正在养伤" in clean and "无法出动" in clean) or self.is_abyss_busy_response(clean) or ("当前并非出战状态" in clean and any(k in clean for k in ["受伤", "养伤"]))
+        return self.is_abyss_busy_response(clean)
 
     def is_beast_injury_response(self, text):
         """检测是否为真实的灵兽受伤回复"""
@@ -2444,7 +2498,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         last_key = "last_beast_cruise_time"
         next_key = "next_beast_cruise_time"
         if not resp:
-            self.schedule_beast_action_retry(next_key)
+            self.schedule_beast_action_retry(next_key, 1800)
             return False
         cd = self.parse_wait_time(resp)
         if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚需", "还需", "请在"]):
@@ -2460,20 +2514,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             return True
         if self.is_beast_cruise_blocked_by_deployed(resp, beast_name):
             self.set_best_beast_status(beast_name, "出战中")
-            self.schedule_beast_action_retry(next_key, 60)
+            self.schedule_beast_action_retry(next_key, 1800)
             return True
         if self.is_beast_pastured_response(resp, beast_name):
             self.defer_beast_actions_while_pastured(beast_name, "cruise response")
             return True
         injury_cd = self.record_beast_injury_from_response(beast_name, resp, source="cruise")
         if injury_cd >= 0:
-            self.schedule_beast_action_retry(next_key, 60)
+            self.schedule_beast_action_retry(next_key, max(1800, injury_cd))
             log.info(f"Beast cruise: {beast_name} is injured; status recorded, trying another candidate later.")
             return True
         if any(k in resp for k in ["需要休息", "休息状态", "无法巡游", "受伤", "重伤", "治疗"]) or (
             "正在" in resp and "正在巡游" not in resp
         ):
-            retry = cd if cd > 0 else BEAST_ACTION_RETRY_SECONDS
+            retry = cd if cd > 0 else 1800
             self.schedule_beast_action_retry(next_key, retry)
             return True
         if any(k in resp for k in ["巡游", "出发", "游历", "带回", "获得", "收获", "成功"]):
@@ -2481,7 +2535,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.state[last_key] = now
             self.state[next_key] = add_seconds_str(now, BEAST_CRUISE_CD_SECONDS)
             return True
-        self.schedule_beast_action_retry(next_key)
+        self.schedule_beast_action_retry(next_key, 1800)
         notify_unrecognized_response(self, command, resp, log, "灵兽巡游")
         return False
 
@@ -2509,7 +2563,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             return
 
         injury_cd = self.record_beast_injury_from_response(beast_name, rest_resp, source="cruise")
-        retry = injury_cd if injury_cd > 0 else BEAST_ACTION_RETRY_SECONDS
+        retry = injury_cd if injury_cd > 0 else 1800
         self.schedule_beast_action_retry("next_beast_cruise_time", retry)
         if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
             notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "巡游失败后休息")
@@ -2519,13 +2573,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         beast = beast or self.select_beast_for_cruise(self.state.get("beasts_cache", []))
         if not beast:
             log.info("Beast cruise: no suitable beast candidate; retry later.")
-            self.schedule_beast_action_retry("next_beast_cruise_time")
+            self.schedule_beast_action_retry("next_beast_cruise_time", 1800)
             return False
         beast_name = beast.get("full_name") or BEAST_FOCUS_NAME
         status = beast.get("status", "未知")
         if status == "未知":
             log.info(f"Beast cruise: {beast_name} status unknown; retry after next beast refresh.")
-            self.schedule_beast_action_retry("next_beast_cruise_time", BEAST_ACTION_RETRY_SECONDS)
+            self.schedule_beast_action_retry("next_beast_cruise_time", 1800)
             return False
         stamina = self.beast_stamina_value(beast)
         if stamina >= 0 and stamina < BEAST_CRUISE_MIN_STAMINA:
@@ -2547,15 +2601,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if rest_status and "休息" in rest_status:
                 return True
             injury_cd = self.record_beast_injury_from_response(beast_name, rest_resp, source="cruise")
-            retry = injury_cd if injury_cd > 0 else BEAST_ACTION_RETRY_SECONDS
+            retry = injury_cd if injury_cd > 0 else 1800
             self.schedule_beast_action_retry("next_beast_cruise_time", retry)
             if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
                 notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "巡游前休息")
             return False
         retry_time = self.state.get("next_beast_status_check_time", "")
-        retry_seconds = int(seconds_until(retry_time)) if retry_time and is_future(retry_time) else BEAST_ACTION_RETRY_SECONDS
+        retry_seconds = int(seconds_until(retry_time)) if retry_time and is_future(retry_time) else 1800
         log.info(f"Beast cruise deferred: {beast_name} status is {status}, retry in {retry_seconds}s.")
-        self.schedule_beast_action_retry("next_beast_cruise_time", max(60, retry_seconds))
+        self.schedule_beast_action_retry("next_beast_cruise_time", max(1800, retry_seconds))
         return False
 
     # ---- 灵兽：放养 ----
@@ -2926,7 +2980,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
     def handle_beast_deploy_failure_for_steal(self, beast_name, response_text, context):
         """Handle explicit deploy failures before steal without emitting unknown alerts."""
         if not response_text:
-            self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+            self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
             self.save_state()
             return False
         if self.is_beast_pastured_response(response_text, beast_name):
@@ -2934,9 +2988,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             return True
         injury_cd = self.record_beast_injury_from_response(beast_name, response_text, source="steal")
         if injury_cd >= 0:
-            self.state["next_steal_time"] = add_seconds_str(now_str(), 60)
+            self.set_next_steal_not_before(add_seconds_str(now_str(), max(1800, injury_cd)))
             self.save_state()
-            log.info(f"Steal candidate skipped: {beast_name} cannot deploy while injured ({context}).")
+            log.info(
+                f"Steal candidate skipped: {beast_name} cannot deploy while injured; "
+                f"next steal not before {self.state.get('next_steal_time', '')} ({context})."
+            )
             return True
         return False
 
@@ -2944,14 +3001,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """Choose a non-protected high-stamina beast and run .灵兽偷菜."""
         steal_cache = list(self.state.get("beasts_cache", [])) or list(cache or [])
         best = self.select_beast_for_steal(steal_cache)
-        if not best and steal_cache and any(self.is_injury_status((b or {}).get("status", "")) for b in steal_cache):
-            log.info("Steal: no candidate from cached roster; refreshing .我的灵兽 after injury statuses.")
-            if await self.update_beast_cache():
-                steal_cache = list(self.state.get("beasts_cache", []))
-                best = self.select_beast_for_steal(steal_cache)
         if not best:
-            log.info("Steal: no suitable beast candidate; retry later.")
-            self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+            status_check = self.state.get("next_beast_status_check_time", "")
+            retry_at = status_check if status_check and is_future(status_check) else add_seconds_str(now_str(), 1800)
+            log.info(f"Steal: no suitable cached beast candidate; next attempt not before {retry_at}.")
+            self.set_next_steal_not_before(retry_at)
             self.save_state()
             return False
 
@@ -2968,7 +3022,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 self.set_next_steal_not_before(status_check)
                 self.save_state()
             else:
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
             return False
 
@@ -2989,11 +3043,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 deploy_ok = False
             elif deploy_resp:
                 notify_unrecognized_response(self, f".灵兽出战 {best_name}", deploy_resp, log, "偷菜前出战")
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
                 deploy_ok = False
             else:
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
                 deploy_ok = False
             await asyncio.sleep(3)
@@ -3020,18 +3074,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 s_resp = ""
             elif deploy_resp:
                 notify_unrecognized_response(self, f".灵兽出战 {best_name}", deploy_resp, log, "偷菜重试出战")
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
                 s_resp = ""
             else:
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
                 s_resp = ""
             if retry_ok:
                 await asyncio.sleep(3)
                 s_resp = await self.send_and_wait_feedback(".灵兽偷菜")
             if s_resp and self.is_fake_beast_status_response(s_resp):
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
                 self.save_state()
                 s_resp = ""
         if s_resp:
@@ -3056,7 +3110,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 self.set_best_beast_status(best_name, "出战中")
             else:
                 notify_unrecognized_response(self, ".灵兽偷菜", s_resp, log, "灵兽偷菜")
-                self.set_next_steal_not_before(add_seconds_str(now_str(), 600))
+                self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
             self.save_state()
             return True
         return False
@@ -3173,7 +3227,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if self.is_beast_deploy_success(deploy_resp): self.set_best_beast_status(beast_name, "出战中"); return True
         if self.handle_beast_deploy_failure_for_steal(beast_name, deploy_resp, "偷菜假状态切换"): return False
         if deploy_resp and not self.is_fake_beast_status_response(deploy_resp): notify_unrecognized_response(self, f".灵兽出战 {beast_name}", deploy_resp, log, "偷菜假状态切换")
-        self.set_next_steal_not_before(add_seconds_str(now_str(), 600)); self.save_state(); return False
+        self.set_next_steal_not_before(add_seconds_str(now_str(), 1800)); self.save_state(); return False
 
     async def normalize_beast_for_abyss(self, beast_name):
         """
@@ -3190,7 +3244,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         elif deploy_resp and not self.is_fake_beast_status_response(deploy_resp):
             injury_cd = self.record_beast_injury_from_response(beast_name, deploy_resp, source="abyss")
             if injury_cd >= 0: self.defer_beast_action_after_injury("abyss", injury_cd); return False
-            notify_unrecognized_response(self, f".灵兽出战 {beast_name}", deploy_resp, log, "探渊假状态出战"); self.schedule_abyss_retry(600); return False
+            notify_unrecognized_response(self, f".灵兽出战 {beast_name}", deploy_resp, log, "探渊假状态出战"); self.schedule_abyss_retry(1800); return False
         await asyncio.sleep(3)
         rest_status, rest_resp = await self.rest_beast_for_abyss(beast_name)
         if rest_status == "休息中": return True
@@ -3198,7 +3252,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.defer_beast_actions_while_pastured(beast_name, "abyss normalize rest response")
             return False
         if rest_resp and not self.is_fake_beast_status_response(rest_resp): notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "探渊假状态休息")
-        self.schedule_abyss_retry(600); return False
+        self.schedule_abyss_retry(1800); return False
 
     def mark_best_beast_pastured_if_needed(self, best_name, best_status, response_text):
         """需要时标记最佳灵兽为放养中"""
@@ -3278,7 +3332,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             resp = await self.send_abyss_once(beast_name)
             if self.is_beast_pastured_response(resp, beast_name):
                 self.defer_beast_actions_while_pastured(beast_name, "abyss retry response")
-            elif self.is_abyss_busy_response(resp): log.warning(f"Abyss still blocked by busy status for {beast_name}; retry later."); self.schedule_abyss_retry(600)
+            elif self.is_abyss_busy_response(resp): log.info(f"Abyss still blocked by busy status for {beast_name}; retry later."); self.schedule_abyss_retry(1800)
         return resp
 
     def is_beast_stamina_insufficient_response(self, text):
@@ -3337,8 +3391,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """探渊前刷新.我的灵兽；六翼>=50优先，否则按候选体力/战力补位。"""
         log.info("Abyss: refreshing .我的灵兽 before selecting candidate.")
         if not await self.update_beast_cache():
-            log.warning("Abyss: failed to refresh beast cache; retry later.")
-            self.schedule_abyss_retry(600)
+            log.info("Abyss: failed to refresh beast cache; retry later.")
+            self.schedule_abyss_retry(1800)
             return False
 
         candidates = self.abyss_candidate_beasts(self.state.get("beasts_cache", []))
@@ -3382,7 +3436,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             a_resp = await self.send_abyss_with_busy_retry(best_name)
             last_response = a_resp or last_response
             if not a_resp:
-                self.schedule_abyss_retry(600)
+                self.schedule_abyss_retry(1800)
                 return False
             if self.is_beast_stamina_insufficient_response(a_resp):
                 self.record_beast_stamina_shortage(best_name, a_resp, "abyss")
@@ -3481,7 +3535,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.mark_pastured_beasts_returned(text)
             self.clear_pasture_pending()
             self.state["last_pasture_return_time"] = now_str()
-            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 60)
+            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
             self.save_state()
             log.info(f"Beast roster sync skipped by pasture-return settlement ({source or 'unknown'}); cache preserved.")
             return True
@@ -3505,12 +3559,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 self.mark_pastured_beasts_returned(resp)
                 self.clear_pasture_pending()
                 self.state["last_pasture_return_time"] = now_str()
-                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 60)
+                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
                 self.save_state()
                 log.info("Beast Cache: .我的灵兽 was interrupted by pasture return; cache preserved and refresh deferred.")
                 return False
             if not self.record_beast_roster_response(resp, source="auto .我的灵兽"):
-                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 300)
+                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
                 self.save_state()
                 log.warning("Beast Cache: response did not contain a valid beast roster; cache preserved.")
                 return False
@@ -3604,7 +3658,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if self.is_abyss_busy_response(text):
                 if resp_status:
                     self.set_best_beast_status(beast_name, resp_status)
-                self.schedule_abyss_retry(600)
+                self.schedule_abyss_retry(1800)
                 return True
             cd = self.parse_wait_time(text)
             if cd > 0:
@@ -5178,7 +5232,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         else:
                             log.warning("Beast action due but cache is empty; scheduling abyss/steal retry.")
                             if need_abyss: await self.execute_abyss_with_fallback()
-                            if need_steal: self.set_next_steal_not_before(add_seconds_str(now_str(), 600)); self.save_state()
+                            if need_steal: self.set_next_steal_not_before(add_seconds_str(now_str(), 1800)); self.save_state()
                     if need_pasture:
                         best_name_for_pasture = self.state.get("best_beast_name", "")
                         best_status_for_pasture = self.state.get("best_beast_status", "")
@@ -5213,7 +5267,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                                 self.save_state()
                             elif not cruise_beast:
                                 log.info("Beast cruise skipped: no suitable beast candidate.")
-                                self.schedule_beast_action_retry("next_beast_cruise_time")
+                                self.schedule_beast_action_retry("next_beast_cruise_time", 1800)
                         await asyncio.sleep(3)
             await self.sleep_beast_action(sleep_for)
 
