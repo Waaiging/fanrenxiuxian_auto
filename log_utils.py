@@ -2986,11 +2986,21 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_spirit_tree_harvest_response(text))
         elif cmd == ".协同守山" and hasattr(actor, "record_spirit_tree_guard_response"):
             processed = bool(actor.record_spirit_tree_guard_response(text))
-    elif cmd.startswith(".灵兽互动 "):
-        if hasattr(actor, "record_beast_interaction_response"):
+    elif (
+        cmd == ".我的灵兽"
+        or cmd == ".灵兽偷菜"
+        or cmd.startswith(".探渊 ")
+        or cmd.startswith(".灵兽探渊 ")
+        or cmd.startswith(".灵兽出战 ")
+        or cmd.startswith(".灵兽休息 ")
+        or cmd.startswith(".灵兽互动 ")
+        or cmd.startswith(".灵兽巡游 ")
+    ):
+        if hasattr(actor, "record_manual_beast_command_response"):
+            processed = bool(actor.record_manual_beast_command_response(cmd, text))
+        elif cmd.startswith(".灵兽互动 ") and hasattr(actor, "record_beast_interaction_response"):
             processed = bool(actor.record_beast_interaction_response(text))
-    elif cmd.startswith(".灵兽巡游 "):
-        if hasattr(actor, "record_beast_cruise_response"):
+        elif cmd.startswith(".灵兽巡游 ") and hasattr(actor, "record_beast_cruise_response"):
             processed = bool(actor.record_beast_cruise_response(text))
     elif cmd == ".元婴出窍":
         if hasattr(actor, "record_yuanying_out_start_response"):
