@@ -89,7 +89,9 @@ from log_utils import (
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
 STAR_GAZING_COMMAND_LEAD_SECONDS = 295               # 高竞争 Good 轮次：提前约 5 分钟拿到可回复的观星消息
-STAR_GAZING_SHIFT_LEAD_SECONDS = -23          # 小号在显现后 23 秒发出，覆盖高竞争延迟窗口
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (19, 21)     # 小号在显现后 19~21 秒发出，覆盖高竞争延迟窗口
+STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 最晚发送秒数，用于窗口截止判断
+STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59               # 即时模式活跃窗口为 59 秒
 STAR_GAZING_OPPORTUNITY_START_HOUR = 1               # 凌晨 1:00 后才开始监听好兆头
@@ -112,6 +114,17 @@ STAR_GAZING_VALID_RESULT_KEYWORDS = (
     "今日已观星一次",
     "天机不可多泄",
 )
+
+
+def star_gazing_shift_dt(target_dt, now=None):
+    """Return a shift send time within this account's configured post-manifest window."""
+    now = now or datetime.now()
+    min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
+    elapsed = (now - target_dt).total_seconds()
+    if elapsed > min_delay:
+        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
+    delay = random.randint(min_delay, max_delay)
+    return target_dt + timedelta(seconds=delay)
 
 # =====================================================================
 # 路径与常量配置
@@ -3761,9 +3774,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
     @safe_bg_task
     async def avatar_schedule_star_shift(self, avatar, reply_msg_id, target_dt, gazing_date=None):
         today = gazing_date or target_dt.strftime("%Y-%m-%d")
-        shift_dt = target_dt - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
+        shift_dt = star_gazing_shift_dt(target_dt)
         if self.get_avatar_state(avatar).get("last_star_shift_date") == today: return
-        if datetime.now() > shift_dt + timedelta(seconds=5): return
+        if datetime.now() > shift_dt + timedelta(seconds=STAR_GAZING_SHIFT_GRACE_SECONDS): return
         
         wait_sec = (shift_dt - datetime.now()).total_seconds()
         if wait_sec > 0: await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
@@ -3874,7 +3887,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     current_manifest_dt = datetime.now().replace(
                         hour=current_manifest_hour, minute=0, second=0, microsecond=0
                     )
-                    shift_dt = current_manifest_dt - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
+                    shift_dt = star_gazing_shift_dt(current_manifest_dt)
 
                     now2 = datetime.now()
                     if now2 < shift_dt:
@@ -3884,6 +3897,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             f"but too early for shift. Waiting {wait_sec:.1f}s until {dt_to_str(shift_dt)}."
                         )
                         await asyncio.sleep(wait_sec)
+                    elif now2 > shift_dt + timedelta(seconds=STAR_GAZING_SHIFT_GRACE_SECONDS):
+                        log.info(
+                            f"Avatar {avatar} Star gazing: skipped ACTIVE window shift; "
+                            f"configured send window ended at {dt_to_str(shift_dt)}."
+                        )
+                        return
 
                     uname = self.get_avatar_username(avatar)
                     if not uname:

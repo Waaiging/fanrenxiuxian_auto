@@ -151,7 +151,9 @@ STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机
 STAR_GAZING_INTERVAL_HOURS = 3                      # 星盘显现间隔 3 小时（每 3 小时整点一次）
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60           # 在显现前 3 分钟开始监听消息
 STAR_GAZING_COMMAND_LEAD_SECONDS = 295              # 高竞争 Good 轮次：提前约 5 分钟拿到可回复的观星消息
-STAR_GAZING_SHIFT_LEAD_SECONDS = -30                # 副号在显现后 30 秒发出，覆盖高竞争延迟窗口
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (22, 24)    # 副号在显现后 22~24 秒发出，覆盖高竞争延迟窗口
+STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 最晚发送秒数，用于窗口截止判断
+STAR_GAZING_SHIFT_GRACE_SECONDS = 1                 # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1                  # 改换星移只发 1 次（晚发策略不需要重试）
 STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS = 3       # 重复间隔（虽然只发 1 次，但必须定义否则 schedule_star_shift 会 NameError）
 STAR_GAZING_OPPORTUNITY_START_HOUR = 1              # 凌晨 1:00 才开始监听显化消息，避免前一天延迟消息在 0:00~1:00 误触发
@@ -161,6 +163,18 @@ STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异�
 # 以上关键字表示 Good 级别的观星结果，只有 Good 才触发观星和改换星移
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59  # 活跃抢占期缩短为 59 秒。超过这个时间收到消息直接排期到下一轮
 STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
+
+
+def star_gazing_shift_dt(target_dt, now=None):
+    """Return a shift send time within this account's configured post-manifest window."""
+    now = now or datetime.now()
+    min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
+    elapsed = (now - target_dt).total_seconds()
+    if elapsed > min_delay:
+        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
+    delay = random.randint(min_delay, max_delay)
+    return target_dt + timedelta(seconds=delay)
+
 MAIN_STAR_PALACE_STATE_KEYS = {
     "next_star_check_time",
     "next_star_attraction_time",
@@ -1858,10 +1872,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
     async def schedule_star_shift(self, reply_msg_id, target_dt, gazing_date=None):
         """
         调度 .改换星移 指令的发送。
-        核心策略：在星盘显现后 25 秒发送，给机器人拥堵队列留出最终快报前的处理时间。
+        核心策略：在星盘显现后的配置窗口内发送，给机器人拥堵队列留出最终快报前的处理时间。
 
         流程:
-          1. 计算发送时间 = target_dt - (-25秒) = target_dt + 25秒
+          1. 在 STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS 内选择本次发送时间
           2. 根据 STAR_GAZING_SHIFT_REPEAT_COUNT 确定发送次数（目前为 1 次）
           3. 在每次发送前检查是否已经完成（可能被其他协程提前做了）
           4. 如果错过了所有发送窗口，记录警告并清理状态
@@ -1875,8 +1889,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         log.info("🔒 [ATOMIC LOCK] Acquired by StarShift")
         try:
             today = gazing_date or target_dt.strftime("%Y-%m-%d")
-            # 负数表示显现后发送，正数表示显现前发送。
-            shift_dt = target_dt - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
+            shift_dt = star_gazing_shift_dt(target_dt)
             send_times = [
                 shift_dt + timedelta(seconds=i * STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS)
                 for i in range(STAR_GAZING_SHIFT_REPEAT_COUNT)
@@ -1890,7 +1903,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 return
 
             # 如果当前时间已超过最后一次发送时间，说明错过了窗口
-            if datetime.now() > last_send_dt + timedelta(seconds=1):
+            if datetime.now() > last_send_dt + timedelta(seconds=STAR_GAZING_SHIFT_GRACE_SECONDS):
                 log.warning(
                     f"Star gazing: missed shift repeat window for {dt_to_str(target_dt)}; "
                     f"clearing pending shift."
@@ -1949,11 +1962,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             gazing_date: 观星日期。
         """
         today = gazing_date or target_dt.strftime("%Y-%m-%d")
-        # 负数表示显现后发送，正数表示显现前发送。
-        shift_dt = target_dt - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
+        shift_dt = star_gazing_shift_dt(target_dt)
         if self.get_avatar_state(avatar).get("last_star_shift_date") == today:
             return
-        if datetime.now() > shift_dt + timedelta(seconds=5):
+        if datetime.now() > shift_dt + timedelta(seconds=STAR_GAZING_SHIFT_GRACE_SECONDS):
             return
 
         wait_sec = (shift_dt - datetime.now()).total_seconds()
@@ -2112,7 +2124,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     current_manifest_dt = datetime.now().replace(
                         hour=current_manifest_hour, minute=0, second=0, microsecond=0
                     )
-                    shift_dt = current_manifest_dt - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
+                    shift_dt = star_gazing_shift_dt(current_manifest_dt)
                     
                     now2 = datetime.now()
                     if now2 < shift_dt:
@@ -2123,6 +2135,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             f"but too early for shift. Waiting {wait_sec:.1f}s until {dt_to_str(shift_dt)}."
                         )
                         await asyncio.sleep(wait_sec)
+                    elif now2 > shift_dt + timedelta(seconds=STAR_GAZING_SHIFT_GRACE_SECONDS):
+                        who = avatar or "主魂"
+                        log.info(
+                            f"Star gazing [{who}]: skipped ACTIVE window shift; "
+                            f"configured send window ended at {dt_to_str(shift_dt)}."
+                        )
+                        return
                     
                     who = avatar or "主魂"
                     log.info(
