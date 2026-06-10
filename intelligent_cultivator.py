@@ -150,7 +150,7 @@ DESTINY_WINDOW_START_HOUR = 0               # 观命开始小时
 DESTINY_WINDOW_START_MINUTE = 10            # 观命开始分钟
 DESTINY_WINDOW_END_HOUR = 0                 # 观命结束小时
 DESTINY_WINDOW_END_MINUTE = 20              # 观命结束分钟
-DESTINY_BLOCKING_MEDITATION_SECONDS = 8 * 3600 + 10 * 60
+DESTINY_MEDITATION_DEFER_SECONDS = 20 * 60  # 观命窗口前短暂暂缓新开闭关
 DESTINY_OBSERVE_FAILURE_KEYWORDS = (
     "无法", "不能", "不可", "闭关中", "深度闭关", "正在闭关", "闭关状态",
     "冷却", "修为不足", "并非", "未开启", "错误"
@@ -2544,7 +2544,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         avatar_default = {
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "nickname": "", "in_deep_meditation": False,
-            "deep_meditation_end_time": "", "last_tower_date": "",
+            "deep_meditation_end_time": "", "meditation_restart_pending": False, "last_tower_date": "",
             "next_dream_map_time": "", "next_heart_trial_time": "", "next_divination_time": "",
             "next_concubine_voyage_time": "", "last_concubine_voyage_time": "",
             "concubine_voyage_active": False,
@@ -2601,6 +2601,27 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return
         self.state["avatars"][avatar].update(values or {})
         self.save_state()
+
+    def mark_avatar_meditation_restart_pending(self, avatar, source=""):
+        """Mark an avatar as out of deep meditation and needing an immediate restart."""
+        a_state = self.get_avatar_state(avatar)
+        a_state["in_deep_meditation"] = False
+        a_state["deep_meditation_end_time"] = ""
+        a_state["meditation_restart_pending"] = True
+        self.save_state()
+        log.info(f"[{avatar}] meditation restart pending ({source}).")
+
+    def avatar_meditation_needs_attention(self, avatar):
+        a_state = self.get_avatar_state(avatar)
+        next_med = a_state.get("next_meditation_time", "")
+        if next_med and is_future(next_med):
+            return False
+        if a_state.get("meditation_restart_pending"):
+            return True
+        if a_state.get("in_deep_meditation"):
+            end_time = a_state.get("deep_meditation_end_time", "")
+            return not end_time or not is_future(end_time)
+        return not a_state.get("deep_meditation_end_time")
 
         # 以下是被动状态检测方法（从万灵宗移植）
         # 用于监控手动发送指令的结果，及时同步到 state
@@ -3016,8 +3037,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 self.state["is_closing"] = False
                 self.meditation_state_event.set()
             else:
-                self.set_avatar_state(avatar, "in_deep_meditation", False)
-                self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+                self.mark_avatar_meditation_restart_pending(avatar, "passive exit")
             log.info(f"[{avatar}] passive: closing state cleared (出关).")
 
         # 深度闭关中 / 预计还需 → 更新深度闭关结束时间
@@ -3029,8 +3049,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     self.state["deep_meditation_end_time"] = ""
                     self.meditation_state_event.set()
                 else:
-                    self.set_avatar_state(avatar, "in_deep_meditation", False)
-                    self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+                    self.mark_avatar_meditation_restart_pending(avatar, "passive settlement")
                 log.info(f"[{avatar}] passive: deep meditation ended.")
             else:
                 cd = self.parse_wait_time(text)
@@ -3040,8 +3059,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         self.state["deep_meditation_end_time"] = add_seconds_str(now, cd)
                         self.meditation_state_event.set()
                     else:
-                        self.set_avatar_state(avatar, "in_deep_meditation", True)
-                        self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now, cd))
+                        self.update_avatar_states(avatar, {
+                            "in_deep_meditation": True,
+                            "deep_meditation_end_time": add_seconds_str(now, cd),
+                            "meditation_restart_pending": False,
+                            "next_meditation_time": "",
+                        })
                     log.info(f"[{avatar}] passive: deep meditation active, {cd}s remaining.")
 
         # 闭关冷却中 → 更新 next_meditation_time
@@ -3351,6 +3374,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     async def record_avatar_deep_meditation_start(self, avatar, response_text):
         if not self.is_deep_meditation_start_success(response_text):
             self.set_avatar_state(avatar, "in_deep_meditation", False)
+            self.set_avatar_state(avatar, "meditation_restart_pending", True)
             return False
         cd = self.parse_wait_time(response_text)
         if cd <= 0:
@@ -3361,6 +3385,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 cd = verify_cd
         self.set_avatar_state(avatar, "in_deep_meditation", True)
         self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600))
+        self.set_avatar_state(avatar, "meditation_restart_pending", False)
+        self.set_avatar_state(avatar, "next_meditation_time", "")
         return True
 
     # ============================================================
@@ -3572,6 +3598,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     features = self.avatar_features.get(avatar, {})
                     if not features.get("training_cmd"):
                         continue
+                    if self.avatar_meditation_needs_attention(avatar):
+                        next_wait = min(next_wait, 60)
+                        continue
                     a_state = self.get_avatar_state(avatar)
                     next_time = a_state.get("next_field_training_time", "")
                     if next_time and is_future(next_time):
@@ -3686,8 +3715,17 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return
 
         async with AtomicTaskContext(self, f"Destiny-{avatar}"):
-            resp = await self.send_and_wait_feedback_identity(avatar, ".观命", timeout=90)
-            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+            resp_text = ""
+            for attempt in range(2):
+                resp = await self.send_and_wait_feedback_identity(avatar, ".观命", timeout=90)
+                resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+                if is_deep_meditation_settlement_response(resp_text) or "神魂正在归位" in resp_text:
+                    self.mark_avatar_meditation_restart_pending(avatar, ".观命 triggered settlement")
+                    if attempt == 0:
+                        log.info(f"[{avatar}] .观命 triggered meditation settlement; retrying .观命 once.")
+                        await asyncio.sleep(3)
+                        continue
+                break
             if not resp_text:
                 log.warning(f"[{avatar}] .观命 未收到有效回复，保留今日重试机会。")
                 return
@@ -3727,19 +3765,28 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if end_time and is_future(end_time):
                 log.info(f"[{avatar}] 深度闭关中，剩余 {seconds_until(end_time)}s，跳过闭关检查。")
                 return  # 不 sleep，让外层循环继续检查其他任务（历练/心劫/入梦等）
-            self.set_avatar_state(avatar, "in_deep_meditation", False)
-            self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+            self.mark_avatar_meditation_restart_pending(avatar, "local end time expired")
+            a_state = self.get_avatar_state(avatar)
+
+        next_med = a_state.get("next_meditation_time", "")
+        if next_med and is_future(next_med):
+            log.info(f"[{avatar}] 闭关冷却中，等待到 {next_med} 后重试。")
+            return
 
         if features.get("destiny"):
-            pending_window = self._avatar_destiny_pending_window(avatar)
-            if pending_window:
-                window_start, window_end = pending_window
-                if datetime.now() <= window_end and datetime.now() + timedelta(seconds=DESTINY_BLOCKING_MEDITATION_SECONDS) >= window_start:
-                    log.info(
-                        f"[{avatar}] 下一次观命窗口 {dt_to_str(window_start)} - {dt_to_str(window_end)} "
-                        "会被新的深度闭关覆盖，暂缓闭关。"
-                    )
-                    return
+            now_dt = datetime.now()
+            today = now_dt.strftime("%Y-%m-%d")
+            if a_state.get("last_destiny_date") != today:
+                pending_window = self._avatar_destiny_pending_window(avatar, now_dt)
+                if pending_window:
+                    window_start, window_end = pending_window
+                    defer_start = window_start - timedelta(seconds=DESTINY_MEDITATION_DEFER_SECONDS)
+                    if defer_start <= now_dt <= window_end:
+                        log.info(
+                            f"[{avatar}] 观命窗口临近 {dt_to_str(window_start)} - {dt_to_str(window_end)}，"
+                            "暂缓新开深度闭关。"
+                        )
+                        return
 
         # 原子流程：整个闭关流程不被身份切换打断
         async with AtomicTaskContext(self, f"Meditation-{avatar}"):
@@ -3756,8 +3803,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 log.info(f"[{avatar}] .查看闭关: 已在深度闭关中。")
                 cd = self.parse_wait_time(check_text)
                 if cd > 0:
-                    self.set_avatar_state(avatar, "in_deep_meditation", True)
-                    self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now_str(), cd))
+                    self.update_avatar_states(avatar, {
+                        "in_deep_meditation": True,
+                        "deep_meditation_end_time": add_seconds_str(now_str(), cd),
+                        "meditation_restart_pending": False,
+                        "next_meditation_time": "",
+                    })
                 return
 
             await asyncio.sleep(3)
@@ -3778,7 +3829,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if not any(k in cr_text for k in ["闭关成功", "闭关失败"]):
                 if any(k in cr_text for k in ["冷却", "无法立即"]) or ("需要" in cr_text and "分钟" in cr_text):
                     cd = self.parse_wait_time(cr_text)
-                    log.info(f"[{avatar}] 闭关冷却中 {cd}s，跳过。")
+                    retry_cd = cd if cd > 0 else 600
+                    self.set_avatar_state(avatar, "next_meditation_time", add_seconds_str(now_str(), retry_cd))
+                    self.set_avatar_state(avatar, "meditation_restart_pending", True)
+                    log.info(f"[{avatar}] 闭关冷却中 {retry_cd}s，稍后重试。")
                     return
 
             await asyncio.sleep(3)
@@ -3877,6 +3931,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
     async def _avatar_field_training_check(self, avatar):
         """化身野外历练检查（单次）。无咎子先发 .推命 探索，再发 .野外历练 深入"""
+        if self.avatar_meditation_needs_attention(avatar):
+            log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
+            return
         a_state = self.get_avatar_state(avatar)
         nt = a_state.get("next_field_training_time", "")
         if nt and is_future(nt): return
@@ -3915,7 +3972,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 if destiny_wait is not None:
                     min_cd = min(min_cd, destiny_wait)
             # 闭关CD
-            if a_state.get("in_deep_meditation"):
+            next_med = a_state.get("next_meditation_time", "")
+            if next_med and is_future(next_med):
+                min_cd = min(min_cd, seconds_until(next_med))
+            elif self.avatar_meditation_needs_attention(avatar):
+                min_cd = min(min_cd, 60)
+            elif a_state.get("in_deep_meditation"):
                 end = a_state.get("deep_meditation_end_time", "")
                 if end and is_future(end):
                     min_cd = min(min_cd, seconds_until(end))
