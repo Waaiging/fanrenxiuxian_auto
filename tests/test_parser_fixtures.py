@@ -279,6 +279,18 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(av_state["spirit_tree_harvest_pending"])
         self.assertEqual(scheduled, ["fixture"])
 
+    def test_spirit_tree_harvest_pending_text_waits_for_edited_result(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.state = {"avatars": {"缘生子": {"spirit_tree_harvest_pending": False}}}
+        actor.save_state = lambda: None
+
+        self.assertFalse(actor.record_spirit_tree_harvest_response("你来到灵眼之树下，拿出宗门贡献令，核对天道榜单..."))
+        self.assertFalse(actor.state["avatars"]["缘生子"].get("spirit_tree_harvested_in_mature_period", False))
+        self.assertTrue(actor.record_spirit_tree_harvest_response("**【灵果入腹 · 造化自生】**\n你摘下一枚**【万年灵木果】**...\n💪 **修为增长**: +28000"))
+        self.assertTrue(actor.state["avatars"]["缘生子"]["spirit_tree_harvested_in_mature_period"])
+
     def test_resource_and_inventory_parsers(self):
         changes = parse_resource_changes_from_text(
             "传功玉简已记录！获得了 **30** 点贡献。\n"

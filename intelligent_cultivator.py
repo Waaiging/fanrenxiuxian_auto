@@ -2940,6 +2940,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             self.save_state()
             log.info(f"[{avatar}] spirit tree harvest rejected as not mature; resume irrigation checks.")
             return True
+        if any(k in clean for k in ["核对天道榜单", "拿出宗门贡献令"]):
+            log.info(f"[{avatar}] spirit tree harvest settlement pending edited result.")
+            return False
         if clean:
             notify_unrecognized_response(self, SPIRIT_TREE_HARVEST_COMMAND, clean, log, "灵树采摘")
         return False
@@ -3077,7 +3080,23 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             log.info(f"[{avatar}] spirit tree mature detected ({reason}); sending {SPIRIT_TREE_HARVEST_COMMAND} once.")
             resp = await self.send_and_wait_feedback_identity(avatar, SPIRIT_TREE_HARVEST_COMMAND, timeout=90, max_retries=1)
             resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-            self.record_spirit_tree_harvest_response(resp_text)
+            if self.record_spirit_tree_harvest_response(resp_text):
+                return
+            resp_id = getattr(resp, "id", None)
+            if not resp_id:
+                return
+            for _ in range(15):
+                await asyncio.sleep(1)
+                try:
+                    updated_msg = await self.client.get_messages(self.target_chat_id, ids=resp_id)
+                except Exception as e:
+                    log.info(f"[{avatar}] spirit tree harvest edit poll failed: {e}")
+                    return
+                updated_text = (updated_msg.text or "") if updated_msg else ""
+                if updated_text and updated_text != resp_text:
+                    resp_text = updated_text
+                    if self.record_spirit_tree_harvest_response(resp_text):
+                        return
 
     async def execute_spirit_tree_guard_once(self, reason="invasion"):
         avatar = SPIRIT_TREE_AVATAR
