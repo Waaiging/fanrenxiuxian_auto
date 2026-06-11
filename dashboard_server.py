@@ -72,12 +72,16 @@ COMMAND_RECORD_CACHE = {}                # 指令执行记录缓存
 COMMAND_RECORD_LOCK = threading.Lock()   # 指令执行记录锁
 MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
 MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
+RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存
+RESOURCE_STATS_LOCK = threading.Lock()   # 资源/库存统计锁
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
 MESSAGE_HEALTH_CACHE_SECONDS = 30
+RESOURCE_STATS_CACHE_SECONDS = 45
+RESOURCE_STATS_MAX_ROWS = 4000
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
@@ -1315,6 +1319,7 @@ def ensure_message_health_indexes(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_created ON message_events(account, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
 
 def build_message_health(since_hours=24, min_gap_seconds=60, min_missing_msg_ids=20, limit=8):
     """Audit message_events.sqlite3 for lightweight listener/message-box health."""
@@ -1513,6 +1518,300 @@ def build_message_health(since_hours=24, min_gap_seconds=60, min_missing_msg_ids
             MESSAGE_HEALTH_CACHE["key"] = json.dumps(signature, sort_keys=True)
             MESSAGE_HEALTH_CACHE["at"] = time.time()
             MESSAGE_HEALTH_CACHE["data"] = payload
+    return payload
+
+
+# =====================================================================
+# 资源/库存统计
+# =====================================================================
+
+RESOURCE_LINE_SKIP_PHRASES = (
+    "当前修为", "**修为**", "修为不足", "修为加成", "修为惩罚", "当前境界",
+    "冷却", "剩余", "预计", "可以使用", "新手秘籍", "http://", "https://",
+)
+RESOURCE_NAME_SKIP_FRAGMENTS = (
+    "修为", "境界", "冷却", "剩余", "预计", "道友", "天命玉牒", "修士状态",
+)
+RESOURCE_UNITS = ("点", "枚", "块", "个", "份", "株", "颗", "瓶", "张", "件", "缕", "滴", "层")
+
+def normalize_resource_line(value):
+    return str(value or "").replace("**", "").replace("`", "").replace(",", "").strip()
+
+def clean_resource_name(value):
+    name = re.sub(r"\s+", "", str(value or ""))
+    name = name.strip(" ：:，,。.!！?？；;、[]【】()（）*x×+-")
+    if not name or len(name) > 32:
+        return ""
+    if any(fragment in name for fragment in RESOURCE_NAME_SKIP_FRAGMENTS):
+        return ""
+    if re.fullmatch(r"\d+", name):
+        return ""
+    return name
+
+def add_resource_change(changes, name, amount, line="", source=""):
+    name = clean_resource_name(name)
+    amount = parse_log_int(amount)
+    if not name or not amount:
+        return
+    changes.append({
+        "name": name,
+        "amount": int(amount),
+        "direction": "gain" if int(amount) > 0 else "loss",
+        "source": source or ("获得" if int(amount) > 0 else "消耗"),
+        "line": str(line or "").strip(),
+    })
+
+def parse_resource_changes_from_text(text):
+    """Extract non-cultivation resource/item gain and loss from bot replies."""
+    raw = str(text or "")
+    if not raw:
+        return []
+    changes = []
+    for raw_line in raw.splitlines():
+        line = normalize_resource_line(raw_line)
+        if not line or any(phrase in line for phrase in RESOURCE_LINE_SKIP_PHRASES):
+            continue
+        if not any(k in line for k in ("获得", "得到", "收获", "带回", "采得", "采摘", "奖励", "消耗", "扣除", "花费", "失去", "减少", "+", "＋", "-")):
+            continue
+
+        for match in re.finditer(
+            r"(?:获得|得到|收获|带回|采得|采摘|奖励)(?:了)?\s*[【\[]([^】\]]+)[】\]]\s*(?:[x×*]\s*(\d+)|(\d+)\s*(?:个|枚|份|株|件|颗|块|瓶|张|缕|滴))?",
+            line,
+        ):
+            amount = match.group(2) or match.group(3) or 1
+            add_resource_change(changes, match.group(1), amount, line=line, source="获得")
+
+        for match in re.finditer(
+            r"(?:消耗|扣除|花费|失去)(?:了)?\s*[【\[]([^】\]]+)[】\]]\s*(?:[x×*]\s*(\d+)|(\d+)\s*(?:个|枚|份|株|件|颗|块|瓶|张|缕|滴))?",
+            line,
+        ):
+            amount = match.group(2) or match.group(3) or 1
+            add_resource_change(changes, match.group(1), -parse_log_int(amount), line=line, source="消耗")
+
+        for match in re.finditer(
+            rf"(?:获得|得到|收获|带回|奖励|增加)(?:了)?\s*([+-]?\d[\d,]*)\s*(?:{'|'.join(RESOURCE_UNITS)})?\s*([\u4e00-\u9fffA-Za-z0-9_·]+)",
+            line,
+        ):
+            add_resource_change(changes, match.group(2), match.group(1), line=line, source="获得")
+
+        for match in re.finditer(
+            rf"(?:消耗|扣除|花费|失去|减少)(?:了)?\s*(\d[\d,]*)\s*(?:{'|'.join(RESOURCE_UNITS)})?\s*([\u4e00-\u9fffA-Za-z0-9_·]+)",
+            line,
+        ):
+            add_resource_change(changes, match.group(2), -parse_log_int(match.group(1)), line=line, source="消耗")
+
+        for match in re.finditer(r"([\u4e00-\u9fffA-Za-z0-9_·]{1,24})\s*[+＋]\s*(\d[\d,]*)", line):
+            add_resource_change(changes, match.group(1), match.group(2), line=line, source="获得")
+        for match in re.finditer(r"([\u4e00-\u9fffA-Za-z0-9_·]{1,24})\s*[-－]\s*(\d[\d,]*)", line):
+            add_resource_change(changes, match.group(1), -parse_log_int(match.group(2)), line=line, source="消耗")
+
+    deduped = []
+    seen = set()
+    for item in changes:
+        key = (item["name"], item["amount"], item["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+def parse_inventory_items_from_text(text):
+    """Parse a latest inventory snapshot from 储物袋/背包 style replies."""
+    raw = str(text or "")
+    if not raw or not any(k in raw for k in ("储物袋", "背包", "物品栏", "物品清单", "库存")):
+        return []
+    items = {}
+    for raw_line in raw.splitlines():
+        line = normalize_resource_line(raw_line)
+        if not line or any(phrase in line for phrase in RESOURCE_LINE_SKIP_PHRASES):
+            continue
+        for match in re.finditer(r"[【\[]([^】\]]+)[】\]]\s*(?:[x×*]\s*)?(\d[\d,]*)", line):
+            name = clean_resource_name(match.group(1))
+            if name:
+                items[name] = items.get(name, 0) + parse_log_int(match.group(2))
+        match = re.match(r"^\s*[-*]?\s*([^:：\n]{1,32})\s*[:：]\s*(\d[\d,]*)\s*$", line)
+        if match:
+            name = clean_resource_name(match.group(1))
+            if name:
+                items[name] = items.get(name, 0) + parse_log_int(match.group(2))
+    return [
+        {"name": name, "amount": amount}
+        for name, amount in sorted(items.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+def empty_resource_account(account):
+    return {
+        "name": ACCOUNT_DISPLAY_NAMES.get(account, account),
+        "resources": [],
+        "recent_events": [],
+        "inventory": [],
+        "_resource_map": {},
+        "_inventory_map": {},
+    }
+
+def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event_limit=60, inventory_limit=40):
+    """Build a lightweight resource/inventory view from message_events.sqlite3."""
+    path = message_events_db_path()
+    now = datetime.now()
+    since_hours = max(1, int(since_hours or 72))
+    max_rows = max(100, min(int(max_rows or RESOURCE_STATS_MAX_ROWS), 20000))
+    cutoff = (now - timedelta(hours=since_hours)).strftime(TIME_FORMAT)
+    try:
+        stat = os.stat(path)
+        signature = {
+            "mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or 0),
+            "size": int(getattr(stat, "st_size", 0) or 0),
+            "since_hours": since_hours,
+            "max_rows": max_rows,
+            "event_limit": int(event_limit or 60),
+            "inventory_limit": int(inventory_limit or 40),
+        }
+    except OSError:
+        stat = None
+        signature = None
+
+    if signature:
+        cache_key = json.dumps(signature, sort_keys=True)
+        with RESOURCE_STATS_LOCK:
+            cached = RESOURCE_STATS_CACHE.get("data")
+            if (
+                cached
+                and RESOURCE_STATS_CACHE.get("key") == cache_key
+                and time.time() - float(RESOURCE_STATS_CACHE.get("at") or 0) < RESOURCE_STATS_CACHE_SECONDS
+            ):
+                return cached
+
+    payload = {
+        "ok": False,
+        "status": "missing",
+        "updated_at": now.strftime(TIME_FORMAT),
+        "since_hours": since_hours,
+        "accounts": {account: empty_resource_account(account) for account in WINDOW_MAP},
+        "recent_events": [],
+        "notes": [
+            "资源变化从机器人回复里提取，不会改 state。",
+            "库存只取最近一次储物袋/背包类回复快照；没发过相关指令就会为空。",
+        ],
+    }
+    if stat is None:
+        payload["error"] = "message_events.sqlite3 不存在"
+        return payload
+
+    try:
+        with sqlite3.connect(path, timeout=2) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1 FROM message_events LIMIT 1").fetchone()
+            ensure_message_health_indexes(conn)
+            rows = conn.execute(
+                """
+                SELECT id, account, identity, command, direction, event_kind, msg_id, text_hash, text, created_at
+                FROM message_events
+                WHERE created_at>=?
+                  AND is_game_bot=1
+                  AND text IS NOT NULL
+                  AND (
+                      text LIKE '%获得%' OR text LIKE '%得到%' OR text LIKE '%收获%'
+                      OR text LIKE '%带回%' OR text LIKE '%消耗%' OR text LIKE '%扣除%'
+                      OR text LIKE '%花费%' OR text LIKE '%储物袋%' OR text LIKE '%背包%'
+                      OR text LIKE '%物品栏%' OR text LIKE '%库存%' OR text LIKE '%灵石%'
+                      OR text LIKE '%贡献%'
+                  )
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (cutoff, max_rows),
+            ).fetchall()
+
+        seen_messages = set()
+        for row in rows:
+            account = row["account"] if row["account"] in WINDOW_MAP else str(row["account"] or "")
+            if not account:
+                continue
+            account_data = payload["accounts"].setdefault(account, empty_resource_account(account))
+            identity = str(row["identity"] or "主魂").strip() or "主魂"
+            text = row["text"] or ""
+            msg_key = (account, row["msg_id"], row["text_hash"] or row["id"])
+            if msg_key in seen_messages:
+                continue
+            seen_messages.add(msg_key)
+
+            inventory_items = parse_inventory_items_from_text(text)
+            if inventory_items:
+                inventory_map = account_data["_inventory_map"]
+                if identity not in inventory_map:
+                    inventory_map[identity] = {
+                        "identity": identity,
+                        "time": row["created_at"],
+                        "command": row["command"] or "",
+                        "items": inventory_items[:int(inventory_limit or 40)],
+                    }
+
+            changes = parse_resource_changes_from_text(text)
+            if not changes:
+                continue
+            event = {
+                "time": row["created_at"],
+                "account": account,
+                "account_name": ACCOUNT_DISPLAY_NAMES.get(account, account),
+                "identity": identity,
+                "command": row["command"] or "",
+                "changes": changes,
+                "line": changes[0].get("line", ""),
+            }
+            payload["recent_events"].append(event)
+            account_data["recent_events"].append(event)
+            resource_map = account_data["_resource_map"]
+            for change in changes:
+                key = (identity, change["name"])
+                bucket = resource_map.setdefault(key, {
+                    "identity": identity,
+                    "name": change["name"],
+                    "gain": 0,
+                    "loss": 0,
+                    "net": 0,
+                    "count": 0,
+                    "last_time": "",
+                    "last_line": "",
+                })
+                amount = int(change["amount"])
+                if amount > 0:
+                    bucket["gain"] += amount
+                else:
+                    bucket["loss"] += abs(amount)
+                bucket["net"] = bucket["gain"] - bucket["loss"]
+                bucket["count"] += 1
+                if not bucket["last_time"] or str(row["created_at"]) > bucket["last_time"]:
+                    bucket["last_time"] = row["created_at"]
+                    bucket["last_line"] = change.get("line", "")
+
+        event_limit = int(event_limit or 60)
+        payload["recent_events"] = payload["recent_events"][:event_limit]
+        total_resource_rows = 0
+        total_inventory_rows = 0
+        for account_data in payload["accounts"].values():
+            resources = list(account_data.pop("_resource_map", {}).values())
+            resources.sort(key=lambda item: (item.get("last_time", ""), abs(item.get("net", 0))), reverse=True)
+            account_data["resources"] = resources[:40]
+            account_data["recent_events"] = account_data["recent_events"][:20]
+            inventory = list(account_data.pop("_inventory_map", {}).values())
+            inventory.sort(key=lambda item: item.get("time", ""), reverse=True)
+            account_data["inventory"] = inventory[:8]
+            total_resource_rows += len(resources)
+            total_inventory_rows += len(inventory)
+
+        payload["ok"] = True
+        payload["status"] = "ok" if (total_resource_rows or total_inventory_rows) else "empty"
+        payload["resource_count"] = total_resource_rows
+        payload["inventory_count"] = total_inventory_rows
+    except Exception as exc:
+        payload["status"] = "error"
+        payload["error"] = str(exc)
+
+    if signature:
+        with RESOURCE_STATS_LOCK:
+            RESOURCE_STATS_CACHE["key"] = json.dumps(signature, sort_keys=True)
+            RESOURCE_STATS_CACHE["at"] = time.time()
+            RESOURCE_STATS_CACHE["data"] = payload
     return payload
 
 
@@ -2075,6 +2374,12 @@ async def message_health(since_hours: int = 24, min_gap_seconds: int = 60,
         min_missing_msg_ids=min_missing_msg_ids,
         limit=limit,
     )
+
+@app.get("/api/resource-stats")
+async def resource_stats(since_hours: int = 72, max_rows: int = RESOURCE_STATS_MAX_ROWS,
+                         username: str = Depends(authenticate)):
+    """获取最近资源变化和库存快照。"""
+    return build_resource_stats(since_hours=since_hours, max_rows=max_rows)
 
 @app.get("/api/command-records")
 async def command_records(username: str = Depends(authenticate)):

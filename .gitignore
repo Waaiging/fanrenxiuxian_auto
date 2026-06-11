@@ -56,6 +56,9 @@ gen_update_script.py
 temp_*.txt
 sftp_cmds.txt
 test_*.py
+!tests/
+!tests/__init__.py
+!tests/test_*.py
 
 # Manual/debug scripts and private operational notes
 star_gazing_manual.py
