@@ -21,6 +21,7 @@ import threading
 import uuid
 import re
 import signal
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
@@ -69,9 +70,14 @@ CULTIVATION_CACHE = {}                   # 修为统计缓存
 CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
 COMMAND_RECORD_CACHE = {}                # 指令执行记录缓存
 COMMAND_RECORD_LOCK = threading.Lock()   # 指令执行记录锁
+MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
+MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
+MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
+MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
+MESSAGE_HEALTH_CACHE_SECONDS = 30
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
@@ -1286,6 +1292,231 @@ def build_all_command_records():
 
 
 # =====================================================================
+# 消息采集健康
+# =====================================================================
+
+def message_events_db_path():
+    return os.path.join(CONFIG_DIR, MESSAGE_EVENTS_DB_FILE)
+
+def parse_db_time(value):
+    try:
+        return datetime.strptime(str(value or ""), TIME_FORMAT)
+    except Exception:
+        return None
+
+def message_time_age_seconds(value):
+    dt = parse_db_time(value)
+    if not dt:
+        return None
+    return int(max(0, (datetime.now() - dt).total_seconds()))
+
+def ensure_message_health_indexes(conn):
+    """Keep dashboard health queries fast on existing message_events.sqlite3 files."""
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_created ON message_events(account, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
+
+def build_message_health(since_hours=24, min_gap_seconds=60, min_missing_msg_ids=20, limit=8):
+    """Audit message_events.sqlite3 for lightweight listener/message-box health."""
+    path = message_events_db_path()
+    now = datetime.now()
+    cutoff = (now - timedelta(hours=max(1, int(since_hours or 24)))).strftime(TIME_FORMAT)
+    try:
+        stat = os.stat(path)
+        signature = {
+            "mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or 0),
+            "size": int(getattr(stat, "st_size", 0) or 0),
+            "since_hours": int(since_hours or 24),
+            "min_gap_seconds": int(min_gap_seconds or 60),
+            "min_missing_msg_ids": int(min_missing_msg_ids or 20),
+            "limit": int(limit or 8),
+        }
+    except OSError:
+        stat = None
+        signature = None
+
+    if signature:
+        cache_key = json.dumps(signature, sort_keys=True)
+        with MESSAGE_HEALTH_LOCK:
+            cached = MESSAGE_HEALTH_CACHE.get("data")
+            if (
+                cached
+                and MESSAGE_HEALTH_CACHE.get("key") == cache_key
+                and time.time() - float(MESSAGE_HEALTH_CACHE.get("at") or 0) < MESSAGE_HEALTH_CACHE_SECONDS
+            ):
+                return cached
+
+    payload = {
+        "ok": False,
+        "status": "missing",
+        "db": MESSAGE_EVENTS_DB_FILE,
+        "updated_at": now.strftime(TIME_FORMAT),
+        "since_hours": since_hours,
+        "min_gap_seconds": min_gap_seconds,
+        "min_missing_msg_ids": min_missing_msg_ids,
+        "accounts": {},
+        "gap_count": 0,
+        "latest_at": "",
+        "latest_age_seconds": None,
+        "notes": [
+            "断层按同账号 msg_id 跳号和写入时间间隔估算，只提示可能漏采。",
+            "消息箱来自脚本运行时记录；session 不回拉也不影响此处统计。",
+        ],
+    }
+    if stat is None:
+        payload["error"] = "message_events.sqlite3 不存在"
+        return payload
+
+    try:
+        payload["db_size"] = int(getattr(stat, "st_size", 0) or 0)
+        payload["db_mtime"] = datetime.fromtimestamp(stat.st_mtime).strftime(TIME_FORMAT)
+        with sqlite3.connect(path, timeout=2) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1 FROM message_events LIMIT 1").fetchone()
+            ensure_message_health_indexes(conn)
+            latest_global = conn.execute(
+                "SELECT MAX(created_at) AS latest_at FROM message_events"
+            ).fetchone()
+            payload["latest_at"] = (latest_global["latest_at"] if latest_global else "") or ""
+            payload["latest_age_seconds"] = message_time_age_seconds(payload["latest_at"])
+
+            total_gaps = 0
+            stale_accounts = 0
+            for account in WINDOW_MAP:
+                counts = {
+                    "total": 0,
+                    "since": 0,
+                    "raw": 0,
+                    "in": 0,
+                    "out": 0,
+                    "edited": 0,
+                    "bot": 0,
+                }
+                total_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM message_events WHERE account=?",
+                    (account,),
+                ).fetchone()
+                counts["total"] = int(total_row["c"] if total_row else 0)
+                since_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM message_events WHERE account=? AND created_at>=?",
+                    (account, cutoff),
+                ).fetchone()
+                counts["since"] = int(since_row["c"] if since_row else 0)
+                for row in conn.execute(
+                    """
+                    SELECT direction, COUNT(*) AS c
+                    FROM message_events
+                    WHERE account=? AND created_at>=?
+                    GROUP BY direction
+                    """,
+                    (account, cutoff),
+                ).fetchall():
+                    key = str(row["direction"] or "raw")
+                    if key in counts:
+                        counts[key] = int(row["c"] or 0)
+                edited_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM message_events
+                    WHERE account=? AND event_kind='edited' AND created_at>=?
+                    """,
+                    (account, cutoff),
+                ).fetchone()
+                counts["edited"] = int(edited_row["c"] if edited_row else 0)
+                bot_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM message_events
+                    WHERE account=? AND is_game_bot=1 AND created_at>=?
+                    """,
+                    (account, cutoff),
+                ).fetchone()
+                counts["bot"] = int(bot_row["c"] if bot_row else 0)
+
+                latest = conn.execute(
+                    """
+                    SELECT msg_id, created_at, event_kind, direction, sender_username, sender_name, substr(text, 1, 80) AS text
+                    FROM message_events
+                    WHERE account=? AND msg_id IS NOT NULL
+                    ORDER BY created_at DESC, msg_id DESC
+                    LIMIT 1
+                    """,
+                    (account,),
+                ).fetchone()
+                latest_dict = dict(latest) if latest else {}
+                latest_age = message_time_age_seconds(latest_dict.get("created_at"))
+                if latest_age is not None and latest_age > 30 * 60:
+                    stale_accounts += 1
+
+                max_msg_row = conn.execute(
+                    "SELECT MAX(msg_id) AS max_msg_id FROM message_events WHERE account=? AND msg_id IS NOT NULL",
+                    (account,),
+                ).fetchone()
+                max_msg_id = int(max_msg_row["max_msg_id"] or 0) if max_msg_row else 0
+                min_scan_msg_id = max(0, max_msg_id - MESSAGE_HEALTH_MAX_SCAN_IDS)
+                msg_rows = conn.execute(
+                    """
+                    SELECT msg_id, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+                    FROM message_events
+                    WHERE account=? AND created_at>=? AND msg_id IS NOT NULL AND msg_id>=?
+                    GROUP BY msg_id
+                    ORDER BY msg_id
+                    """,
+                    (account, cutoff, min_scan_msg_id),
+                ).fetchall()
+                gaps = []
+                prev = None
+                for row in msg_rows:
+                    current = {
+                        "msg_id": int(row["msg_id"]),
+                        "first_at": row["first_at"],
+                        "last_at": row["last_at"],
+                    }
+                    if prev:
+                        missing = current["msg_id"] - prev["msg_id"] - 1
+                        if missing >= int(min_missing_msg_ids or 20):
+                            prev_dt = parse_db_time(prev["last_at"])
+                            current_dt = parse_db_time(current["first_at"])
+                            time_gap = int((current_dt - prev_dt).total_seconds()) if prev_dt and current_dt else 0
+                            if time_gap >= int(min_gap_seconds or 60):
+                                gaps.append({
+                                    "from_msg_id": prev["msg_id"],
+                                    "to_msg_id": current["msg_id"],
+                                    "missing_msg_ids": missing,
+                                    "from_time": prev["last_at"],
+                                    "to_time": current["first_at"],
+                                    "gap_seconds": time_gap,
+                                })
+                    prev = current
+                if len(gaps) > int(limit or 8):
+                    gaps = gaps[-int(limit or 8):]
+                total_gaps += len(gaps)
+                payload["accounts"][account] = {
+                    "name": ACCOUNT_DISPLAY_NAMES.get(account, account),
+                    "counts": counts,
+                    "latest": latest_dict,
+                    "latest_age_seconds": latest_age,
+                    "gap_count": len(gaps),
+                    "gaps": gaps,
+                }
+
+            payload["gap_count"] = total_gaps
+            payload["ok"] = True
+            payload["status"] = "ok"
+            if total_gaps:
+                payload["status"] = "warn"
+            if stale_accounts == len(WINDOW_MAP):
+                payload["status"] = "stale"
+    except Exception as exc:
+        payload["status"] = "error"
+        payload["error"] = str(exc)
+    if signature:
+        with MESSAGE_HEALTH_LOCK:
+            MESSAGE_HEALTH_CACHE["key"] = json.dumps(signature, sort_keys=True)
+            MESSAGE_HEALTH_CACHE["at"] = time.time()
+            MESSAGE_HEALTH_CACHE["data"] = payload
+    return payload
+
+
+# =====================================================================
 # 修为统计
 # =====================================================================
 
@@ -1826,8 +2057,24 @@ async def status(username: str = Depends(authenticate)):
                 "command_panels": build_command_panels(key, state),
                 "profile_usernames": account_profile_usernames(key),
             }
-        return {"accounts": result, "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
+        return {
+            "accounts": result,
+            "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "message_health": build_message_health(),
+        }
     except Exception as e: return {"error": str(e)}
+
+@app.get("/api/message-health")
+async def message_health(since_hours: int = 24, min_gap_seconds: int = 60,
+                         min_missing_msg_ids: int = 20, limit: int = 8,
+                         username: str = Depends(authenticate)):
+    """消息箱水位和疑似断层审计。"""
+    return build_message_health(
+        since_hours=since_hours,
+        min_gap_seconds=min_gap_seconds,
+        min_missing_msg_ids=min_missing_msg_ids,
+        limit=limit,
+    )
 
 @app.get("/api/command-records")
 async def command_records(username: str = Depends(authenticate)):

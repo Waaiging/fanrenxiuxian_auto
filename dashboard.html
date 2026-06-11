@@ -151,6 +151,26 @@
         .command-visibility-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-list-empty { color: var(--text-secondary); text-align: center; padding: 1.4rem 0; border: 1px dashed rgba(255,255,255,0.12); border-radius: 8px; font-size: 0.82rem; }
         .command-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
+        .message-health-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
+        .message-health-section.status-ok { border-color: rgba(16,185,129,0.32); }
+        .message-health-section.status-warn,
+        .message-health-section.status-stale { border-color: rgba(245,158,11,0.42); }
+        .message-health-section.status-error,
+        .message-health-section.status-missing { border-color: rgba(239,68,68,0.42); }
+        .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.75rem; padding: 0.85rem 1rem 1rem; }
+        .health-card { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.75rem; min-width: 0; }
+        .health-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.55rem; margin-bottom: 0.55rem; }
+        .health-card-name { font-weight: 900; color: var(--text-primary); }
+        .health-card-status { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-secondary); }
+        .health-card.status-warn .health-card-status,
+        .health-card.status-stale .health-card-status { color: #fbbf24; }
+        .health-card.status-error .health-card-status,
+        .health-card.status-missing .health-card-status { color: #fca5a5; }
+        .health-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem 0.6rem; font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; color: var(--text-secondary); }
+        .health-metrics b { color: var(--text-primary); font-weight: 800; }
+        .health-gap-list { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #fbbf24; }
+        .health-gap-item { border-left: 3px solid rgba(245,158,11,0.58); padding-left: 0.42rem; }
+        .health-note { color: var(--text-secondary); font-size: 0.72rem; line-height: 1.45; padding: 0 1rem 0.85rem; }
         .record-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 0.9rem 1rem; border-bottom: 1px solid var(--border-color); }
         .record-title { font-size: 0.95rem; font-weight: 800; color: var(--text-primary); }
         .record-summary { color: var(--text-secondary); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; text-align: right; }
@@ -376,6 +396,16 @@
 
     <main>
         <div id="account-cards" style="display: contents;"></div>
+        <section class="message-health-section status-unknown" id="message-health-section">
+            <div class="record-header">
+                <div class="record-title">消息采集健康</div>
+                <div class="record-summary" id="message-health-summary">加载中...</div>
+            </div>
+            <div class="health-grid" id="message-health-content">
+                <div class="record-empty">加载中...</div>
+            </div>
+            <div class="health-note" id="message-health-note"></div>
+        </section>
         <section class="command-record-section">
             <div class="record-header">
                 <div class="record-title">指令执行记录表</div>
@@ -1241,6 +1271,79 @@
             `;
         }
 
+        function healthStatusText(status) {
+            return {
+                ok: '正常',
+                warn: '需留意',
+                stale: '采集偏旧',
+                error: '错误',
+                missing: '无消息库',
+                unknown: '未知'
+            }[status || 'unknown'] || status || '未知';
+        }
+
+        function renderMessageHealth(payload) {
+            const section = document.getElementById('message-health-section');
+            const summary = document.getElementById('message-health-summary');
+            const content = document.getElementById('message-health-content');
+            const note = document.getElementById('message-health-note');
+            if (!section || !summary || !content || !note) return;
+            const status = payload?.status || 'unknown';
+            section.className = `message-health-section status-${status}`;
+            const latest = payload?.latest_at ? recordDateText(payload.latest_at) : '无记录';
+            const age = payload?.latest_age_seconds != null ? formatDurationShort(payload.latest_age_seconds) : '--';
+            const gapCount = Number(payload?.gap_count || 0);
+            summary.textContent = `${healthStatusText(status)} · 最新 ${latest} · 距今 ${age} · 断层 ${gapCount}`;
+            if (!payload?.ok) {
+                content.innerHTML = `<div class="record-empty">${escapeHtml(payload?.error || '消息库暂不可用。')}</div>`;
+                note.textContent = (payload?.notes || []).join(' ');
+                return;
+            }
+            const accounts = Object.entries(payload.accounts || {});
+            if (!accounts.length) {
+                content.innerHTML = '<div class="record-empty">消息库里还没有账号记录。</div>';
+                note.textContent = (payload.notes || []).join(' ');
+                return;
+            }
+            content.innerHTML = accounts.map(([account, item]) => {
+                const latestItem = item.latest || {};
+                const counts = item.counts || {};
+                const itemStatus = item.gap_count ? 'warn' : (Number(item.latest_age_seconds || 0) > 1800 ? 'stale' : 'ok');
+                const latestText = latestItem.created_at ? recordDateText(latestItem.created_at) : '无记录';
+                const latestAge = item.latest_age_seconds != null ? formatDurationShort(item.latest_age_seconds) : '--';
+                const gaps = (item.gaps || []).slice(-3).reverse();
+                return `
+                    <div class="health-card status-${itemStatus}">
+                        <div class="health-card-head">
+                            <div class="health-card-name">${escapeHtml(item.name || account)}</div>
+                            <div class="health-card-status">${escapeHtml(healthStatusText(itemStatus))}</div>
+                        </div>
+                        <div class="health-metrics">
+                            <span>最新 <b>${escapeHtml(latestText)}</b></span>
+                            <span>距今 <b>${escapeHtml(latestAge)}</b></span>
+                            <span>24h <b>${Number(counts.since || 0)}</b></span>
+                            <span>总计 <b>${Number(counts.total || 0)}</b></span>
+                            <span>raw <b>${Number(counts.raw || 0)}</b></span>
+                            <span>in/out <b>${Number(counts['in'] || 0)} / ${Number(counts['out'] || 0)}</b></span>
+                            <span>edited <b>${Number(counts.edited || 0)}</b></span>
+                            <span>bot <b>${Number(counts.bot || 0)}</b></span>
+                        </div>
+                        ${gaps.length ? `
+                            <div class="health-gap-list">
+                                ${gaps.map(gap => `
+                                    <div class="health-gap-item">
+                                        #${Number(gap.from_msg_id || 0)} → #${Number(gap.to_msg_id || 0)}
+                                        缺 ${Number(gap.missing_msg_ids || 0)}，间隔 ${escapeHtml(formatDurationShort(gap.gap_seconds))}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+            note.textContent = (payload.notes || []).join(' ');
+        }
+
         function changeRecordFilters() {
             updateRecordFilterOptions();
             renderCommandRecordTable();
@@ -1384,6 +1487,7 @@
                 const r = await fetch('/api/status', {cache: 'no-store'});
                 const data = await r.json();
                 document.getElementById('server-time').innerText = data.server_time;
+                renderMessageHealth(data.message_health || {});
                 
                 let html = '';
                 window.commandPanelDataMap = {};
