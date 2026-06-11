@@ -789,8 +789,9 @@ def main_soul_panel(account, state):
     return {"identity": "主魂", "role": "主魂", "commands": rows}
 
 
-def lingxiao_avatar_commands(name, state):
+def lingxiao_avatar_commands(name, state, root_state=None):
     rows = []
+    root_state = root_state or {}
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
     if name == "无咎子":
@@ -814,10 +815,30 @@ def lingxiao_avatar_commands(name, state):
         rows.extend([spirit_tree_command(state), spirit_tree_guard_command(state)])
     if name == "素缘子":
         rows.extend(xiaohao_star_attraction_commands(state))
+        star_gazing_state = root_state or state
         rows.extend([
             time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
-            manual_command(".观星", "观星", group="星宫"),
-            manual_command(".改换星移 @Waaiging", "改换星移", group="星宫"),
+            time_command(star_gazing_state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
+            time_command(
+                star_gazing_state,
+                "pending_star_gazing_target_time",
+                ".观星",
+                "待观星",
+                waiting="已排程",
+                ready="监听中",
+                missing="监听中",
+                group="星宫",
+            ),
+            time_command(
+                star_gazing_state,
+                "pending_star_shift_target_time",
+                ".改换星移 @Waaiging",
+                "改换星移",
+                waiting="已排程",
+                ready="监听中",
+                missing="监听中",
+                group="星宫",
+            ),
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
     rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
@@ -871,9 +892,9 @@ def xiaohao_avatar_commands(name, state):
     return rows
 
 
-def avatar_commands(account, name, state):
+def avatar_commands(account, name, state, root_state=None):
     if account == "main":
-        return lingxiao_avatar_commands(name, state)
+        return lingxiao_avatar_commands(name, state, root_state=root_state)
     if account == "sub":
         return star_avatar_commands(name, state)
     if account == "xiaohao":
@@ -889,7 +910,7 @@ def build_command_panels(account, state):
         panels.append({
             "identity": name,
             "role": "化身",
-            "commands": avatar_commands(account, name, avatar_state or {}),
+            "commands": avatar_commands(account, name, avatar_state or {}, root_state=state),
         })
     custom_commands = load_custom_commands()
     result = []

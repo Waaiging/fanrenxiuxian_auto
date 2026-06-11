@@ -2521,19 +2521,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     def should_rest_before_abyss(self, status):
         """判断探渊前是否需要先休息灵兽"""
-        return "出战" in (status or "") or self.is_stale_injury_status(status)
+        status = status or ""
+        return self.is_pastured_status(status) or "出战" in status or self.is_stale_injury_status(status)
 
     def can_attempt_abyss_status(self, status):
         """判断灵兽状态是否允许探渊"""
         status = status or ""
-        if self.is_pastured_status(status): return False
         if self.is_injury_status(status): return False
         return not any(k in status for k in ["受伤", "重伤", "治疗", "探险", "偷菜", "巡游"])
 
     def can_attempt_steal_status(self, status):
         """判断灵兽状态是否允许偷菜"""
         status = status or ""
-        if self.is_pastured_status(status): return False
         if any(k in status for k in ["探险", "偷菜", "巡游"]): return False
         if self.is_injury_status(status): return False
         return True
@@ -3137,6 +3136,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 log.info(f"Steal candidate skipped: {best_name} status is {best_status}.")
                 continue
 
+            if self.is_pastured_status(best_status):
+                ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
+                last_response = recall_resp or last_response
+                if not ok:
+                    continue
+                best_status = "休息中"
+                await asyncio.sleep(3)
+
             deploy_ok = best_status == "出战中"
             if best_status != "出战中":
                 deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
@@ -3148,8 +3155,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     deploy_ok = await self.normalize_beast_for_steal(best_name)
                 elif deploy_resp and self.is_beast_pastured_response(deploy_resp, best_name):
                     self.set_best_beast_status(best_name, "放养中")
-                    log.info(f"Steal candidate skipped: {best_name} is pastured.")
-                    deploy_ok = False
+                    ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
+                    last_response = recall_resp or last_response
+                    if ok:
+                        await asyncio.sleep(3)
+                        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
+                        last_response = deploy_resp or last_response
+                        if self.is_beast_deploy_success(deploy_resp):
+                            self.set_best_beast_status(best_name, "出战中")
+                            deploy_ok = True
+                        else:
+                            deploy_ok = False
+                    else:
+                        deploy_ok = False
                 else:
                     injury_cd = self.record_beast_injury_from_response(best_name, deploy_resp, source="steal")
                     if injury_cd >= 0:
@@ -3183,7 +3201,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     retry_ok = await self.normalize_beast_for_steal(best_name)
                 elif deploy_resp and self.is_beast_pastured_response(deploy_resp, best_name):
                     self.set_best_beast_status(best_name, "放养中")
-                    log.info(f"Steal candidate skipped on retry: {best_name} is pastured.")
+                    ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
+                    last_response = recall_resp or last_response
+                    if ok:
+                        await asyncio.sleep(3)
+                        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
+                        last_response = deploy_resp or last_response
+                        retry_ok = self.is_beast_deploy_success(deploy_resp)
+                        if retry_ok:
+                            self.set_best_beast_status(best_name, "出战中")
                 else:
                     injury_cd = self.record_beast_injury_from_response(best_name, deploy_resp, source="steal")
                     if injury_cd >= 0:
@@ -3339,6 +3365,26 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if rest_status: self.set_best_beast_status(beast_name, rest_status)
         return rest_status, rest_resp
 
+    async def recall_pastured_beast_for_action(self, beast_name, action=""):
+        """放养中的灵兽可用 .灵兽休息 <名> 召回后继续执行任务。"""
+        action_label = action or "action"
+        log.info(f"Beast {action_label}: {beast_name} is pastured; recalling with .灵兽休息.")
+        rest_status, rest_resp = await self.rest_beast_for_abyss(beast_name)
+        if rest_status and "休息" in rest_status:
+            self.set_best_beast_status(beast_name, "休息中")
+            return True, rest_resp
+        injury_cd = self.record_beast_injury_from_response(beast_name, rest_resp, source=action_label)
+        if injury_cd >= 0:
+            log.info(f"Beast {action_label}: {beast_name} cannot be recalled while injured; retry after {injury_cd}s.")
+            return False, rest_resp
+        if self.is_beast_pastured_response(rest_resp, beast_name) or self.is_pastured_status(rest_status):
+            self.set_best_beast_status(beast_name, "放养中")
+            log.info(f"Beast {action_label}: {beast_name} is still pastured after recall attempt.")
+            return False, rest_resp
+        if rest_resp and not self.is_fake_beast_status_response(rest_resp):
+            notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, f"灵兽{action_label}前召回")
+        return False, rest_resp
+
     async def normalize_beast_for_steal(self, beast_name):
         """修复偷菜时的伪受伤状态（切换出战状态）"""
         log.warning(f"Beast stale/fake status detected for steal. Switching {beast_name} to battle once.")
@@ -3358,8 +3404,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {beast_name}", timeout=60, max_retries=1)
         if self.is_beast_deploy_success(deploy_resp): self.set_best_beast_status(beast_name, "出战中")
         elif self.is_beast_pastured_response(deploy_resp, beast_name):
-            self.defer_beast_actions_while_pastured(beast_name, "abyss normalize deploy response")
-            return False
+            ok, _ = await self.recall_pastured_beast_for_action(beast_name, "abyss")
+            return ok
         elif deploy_resp and not self.is_fake_beast_status_response(deploy_resp):
             injury_cd = self.record_beast_injury_from_response(beast_name, deploy_resp, source="abyss")
             if injury_cd >= 0: self.defer_beast_action_after_injury("abyss", injury_cd); return False
@@ -3438,13 +3484,21 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """发送探渊指令，遇正忙时自动修复后重试一次"""
         resp = await self.send_abyss_once(beast_name)
         if self.is_beast_pastured_response(resp, beast_name):
-            self.defer_beast_actions_while_pastured(beast_name, "abyss response")
-            return resp
+            ok, recall_resp = await self.recall_pastured_beast_for_action(beast_name, "abyss")
+            if ok:
+                await asyncio.sleep(3)
+                return await self.send_abyss_once(beast_name)
+            self.schedule_abyss_retry(1800)
+            return recall_resp or resp
         if self.is_abyss_busy_response(resp):
             cached = self.get_cached_beast_by_name(beast_name)
             if self.is_pastured_status((cached or {}).get("status", "")) or self.is_pastured_status(self.state.get("best_beast_status", "")):
-                self.defer_beast_actions_while_pastured(beast_name, "abyss busy while cached pastured")
-                return resp
+                ok, recall_resp = await self.recall_pastured_beast_for_action(beast_name, "abyss")
+                if ok:
+                    await asyncio.sleep(3)
+                    return await self.send_abyss_once(beast_name)
+                self.schedule_abyss_retry(1800)
+                return recall_resp or resp
             log.warning(f"Abyss blocked by stale busy status for {beast_name}. Normalizing once before retry.")
             if not await self.normalize_beast_for_abyss(beast_name): return resp
             await asyncio.sleep(3)
@@ -3508,14 +3562,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     async def execute_abyss_with_fallback(self):
         """探渊前刷新.我的灵兽；六翼>=50优先，否则按候选体力/战力补位。"""
-        cached = list(self.state.get("beasts_cache", []))
-        if cached and self.all_cached_beasts_pastured(cached) and self.has_pending_pasture_return():
-            retry_at = self.pasture_block_until()
-            self.state["next_beast_status_check_time"] = retry_at
-            self.set_next_abyss_not_before(retry_at)
-            self.save_state()
-            log.info(f"Abyss: cached beasts are all pastured; skip .我的灵兽 refresh until {retry_at}.")
-            return False
         log.info("Abyss: refreshing .我的灵兽 before selecting candidate.")
         if not await self.update_beast_cache():
             log.info("Abyss: failed to refresh beast cache; retry later.")
@@ -3545,16 +3591,29 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.update_best_beast_tracking(beast)
             self.save_state()
             if self.should_rest_before_abyss(best_status):
-                rest_status, rest_resp = await self.rest_beast_for_abyss(best_name)
-                if rest_status:
-                    best_status = rest_status
+                if self.is_pastured_status(best_status):
+                    ok, rest_resp = await self.recall_pastured_beast_for_action(best_name, "abyss")
+                    if not ok:
+                        last_response = rest_resp or last_response
+                        continue
+                    best_status = "休息中"
                 else:
-                    log.warning(f"Abyss: {best_name} rest failed before abyss; trying next candidate.")
-                    if self.is_beast_stamina_insufficient_response(rest_resp):
-                        self.record_beast_stamina_shortage(best_name, rest_resp, "abyss")
-                    elif rest_resp and self.is_beast_pastured_response(rest_resp, best_name):
-                        self.set_best_beast_status(best_name, "放养中")
-                    continue
+                    rest_status, rest_resp = await self.rest_beast_for_abyss(best_name)
+                    if rest_status:
+                        best_status = rest_status
+                    else:
+                        log.warning(f"Abyss: {best_name} rest failed before abyss; trying next candidate.")
+                        if self.is_beast_stamina_insufficient_response(rest_resp):
+                            self.record_beast_stamina_shortage(best_name, rest_resp, "abyss")
+                        elif rest_resp and self.is_beast_pastured_response(rest_resp, best_name):
+                            ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "abyss")
+                            if ok:
+                                best_status = "休息中"
+                            else:
+                                last_response = recall_resp or rest_resp or last_response
+                                continue
+                        else:
+                            continue
                 await asyncio.sleep(3)
                 if not self.can_attempt_abyss_status(best_status):
                     log.warning(f"Abyss: {best_name} cannot enter after recall; status is {best_status}.")

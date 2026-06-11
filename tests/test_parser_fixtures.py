@@ -144,6 +144,47 @@ class ParserFixtureTests(unittest.TestCase):
         cache[2]["status"] = "受伤"
         self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "青蛟")
 
+    def test_pastured_beasts_remain_action_candidates(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        cache = [
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "放养中", "power": 4096, "exp": 0, "stamina": 34},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 100},
+            {"full_name": "吞金兽", "species": "一阶噬金虫", "status": "放养中", "power": 28, "exp": 207, "stamina": 100},
+        ]
+
+        self.assertTrue(actor.can_attempt_steal_status("放养中"))
+        self.assertTrue(actor.can_attempt_abyss_status("放养中"))
+        self.assertTrue(actor.should_rest_before_abyss("放养中"))
+        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
+        self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "麻花藤")
+
+    def test_steal_recalls_pastured_candidate_before_deploy(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽休息 麻花藤":
+                return "已将灵兽【麻花藤】召回休息。"
+            if command == ".灵兽出战 麻花藤":
+                return "已将灵兽【麻花藤】设为出战状态。"
+            if command == ".灵兽偷菜":
+                return "灵兽偷菜成功，获得【灵石】x1。"
+            return ""
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
+        self.assertEqual(sent, [".灵兽休息 麻花藤", ".灵兽出战 麻花藤", ".灵兽偷菜"])
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "出战中")
+        self.assertTrue(actor.state.get("next_steal_time"))
+
     def test_abyss_prefers_focus_beast_when_healthy(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         cache = [
