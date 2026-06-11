@@ -37,6 +37,7 @@ from log_utils import (
 # =====================================================================
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+COMMAND_CONTROL_FILE = os.path.join(CONFIG_DIR, "command_controls.json")
 CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
@@ -303,6 +304,33 @@ class CommonCommandMixin:
     def dashboard_command_paused(self, command, identity=""):
         return dashboard_command_disabled(self, command, identity or "主魂")[0]
 
+    def dashboard_command_control_mtime(self):
+        """Return command_controls.json mtime; 0 means missing/unreadable."""
+        try:
+            return os.path.getmtime(COMMAND_CONTROL_FILE)
+        except OSError:
+            return 0.0
+
+    async def wait_for_dashboard_command_control_change(self, timeout, poll_interval=2):
+        """Sleep until dashboard command controls change or timeout expires."""
+        try:
+            timeout = float(timeout)
+        except Exception:
+            timeout = 0
+        if timeout <= 0:
+            return False
+
+        started_mtime = self.dashboard_command_control_mtime()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(float(poll_interval), remaining))
+            current_mtime = self.dashboard_command_control_mtime()
+            if current_mtime != started_mtime:
+                return True
+
     def latest_command_block(self, command=None, max_age=120):
         block = getattr(self, "_last_command_guard_block", None)
         if not isinstance(block, dict):
@@ -339,6 +367,14 @@ class CommonCommandMixin:
             f"{context or command}: blocked by {reason}; "
             f"backing off {sleep_seconds}s."
         )
+        if reason == "dashboard_disabled":
+            identity = str(block.get("identity") or getattr(self, "current_identity", "主魂") or "主魂")
+            if not self.dashboard_command_paused(command, identity):
+                log.info(f"{context or command}: dashboard command is enabled again; rechecking now.")
+                return True
+            if await self.wait_for_dashboard_command_control_change(sleep_seconds):
+                log.info(f"{context or command}: dashboard command controls changed; rechecking now.")
+            return True
         await asyncio.sleep(sleep_seconds)
         return True
 

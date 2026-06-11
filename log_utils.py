@@ -227,7 +227,7 @@ def command_guard_policy(command, limit, window, block_seconds):
     )
 
 
-def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="command_guard"):
+def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="command_guard", identity=None):
     """Record the latest local command-guard block for callers that need to back off."""
     try:
         setattr(actor, "_last_command_guard_block", {
@@ -235,6 +235,7 @@ def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="comm
             "wait": max(0, int(wait or 0)),
             "blocked_until": float(blocked_until or 0),
             "reason": reason,
+            "identity": str(identity or ""),
             "at": time.monotonic(),
         })
     except Exception:
@@ -1345,7 +1346,7 @@ def command_send_precheck(actor, command, logger=None, identity=None,
                 f"skip identity switch (control={disabled_key})."
             )
             cache[log_key] = now_for_log
-        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled")
+        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled", identity=current_id)
         return False
 
     limit, window, block_seconds, _should_alert = command_guard_policy(key, limit, window, block_seconds)
@@ -1432,7 +1433,7 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
                 f" (control={disabled_key}); skipping send."
             )
             cache[log_key] = now_for_log
-        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled")
+        remember_command_guard_block(actor, key, 300, reason="dashboard_disabled", identity=current_id)
         return False
 
     limit, window, block_seconds, should_alert = command_guard_policy(key, limit, window, block_seconds)
