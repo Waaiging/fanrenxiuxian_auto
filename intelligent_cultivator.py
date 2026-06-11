@@ -2550,6 +2550,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 # === Step 1: 发送 .深度闭关 ===
                 log.info("Meditation Step 1: Sending .深度闭关...")
                 resp = await self.send_and_wait_feedback(".深度闭关")
+                resp = resp or ""
                 cd = self.parse_wait_time(resp)
 
                 # 识别到"已在"或开启成功，进入闭关监控状态
@@ -2689,7 +2690,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         avatar_default = {
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "nickname": "", "in_deep_meditation": False,
-            "deep_meditation_end_time": "", "meditation_restart_pending": False, "last_tower_date": "",
+            "deep_meditation_end_time": "", "meditation_restart_pending": False,
+            "meditation_restart_mode": "", "last_tower_date": "",
             "next_dream_map_time": "", "next_heart_trial_time": "", "next_divination_time": "",
             "next_concubine_voyage_time": "", "last_concubine_voyage_time": "",
             "concubine_voyage_active": False,
@@ -2753,6 +2755,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         a_state["in_deep_meditation"] = False
         a_state["deep_meditation_end_time"] = ""
         a_state["meditation_restart_pending"] = True
+        source_text = str(source or "")
+        if "force" in source_text.lower() or "强行" in source_text:
+            a_state["meditation_restart_mode"] = "deep_only"
+        elif not a_state.get("meditation_restart_mode"):
+            a_state["meditation_restart_mode"] = ""
         self.save_state()
         log.info(f"[{avatar}] meditation restart pending ({source}).")
 
@@ -3176,7 +3183,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # ---- 闭关相关（主魂+化身） ----
         # 强行出关 / 明确闭关结算 → 清除深度闭关状态
-        _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"])
+        _is_force_exit = any(k in text for k in ["强行出关", "强行中断", "强行出关惩罚"])
+        _is_real_exit = _is_force_exit or any(k in text for k in ["出关成功", "已出关", "闭关结束"])
         _is_deep_settlement = is_deep_meditation_settlement_response(text)
         if _is_real_exit or _is_deep_settlement:
             if avatar == "主魂":
@@ -3185,7 +3193,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 self.state["is_closing"] = False
                 self.meditation_state_event.set()
             else:
-                self.mark_avatar_meditation_restart_pending(avatar, "passive exit")
+                self.mark_avatar_meditation_restart_pending(
+                    avatar,
+                    "passive force exit" if _is_force_exit else "passive settlement",
+                )
             log.info(f"[{avatar}] passive: closing state cleared (出关).")
 
         # 深度闭关中 / 预计还需 → 更新深度闭关结束时间
@@ -3537,8 +3548,42 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self.set_avatar_state(avatar, "in_deep_meditation", True)
         self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600))
         self.set_avatar_state(avatar, "meditation_restart_pending", False)
+        self.set_avatar_state(avatar, "meditation_restart_mode", "")
         self.set_avatar_state(avatar, "next_meditation_time", "")
         return True
+
+    async def restart_avatar_deep_meditation_direct(self, avatar, reason=""):
+        """强行出关后只需要直接补 .深度闭关，不先走 .闭关修炼。"""
+        log.info(f"[{avatar}] restarting deep meditation directly ({reason}).")
+        resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, max_retries=1)
+        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+        if await self.record_avatar_deep_meditation_start(avatar, resp_text):
+            log.info(f"[{avatar}] direct deep meditation restart complete ({reason}).")
+            return True
+
+        if not resp_text:
+            self.update_avatar_states(avatar, {
+                "meditation_restart_pending": True,
+                "meditation_restart_mode": "deep_only",
+                "next_meditation_time": add_seconds_str(now_str(), 600),
+            })
+            log.info(f"[{avatar}] direct deep meditation restart got no response; retry later.")
+            return True
+
+        if any(k in resp_text for k in ["先闭关", "闭关修炼", "普通闭关"]):
+            self.set_avatar_state(avatar, "meditation_restart_mode", "")
+            return False
+
+        cd = self.parse_wait_time(resp_text)
+        if cd > 0:
+            self.update_avatar_states(avatar, {
+                "meditation_restart_pending": True,
+                "meditation_restart_mode": "deep_only",
+                "next_meditation_time": add_seconds_str(now_str(), cd),
+            })
+            log.info(f"[{avatar}] direct deep meditation restart deferred {cd}s ({reason}).")
+            return True
+        return False
 
     # ============================================================
     # 身外化身：修为不足
@@ -3945,6 +3990,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 log.info(f"[{avatar}] 深度闭关中，剩余 {seconds_until(end_time)}s，跳过闭关检查。")
                 return  # 不 sleep，让外层循环继续检查其他任务（历练/心劫/入梦等）
             self.mark_avatar_meditation_restart_pending(avatar, "local end time expired")
+            a_state = self.get_avatar_state(avatar)
+
+        if a_state.get("meditation_restart_mode") == "deep_only":
+            if await self.restart_avatar_deep_meditation_direct(avatar, "pending force-exit restart"):
+                return
             a_state = self.get_avatar_state(avatar)
 
         next_med = a_state.get("next_meditation_time", "")
@@ -6083,13 +6133,17 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 resp_text
                 and (
                     "出关" in resp_text
+                    or "强行中断" in resp_text
                     or is_deep_meditation_settlement_response(resp_text)
                     or is_not_deep_meditation_response(resp_text)
                 )
             ):
-                self.set_avatar_state(avatar, "in_deep_meditation", False)
-                self.set_avatar_state(avatar, "deep_meditation_end_time", "")
-                self.set_avatar_state(avatar, "meditation_restart_pending", False)
+                self.update_avatar_states(avatar, {
+                    "in_deep_meditation": False,
+                    "deep_meditation_end_time": "",
+                    "meditation_restart_pending": True,
+                    "meditation_restart_mode": "deep_only",
+                })
                 return True
             log.info(f"Avatar [{avatar}] formation assist skipped: force exit not confirmed.")
             return False
@@ -6130,10 +6184,22 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         break
                     if not await self.prepare_avatar_for_formation_assist(avatar):
                         continue
+                    force_exit_restart = (
+                        self.get_avatar_state(avatar).get("meditation_restart_mode") == "deep_only"
+                    )
                     if self.message_age_seconds(formation_msg) > 60:
                         log.info(f"Avatar [{avatar}] assist skipped: invite expired after preparation.")
+                        if force_exit_restart:
+                            await self.restart_avatar_deep_meditation_direct(
+                                avatar, "formation invite expired after force exit"
+                            )
                         break
-                    if await self._avatar_assist_formation(avatar):
+                    assisted = await self._avatar_assist_formation(avatar)
+                    if force_exit_restart:
+                        await self.restart_avatar_deep_meditation_direct(
+                            avatar, "formation assist after force exit"
+                        )
+                    if assisted:
                         return True
                 return False
             finally:
@@ -6260,11 +6326,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 self.set_avatar_state(avatar, "in_deep_meditation", False)
                 self.set_avatar_state(avatar, "deep_meditation_end_time", "")
                 self.set_avatar_state(avatar, "next_force_exit_time", "")
+                self.set_avatar_state(avatar, "meditation_restart_pending", True)
+                self.set_avatar_state(avatar, "meditation_restart_mode", "deep_only")
                 await asyncio.sleep(10)
-                resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60)
-                resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-                await self.record_avatar_deep_meditation_start(avatar, resp_text)
-                log.info(f"Avatar [{avatar}] deep meditation restarted after force exit.")
+                await self.restart_avatar_deep_meditation_direct(avatar, "delayed force exit")
             except Exception as e:
                 log.error(f"Avatar [{avatar}] delayed force exit error: {e}", exc_info=True)
                 self.set_avatar_state(avatar, "next_force_exit_time", "")

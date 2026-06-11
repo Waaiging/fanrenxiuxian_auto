@@ -146,6 +146,53 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "六翼")
 
+    def test_recent_profile_fallback_requires_username(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor._recent_cultivation_profile_commands = None
+
+        log_utils.record_recent_profile_command(actor, 1000, ".闭关修炼", "素缘子")
+
+        text = """
+**【闭关失败】**
+当前境界: 炼气一层
+当前修为: **0 / 100**
+你感到一阵疲惫，需要打坐调息 **10** 分钟方可再次闭关。
+"""
+
+        self.assertEqual(log_utils.recent_profile_identity_for_text(actor, text, msg_id=1010), "")
+
+    def test_force_exit_restart_sends_deep_meditation_directly(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["素缘子"]
+        actor.avatar_nicknames = {"素缘子": "老爱同学"}
+        actor.state = {
+            "avatars": {
+                "素缘子": {
+                    "in_deep_meditation": False,
+                    "deep_meditation_end_time": "",
+                    "meditation_restart_pending": True,
+                    "meditation_restart_mode": "deep_only",
+                    "next_meditation_time": "",
+                    "nickname": "老爱同学",
+                }
+            }
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(identity, command, *args, **kwargs):
+            sent.append((identity, command))
+            return "你已进入深度闭关状态，神魂将自行吐纳 **8** 小时。"
+
+        actor.send_and_wait_feedback_identity = fake_send
+
+        self.assertTrue(asyncio.run(actor.restart_avatar_deep_meditation_direct("素缘子", "test")))
+        self.assertEqual(sent, [("素缘子", ".深度闭关")])
+        state = actor.get_avatar_state("素缘子")
+        self.assertTrue(state["in_deep_meditation"])
+        self.assertFalse(state["meditation_restart_pending"])
+        self.assertEqual(state["meditation_restart_mode"], "")
+
     def test_pasture_precheck_rests_focus_beast_instead_of_deploying(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

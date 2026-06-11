@@ -2591,6 +2591,11 @@ def recent_profile_identity_for_text(actor, text, msg_id=None, max_age_seconds=9
     expected = set(_expected_profile_commands_for_text(text))
     if not expected:
         return ""
+    # Non-reply profile fallbacks are only safe when the text carries the
+    # character username. Username-less meditation/profile snippets are common
+    # in the group and can otherwise be claimed by the nearest recent command.
+    if not profile_username_from_text(text):
+        return ""
     pending = getattr(actor, "_recent_cultivation_profile_commands", None)
     if not pending:
         return ""
