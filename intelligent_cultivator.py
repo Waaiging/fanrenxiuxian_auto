@@ -1616,15 +1616,22 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # 如果罡风冷却完毕但还没用，优先用罡风
         if self.is_nine_heaven_wind_ready():
-            log.info(f"Heart Platform check at {curr_step}/12, but Wind is ready. Sending .引九天罡风 first; Heart Platform is skipped.")
-            wind_resp = await self.send_and_wait_feedback(".引九天罡风", timeout=120, force_identity_check=True)
-            wind_pending = self.record_nine_heaven_wind_response(wind_resp, source="Cloud Stairs")
-            await asyncio.sleep(3)
+            if self.dashboard_command_paused(".引九天罡风", "主魂"):
+                log.info("Heart Platform precheck: .引九天罡风 is paused by dashboard; skipping Wind send.")
+            else:
+                log.info(f"Heart Platform check at {curr_step}/12, but Wind is ready. Sending .引九天罡风 first; Heart Platform is skipped.")
+                wind_resp = await self.send_and_wait_feedback(".引九天罡风", timeout=120, force_identity_check=True)
+                wind_pending = self.record_nine_heaven_wind_response(wind_resp, source="Cloud Stairs")
+                await asyncio.sleep(3)
 
-            # 如果罡风用了或者还是冷却完毕状态（说明施展失败），跳过问心台
-            if wind_pending or self.is_nine_heaven_wind_ready():
-                log.info("Heart Platform skipped to preserve Wind priority.")
-                return
+                # 如果罡风用了或者还是冷却完毕状态（说明施展失败），跳过问心台
+                if wind_pending or self.is_nine_heaven_wind_ready():
+                    log.info("Heart Platform skipped to preserve Wind priority.")
+                    return
+
+        if self.dashboard_command_paused(".问心台", "主魂"):
+            log.info("Heart Platform skipped: .问心台 is paused by dashboard.")
+            return
 
         # 使用问心台
         reason = "late daily fallback" if late_fallback and not (8 <= curr_step <= 11) else "late cloud-stairs climb"
@@ -1677,6 +1684,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         await self.startup_done.wait()  # 等待启动同步完成
         while self.is_running:
             await self._wait_for_main_identity()
+            if self.dashboard_command_paused(".引九天罡风", "主魂"):
+                log.info("Nine Heaven Wind is paused by dashboard; waiting before recheck.")
+                await self.wait_for_dashboard_command_control_change(scheduler_sleep_seconds(600))
+                continue
+
             should_use_wind = self.is_nine_heaven_wind_ready()
             heart_pending = self.has_pending_heart_buff()
 
@@ -2319,13 +2331,21 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         await self.startup_done.wait()
         while self.is_running:
             await self._wait_for_main_identity()
+            stairs_paused = self.dashboard_command_paused(".登天阶", "主魂")
+            status_paused = self.dashboard_command_paused(".天阶状态", "主魂")
+            heart_paused = self.dashboard_command_paused(".问心台", "主魂")
+
             # ---- 1. 天阶状态检查 ----
             # 天阶状态只作为缓存缺失时的补账；正常登阶按固定 3 小时 CD 执行。
             next_stairs = self.restore_cloud_stairs_time_from_last()
             status_missing = not self.state.get("cloud_stairs_progress")
             if status_missing:
-                log.info("Checking .天阶状态 (missing cached progress)...")
-                status_resp = await self.send_and_wait_feedback(".天阶状态", force_identity_check=True)
+                if status_paused:
+                    log.info("Cloud stairs status skipped: .天阶状态 is paused by dashboard.")
+                    status_resp = None
+                else:
+                    log.info("Checking .天阶状态 (missing cached progress)...")
+                    status_resp = await self.send_and_wait_feedback(".天阶状态", force_identity_check=True)
             else:
                 log.info(f"Cloud stairs cache valid. Skipping .天阶状态. Next Stairs: {next_stairs}")
                 status_resp = None
@@ -2359,6 +2379,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             today = datetime.now().strftime('%Y-%m-%d')
 
             if not next_time_str or not is_future(next_time_str):
+                if stairs_paused:
+                    log.info("Cloud stairs climb skipped: .登天阶 is paused by dashboard.")
+                    if await self.wait_for_dashboard_command_control_change(scheduler_sleep_seconds(600)):
+                        log.info("Cloud stairs command controls changed; rechecking now.")
+                    continue
+
                 # 登阶前先考虑是否用问心台
                 await self.maybe_use_heart_platform_before_climb(curr_step, today)
 
@@ -2373,7 +2399,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     self.save_state()
             elif self.state.get("heart_platform_date") != today and self.is_heart_platform_fallback_due(today):
                 # 登天阶 CD 中，但问心台保底时间到了
-                await self.maybe_use_heart_platform_before_climb(curr_step, today, allow_daily_fallback=True)
+                if heart_paused:
+                    log.info("Heart Platform daily fallback skipped: .问心台 is paused by dashboard.")
+                else:
+                    await self.maybe_use_heart_platform_before_climb(curr_step, today, allow_daily_fallback=True)
 
             # ---- 3. 计算等待时间 ----
             next_stairs_str = self.state.get("next_stairs_time", "")
@@ -2388,7 +2417,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
             # ---- 4. 问心台每日保底调度 ----
             # 如果今天还没用问心台，检查是否需要提前醒来执行保底
-            if self.state.get("heart_platform_date") != today:
+            if self.state.get("heart_platform_date") != today and not heart_paused:
                 fallback_time = self.heart_platform_fallback_time(today)
                 if is_future(fallback_time):
                     heart_wait = seconds_until(fallback_time) + random.randint(5, 15)
@@ -4348,6 +4377,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 next_stairs = self.restore_cloud_stairs_time_from_last()
                 if self.state.get("cloud_stairs_progress") and next_stairs:
                     log.info(f"Startup Sync: Cloud stairs cache present. Skipping .天阶状态. Next: {next_stairs}")
+                elif self.dashboard_command_paused(".天阶状态", "主魂"):
+                    log.info("Startup Sync: .天阶状态 is paused by dashboard. Skipping cloud stairs query.")
                 else:
                     log.info("Startup Sync: Cloud stairs cache missing. Querying .天阶状态...")
                     resp = await self.send_and_wait_feedback(".天阶状态", force_identity_check=True)
