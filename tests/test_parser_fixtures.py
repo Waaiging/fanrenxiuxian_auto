@@ -1,6 +1,9 @@
 import unittest
+import os
+import tempfile
 from datetime import datetime
 
+import log_utils
 from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
@@ -33,6 +36,23 @@ class DummyCommon(CommonCommandMixin):
 
     def parse_wait_time(self, text, *args, **kwargs):
         return parse_duration_seconds(text)
+
+
+class DummyMessage:
+    def __init__(self, msg_id, chat_id=-100123456, text="", reply_to_msg_id=None, out=False):
+        self.id = msg_id
+        self.chat_id = chat_id
+        self.text = text
+        self.out = out
+        self.sender_id = 999 if out else 888
+        self.reply_to = None
+        if reply_to_msg_id is not None:
+            self.reply_to = type("ReplyTo", (), {"reply_to_msg_id": reply_to_msg_id})()
+
+
+class DummyManualActor:
+    state_file = "state_main.json"
+    target_chat_id = -100123456
 
 
 class ParserFixtureTests(unittest.TestCase):
@@ -182,6 +202,33 @@ class ParserFixtureTests(unittest.TestCase):
         wait = (datetime.strptime(actor.state["next_yuanying_out_time"], "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds()
         self.assertTrue(actor.state["yuanying_out_active"])
         self.assertGreater(wait, 7 * 3600)
+
+    def test_manual_reply_falls_back_to_command_ledger_after_memory_loss(self):
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                log_utils.MESSAGE_EVENTS_DB_FILE = os.path.join(tmp, "message_events.sqlite3")
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                actor = DummyManualActor()
+                command_msg = DummyMessage(1001, text=".我的灵根", out=True)
+                reply_msg = DummyMessage(1002, text="天命玉牒", reply_to_msg_id=1001)
+
+                self.assertTrue(
+                    log_utils.record_command_sent(
+                        actor,
+                        command_msg,
+                        ".我的灵根",
+                        identity="无咎子",
+                        source="manual",
+                    )
+                )
+
+                self.assertTrue(log_utils.is_reply_to_manual_command(actor, reply_msg))
+                self.assertEqual(log_utils.manual_command_text_for_reply(actor, reply_msg), ".我的灵根")
+                self.assertEqual(log_utils.manual_command_identity_for_reply(actor, reply_msg), "无咎子")
+        finally:
+            log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+            log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
 
 if __name__ == "__main__":

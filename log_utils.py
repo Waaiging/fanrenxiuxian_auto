@@ -20,6 +20,7 @@ import re
 import sqlite3
 import time
 import urllib.request
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta
 from collections import deque  # 用于手动指令 ID 的固定大小队列
@@ -1734,6 +1735,68 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
     return True
 
 
+def _manual_command_record_from_ledger(actor, msg):
+    """
+    Return a manual command row for the message this bot reply points to.
+
+    The hot path keeps recent manual command IDs in memory, but a delayed bot
+    reply can arrive after a restart or after the deque has rotated. The command
+    ledger is the persistent authority for that case.
+    """
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    if not replied_id:
+        return None
+    try:
+        replied_id = int(replied_id)
+    except Exception:
+        return None
+
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    cache = getattr(actor, "_manual_command_ledger_cache", None)
+    if cache is None:
+        cache = {}
+        actor._manual_command_ledger_cache = cache
+    cache_key = (account, chat_id, replied_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached or None
+
+    row = None
+    try:
+        with _message_db_connect() as conn:
+            if chat_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT command, identity
+                    FROM command_ledger
+                    WHERE account=? AND chat_id IS ? AND command_msg_id=? AND source='manual'
+                    LIMIT 1
+                    """,
+                    (account, chat_id, replied_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT command, identity
+                    FROM command_ledger
+                    WHERE account=? AND command_msg_id=? AND source='manual'
+                    LIMIT 1
+                    """,
+                    (account, replied_id),
+                ).fetchone()
+    except Exception:
+        return None
+
+    if row is None:
+        return None
+    record = {"command": row[0] or "", "identity": row[1] or ""}
+    cache[cache_key] = record
+    if len(cache) > 300:
+        actor._manual_command_ledger_cache = dict(list(cache.items())[-150:])
+    return record
+
+
 def is_reply_to_manual_command(actor, msg):
     """检查消息是否是对手动指令的回复（reply_to 指向手动指令消息）"""
     replied_id = meaningful_reply_to_msg_id(actor, msg)
@@ -1742,7 +1805,7 @@ def is_reply_to_manual_command(actor, msg):
     manual_ids = getattr(actor, "_manual_command_ids", None)
     if manual_ids and replied_id in manual_ids:
         return True
-    return False
+    return bool(_manual_command_record_from_ledger(actor, msg))
 
 
 def manual_command_text_for_reply(actor, msg):
@@ -1751,7 +1814,11 @@ def manual_command_text_for_reply(actor, msg):
     if not replied_id:
         return ""
     texts = getattr(actor, "_manual_command_texts", None) or {}
-    return texts.get(replied_id, "")
+    command = texts.get(replied_id, "")
+    if command:
+        return command
+    record = _manual_command_record_from_ledger(actor, msg)
+    return (record or {}).get("command", "")
 
 
 def manual_command_identity_for_reply(actor, msg):
@@ -1764,7 +1831,11 @@ def manual_command_identity_for_reply(actor, msg):
     if identity:
         return identity
     command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
-    return command_avatar_map.get(replied_id, "")
+    identity = command_avatar_map.get(replied_id, "")
+    if identity:
+        return identity
+    record = _manual_command_record_from_ledger(actor, msg)
+    return (record or {}).get("identity", "")
 
 
 def tracked_command_text_for_reply(actor, msg):
@@ -1837,64 +1908,72 @@ def _message_text_hash(text):
     return hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()
 
 
+@contextmanager
 def _message_db_connect():
     global _MESSAGE_EVENTS_SCHEMA_READY
     conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=2)
-    if not _MESSAGE_EVENTS_SCHEMA_READY:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS message_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account TEXT NOT NULL,
-                event_kind TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                chat_id INTEGER,
-                msg_id INTEGER,
-                reply_to_msg_id INTEGER,
-                sender_id INTEGER,
-                sender_username TEXT,
-                sender_name TEXT,
-                is_out INTEGER NOT NULL DEFAULT 0,
-                is_game_bot INTEGER NOT NULL DEFAULT 0,
-                identity TEXT,
-                command TEXT,
-                text TEXT,
-                text_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(account, event_kind, chat_id, msg_id, text_hash)
+    try:
+        if not _MESSAGE_EVENTS_SCHEMA_READY:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    chat_id INTEGER,
+                    msg_id INTEGER,
+                    reply_to_msg_id INTEGER,
+                    sender_id INTEGER,
+                    sender_username TEXT,
+                    sender_name TEXT,
+                    is_out INTEGER NOT NULL DEFAULT 0,
+                    is_game_bot INTEGER NOT NULL DEFAULT 0,
+                    identity TEXT,
+                    command TEXT,
+                    text TEXT,
+                    text_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account, event_kind, chat_id, msg_id, text_hash)
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS command_ledger (
-                account TEXT NOT NULL,
-                chat_id INTEGER,
-                command_msg_id INTEGER NOT NULL,
-                command TEXT NOT NULL,
-                identity TEXT NOT NULL,
-                source TEXT NOT NULL,
-                reply_to_msg_id INTEGER,
-                status TEXT NOT NULL,
-                sent_at TEXT NOT NULL,
-                response_msg_id INTEGER,
-                response_hash TEXT,
-                response_at TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(account, chat_id, command_msg_id)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS command_ledger (
+                    account TEXT NOT NULL,
+                    chat_id INTEGER,
+                    command_msg_id INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    identity TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    reply_to_msg_id INTEGER,
+                    status TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    response_msg_id INTEGER,
+                    response_hash TEXT,
+                    response_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account, chat_id, command_msg_id)
+                )
+                """
             )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_msg ON message_events(account, chat_id, msg_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_reply ON message_events(account, chat_id, reply_to_msg_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_created ON message_events(account, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_status ON command_ledger(account, status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_msg ON message_events(account, chat_id, msg_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_reply ON message_events(account, chat_id, reply_to_msg_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_created ON message_events(account, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_status ON command_ledger(account, status, updated_at)")
+            conn.commit()
+            _MESSAGE_EVENTS_SCHEMA_READY = True
+        yield conn
         conn.commit()
-        _MESSAGE_EVENTS_SCHEMA_READY = True
-    return conn
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_message_event(
