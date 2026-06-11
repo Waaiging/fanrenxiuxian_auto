@@ -5851,7 +5851,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             forced_exit = False
             for flow_attempt in range(1, 3):
                 status_msg = await self.send_and_wait_feedback_identity(
-                    avatar, ".我的侍妾", return_response_msg=True, delete_after=False
+                    avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False
                 )
                 status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else str(status_msg) if isinstance(status_msg, str) else ""
                 if status_text and not self.concubine_status_matches_identity(status_text, avatar):

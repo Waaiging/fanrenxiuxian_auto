@@ -480,7 +480,7 @@ def text_response_family(text):
         return "concubine_voyage"
     if "卦象" in clean:
         return "divination"
-    if "天机代卜" in clean:
+    if "天机代卜" in clean or "天机链路" in clean:
         return "divination"
     if "宗门传功" in clean or "传功玉简" in clean:
         return "sect_skill"
@@ -579,7 +579,7 @@ def feedback_response_matches_command(command, text):
             "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
         ])
     if expected == "divination":
-        return any(k in clean for k in ["天机代卜", "卜算", "代卜", "卦象"])
+        return any(k in clean for k in ["天机代卜", "天机链路", "卜算", "代卜", "卦象"])
     if expected == "sect_skill":
         return any(k in clean for k in ["宗门传功", "传功玉简", "元神", "传功"])
     if expected == "spirit_tree":

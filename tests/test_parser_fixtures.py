@@ -91,6 +91,13 @@ class ParserFixtureTests(unittest.TestCase):
             8 * 3600,
         )
 
+    def test_divination_cooldown_reply_matches_command_family(self):
+        text = "天机链路尚未重铸，请在 **7小时20分钟15秒** 后再试。"
+
+        self.assertEqual(log_utils.text_response_family(text), "divination")
+        self.assertTrue(log_utils.feedback_response_matches_command(".天机代卜", text))
+        self.assertFalse(log_utils.feedback_response_conflicts(".天机代卜", text))
+
     def test_beast_roster_parser_ignores_return_title_and_preserves_injury(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         roster = """
