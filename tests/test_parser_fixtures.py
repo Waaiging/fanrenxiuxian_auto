@@ -256,6 +256,22 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("素缘子")))
         self.assertEqual(sent, [])
 
+    def test_xiaohao_formation_assist_does_not_force_exit_before_assist(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["素心子"]
+        actor.state = {"avatars": {"素心子": {"in_deep_meditation": True}}}
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(*args, **kwargs):
+            sent.append(args)
+            return "should not send"
+
+        actor.send_and_wait_feedback_identity = fake_send
+
+        self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("素心子")))
+        self.assertEqual(sent, [])
+
     def test_global_spirit_tree_mature_status_from_untracked_reply_is_accepted(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]

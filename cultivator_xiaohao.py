@@ -4103,24 +4103,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         a_state = self.get_avatar_state(avatar)
         if not a_state.get("in_deep_meditation"):
             return True
-        log.info(f"Avatar {avatar}: formation assist force exits deep meditation first.")
-        resp = await self.send_and_wait_feedback_identity(
-            avatar, ".强行出关", timeout=30, max_retries=0, force_identity_check=True,
-        )
-        resp_str = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-        if (
-            resp_str
-            and (
-                "出关" in resp_str
-                or is_deep_meditation_settlement_response(resp_str)
-                or is_not_deep_meditation_response(resp_str)
-            )
-        ):
-            self.set_avatar_state(avatar, "in_deep_meditation", False)
-            self.set_avatar_state(avatar, "deep_meditation_end_time", "")
-            self.set_avatar_state(avatar, "meditation_restart_pending", False)
-            return True
-        log.info(f"Avatar {avatar}: formation assist skipped, force exit not confirmed.")
+        log.info(f"Avatar {avatar}: formation assist skipped; force exit is only scheduled after successful formation.")
         return False
 
     FORMATION_PAIRS = {
