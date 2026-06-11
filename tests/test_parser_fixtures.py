@@ -7,7 +7,7 @@ import log_utils
 from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
-from dashboard_server import parse_inventory_items_from_text, parse_resource_changes_from_text
+from dashboard_server import parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
 from intelligent_cultivator import Cultivator
 from log_utils import parse_cultivation_delta_text, parse_cultivation_profile_text
 from sub_cultivator import SubCultivator
@@ -160,6 +160,23 @@ class ParserFixtureTests(unittest.TestCase):
         inventory = parse_inventory_items_from_text("【储物袋】\n【养魂木】x3\n灵石：1200")
         self.assertIn({"name": "养魂木", "amount": 3}, inventory)
         self.assertIn({"name": "灵石", "amount": 1200}, inventory)
+
+        self.assertEqual(
+            parse_inventory_items_from_text("道友 @cupaopao 购得 **【幸运符】x1**，物资已发放到储物袋！"),
+            [],
+        )
+
+    def test_resource_stats_rejects_other_user_mentions(self):
+        self.assertTrue(resource_text_matches_identity(
+            "xiaohao",
+            "素心子",
+            "@hajiimiii 获得修为 **+2548**，获得 **【三级妖丹】x1**。",
+        ))
+        self.assertFalse(resource_text_matches_identity(
+            "main",
+            "主魂",
+            "@hajiimiii 获得修为 **+2548**，获得 **【三级妖丹】x1**。",
+        ))
 
     def test_field_training_retry_preserves_confirmed_cooldown(self):
         actor = DummyCommon()

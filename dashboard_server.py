@@ -1533,6 +1533,9 @@ RESOURCE_NAME_SKIP_FRAGMENTS = (
     "修为", "境界", "冷却", "剩余", "预计", "道友", "天命玉牒", "修士状态",
 )
 RESOURCE_UNITS = ("点", "枚", "块", "个", "份", "株", "颗", "瓶", "张", "件", "缕", "滴", "层")
+INVENTORY_COMMAND_PREFIXES = (".储物袋", ".背包", ".物品栏", ".物品清单", ".库存")
+INVENTORY_HEADER_RE = re.compile(r"(?:^|\n)\s*(?:[【\[]?(?:储物袋|背包|物品栏|物品清单|库存)[】\]]?|[-=]{2,})\s*(?:$|\n|[:：])")
+TEXT_USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{2,64})")
 
 def normalize_resource_line(value):
     return str(value or "").replace("**", "").replace("`", "").replace(",", "").strip()
@@ -1560,6 +1563,55 @@ def add_resource_change(changes, name, amount, line="", source=""):
         "source": source or ("获得" if int(amount) > 0 else "消耗"),
         "line": str(line or "").strip(),
     })
+
+def known_resource_usernames(account, identity=""):
+    mapping = ACCOUNT_PROFILE_USERNAMES.get(account) or {}
+    names = set()
+    if identity:
+        for value in mapping.get(identity, set()) or set():
+            normalized = normalize_profile_username(value)
+            if normalized:
+                names.add(normalized)
+    else:
+        for values in mapping.values():
+            for value in values or set():
+                normalized = normalize_profile_username(value)
+                if normalized:
+                    names.add(normalized)
+    return names
+
+def resource_text_matches_identity(account, identity, text):
+    """Reject resource rows that explicitly point at a different game username."""
+    if account not in WINDOW_MAP:
+        return False
+    clean = str(text or "")
+    profile_username = profile_username_from_text(clean)
+    if profile_username:
+        profile_identity = profile_username_identity(account, profile_username)
+        if profile_identity == "__other__":
+            return False
+        if identity and profile_identity and profile_identity != identity:
+            return False
+
+    mentions = {normalize_profile_username(name) for name in TEXT_USERNAME_RE.findall(clean)}
+    mentions.discard("")
+    if not mentions:
+        return True
+
+    known_for_identity = known_resource_usernames(account, identity)
+    if identity and known_for_identity:
+        return bool(mentions & known_for_identity)
+    known_for_account = known_resource_usernames(account)
+    return bool(mentions & known_for_account)
+
+def is_inventory_snapshot_text(text, command=""):
+    cmd = str(command or "").strip()
+    if any(cmd.startswith(prefix) for prefix in INVENTORY_COMMAND_PREFIXES):
+        return True
+    raw = str(text or "")
+    if not raw:
+        return False
+    return bool(INVENTORY_HEADER_RE.search(raw.replace("**", "")))
 
 def parse_resource_changes_from_text(text):
     """Extract non-cultivation resource/item gain and loss from bot replies."""
@@ -1615,10 +1667,10 @@ def parse_resource_changes_from_text(text):
         deduped.append(item)
     return deduped
 
-def parse_inventory_items_from_text(text):
+def parse_inventory_items_from_text(text, command=""):
     """Parse a latest inventory snapshot from 储物袋/背包 style replies."""
     raw = str(text or "")
-    if not raw or not any(k in raw for k in ("储物袋", "背包", "物品栏", "物品清单", "库存")):
+    if not raw or not is_inventory_snapshot_text(raw, command=command):
         return []
     items = {}
     for raw_line in raw.splitlines():
@@ -1704,19 +1756,45 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
             ensure_message_health_indexes(conn)
             rows = conn.execute(
                 """
-                SELECT id, account, identity, command, direction, event_kind, msg_id, text_hash, text, created_at
-                FROM message_events
-                WHERE created_at>=?
-                  AND is_game_bot=1
-                  AND text IS NOT NULL
+                SELECT
+                    me.id,
+                    me.account,
+                    CASE
+                        WHEN COALESCE(me.identity, '') != '' THEN me.identity
+                        ELSE COALESCE(cl.identity, '')
+                    END AS identity,
+                    CASE
+                        WHEN COALESCE(me.command, '') != '' THEN me.command
+                        ELSE COALESCE(cl.command, '')
+                    END AS command,
+                    me.direction,
+                    me.event_kind,
+                    me.msg_id,
+                    me.text_hash,
+                    me.text,
+                    me.created_at,
+                    CASE WHEN cl.command_msg_id IS NULL THEN 0 ELSE 1 END AS ledger_match
+                FROM message_events me
+                LEFT JOIN command_ledger cl
+                  ON cl.account=me.account
+                 AND cl.command_msg_id=me.reply_to_msg_id
+                 AND (cl.chat_id IS me.chat_id OR cl.chat_id IS NULL OR me.chat_id IS NULL)
+                WHERE me.created_at>=?
+                  AND me.is_game_bot=1
+                  AND me.text IS NOT NULL
                   AND (
-                      text LIKE '%获得%' OR text LIKE '%得到%' OR text LIKE '%收获%'
-                      OR text LIKE '%带回%' OR text LIKE '%消耗%' OR text LIKE '%扣除%'
-                      OR text LIKE '%花费%' OR text LIKE '%储物袋%' OR text LIKE '%背包%'
-                      OR text LIKE '%物品栏%' OR text LIKE '%库存%' OR text LIKE '%灵石%'
-                      OR text LIKE '%贡献%'
+                      COALESCE(me.identity, '') != ''
+                      OR COALESCE(me.command, '') != ''
+                      OR cl.command_msg_id IS NOT NULL
                   )
-                ORDER BY created_at DESC, id DESC
+                  AND (
+                      me.text LIKE '%获得%' OR me.text LIKE '%得到%' OR me.text LIKE '%收获%'
+                      OR me.text LIKE '%带回%' OR me.text LIKE '%消耗%' OR me.text LIKE '%扣除%'
+                      OR me.text LIKE '%花费%' OR me.text LIKE '%储物袋%' OR me.text LIKE '%背包%'
+                      OR me.text LIKE '%物品栏%' OR me.text LIKE '%库存%' OR me.text LIKE '%灵石%'
+                      OR me.text LIKE '%贡献%'
+                  )
+                ORDER BY me.created_at DESC, me.id DESC
                 LIMIT ?
                 """,
                 (cutoff, max_rows),
@@ -1729,20 +1807,23 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
                 continue
             account_data = payload["accounts"].setdefault(account, empty_resource_account(account))
             identity = str(row["identity"] or "主魂").strip() or "主魂"
+            command = str(row["command"] or "").strip()
             text = row["text"] or ""
-            msg_key = (account, row["msg_id"], row["text_hash"] or row["id"])
+            msg_key = (account, row["msg_id"] if row["msg_id"] is not None else row["id"])
             if msg_key in seen_messages:
                 continue
             seen_messages.add(msg_key)
+            if not resource_text_matches_identity(account, identity, text):
+                continue
 
-            inventory_items = parse_inventory_items_from_text(text)
+            inventory_items = parse_inventory_items_from_text(text, command=command)
             if inventory_items:
                 inventory_map = account_data["_inventory_map"]
                 if identity not in inventory_map:
                     inventory_map[identity] = {
                         "identity": identity,
                         "time": row["created_at"],
-                        "command": row["command"] or "",
+                        "command": command,
                         "items": inventory_items[:int(inventory_limit or 40)],
                     }
 
@@ -1754,7 +1835,7 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
                 "account": account,
                 "account_name": ACCOUNT_DISPLAY_NAMES.get(account, account),
                 "identity": identity,
-                "command": row["command"] or "",
+                "command": command,
                 "changes": changes,
                 "line": changes[0].get("line", ""),
             }
