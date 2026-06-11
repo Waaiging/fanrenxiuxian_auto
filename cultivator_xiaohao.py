@@ -2977,50 +2977,59 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """检测灵兽出战是否成功"""
         return bool(text and any(k in text for k in ["设为出战", "出战状态", "并肩作战", "已经出战", "已出战"]))
 
-    def is_focus_beast_ready_for_pasture_response(self, text):
-        """检测六翼是否已经保持出战状态，满足一键放养前置条件。"""
+    def is_focus_beast_resting_for_pasture_response(self, text):
+        """检测六翼是否已经回到休息状态，可以参与一键放养。"""
         if not text:
             return False
-        if self.is_beast_deploy_success(text):
+        rest_status = self.parse_rest_response_status(text)
+        if rest_status and "休息" in rest_status:
             return True
-        return BEAST_FOCUS_NAME in text and "出战中" in text and not self.is_beast_injury_response(text)
+        return BEAST_FOCUS_NAME in text and "休息中" in text and not self.is_beast_injury_response(text)
 
     def schedule_pasture_retry(self, retry_seconds=600):
         self.state["next_pasture_time"] = add_seconds_str(now_str(), retry_seconds)
         self.save_state()
 
-    async def ensure_focus_beast_deployed_for_pasture(self):
-        """一键放养前确保六翼出战，避免六翼被放养后无法召回。"""
+    async def ensure_focus_beast_ready_for_pasture(self):
+        """一键放养前不强制六翼出战；如六翼出战则先召回休息。"""
         focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
         if not focus:
-            log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} not in cache; trying deploy directly without .我的灵兽 refresh.")
+            state_focus_name = self.state.get("best_beast_name", "")
+            if self.beast_name_matches(state_focus_name, BEAST_FOCUS_NAME):
+                focus = {
+                    "full_name": state_focus_name or BEAST_FOCUS_NAME,
+                    "status": self.state.get("best_beast_status", ""),
+                }
+            else:
+                log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} not in cache; sending .一键放养 without forced deploy.")
+                return True
 
         status = (focus or {}).get("status", "")
         focus_cache_name = (focus or {}).get("full_name") or BEAST_FOCUS_NAME
-        if "出战" in status:
-            return True
         if self.is_pastured_status(status):
-            self.defer_beast_actions_while_pastured(focus_cache_name, "pasture precheck")
-            return False
-
-        log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} status is {status or '未知'}, deploying before .一键放养.")
-        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {BEAST_FOCUS_NAME}", timeout=60, max_retries=1)
-        if self.is_focus_beast_ready_for_pasture_response(deploy_resp):
-            self.set_best_beast_status(focus_cache_name, "出战中")
+            log.info(f"Pasture precheck: {focus_cache_name} already pastured; .一键放养 can still handle other resting beasts.")
             return True
-        if self.is_beast_pastured_response(deploy_resp, focus_cache_name):
-            self.defer_beast_actions_while_pastured(focus_cache_name, "pasture deploy response")
-            return False
+        if "出战" not in status:
+            return True
 
-        injury_cd = self.record_beast_injury_from_response(focus_cache_name, deploy_resp, source="pasture")
+        log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} is deployed; resting before .一键放养.")
+        rest_status, rest_resp = await self.rest_beast_for_abyss(focus_cache_name)
+        if self.is_focus_beast_resting_for_pasture_response(rest_resp):
+            self.set_best_beast_status(focus_cache_name, "休息中")
+            return True
+        if self.is_beast_pastured_response(rest_resp, focus_cache_name) or self.is_pastured_status(rest_status):
+            log.info(f"Pasture precheck: {focus_cache_name} is already pastured after rest attempt.")
+            return True
+
+        injury_cd = self.record_beast_injury_from_response(focus_cache_name, rest_resp, source="pasture")
         if injury_cd >= 0:
             retry_seconds = max(600, injury_cd)
             self.schedule_pasture_retry(retry_seconds)
-            log.warning(f"Pasture deferred: {BEAST_FOCUS_NAME} cannot deploy while injured; retry in {retry_seconds}s.")
+            log.warning(f"Pasture deferred: {BEAST_FOCUS_NAME} cannot rest while injured; retry in {retry_seconds}s.")
             return False
 
-        if deploy_resp:
-            notify_unrecognized_response(self, f".灵兽出战 {BEAST_FOCUS_NAME}", deploy_resp, log, "一键放养前出战")
+        if rest_resp:
+            notify_unrecognized_response(self, f".灵兽休息 {BEAST_FOCUS_NAME}", rest_resp, log, "一键放养前休息")
         self.schedule_pasture_retry()
         return False
 
@@ -5467,11 +5476,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     if need_pasture:
                         best_name_for_pasture = self.state.get("best_beast_name", "")
                         best_status_for_pasture = self.state.get("best_beast_status", "")
-                        if await self.ensure_focus_beast_deployed_for_pasture():
+                        if await self.ensure_focus_beast_ready_for_pasture():
                             f_resp = await self.send_and_wait_feedback(".一键放养")
                             self.record_auto_pasture_response(f_resp, cache, best_name_for_pasture, best_status_for_pasture)
                         else:
-                            log.warning(f"Pasture skipped: {BEAST_FOCUS_NAME} is not confirmed deployed.")
+                            log.warning(f"Pasture skipped: {BEAST_FOCUS_NAME} could not be prepared for resting pasture.")
                         await asyncio.sleep(3)
                     if need_interaction:
                         focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)

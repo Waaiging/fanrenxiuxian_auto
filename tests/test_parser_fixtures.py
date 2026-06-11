@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 import os
 import tempfile
@@ -144,6 +145,30 @@ class ParserFixtureTests(unittest.TestCase):
         ]
 
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "六翼")
+
+    def test_pasture_precheck_rests_focus_beast_instead_of_deploying(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 34},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+            "best_beast_name": "六翼",
+            "best_beast_status": "出战中",
+            "best_beast_stamina": 34,
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return "已将灵兽【六翼】召回休息。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.ensure_focus_beast_ready_for_pasture()))
+        self.assertEqual(sent, [".灵兽休息 六翼"])
+        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "休息中")
 
     def test_concubine_status_blocks_chain_during_active_voyage(self):
         actor = DummyConcubine()
