@@ -1531,7 +1531,9 @@ RESOURCE_LINE_SKIP_PHRASES = (
 )
 RESOURCE_NAME_SKIP_FRAGMENTS = (
     "修为", "境界", "冷却", "剩余", "预计", "道友", "天命玉牒", "修士状态",
+    "评分", "体力", "精力", "胜算", "战力", "经验", "奇遇", "次数", "底蕴",
 )
+RESOURCE_NAME_SKIP_EXACT = {"点", "次", "小时", "分钟", "秒", "轮", "层"}
 RESOURCE_UNITS = ("点", "枚", "块", "个", "份", "株", "颗", "瓶", "张", "件", "缕", "滴", "层")
 INVENTORY_COMMAND_PREFIXES = (".储物袋", ".背包", ".物品栏", ".物品清单", ".库存")
 INVENTORY_HEADER_RE = re.compile(r"(?:^|\n)\s*(?:[【\[]?(?:储物袋|背包|物品栏|物品清单|库存)[】\]]?|[-=]{2,})\s*(?:$|\n|[:：])")
@@ -1544,6 +1546,8 @@ def clean_resource_name(value):
     name = re.sub(r"\s+", "", str(value or ""))
     name = name.strip(" ：:，,。.!！?？；;、[]【】()（）*x×+-")
     if not name or len(name) > 32:
+        return ""
+    if name in RESOURCE_NAME_SKIP_EXACT:
         return ""
     if any(fragment in name for fragment in RESOURCE_NAME_SKIP_FRAGMENTS):
         return ""
