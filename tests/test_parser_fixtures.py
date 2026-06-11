@@ -239,6 +239,46 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.is_formation_pending("【周天星斗大阵-启】正在布设大阵，尚需 2 位道友助阵。"))
         self.assertTrue(actor.is_formation_success("【周天星斗大阵-成】大阵已成，星辉流转。"))
 
+    def test_main_formation_assist_does_not_force_exit_before_assist(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["素缘子"]
+        actor.avatar_nicknames = {}
+        actor.state = {"avatars": {"素缘子": {"in_deep_meditation": True}}}
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(*args, **kwargs):
+            sent.append(args)
+            return "should not send"
+
+        actor.send_and_wait_feedback_identity = fake_send
+
+        self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("素缘子")))
+        self.assertEqual(sent, [])
+
+    def test_global_spirit_tree_mature_status_from_untracked_reply_is_accepted(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.avatar_usernames = {"kulipabp": "缘生子"}
+        actor.state = {"avatars": {"缘生子": {}}}
+        actor.save_state = lambda: None
+        scheduled = []
+        actor.schedule_spirit_tree_harvest_once = lambda reason="mature": scheduled.append(reason)
+        msg = DummyMessage(10212367, reply_to_msg_id=10212365)
+        text = """
+**【落云宗 · 灵眼之树】**
+✨ **状态**: 成熟采摘期
+⏳ **剩余**: 23小时38分钟46秒
+🍎 **果实**: **极品 (万年灵木)**
+"""
+
+        self.assertTrue(actor.maybe_record_spirit_tree_passive_message(msg, text, source="fixture"))
+        av_state = actor.state["avatars"]["缘生子"]
+        self.assertEqual(av_state["spirit_tree_status"], "成熟采摘期")
+        self.assertTrue(av_state["spirit_tree_harvest_pending"])
+        self.assertEqual(scheduled, ["fixture"])
+
     def test_resource_and_inventory_parsers(self):
         changes = parse_resource_changes_from_text(
             "传功玉简已记录！获得了 **30** 点贡献。\n"

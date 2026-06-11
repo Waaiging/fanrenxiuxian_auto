@@ -2785,10 +2785,22 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         clean = self.clean_spirit_tree_text(text)
         if any(k in clean for k in SPIRIT_TREE_MATURE_KEYWORDS):
             return True
+        if "灵眼之树已然成熟" in clean:
+            return True
+        if "落云宗" in clean and "灵眼之树" in clean and "状态" in clean and "成熟采摘期" in clean:
+            return True
         return (
             "采摘期" in clean
             and any(k in clean for k in ["剩余", "结束", "已开启", "开启中", "可采摘"])
             and "可查看神树成熟进度" not in clean
+        )
+
+    def spirit_tree_text_is_global_state(self, text):
+        clean = self.clean_spirit_tree_text(text)
+        return (
+            "落云宗" in clean
+            and "灵眼之树" in clean
+            and any(k in clean for k in ["状态", "成熟采摘期", "成熟度", "剩余"])
         )
 
     def spirit_tree_text_indicates_invasion(self, text):
@@ -2986,13 +2998,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self._spirit_tree_guard_task = asyncio.create_task(self.execute_spirit_tree_guard_once(reason))
 
     def maybe_record_spirit_tree_passive_message(self, msg, text, source="passive"):
-        if is_reply_to_untracked_message(self, msg):
+        global_tree_state = self.spirit_tree_text_is_global_state(text)
+        if is_reply_to_untracked_message(self, msg) and not global_tree_state:
             return False
         indicates_mature = self.spirit_tree_text_indicates_mature(text)
         indicates_irrigation = self.spirit_tree_text_indicates_irrigation_state(text)
         indicates_invasion = self.spirit_tree_text_indicates_invasion(text)
         if (
             (indicates_mature or indicates_irrigation or indicates_invasion)
+            and not global_tree_state
             and not self.spirit_tree_message_targets_avatar(msg, text, source=source)
         ):
             log.info(f"[{SPIRIT_TREE_AVATAR}] spirit tree sync skipped ({source}): message is not targeted to this avatar.")
@@ -6120,32 +6134,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return self.formation_invite_actor_username(text) in FORMATION_TARGET_INITIATORS
 
     async def prepare_avatar_for_formation_assist(self, avatar):
-            """助阵前确保专用化身不处于深度闭关。"""
+            """助阵前检查化身是否可直接助阵；强行出关只在助阵成功 5小时55分后执行。"""
             a_state = self.get_avatar_state(avatar)
             if not a_state.get("in_deep_meditation"):
                 return True
-            log.info(f"Avatar [{avatar}] formation assist: force exiting deep meditation first.")
-            resp = await self.send_and_wait_feedback_identity(
-                avatar, ".强行出关", timeout=30, max_retries=0, force_identity_check=True,
-            )
-            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-            if (
-                resp_text
-                and (
-                    "出关" in resp_text
-                    or "强行中断" in resp_text
-                    or is_deep_meditation_settlement_response(resp_text)
-                    or is_not_deep_meditation_response(resp_text)
-                )
-            ):
-                self.update_avatar_states(avatar, {
-                    "in_deep_meditation": False,
-                    "deep_meditation_end_time": "",
-                    "meditation_restart_pending": True,
-                    "meditation_restart_mode": "deep_only",
-                })
-                return True
-            log.info(f"Avatar [{avatar}] formation assist skipped: force exit not confirmed.")
+            log.info(f"Avatar [{avatar}] formation assist skipped: in deep meditation; force exit is only scheduled after successful formation.")
             return False
 
     async def maybe_assist_target_formation_invite(self, formation_msg):
@@ -6184,21 +6177,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         break
                     if not await self.prepare_avatar_for_formation_assist(avatar):
                         continue
-                    force_exit_restart = (
-                        self.get_avatar_state(avatar).get("meditation_restart_mode") == "deep_only"
-                    )
                     if self.message_age_seconds(formation_msg) > 60:
                         log.info(f"Avatar [{avatar}] assist skipped: invite expired after preparation.")
-                        if force_exit_restart:
-                            await self.restart_avatar_deep_meditation_direct(
-                                avatar, "formation invite expired after force exit"
-                            )
                         break
                     assisted = await self._avatar_assist_formation(avatar)
-                    if force_exit_restart:
-                        await self.restart_avatar_deep_meditation_direct(
-                            avatar, "formation assist after force exit"
-                        )
                     if assisted:
                         return True
                 return False
