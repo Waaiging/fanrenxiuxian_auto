@@ -47,6 +47,12 @@ STAR_PRE_APPEASE_LEAD_SECONDS = 60
 STAR_STATUS_RETRY_SECONDS = 10 * 60
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
 STAR_ATTRACTION_AVATARS = {"素缘子"}
+FORMATION_TARGET_INITIATORS = {
+    "crayonxxin": "副号-厚土",
+    "lvdoumiao": "副号-缘生子",
+    "ding303": "副号-寻真子",
+}
+FORMATION_ASSIST_AVATARS = ["素缘子"]
 
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
              # 读写 JSON 配置文件/状态文件
@@ -405,7 +411,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self.avatar_features = {
             "无咎子": {"meditation_prefix": ".推命", "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True},
             "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True},
-            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "tower": True, "formation": True, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
+            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "谨慎", "dream_map": True, "heart_trial": True, "tower": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
         }
         # 化身 chat_id 映射（供 log_utils.log_manual_outgoing_if_needed 使用）
         self._avatar_chat_ids = {
@@ -454,6 +460,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         self.keywords = [k.lower() for k in self.mc.get('keywords', [])]          # 要监控的关键词
         self.active_atomic_task = None             # 整体任务独占锁持有任务
         self.pending_formation_invite_msg = None   # 待回复的阵法邀请消息（化身助阵用）
+        self.formation_assist_in_progress = False  # 实时助阵并发保护
         self._spirit_tree_harvest_task = None      # 缘生子灵树成熟后的一次性采摘任务
         self._spirit_tree_guard_task = None        # 缘生子古剑门来袭后的一次性守山任务
 
@@ -997,6 +1004,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
                 # 星宫化身专属：全天候被动截获好星相
                 await self.maybe_handle_star_gazing_opportunity(msg, text, sender_cache)
+                if self.is_target_formation_invite(text):
+                    asyncio.create_task(self.maybe_assist_target_formation_invite(msg))
 
             # 处理反机器人验证（如 captcha）
             if await handle_anti_bot_challenge(self, msg, text, sender_cache, log, title="凌霄宫自证告警"):
@@ -3288,7 +3297,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             "heart_platform_time",
         }
         min_wait = None
+        features = self.avatar_features.get(identity, {}) if identity in self.avatars else {}
         for key, value in state.items():
+            if key in ("next_formation_time", "next_formation_retry_time") and identity in self.avatars and not features.get("formation"):
+                continue
             if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
                 continue
             if (
@@ -3374,7 +3386,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     async def send_and_wait_feedback_identity(self, identity, message, timeout=45, max_retries=2, **kwargs):
         """带身份感知的指令发送：先切换到目标化身，再发送指令"""
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
-        high_priority_identity_command = str(message).startswith((".观星", ".改换星移", ".观命", ".定命"))
+        high_priority_identity_command = str(message).startswith((".观星", ".改换星移", ".观命", ".定命", ".助阵"))
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
         # 整体任务守卫
         current_t = asyncio.current_task()
@@ -3710,7 +3722,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                         # 2. 野外历练由独立循环负责，避免被闭关/侍妾/阵法长流程拖慢。
                         # 3. 阵法 (星宫)
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
-                        elif features.get("formation_assist") and self.pending_formation_invite_msg:
+                        elif features.get("formation_assist") and self.pending_formation_invite_msg and not self.formation_assist_in_progress:
                             await self._avatar_assist_formation(avatar)
                         if self.avatar_meditation_needs_attention(avatar):
                             await self._avatar_meditation_check(avatar)
@@ -4146,11 +4158,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             if ft and is_future(ft):
                 min_cd = min(min_cd, seconds_until(ft))
             # 阵法CD/重试/强行出关
-            if features.get("formation") or features.get("formation_assist"):
+            if features.get("formation"):
                 for key in ("next_formation_time", "next_formation_retry_time", "next_force_exit_time"):
                     value = a_state.get(key, "")
                     if value and is_future(value):
                         min_cd = min(min_cd, seconds_until(value))
+            elif features.get("formation_assist"):
+                value = a_state.get("next_force_exit_time", "")
+                if value and is_future(value):
+                    min_cd = min(min_cd, seconds_until(value))
             # 侍妾批次CD
             if features.get("dream_map") or features.get("heart_trial"):
                 if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 冒险", avatar):
@@ -5999,6 +6015,109 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     })
                     await asyncio.sleep(60)
 
+    def formation_invite_actor_username(self, text):
+            """提取阵法邀请里的发起者 @username。"""
+            if not text:
+                return ""
+            match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
+            if not match:
+                match = re.search(r"@([A-Za-z0-9_]+)", text)
+            return (match.group(1).lower() if match else "")
+
+    def avatar_username_for_identity(self, avatar):
+            for username, name in self.avatar_usernames.items():
+                if name == avatar:
+                    return username.lower()
+            return ""
+
+    def formation_result_includes_avatar(self, text, avatar):
+            username = self.avatar_username_for_identity(avatar)
+            return bool(username and f"@{username}" in (text or "").lower())
+
+    def is_target_formation_invite(self, text):
+            """只监听副号三个分身发起的星宫启阵邀请。"""
+            if not text or self.is_formation_success(text):
+                return False
+            if not (
+                "周天星斗大阵-启" in text
+                and "正在布设大阵" in text
+                and ("尚需" in text or "助阵" in text)
+            ):
+                return False
+            return self.formation_invite_actor_username(text) in FORMATION_TARGET_INITIATORS
+
+    async def prepare_avatar_for_formation_assist(self, avatar):
+            """助阵前确保专用化身不处于深度闭关。"""
+            a_state = self.get_avatar_state(avatar)
+            if not a_state.get("in_deep_meditation"):
+                return True
+            log.info(f"Avatar [{avatar}] formation assist: force exiting deep meditation first.")
+            resp = await self.send_and_wait_feedback_identity(
+                avatar, ".强行出关", timeout=30, max_retries=0, force_identity_check=True,
+            )
+            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+            if (
+                resp_text
+                and (
+                    "出关" in resp_text
+                    or is_deep_meditation_settlement_response(resp_text)
+                    or is_not_deep_meditation_response(resp_text)
+                )
+            ):
+                self.set_avatar_state(avatar, "in_deep_meditation", False)
+                self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+                self.set_avatar_state(avatar, "meditation_restart_pending", False)
+                return True
+            log.info(f"Avatar [{avatar}] formation assist skipped: force exit not confirmed.")
+            return False
+
+    async def maybe_assist_target_formation_invite(self, formation_msg):
+            """实时响应副号三分身的阵法邀请。"""
+            if not formation_msg:
+                return False
+            text = formation_msg.text or ""
+            if not self.is_target_formation_invite(text):
+                return False
+            age = self.message_age_seconds(formation_msg)
+            if age > 60:
+                log.info(f"Target formation invite {formation_msg.id} ignored: stale ({int(age)}s).")
+                return False
+            if self.formation_assist_in_progress:
+                return False
+
+            initiator = self.formation_invite_actor_username(text)
+            initiator_label = FORMATION_TARGET_INITIATORS.get(initiator, initiator)
+            self.formation_assist_in_progress = True
+            self.pending_formation_invite_msg = formation_msg
+            try:
+                log.info(
+                    f"Target formation invite detected from {initiator_label} "
+                    f"(@{initiator}), msg={formation_msg.id}."
+                )
+                for avatar in FORMATION_ASSIST_AVATARS:
+                    if not self.avatar_features.get(avatar, {}).get("formation_assist"):
+                        continue
+                    a_state = self.get_avatar_state(avatar)
+                    next_form = a_state.get("next_formation_time", "")
+                    if next_form and is_future(next_form):
+                        log.info(f"Avatar [{avatar}] assist skipped: formation CD until {next_form}.")
+                        continue
+                    if self.message_age_seconds(formation_msg) > 55:
+                        log.info(f"Avatar [{avatar}] assist skipped: invite nearly expired.")
+                        break
+                    if not await self.prepare_avatar_for_formation_assist(avatar):
+                        continue
+                    if self.message_age_seconds(formation_msg) > 60:
+                        log.info(f"Avatar [{avatar}] assist skipped: invite expired after preparation.")
+                        break
+                    if await self._avatar_assist_formation(avatar):
+                        return True
+                return False
+            finally:
+                if self.pending_formation_invite_msg is formation_msg:
+                    self.pending_formation_invite_msg = None
+                self.formation_assist_in_progress = False
+
     def is_formation_success(self, text):
             """检测阵法是否已成（周天星斗大阵-成 或 大阵已成）。"""
             return bool(text and ("周天星斗大阵-成" in text or "大阵已成" in text))
@@ -6024,7 +6143,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             return any(k in text for k in [
                 "助阵成功", "成功助阵", "参与布阵", "加入大阵", "大阵已成",
                 "周天星斗大阵-成", "阵成", "成功加入", "已参与", "已经参与",
-                "已助阵", "已经助阵", "助阵完成",
+                "已助阵", "已经助阵", "助阵完成", "已在阵中",
             ])
 
     def is_formation_assist_failure(self, text):
@@ -6045,6 +6164,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             """
             invite_msg = self.pending_formation_invite_msg
             if not invite_msg or not hasattr(invite_msg, "id"):
+                return False
+            if not self.is_target_formation_invite(invite_msg.text or ""):
+                self.pending_formation_invite_msg = None
                 return False
 
             # 检查邀请消息是否还在有效期内（60秒）
@@ -6072,13 +6194,33 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             cd = self.parse_wait_time(assist_text)
             if cd > 0 and any(k in assist_text for k in ["冷却", "参与过布阵", "心神消耗", "再次启阵"]):
                 log.info(f"Avatar [{avatar}] assist on cooldown ({cd}s).")
+                self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), cd))
+                self.set_avatar_state(avatar, "next_formation_retry_time", "")
                 self.pending_formation_invite_msg = None
                 return False
 
             # 助阵失败
-            if any(k in assist_text for k in ["无法助阵", "不能助阵", "助阵失败", "已助阵"]):
+            if self.is_formation_assist_failure(assist_text) or any(k in assist_text for k in ["已助阵"]):
                 log.info(f"Avatar [{avatar}] assist failed: {assist_text[:80]}")
                 return False
+
+            for _ in range(15):
+                await asyncio.sleep(1)
+                try:
+                    updated_msg = await self.client.get_messages(self.target_chat_id, ids=invite_msg.id)
+                except Exception as e:
+                    log.info(f"Avatar [{avatar}] assist poll failed: {e}")
+                    break
+                updated_text = (updated_msg.text or "") if updated_msg else ""
+                if self.is_formation_success(updated_text):
+                    if self.formation_result_includes_avatar(updated_text, avatar):
+                        log.info(f"Avatar [{avatar}] formation assist confirmed by edited invite.")
+                        self.pending_formation_invite_msg = None
+                        self.record_avatar_formation_success(avatar, self.message_effective_time_str(updated_msg))
+                        return True
+                    log.info(f"Avatar [{avatar}] edited formation succeeded without this avatar; not recording CD.")
+                    self.pending_formation_invite_msg = None
+                    return False
 
             log.info(f"Avatar [{avatar}] assist response: {assist_text[:80]!r}")
             return False

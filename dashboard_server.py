@@ -805,8 +805,7 @@ def lingxiao_avatar_commands(name, state):
     if name == "素缘子":
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
-            time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
-            manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
+            time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
             manual_command(".观星", "观星", group="星宫"),
             manual_command(".改换星移 @Waaiging", "改换星移", group="星宫"),
         ])
@@ -823,7 +822,6 @@ def star_avatar_commands(name, state):
     rows.extend(xiaohao_star_attraction_commands(state))
     rows.extend([
         time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
-        manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
         time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
         time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
@@ -852,13 +850,12 @@ def xiaohao_avatar_commands(name, state):
         ])
     else:
         rows.extend([
-            manual_command(".助阵", "助阵", "监听阵法邀请", "阵法"),
+            time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
         ])
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
             time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
             time_command(state, "pending_star_shift_target_time", ".改换星移 @TitanCreeper", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
-            time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("xiaohao", name)))
     return rows

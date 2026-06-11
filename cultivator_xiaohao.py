@@ -108,6 +108,12 @@ STAR_PRE_APPEASE_LEAD_SECONDS = 60
 STAR_STATUS_RETRY_SECONDS = 10 * 60
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
 STAR_ATTRACTION_AVATARS = {"素心子", "缘生子"}
+FORMATION_TARGET_INITIATORS = {
+    "crayonxxin": "副号-厚土",
+    "lvdoumiao": "副号-缘生子",
+    "ding303": "副号-寻真子",
+}
+FORMATION_ASSIST_AVATARS = ["素心子", "缘生子"]
 STAR_GAZING_FORBIDDEN_KEYWORDS = (
     "非星宫弟子",
     "并非星宫弟子",
@@ -316,6 +322,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         self.pause_event.set()  # 默认运行中
         # startup: check is_paused to restore paused state
         self.active_atomic_task = None       # 整体任务独占锁持有任务
+        self.formation_assist_in_progress = False
         self._avatar_loop_count = 0          # 活跃化身循环计数（阻止主循环自动切回主魂）
         # 止/启管理员名单（只有这些人发"止"才生效）
         self.pause_admins = set(self.mc.get("pause_admins", [8325841058, -1003658665113, -1003843934428, -1003996748766]))  # 主魂(TitanCreeper)+问心子+素心子+缘生子
@@ -1259,6 +1266,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         for k in keys_to_check:
             if k == "next_switch_allowed_time":
                 continue
+            if identity in FORMATION_ASSIST_AVATARS and k in ("next_formation_time", "next_formation_retry_time"):
+                continue
             if (
                 k == "next_concubine_voyage_time"
                 and not self.concubine_voyage_auto_start_enabled(identity)
@@ -1352,7 +1361,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
-        high_priority_identity_command = str(message).startswith((".观星", ".改换星移"))
+        high_priority_identity_command = str(message).startswith((".观星", ".改换星移", ".助阵"))
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
 
         _t0 = time.monotonic()
@@ -3455,6 +3464,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     async def execute_abyss_with_fallback(self):
         """探渊前刷新.我的灵兽；六翼>=50优先，否则按候选体力/战力补位。"""
+        cached = list(self.state.get("beasts_cache", []))
+        if cached and self.all_cached_beasts_pastured(cached) and self.has_pending_pasture_return():
+            retry_at = self.pasture_block_until()
+            self.state["next_beast_status_check_time"] = retry_at
+            self.set_next_abyss_not_before(retry_at)
+            self.save_state()
+            log.info(f"Abyss: cached beasts are all pastured; skip .我的灵兽 refresh until {retry_at}.")
+            return False
         log.info("Abyss: refreshing .我的灵兽 before selecting candidate.")
         if not await self.update_beast_cache():
             log.info("Abyss: failed to refresh beast cache; retry later.")
@@ -3619,7 +3636,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
     async def update_beast_cache(self):
         """刷新灵兽缓存（发送.我的灵兽并解析结果）"""
         log.info("Refreshing Beast Cache...")
-        resp = await self.send_and_wait_feedback(".我的灵兽")
+        resp = await self.send_and_wait_feedback(".我的灵兽", timeout=45, max_retries=0)
         if resp and "灵兽" in resp:
             if self.is_pasture_return_message(resp):
                 self.mark_pastured_beasts_returned(resp)
@@ -3894,8 +3911,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             self.remember_manual_pasture_command_if_needed(msg, text)
             
             # --- 阵法助阵拦截 ---
-            if is_game_bot_sender(self, sender) and "周天星斗大阵-启" in text and "正在布设大阵" in text and ("尚需" in text or "助阵" in text):
-                asyncio.create_task(self.handle_global_formation_invite(msg.id))
+            if is_game_bot_sender(self, sender) and self.is_target_formation_invite(text):
+                asyncio.create_task(self.handle_global_formation_invite(msg))
                     
             # --- 观星显化拦截（轮换派发：每次只派一个化身） ---
             if is_game_bot_sender(self, sender) and "【Good -" in text:
@@ -3984,7 +4001,83 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if await maybe_auto_reply_exchange(self, event, text=text): return
         except Exception as e: log.error(f"Handler Error: {e}")
 
-    # ---- 互相助阵：缘生子 ↔ 素心子 ----
+    # ---- 星宫阵法助阵：小号只助阵副号三分身的启阵邀请 ----
+
+    def formation_invite_actor_username(self, text):
+        if not text:
+            return ""
+        match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
+        if not match:
+            match = re.search(r"@([A-Za-z0-9_]+)", text)
+        return (match.group(1).lower() if match else "")
+
+    def avatar_username_for_identity(self, avatar):
+        for username, name in self.avatar_usernames.items():
+            if name == avatar:
+                return username.lower()
+        return ""
+
+    def formation_result_includes_avatar(self, text, avatar):
+        username = self.avatar_username_for_identity(avatar)
+        return bool(username and f"@{username}" in (text or "").lower())
+
+    def is_target_formation_invite(self, text):
+        if not text:
+            return False
+        if "周天星斗大阵-成" in text or "大阵已成" in text:
+            return False
+        if not (
+            "周天星斗大阵-启" in text
+            and "正在布设大阵" in text
+            and ("尚需" in text or "助阵" in text)
+        ):
+            return False
+        return self.formation_invite_actor_username(text) in FORMATION_TARGET_INITIATORS
+
+    def message_age_seconds(self, msg):
+        msg_dt = getattr(msg, "date", None)
+        if not msg_dt:
+            return 0
+        try:
+            now_dt = datetime.now(msg_dt.tzinfo) if msg_dt.tzinfo else datetime.utcnow()
+            return max(0, (now_dt - msg_dt).total_seconds())
+        except Exception:
+            return 0
+
+    def record_avatar_formation_success(self, avatar, formation_time=None):
+        formation_time = formation_time or now_str()
+        force_delay = 5 * 3600 + 55 * 60
+        self.set_avatar_state(avatar, "last_formation_time", formation_time)
+        self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(formation_time, 12 * 3600))
+        self.set_avatar_state(avatar, "formation_active_until", add_seconds_str(formation_time, 6 * 3600))
+        self.set_avatar_state(avatar, "next_formation_retry_time", "")
+        self.set_avatar_state(avatar, "next_force_exit_time", add_seconds_str(formation_time, force_delay))
+        if seconds_until(add_seconds_str(formation_time, force_delay)) > 0:
+            asyncio.create_task(self.delayed_avatar_force_exit(avatar, seconds_until(add_seconds_str(formation_time, force_delay))))
+
+    async def prepare_avatar_for_formation_assist(self, avatar):
+        a_state = self.get_avatar_state(avatar)
+        if not a_state.get("in_deep_meditation"):
+            return True
+        log.info(f"Avatar {avatar}: formation assist force exits deep meditation first.")
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, ".强行出关", timeout=30, max_retries=0, force_identity_check=True,
+        )
+        resp_str = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+        if (
+            resp_str
+            and (
+                "出关" in resp_str
+                or is_deep_meditation_settlement_response(resp_str)
+                or is_not_deep_meditation_response(resp_str)
+            )
+        ):
+            self.set_avatar_state(avatar, "in_deep_meditation", False)
+            self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+            self.set_avatar_state(avatar, "meditation_restart_pending", False)
+            return True
+        log.info(f"Avatar {avatar}: formation assist skipped, force exit not confirmed.")
+        return False
 
     FORMATION_PAIRS = {
         "缘生子": "素心子",
@@ -4045,8 +4138,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         except Exception as e:
             log.error(f"[互助阵] {initiator} error: {e}")
 
-    async def handle_global_formation_invite(self, msg_id):
-        """处理全局阵法邀请，只让一个化身去助阵，失败则尝试下一个。"""
+    async def handle_global_formation_invite(self, formation_msg):
+        """处理副号三分身的阵法邀请，只让一个专用化身助阵。"""
+        if not formation_msg:
+            return
+        text = formation_msg.text or ""
+        if not self.is_target_formation_invite(text):
+            return
+        msg_id = formation_msg.id
+        age = self.message_age_seconds(formation_msg)
+        if age > 60:
+            log.info(f"Target formation invite ignored: stale ({int(age)}s), msg={msg_id}.")
+            return
+        if self.formation_assist_in_progress:
+            return
         # 前置校验：是否在全局助阵封禁期间
         form_ban = self.state.get("next_formation_ban_time", "")
         if form_ban and is_future(form_ban):
@@ -4057,55 +4162,79 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if getattr(self, "last_global_assist_time", 0) and now - self.last_global_assist_time < 60:
             return
         self.last_global_assist_time = now
+        initiator = self.formation_invite_actor_username(text)
+        log.info(
+            f"Target formation invite detected from "
+            f"{FORMATION_TARGET_INITIATORS.get(initiator, initiator)} (@{initiator}), msg={msg_id}."
+        )
 
-        for avatar in ["素心子", "缘生子"]:
-            a_state = self.get_avatar_state(avatar)
+        self.formation_assist_in_progress = True
+        try:
+            for avatar in FORMATION_ASSIST_AVATARS:
+                a_state = self.get_avatar_state(avatar)
 
-            # 前置校验 1：如果已经在深度闭关中，跳过
-            in_med = a_state.get("in_deep_meditation", False)
-            end_time = a_state.get("deep_meditation_end_time", "")
-            if in_med and end_time and is_future(end_time):
-                log.info(f"Avatar {avatar} skipped: currently in deep meditation until {end_time}")
-                continue
+                next_form = a_state.get("next_formation_time", "")
+                if next_form and is_future(next_form):
+                    log.info(f"Avatar {avatar} skipped: formation CD active until {next_form}")
+                    continue
 
-            # 前置校验 2：大阵冷却时间未到，跳过
-            next_form = a_state.get("next_formation_time", "")
-            if next_form and is_future(next_form):
-                log.info(f"Avatar {avatar} skipped: formation CD active until {next_form}")
-                continue
+                if self.message_age_seconds(formation_msg) > 55:
+                    log.info(f"Avatar {avatar} skipped: invite nearly expired.")
+                    break
+                if not await self.prepare_avatar_for_formation_assist(avatar):
+                    continue
+                if self.message_age_seconds(formation_msg) > 60:
+                    log.info(f"Avatar {avatar} skipped: invite expired after preparation.")
+                    break
 
-            log.info(f"Avatar {avatar}: sending .助阵 to invite message {msg_id}")
-            resp = await self.send_and_wait_feedback_identity(avatar, ".助阵", reply_to=msg_id)
-            resp_str = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+                log.info(f"Avatar {avatar}: sending .助阵 to invite message {msg_id}")
+                resp = await self.send_and_wait_feedback_identity(avatar, ".助阵", reply_to=msg_id, timeout=30, max_retries=0)
+                resp_str = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
 
-            # 校验是否被大阵助阵命令保护拦截
-            if resp_str and any(k in resp_str for k in ["命令保护提醒", "已暂停该命令", "暂停该命令"]):
-                cd = self.parse_wait_time(resp_str)
-                cd_seconds = cd if cd > 0 else 3600
-                ban_expire = add_seconds_str(now_str(), cd_seconds)
-                self.state["next_formation_ban_time"] = ban_expire
-                self.save_state()
-                log.critical(f"⚠️ Global Formation Assist Command Banned! Suspended until {ban_expire}. Response: {resp_str}")
-                return # 全局被禁，直接退出
-
-            if resp_str:
-                if any(k in resp_str for k in ["助阵成功", "大阵已成", "成功助阵", "阵成", "加入大阵", "已经参与"]):
-                    log.info(f"Avatar {avatar} successfully assisted formation!")
+                if resp_str and any(k in resp_str for k in ["命令保护提醒", "已暂停该命令", "暂停该命令"]):
                     cd = self.parse_wait_time(resp_str)
-                    cd_seconds = cd if cd > 0 else 7200 # 成功默认 2 小时
+                    cd_seconds = cd if cd > 0 else 3600
+                    ban_expire = add_seconds_str(now_str(), cd_seconds)
+                    self.state["next_formation_ban_time"] = ban_expire
+                    self.save_state()
+                    log.critical(f"⚠️ Global Formation Assist Command Banned! Suspended until {ban_expire}. Response: {resp_str}")
+                    return
+
+                if resp_str and any(k in resp_str for k in ["助阵成功", "大阵已成", "成功助阵", "阵成", "加入大阵", "已经参与", "已在阵中"]):
+                    log.info(f"Avatar {avatar} successfully assisted formation!")
+                    self.record_avatar_formation_success(avatar)
+                    return
+
+                cd = self.parse_wait_time(resp_str)
+                if cd > 0 or any(k in resp_str for k in ["冷却", "尚未结束", "请在", "未到", "参与过布阵", "心神消耗"]):
+                    cd_seconds = cd if cd > 0 else 1800
                     self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), cd_seconds))
                     self.save_state()
-                    return  # 只要有一人成功助阵，就直接退出
-                else:
+                    await asyncio.sleep(2)
+                    continue
+                elif resp_str:
                     log.info(f"Avatar {avatar} assist failed/response: {resp_str[:120]}")
-                    # 即使失败了，如果提示已经在冷却中，也需要更新冷却时间
-                    cd = self.parse_wait_time(resp_str)
-                    if cd > 0 or any(k in resp_str for k in ["冷却", "尚未结束", "请在", "未到"]):
-                        cd_seconds = cd if cd > 0 else 1800 # 冷却默认 30 分钟
-                        self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), cd_seconds))
-                        self.save_state()
-            # 如果助阵失败（例如在冷却中），稍作延迟后换下一个化身尝试
-            await asyncio.sleep(2)
+                    if any(k in resp_str for k in ["没有找到", "过期", "无法助阵", "不能助阵", "助阵失败"]):
+                        await asyncio.sleep(2)
+                        continue
+                for _ in range(15):
+                    await asyncio.sleep(1)
+                    try:
+                        updated_msg = await self.client.get_messages(self.target_chat_id, ids=msg_id)
+                    except Exception as e:
+                        log.info(f"Avatar {avatar} assist poll failed: {e}")
+                        break
+                    updated_text = (updated_msg.text or "") if updated_msg else ""
+                    if "周天星斗大阵-成" in updated_text or "大阵已成" in updated_text:
+                        if self.formation_result_includes_avatar(updated_text, avatar):
+                            log.info(f"Avatar {avatar} formation assist confirmed by edited invite.")
+                            self.record_avatar_formation_success(avatar)
+                            return
+                        log.info(f"Avatar {avatar} edited formation succeeded without this avatar; not recording CD.")
+                        return
+                await asyncio.sleep(2)
+        finally:
+            self.formation_assist_in_progress = False
 
     # ---- 观星与改换星移 (化身专用) ----
 
@@ -5868,55 +5997,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 
                 # --- 星辰牵引/安抚/收集由 run_avatar_star_attraction_loop 独立调度 ---
 
-                # --- 周天星斗大阵 (12小时冷却) ---
-                last_formation = state.get("last_formation_time", "")
-                next_formation = state.get("next_formation_time", "")
-                if is_star_palace and (not next_formation or not is_future(next_formation)):
-                    resp, forced_exit = await send_with_cultivation_check(".启阵")
-                    # 启阵成功后，通知配对化身助阵
-                    if resp and "周天星斗大阵" in str(resp) and "尚需" in str(resp):
-                        asyncio.create_task(self.mutual_formation_assist(avatar, resp.id if hasattr(resp, "id") else 0))
-                    resp_str = str(resp) if resp else ""
-                    if resp == "PAUSE_1H":
-                        self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 3600))
-                    elif "周天星斗大阵" in resp_str and "尚需" in resp_str:
-                        log.info(f"Avatar {avatar} formation pending assist, waiting 65s to check result...")
-                        await asyncio.sleep(65)
-                        if hasattr(resp, "id"):
-                            updated_msg = await self.client.get_messages(self.target_chat_id, ids=resp.id)
-                            resp_str = updated_msg.text or ""
-                        if "大阵已成" in resp_str or "阵成" in resp_str:
-                            self.set_avatar_state(avatar, "last_formation_time", now_str())
-                            self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 12 * 3600))
-                            self.set_avatar_state(avatar, "formation_active_until", add_seconds_str(now_str(), 6 * 3600))
-                            self.set_avatar_state(avatar, "next_formation_retry_time", "")  # 清空重试时间
-                            force_delay = 5 * 3600 + 55 * 60
-                            self.set_avatar_state(avatar, "next_force_exit_time", add_seconds_str(now_str(), force_delay))
-                            asyncio.create_task(self.delayed_avatar_force_exit(avatar, force_delay))
-                            log.info(f"Avatar {avatar} formation success! Force exit in 5h55m.")
-                        else:
-                            log.info(f"Avatar {avatar} formation failed (no assist). Retrying in 10m.")
-                            self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 600))
-                    elif "大阵已成" in resp_str or "阵成" in resp_str:
-                        self.set_avatar_state(avatar, "last_formation_time", now_str())
-                        self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 12 * 3600))
-                        self.set_avatar_state(avatar, "formation_active_until", add_seconds_str(now_str(), 6 * 3600))
-                        self.set_avatar_state(avatar, "next_formation_retry_time", "")  # 清空重试时间
-                        force_delay = 5 * 3600 + 55 * 60
-                        self.set_avatar_state(avatar, "next_force_exit_time", add_seconds_str(now_str(), force_delay))
-                        asyncio.create_task(self.delayed_avatar_force_exit(avatar, force_delay))
-                        log.info(f"Avatar {avatar} formation success immediately! Force exit in 5h55m.")
-                    elif "冷却" in resp_str or "心神消耗" in resp_str or "再次启阵" in resp_str:
-                        cd = getattr(self, "parse_wait_time", lambda x: -1)(resp_str)
-                        if cd > 0:
-                            self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), cd))
-                        else:
-                            self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 1800))
-                    else:
-                        self.set_avatar_state(avatar, "next_formation_time", add_seconds_str(now_str(), 600))
-                    
-                    if forced_exit:
-                        await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
+                # --- 周天星斗大阵 ---
+                # 小号星宫分身不再主动启阵，只实时助阵副号三分身的邀请。
                 if self.avatar_meditation_needs_attention(avatar):
                     log.info(f"Avatar {avatar}: concubine chain skipped; meditation needs restart first.")
                     await asyncio.sleep(60)

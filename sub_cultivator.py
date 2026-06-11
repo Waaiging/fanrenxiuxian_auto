@@ -5489,6 +5489,35 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             asyncio.create_task(self.delayed_avatar_force_exit(avatar, force_delay_remaining))
             log.info(f"Avatar [{avatar}] force exit timer started: {int(force_delay_remaining)}s.")
 
+    def avatar_formation_block_until(self, avatar, a_state=None):
+        """Return the latest active formation cooldown/retry time for an avatar."""
+        a_state = a_state or self.get_avatar_state(avatar)
+        future_times = []
+
+        next_form = a_state.get("next_formation_time", "")
+        if next_form and is_future(next_form):
+            future_times.append(next_form)
+
+        last_formation = a_state.get("last_formation_time", "")
+        if last_formation:
+            last_based_next = add_seconds_str(last_formation, 12 * 3600)
+            if is_future(last_based_next):
+                future_times.append(last_based_next)
+                if (
+                    not next_form
+                    or not is_future(next_form)
+                    or str_to_dt(next_form) < str_to_dt(last_based_next)
+                ):
+                    self.set_avatar_state(avatar, "next_formation_time", last_based_next)
+
+        next_retry = a_state.get("next_formation_retry_time", "")
+        if next_retry and is_future(next_retry):
+            future_times.append(next_retry)
+
+        if not future_times:
+            return ""
+        return dt_to_str(max(str_to_dt(t) for t in future_times))
+
     async def execute_avatar_formation(self, avatar):
         """
         化身版启阵流程（迁移自主循环 run_formation_meditation_loop 的启阵部分）。
@@ -5500,28 +5529,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         4. 处理响应：直接成功 / 等待助阵(2分钟后查看编辑) / 冷却 / 未知。
         """
         a_state = self.get_avatar_state(avatar)
-        last_formation = a_state.get("last_formation_time", "")
-        next_retry = a_state.get("next_formation_retry_time", "")
-
-        # 冷却检查：距上次启阵不足 12 小时
-        if last_formation and is_future(add_seconds_str(last_formation, 12 * 3600)):
-            # 冷却中，但如果有助阵邀请还是可以助阵
-            if self.pending_formation_invite_msg:
-                await self._avatar_assist_formation(avatar)
+        block_until = self.avatar_formation_block_until(avatar, a_state)
+        if block_until:
+            log.debug(f"Avatar [{avatar}] formation not due until {block_until}.")
             return
-
-        # 重试时间检查
-        if next_retry and is_future(next_retry):
-            # 还没到重试时间，但如果有助阵邀请可以助阵
-            if self.pending_formation_invite_msg:
-                await self._avatar_assist_formation(avatar)
-            return
-
-        # 优先助阵：如果有待助阵邀请，先助阵再考虑自己启阵
-        if self.pending_formation_invite_msg:
-            assisted = await self._avatar_assist_formation(avatar)
-            if assisted:
-                return  # 助阵成功，不用自己启阵了
 
         log.info(f"Avatar [{avatar}] attempting Star Formation (.启阵)...")
         resp_msg = await self.send_and_wait_feedback_identity(
@@ -5546,33 +5557,27 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             self.record_avatar_formation_success(avatar, self.message_effective_time_str(resp_msg))
             return
 
-        # 情况 2：等待助阵（pending），存储邀请消息供其他化身助阵，等待 2 分钟查看编辑结果
+        # 情况 2：等待跨脚本助阵，等待邀请消息编辑为最终结果
         if self.is_formation_pending(resp):
-            log.info(f"Avatar [{avatar}] formation pending, storing invite for other avatars...")
-            self.pending_formation_invite_msg = resp_msg  # 存储邀请消息
-            log.info(f"Avatar [{avatar}] waiting 2min for assist...")
-            updated_msg = await self.get_updated_message(resp_msg, delay_sec=120)
+            log.info(f"Avatar [{avatar}] formation pending, waiting for cross-account assist...")
+            self.pending_formation_invite_msg = resp_msg
+            updated_msg = await self.get_updated_message(resp_msg, delay_sec=75)
             updated_resp = (updated_msg.text or "") if updated_msg else ""
             if self.is_formation_success(updated_resp):
-                self.pending_formation_invite_msg = None  # 清除
+                self.pending_formation_invite_msg = None
                 self.record_avatar_formation_success(avatar, self.message_effective_time_str(updated_msg))
             else:
-                log.info(f"Avatar [{avatar}] formation still pending after 2min. Retry in 10min.")
+                self.pending_formation_invite_msg = None
+                log.info(f"Avatar [{avatar}] formation still pending after invite window. Retry in 10min.")
                 retry_at = add_seconds_str(now_str(), 600)
                 self.set_avatar_state(avatar, "next_formation_retry_time", retry_at)
             return
 
-        # 情况 3：已有人启阵（"请勿重复操作"），尝试助阵
+        # 情况 3：已有人启阵（"请勿重复操作"），本脚本分身只发起不助阵
         if "请勿重复操作" in resp or "已发布" in resp:
-            log.info(f"Avatar [{avatar}] formation already pending, trying to assist...")
-            # 尝试获取邀请消息来助阵
-            if self.pending_formation_invite_msg:
-                await self._avatar_assist_formation(avatar)
-            else:
-                # 没有存储的邀请消息，10分钟后重试
-                retry_at = add_seconds_str(now_str(), 600)
-                self.set_avatar_state(avatar, "next_formation_retry_time", retry_at)
-                log.info(f"Avatar [{avatar}] no invite msg cached. Retry in 10min.")
+            retry_at = add_seconds_str(now_str(), 600)
+            self.set_avatar_state(avatar, "next_formation_retry_time", retry_at)
+            log.info(f"Avatar [{avatar}] formation already pending. Retry own initiation in 10min.")
             return
 
         # 情况 4：冷却或其他响应
@@ -6075,8 +6080,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 next_med = a_state.get("next_meditation_time", "")
                 next_ft2 = a_state.get("next_field_training_time", "")
                 retry_time2 = a_state.get("next_meditation_retry_time", "")
-                next_form = a_state.get("next_formation_time", "")
-                next_form_retry = a_state.get("next_formation_retry_time", "")
+                next_form = self.avatar_formation_block_until(avatar, a_state)
                 next_force_exit = a_state.get("next_force_exit_time", "")
                 next_heart2 = a_state.get("next_heart_trial_time", "")
                 next_dream2 = a_state.get("next_dream_map_time", "")
@@ -6097,7 +6101,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 add_due_or_future(next_ft2, due_when_missing=True)
                 add_due_or_future(retry_time2)
                 add_due_or_future(next_form, due_when_missing=True)
-                add_due_or_future(next_form_retry)
                 add_due_or_future(next_force_exit)
                 add_due_or_future(next_heart2)
                 if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 冒险", avatar):

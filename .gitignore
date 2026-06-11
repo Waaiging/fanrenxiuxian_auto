@@ -19,6 +19,7 @@ config_sub.json
 # Runtime state and generated data
 *.log
 *.sqlite3
+*.sqlite3.snapshot
 state_*.json
 status.json
 cultivation_stats_cache.json
