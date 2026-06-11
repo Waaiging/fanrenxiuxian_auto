@@ -1,5 +1,7 @@
 import unittest
+from datetime import datetime
 
+from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
 from dashboard_server import parse_inventory_items_from_text, parse_resource_changes_from_text
@@ -14,6 +16,17 @@ class DummyConcubine(ConcubineMixin):
 
     def __init__(self):
         self.state = concubine_default_state()
+
+    def save_state(self):
+        return None
+
+    def parse_wait_time(self, text, *args, **kwargs):
+        return parse_duration_seconds(text)
+
+
+class DummyCommon(CommonCommandMixin):
+    def __init__(self):
+        self.state = {}
 
     def save_state(self):
         return None
@@ -127,6 +140,48 @@ class ParserFixtureTests(unittest.TestCase):
         inventory = parse_inventory_items_from_text("【储物袋】\n【养魂木】x3\n灵石：1200")
         self.assertIn({"name": "养魂木", "amount": 3}, inventory)
         self.assertIn({"name": "灵石", "amount": 1200}, inventory)
+
+    def test_field_training_retry_preserves_confirmed_cooldown(self):
+        actor = DummyCommon()
+        actor.state = {
+            "last_field_training_time": now_str(),
+            "next_field_training_time": "",
+        }
+
+        actor.record_field_training_response("", context="test")
+
+        self.assertGreater(common_seconds_until(actor.state["next_field_training_time"]), 110 * 60)
+
+    def test_yuanying_active_and_settlement_do_not_short_retry(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "last_yuanying_out_time": "",
+            "next_yuanying_out_time": "",
+            "yuanying_out_end_time": "",
+            "yuanying_out_active": False,
+        }
+
+        self.assertTrue(actor.record_yuanying_out_active_response(
+            "你的元婴正在执行“元神出窍”任务，无法分身。请先使用 `.元婴归窍` 将其召回。",
+            source="test",
+        ))
+        wait = (datetime.strptime(actor.state["next_yuanying_out_time"], "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds()
+        self.assertGreater(wait, 50 * 60)
+        self.assertLess(wait, 70 * 60)
+
+        actor.state = {
+            "last_yuanying_out_time": "",
+            "next_yuanying_out_time": "",
+            "yuanying_out_end_time": "",
+            "yuanying_out_active": False,
+        }
+        self.assertTrue(actor.record_yuanying_out_settlement_response(
+            "✨ **元神回响**：感应到 @Waaiging 的元婴已神游归来，正在清点收获...",
+            source=".元婴出窍 response",
+        ))
+        wait = (datetime.strptime(actor.state["next_yuanying_out_time"], "%Y-%m-%d %H:%M:%S") - datetime.now()).total_seconds()
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertGreater(wait, 7 * 3600)
 
 
 if __name__ == "__main__":

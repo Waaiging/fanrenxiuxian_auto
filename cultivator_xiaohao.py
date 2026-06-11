@@ -1401,7 +1401,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             )
                 
                 if not should_yield:
-                    if force_identity_check or self.current_identity != identity:
+                    if self.current_identity != identity:
                         ban_time = self.state.get("next_switch_allowed_time", "")
                         if ban_time and is_future(ban_time):
                             log.warning(f"🚫 Global switch is banned until {ban_time}. Blocking switch to {identity}.")
@@ -1583,7 +1583,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if self.active_atomic_task is not None and self.active_atomic_task != current_t:
                     should_yield = True
                     wait_sec_to_sleep = 0.5
-                elif force_identity_check or self.current_identity != "主魂" or not self._main_confirmed:
+                elif self.current_identity != "主魂" or not self._main_confirmed:
                     if not command_send_precheck(self, message, log, identity="主魂"):
                         log.info(f"Skip auto-switch to 主魂: main command is not sendable now ({message}).")
                         return None
@@ -1950,6 +1950,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             )
             return True
         now = now_str()
+        if ".元婴出窍 response" in str(source):
+            next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
+            self.state["last_yuanying_return_time"] = now
+            self.state["last_yuanying_out_time"] = now
+            self.state["next_yuanying_out_time"] = next_time
+            self.state["yuanying_out_end_time"] = next_time
+            self.state["yuanying_out_active"] = True
+            log.info(
+                f".元婴出窍: settlement response followed by start command; "
+                f"assuming new out active until {next_time}."
+            )
+            return True
         self.state["last_yuanying_return_time"] = now
         self.state["next_yuanying_out_time"] = add_seconds_str(now, 90)
         self.state["yuanying_out_active"] = False
@@ -1990,6 +2002,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         cd = self.parse_wait_time(clean)
         start_markers = ["心念一动", "消失在天际", "将在外云游", "自动结算收获"]
         is_confirmed_start = any(k in clean for k in start_markers)
+        already_active_unknown = any(k in clean for k in ["正在执行", "无法分身", "先使用 `.元婴归窍`", "先使用 .元婴归窍"])
         if is_confirmed_start:
             next_time = add_seconds_str(now, cd if cd > 0 else YUANYING_OUT_CD_SECONDS)
             self.state["last_yuanying_out_time"] = now
@@ -1998,7 +2011,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         else:
             next_time = self._yuanying_existing_future_time()
             if not next_time:
-                next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
+                retry_seconds = 3600 if already_active_unknown else YUANYING_OUT_CD_SECONDS
+                next_time = add_seconds_str(now, retry_seconds)
 
         self.state["next_yuanying_out_time"] = next_time
         self.state["yuanying_out_end_time"] = next_time
@@ -2077,7 +2091,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
                 continue
             log.info("Yuanying ability due: sending .元婴出窍.")
-            resp = await self.send_and_wait_feedback(".元婴出窍", timeout=120)
+            resp = await self.send_and_wait_feedback(".元婴出窍", timeout=120, max_retries=0)
             self.record_yuanying_out_start_response(resp)
             self.save_state()
             await asyncio.sleep(5)
@@ -2108,7 +2122,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
             log.info("Rift search due: sending .探寻裂缝.")
-            resp_msg = await self.send_and_wait_feedback(command, timeout=120, return_response_msg=True)
+            resp_msg = await self.send_and_wait_feedback(command, timeout=120, max_retries=0, return_response_msg=True)
             if resp_msg is None:
                 if await self.sleep_after_blocked_command(command, "Rift search"):
                     continue
@@ -5672,6 +5686,17 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
                     await asyncio.sleep(60)
                     continue
+                repaired_next = self.preserve_cooldown_floor(
+                    a_state,
+                    "last_field_training_time",
+                    "next_field_training_time",
+                    2 * 3600,
+                    f"avatar field training [{avatar}]",
+                )
+                if repaired_next and is_future(repaired_next):
+                    wait_sec = seconds_until(repaired_next)
+                    await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
+                    continue
                 next_time = a_state.get("next_field_training_time", "")
 
                 if next_time and is_future(next_time):
@@ -5683,7 +5708,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 cmd = self.field_training_command  # ".野外历练 谨慎"
                 log.info(f"Avatar [{avatar}] field training due: sending {cmd}")
                 resp = await self.send_and_wait_feedback_identity(
-                    avatar, cmd, timeout=90, force_identity_check=True
+                    avatar, cmd, timeout=90, max_retries=0, force_identity_check=True
                 )
 
                 # 解析回复并更新分身独立冷却

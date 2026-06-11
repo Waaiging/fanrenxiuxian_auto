@@ -175,6 +175,66 @@ class CommonCommandMixin:
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
 
+    def _future_time_from_last(self, last_time, cd_seconds):
+        """Return last_time + cd_seconds only when it is a valid future time."""
+        if not last_time:
+            return ""
+        try:
+            due = datetime.strptime(str(last_time), TIME_FORMAT) + timedelta(seconds=int(cd_seconds))
+        except Exception:
+            return ""
+        return dt_to_str(due) if due > datetime.now() else ""
+
+    def _latest_future_time(self, *values):
+        """Return the latest valid future time from a list of state strings."""
+        candidates = []
+        for value in values:
+            if not value:
+                continue
+            try:
+                dt = datetime.strptime(str(value), TIME_FORMAT)
+            except Exception:
+                continue
+            if dt > datetime.now():
+                candidates.append((dt, str(value)))
+        if not candidates:
+            return ""
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def preserve_cooldown_floor(self, state, last_key, next_key, cd_seconds, reason=""):
+        """
+        Keep next_key at least last_key + cd_seconds.
+
+        This prevents a stale empty/short retry state from making fixed-cooldown
+        commands fire before the last confirmed success cooldown has elapsed.
+        """
+        if not isinstance(state, dict):
+            return ""
+        floor = self._future_time_from_last(state.get(last_key, ""), cd_seconds)
+        current = state.get(next_key, "")
+        next_time = self._latest_future_time(current, floor)
+        if floor and next_time and next_time != current:
+            state[next_key] = next_time
+            self.save_state()
+            log = self.common_command_logger()
+            detail = f" ({reason})" if reason else ""
+            log.info(f"{next_key}: repaired cooldown floor{detail}, next at {next_time}.")
+        return next_time
+
+    def set_retry_preserving_cooldown(self, state, last_key, next_key, cd_seconds, retry_seconds, reason=""):
+        """Set a retry time without moving a fixed-cooldown command before its floor."""
+        if not isinstance(state, dict):
+            return ""
+        retry_at = add_seconds_str(now_str(), retry_seconds)
+        floor = self._future_time_from_last(state.get(last_key, ""), cd_seconds)
+        next_time = self._latest_future_time(state.get(next_key, ""), floor, retry_at) or retry_at
+        state[next_key] = next_time
+        log = self.common_command_logger()
+        detail = f" ({reason})" if reason else ""
+        if floor and next_time == floor:
+            log.info(f"{next_key}: retry preserved cooldown floor{detail}, next at {next_time}.")
+        return next_time
+
     # ---- Dashboard 自定义指令调度 ----
 
     def load_dashboard_custom_commands(self):
@@ -487,7 +547,14 @@ class CommonCommandMixin:
         self.ensure_common_command_state()
         log = self.common_command_logger()
         if not text:
-            self.state["next_field_training_time"] = add_seconds_str(now_str(), 600)
+            self.set_retry_preserving_cooldown(
+                self.state,
+                "last_field_training_time",
+                "next_field_training_time",
+                FIELD_TRAINING_CD_SECONDS,
+                600,
+                "missing response",
+            )
             self.save_state()
             log.warning(f"Field training: missing response; retry at {self.state['next_field_training_time']}.")
             return False
@@ -495,7 +562,12 @@ class CommonCommandMixin:
         cd = self.parse_wait_time(text)
         now = now_str()
         if self.is_field_training_cooldown_response(text) and cd > 0:
-            self.state["next_field_training_time"] = add_seconds_str(now, cd)
+            cooldown_at = add_seconds_str(now, cd)
+            floor = self._future_time_from_last(
+                self.state.get("last_field_training_time", ""),
+                FIELD_TRAINING_CD_SECONDS,
+            )
+            self.state["next_field_training_time"] = self._latest_future_time(cooldown_at, floor) or cooldown_at
             self.save_state()
             log.info(f"Field training cooldown from response: {cd}s, next at {self.state['next_field_training_time']}.")
             return True
@@ -509,7 +581,14 @@ class CommonCommandMixin:
 
         # 无法识别的回复：重试 10 分钟后
         notify_unrecognized_response(self, FIELD_TRAINING_COMMAND, text, log, context)
-        self.state["next_field_training_time"] = add_seconds_str(now, 600)
+        self.set_retry_preserving_cooldown(
+            self.state,
+            "last_field_training_time",
+            "next_field_training_time",
+            FIELD_TRAINING_CD_SECONDS,
+            600,
+            "unrecognized response",
+        )
         self.save_state()
         log.warning(f"Field training unrecognized response; skipped until {self.state['next_field_training_time']}.")
         return False
@@ -558,14 +637,26 @@ class CommonCommandMixin:
                     self.set_avatar_state(identity, key, value)
 
         if not text:
-            next_time = add_seconds_str(now, 600)
+            next_time = self.set_retry_preserving_cooldown(
+                self.get_avatar_state(identity),
+                "last_field_training_time",
+                "next_field_training_time",
+                FIELD_TRAINING_CD_SECONDS,
+                600,
+                f"missing response [{identity}]",
+            )
             update_avatar({"next_field_training_time": next_time})
             log.warning(f"Avatar [{identity}] field training: missing response; retry at {next_time}.")
             return False
 
         cd = self.parse_wait_time(text)
         if self.is_field_training_cooldown_response(text) and cd > 0:
-            next_time = add_seconds_str(now, cd)
+            cooldown_at = add_seconds_str(now, cd)
+            floor = self._future_time_from_last(
+                self.get_avatar_state(identity).get("last_field_training_time", ""),
+                FIELD_TRAINING_CD_SECONDS,
+            )
+            next_time = self._latest_future_time(cooldown_at, floor) or cooldown_at
             update_avatar({"next_field_training_time": next_time})
             log.info(f"Avatar [{identity}] field training cooldown from response: {cd}s, next at {next_time}.")
             return True
@@ -580,7 +671,14 @@ class CommonCommandMixin:
             return True
 
         notify_unrecognized_response(self, FIELD_TRAINING_COMMAND, text, log, f"{context} ({identity})")
-        next_time = add_seconds_str(now, 600)
+        next_time = self.set_retry_preserving_cooldown(
+            self.get_avatar_state(identity),
+            "last_field_training_time",
+            "next_field_training_time",
+            FIELD_TRAINING_CD_SECONDS,
+            600,
+            f"unrecognized response [{identity}]",
+        )
         update_avatar({"next_field_training_time": next_time})
         log.warning(f"Avatar [{identity}] field training unrecognized response; skipped until {next_time}.")
         return False
@@ -866,6 +964,16 @@ class CommonCommandMixin:
         while self.is_running:
             # 只检查本地冷却时不切身份；真正发送主魂命令时由 send_and_wait_feedback 对齐。
             self.ensure_common_command_state()
+            repaired_next = self.preserve_cooldown_floor(
+                self.state,
+                "last_field_training_time",
+                "next_field_training_time",
+                FIELD_TRAINING_CD_SECONDS,
+                "field training loop",
+            )
+            if repaired_next and is_future(repaired_next):
+                await asyncio.sleep(min(seconds_until(repaired_next), 300))
+                continue
             next_time = self.state.get("next_field_training_time", "")
             if next_time and is_future(next_time):
                 wait_sec = seconds_until(next_time)
@@ -875,7 +983,7 @@ class CommonCommandMixin:
             log = self.common_command_logger()
             cmd = getattr(self, 'field_training_command', FIELD_TRAINING_COMMAND)
             log.info(f"Field training due: sending {cmd}.")
-            resp = await self.send_and_wait_feedback(cmd, timeout=90)
+            resp = await self.send_and_wait_feedback(cmd, timeout=90, max_retries=0)
             self.record_field_training_response(resp)
             await asyncio.sleep(5)
 
