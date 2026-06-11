@@ -171,6 +171,7 @@ TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 YUANYING_OUT_CD_SECONDS = 8 * 3600
 RIFT_SEARCH_CD_SECONDS = 12 * 3600
+MAIN_SOUL_WEAKNESS_PAUSE_SECONDS = 6 * 3600
 
 
 # =====================================================================
@@ -421,6 +422,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "pending_star_gazing_manifest_time": "",
             "star_gazing_claimed_manifest_time": "",
             "star_gazing_claimed_avatar": "",
+            "main_soul_pause_until": "",
+            "main_soul_pause_reason": "",
             "is_paused": False,  # 脚本是否被暂停（"止"指令）
         }
         default_state.update(common_command_default_state())
@@ -1317,12 +1320,71 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     def get_identity_impending_command_wait(self, identity):
         if identity == "主魂":
+            if self.main_soul_pause_seconds() > 0:
+                return 999999
             wait = self._state_impending_command_wait(self.state, identity="主魂")
             return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
         if identity in self.avatars:
             wait = self._state_impending_command_wait(self.get_avatar_state(identity), identity=identity)
             return self.merge_impending_wait(wait, self.custom_command_impending_wait(identity))
         return 999999
+
+    def main_soul_pause_seconds(self):
+        """Return remaining seconds for a main-soul-only pause, clearing expired state."""
+        pause_until = self.state.get("main_soul_pause_until", "")
+        if not pause_until:
+            return 0
+        try:
+            remaining = int((str_to_dt(pause_until) - datetime.now()).total_seconds())
+        except Exception:
+            remaining = 0
+        if remaining > 0:
+            return remaining
+        if self.state.get("main_soul_pause_until") or self.state.get("main_soul_pause_reason"):
+            self.state["main_soul_pause_until"] = ""
+            self.state["main_soul_pause_reason"] = ""
+            self.save_state()
+            log.info("Main soul pause expired; main-soul commands are enabled again.")
+        return 0
+
+    def set_main_soul_pause(self, seconds, reason):
+        """Pause only main-soul commands; avatar command loops continue to run."""
+        seconds = max(0, int(seconds or 0))
+        pause_until = add_seconds_str(now_str(), seconds)
+        self.state["main_soul_pause_until"] = pause_until
+        self.state["main_soul_pause_reason"] = str(reason or "").strip()
+        self.save_state()
+        return pause_until
+
+    async def wait_while_main_soul_paused(self, command=""):
+        """Hold a main-soul command outside locks while the main soul is weak/paused."""
+        last_log = 0.0
+        while self.is_running:
+            remaining = self.main_soul_pause_seconds()
+            if remaining <= 0:
+                return True
+            now_mono = time.monotonic()
+            if now_mono - last_log > 300:
+                reason = self.state.get("main_soul_pause_reason") or "主魂暂停"
+                until = self.state.get("main_soul_pause_until", "")
+                log.info(
+                    f"Main soul command paused ({command or 'unknown'}): {reason}; "
+                    f"resume at {until}."
+                )
+                last_log = now_mono
+            await asyncio.sleep(scheduler_sleep_seconds(remaining, minimum=5))
+        return False
+
+    async def sleep_if_main_soul_paused(self, loop_name="Main soul loop"):
+        """Skip one main-soul scheduler iteration while paused, without holding locks."""
+        remaining = self.main_soul_pause_seconds()
+        if remaining <= 0:
+            return False
+        until = self.state.get("main_soul_pause_until", "")
+        reason = self.state.get("main_soul_pause_reason") or "主魂暂停"
+        log.info(f"{loop_name} paused: {reason}; resume at {until}.")
+        await asyncio.sleep(scheduler_sleep_seconds(remaining, minimum=30))
+        return True
 
     def get_avatar_impending_command_wait(self, avatar):
         return self.get_identity_impending_command_wait(avatar)
@@ -1426,6 +1488,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             log.error(f"❌ Switch to {identity} failed due to global command ban. Blocking subsequent command: {message}")
                             return None
                         is_success = False
+                        if self.current_identity == identity:
+                            is_success = True
+                            log.info(f"✅ Avatar switch passively confirmed: now {identity}")
                         if resp_str and any(k in resp_str for k in ["成功", "已切换", "当前操控", identity]):
                             is_success = True
                         if is_success:
@@ -1478,6 +1543,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if self._main_confirmed or self.current_identity == "主魂":
             return
         if not force:
+            return
+        if self.main_soul_pause_seconds() > 0:
+            log.info("switch_back_to_main skipped: main soul is paused.")
             return
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()
@@ -1540,6 +1608,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if getattr(self, "current_identity", "主魂") == "主魂":
+            if not await self.wait_while_main_soul_paused(message):
+                return None
 
         try:
             target_reply = reply_to.id if hasattr(reply_to, "id") else (reply_to if reply_to else self.topic_id)
@@ -1572,6 +1643,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
+        if not await self.wait_while_main_soul_paused(message):
+            return None
 
         yield_attempts = 0
         defer_started_at = None
@@ -1630,6 +1703,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                             return None
 
                         is_success = False
+                        if self.current_identity == "主魂":
+                            is_success = True
+                            log.info("✅ Auto-switch back to 主魂 passively confirmed.")
                         if resp_str:
                             if "成功" in resp_str or "已切换" in resp_str or "当前操控" in resp_str or "主魂" in resp_str:
                                 is_success = True
@@ -1679,6 +1755,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Daily tasks"):
+                continue
             now = datetime.now()
             daily_wait = seconds_until_daily_task_start(now)
             if daily_wait > 0:
@@ -1810,6 +1888,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """抚摸法宝循环：到冷却发指令"""
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Treasure touch loop"):
+                continue
             await self._wait_for_main_identity()
             next_time = self.state.get("next_treasure_touch_time", "")
             if next_time and is_future(next_time):
@@ -2028,26 +2108,37 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         clean = text.replace("**", "").replace(" ", "")
         return (
             "元婴遁逃·虚弱" in clean
+            or ("肉体破碎" in clean and ("元婴虚弱" in clean or "虚弱" in clean))
+            or ("元婴虚弱" in clean and ("肉体" in clean or "神魂" in clean or "虚弱" in clean))
             or ("虚弱期" in clean and "无法进行夺舍" in clean)
             or ("神魂遭受重创" in clean and "虚弱" in clean)
         )
 
     async def stop_for_rift_weakness(self, response):
-        """检测到元婴虚弱期：发送告警并停止脚本"""
-        self.state["next_rift_search_time"] = ""
+        """检测到元婴虚弱期：只暂停小号主魂，化身循环继续执行。"""
+        pause_until = self.set_main_soul_pause(
+            MAIN_SOUL_WEAKNESS_PAUSE_SECONDS,
+            "肉体破碎/元婴虚弱",
+        )
+        self.state["next_rift_search_time"] = pause_until
         self.save_state()
         await send_text_alert(
             self, "万灵宗探寻裂缝告警",
-            "探寻裂缝触发元婴虚弱期，脚本已停止，请手动处理。\n\n" f"机器人回复：\n{response}",
+            "探寻裂缝触发元婴虚弱期，小号主魂已暂停 6 小时；化身任务继续执行。\n\n"
+            f"恢复时间：{pause_until}\n\n机器人回复：\n{response}",
             log,
         )
-        log.critical(f"Rift weakness detected. Stopping xiaohao script:\n{response}")
-        self.is_running = False
+        log.critical(
+            f"Rift weakness detected. Main soul paused until {pause_until}; "
+            f"avatar loops continue.\n{response}"
+        )
 
     async def run_yuanying_out_loop(self):
         """元婴出窍循环：到点自动归窍，再重新出窍"""
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Yuanying out loop"):
+                continue
             await self._wait_for_main_identity()
             # 境界自适应校验
             main_level = self.state.get("level", "")
@@ -2104,6 +2195,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         last_key = "last_rift_search_time"
         next_key = "next_rift_search_time"
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Rift search loop"):
+                continue
             await self._wait_for_main_identity()
             # 境界自适应校验
             main_level = self.state.get("level", "")
@@ -5384,6 +5477,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Beast hunt loop"):
+                continue
             if self.state.get("beast_hunt_stopped"):
                 log.info(f"Hunt Loop: stopped ({self.state.get('beast_hunt_stopped_reason', '')}).")
                 await asyncio.sleep(scheduler_sleep_seconds(24 * 3600)); continue
@@ -5446,6 +5541,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Beast action loop"):
+                continue
             # 化身正在发送命令时等待，避免以错误身份发送灵兽命令
             if self.avatar_send_lock.locked():
                 log.info("Beast timer deferred: avatar_send_lock held. Waiting 30s.")
@@ -5575,6 +5672,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """深度闭关循环：查看状态→结算→重新开始"""
         await self.startup_done.wait()
         while self.is_running:
+            if await self.sleep_if_main_soul_paused("Meditation loop"):
+                continue
             retry_time = self.state.get("next_meditation_retry_time", "")
             if retry_time and is_future(retry_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time) + random.randint(10, 30))); continue
@@ -6185,6 +6284,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 "Startup Sync: Keep persisted identity "
                 f"{self.current_identity}; main_confirmed={self._main_confirmed}."
             )
+            if self.main_soul_pause_seconds() > 0:
+                log.info(
+                    "Startup Sync: main soul is paused; skipping main-soul startup checks "
+                    "and releasing avatar loops."
+                )
+                self.startup_done.set()
+                return
             await asyncio.sleep(3)
             
             async with self.beast_lock:

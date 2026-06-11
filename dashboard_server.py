@@ -724,6 +724,33 @@ def concubine_commands(state, include_divination=True, include_voyage=False):
     return rows
 
 
+def apply_xiaohao_main_soul_pause(panel, state):
+    """Show state-level main-soul pauses without affecting avatar panels."""
+    if (panel.get("identity") or "主魂") != "主魂":
+        return panel
+    target = parse_state_time(state.get("main_soul_pause_until", ""))
+    if not target or target <= datetime.now():
+        return panel
+    seconds = max(0, int((target - datetime.now()).total_seconds()))
+    reason = clean_custom_text(state.get("main_soul_pause_reason") or "主魂暂停", 80)
+    remaining = format_remaining(seconds)
+    until = state.get("main_soul_pause_until", "")
+    for row in panel.get("commands") or []:
+        old_status = row.get("status", "")
+        old_detail = row.get("detail", "")
+        row["status"] = "元婴虚弱暂停"
+        row["tone"] = "paused"
+        row["remaining"] = remaining
+        row["at"] = until
+        row["next_seconds"] = seconds
+        row["detail"] = (
+            f"{reason}，暂停至 {until}"
+            f"{f' · 原状态：{old_status}' if old_status else ''}"
+            f"{f' · {old_detail}' if old_detail else ''}"
+        )
+    return panel
+
+
 def main_soul_panel(account, state):
     rows = []
     rows.extend(global_sync_commands())
@@ -916,7 +943,10 @@ def build_command_panels(account, state):
     result = []
     for panel in panels:
         append_custom_commands(account, panel, custom_commands, root_state=state)
-        result.append(apply_command_controls(account, panel))
+        panel = apply_command_controls(account, panel)
+        if account == "xiaohao":
+            panel = apply_xiaohao_main_soul_pause(panel, state)
+        result.append(panel)
     return result
 
 

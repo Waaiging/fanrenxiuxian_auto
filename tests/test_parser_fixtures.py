@@ -2,7 +2,7 @@ import asyncio
 import unittest
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import log_utils
 from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
@@ -157,6 +157,19 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.should_rest_before_abyss("放养中"))
         self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "麻花藤")
+
+    def test_xiaohao_main_soul_pause_does_not_make_main_impending(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["问心子"]
+        actor.state = {
+            "main_soul_pause_until": (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S"),
+            "main_soul_pause_reason": "肉体破碎/元婴虚弱",
+        }
+        actor.save_state = lambda: None
+        actor.custom_command_impending_wait = lambda identity: -1
+
+        self.assertGreater(actor.main_soul_pause_seconds(), 0)
+        self.assertEqual(actor.get_identity_impending_command_wait("主魂"), 999999)
 
     def test_steal_recalls_pastured_candidate_before_deploy(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
