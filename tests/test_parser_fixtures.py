@@ -171,6 +171,7 @@ class ParserFixtureTests(unittest.TestCase):
             "【天机前兆】本次心劫入场消耗降低，首轮评分+1。\n"
             "🌱 养树底蕴 +10\n"
             "- 体力 -20 点\n"
+            "心情 +5、羁绊 +6，你获得 10 点宗门贡献！\n"
             "- 灵石 +98\n"
             "获得【玄铁剑图纸】！\n"
             "闭关奇遇：8 次"
@@ -179,10 +180,13 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertIn(("灵石", 98), compact)
         self.assertIn(("玄铁剑图纸", 1), compact)
+        self.assertIn(("宗门贡献", 10), compact)
         self.assertNotIn(("首轮评分", 1), compact)
         self.assertNotIn(("养树底蕴", 10), compact)
         self.assertNotIn(("体力", -20), compact)
         self.assertNotIn(("奇遇", 8), compact)
+        self.assertNotIn(("心情", 5), compact)
+        self.assertNotIn(("羁绊", 6), compact)
 
     def test_resource_stats_rejects_other_user_mentions(self):
         self.assertTrue(resource_text_matches_identity(
