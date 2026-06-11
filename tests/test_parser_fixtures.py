@@ -123,6 +123,28 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual([b["full_name"] for b in candidates], ["青蛟"])
 
+    def test_beast_steal_prefers_mahuateng_then_fallback(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        cache = [
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 90},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+        ]
+
+        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
+
+        cache[2]["status"] = "受伤"
+        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "青蛟")
+
+    def test_abyss_prefers_focus_beast_when_healthy(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        cache = [
+            {"full_name": "青蛟", "species": "一阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 100},
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+        ]
+
+        self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "六翼")
+
     def test_concubine_status_blocks_chain_during_active_voyage(self):
         actor = DummyConcubine()
         status = """
