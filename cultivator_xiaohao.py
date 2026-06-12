@@ -86,6 +86,7 @@ from log_utils import (
     mentions_other_user,
     mentions_other_user_for_identity,
     text_targets_current_account,
+    tracked_command_identity_for_reply,
 )
 
 # ============================================================
@@ -1319,9 +1320,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         return min_wait
 
     def get_identity_impending_command_wait(self, identity):
+        if self.identity_pause_seconds(identity) > 0:
+            return 999999
         if identity == "主魂":
-            if self.main_soul_pause_seconds() > 0:
-                return 999999
             wait = self._state_impending_command_wait(self.state, identity="主魂")
             return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
         if identity in self.avatars:
@@ -1330,31 +1331,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         return 999999
 
     def main_soul_pause_seconds(self):
-        """Return remaining seconds for a main-soul-only pause, clearing expired state."""
-        pause_until = self.state.get("main_soul_pause_until", "")
-        if not pause_until:
-            return 0
-        try:
-            remaining = int((str_to_dt(pause_until) - datetime.now()).total_seconds())
-        except Exception:
-            remaining = 0
-        if remaining > 0:
-            return remaining
-        if self.state.get("main_soul_pause_until") or self.state.get("main_soul_pause_reason"):
-            self.state["main_soul_pause_until"] = ""
-            self.state["main_soul_pause_reason"] = ""
-            self.save_state()
-            log.info("Main soul pause expired; main-soul commands are enabled again.")
-        return 0
+        """Backward-compatible wrapper for old dashboard/state fields."""
+        return self.identity_pause_seconds("主魂")
 
     def set_main_soul_pause(self, seconds, reason):
-        """Pause only main-soul commands; avatar command loops continue to run."""
-        seconds = max(0, int(seconds or 0))
-        pause_until = add_seconds_str(now_str(), seconds)
-        self.state["main_soul_pause_until"] = pause_until
-        self.state["main_soul_pause_reason"] = str(reason or "").strip()
-        self.save_state()
-        return pause_until
+        """Backward-compatible wrapper for old dashboard/state fields."""
+        return self.set_identity_pause("主魂", seconds, reason)
 
     async def wait_while_main_soul_paused(self, command=""):
         """Hold a main-soul command outside locks while the main soul is weak/paused."""
@@ -1424,6 +1406,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused(identity, message):
+            return None
         high_priority_identity_command = str(message).startswith((".观星", ".改换星移", ".助阵"))
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
 
@@ -1544,7 +1528,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             return
         if not force:
             return
-        if self.main_soul_pause_seconds() > 0:
+        if self.identity_pause_seconds("主魂") > 0:
             log.info("switch_back_to_main skipped: main soul is paused.")
             return
         # 整体任务独占锁守卫
@@ -1609,7 +1593,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         # 暂停阻断守卫
         await self.pause_event.wait()
         if getattr(self, "current_identity", "主魂") == "主魂":
-            if not await self.wait_while_main_soul_paused(message):
+            if not await self.wait_while_identity_paused("主魂", message):
                 return None
 
         try:
@@ -1643,7 +1627,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
-        if not await self.wait_while_main_soul_paused(message):
+        if not await self.wait_while_identity_paused("主魂", message):
             return None
 
         yield_attempts = 0
@@ -1881,6 +1865,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         主循环身份守卫：只等待正在发送的化身指令完成。
         不在这里主动切回主魂；真正要发送主魂指令时由 send_and_wait_feedback 对齐身份。
         """
+        while getattr(self, "is_running", True):
+            remaining = self.identity_pause_seconds("主魂")
+            if remaining <= 0:
+                break
+            await asyncio.sleep(max(30, min(int(remaining), 300)))
         while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
@@ -2114,23 +2103,26 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             or ("神魂遭受重创" in clean and "虚弱" in clean)
         )
 
-    async def stop_for_rift_weakness(self, response):
-        """检测到元婴虚弱期：只暂停小号主魂，化身循环继续执行。"""
-        pause_until = self.set_main_soul_pause(
+    async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
+        """检测到元婴虚弱期：只暂停触发身份，其他身份继续执行。"""
+        identity = str(identity or "").strip() or "主魂"
+        pause_until = self.set_identity_pause(
+            identity,
             MAIN_SOUL_WEAKNESS_PAUSE_SECONDS,
             "肉体破碎/元婴虚弱",
         )
-        self.state["next_rift_search_time"] = pause_until
+        if identity == "主魂":
+            self.state["next_rift_search_time"] = pause_until
         self.save_state()
         await send_text_alert(
             self, "万灵宗探寻裂缝告警",
-            "探寻裂缝触发元婴虚弱期，小号主魂已暂停 6 小时；化身任务继续执行。\n\n"
+            f"探寻裂缝触发元婴虚弱期，小号身份【{identity}】已暂停 6 小时；其他身份继续执行。\n\n"
             f"恢复时间：{pause_until}\n\n机器人回复：\n{response}",
             log,
         )
         log.critical(
-            f"Rift weakness detected. Main soul paused until {pause_until}; "
-            f"avatar loops continue.\n{response}"
+            f"Rift weakness detected. Identity [{identity}] paused until {pause_until}; "
+            f"other identities continue.\n{response}"
         )
 
     async def run_yuanying_out_loop(self):
@@ -2229,7 +2221,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if replied_id and replied_id != getattr(self, 'last_sent_id', None):
                     log.warning(f"Rift weakness detected but reply_to #{replied_id} != our sent msg, likely someone else's. Skipping.")
                     continue
-                await self.stop_for_rift_weakness(resp_text)
+                await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
                 break
             self.record_fixed_cd_command_response(resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS)
             await asyncio.sleep(5)
@@ -6243,8 +6235,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     record_star_gazing_event("xiaohao", msg, text, sender=sender, is_edited=True, logger=log)
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁，加入账号强匹配）
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
-                        log.critical(f"Rift weakness DETECTED in edited message! Stopping immediately.\n{text}")
-                        await self.stop_for_rift_weakness(text)
+                        identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")
+                        log.critical(f"Rift weakness DETECTED in edited message for [{identity}].\n{text}")
+                        await self.stop_for_rift_weakness(text, identity=identity, msg=msg)
                         return
                     await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                     self.maybe_record_avatar_passive_states(msg)
@@ -6284,7 +6277,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 "Startup Sync: Keep persisted identity "
                 f"{self.current_identity}; main_confirmed={self._main_confirmed}."
             )
-            if self.main_soul_pause_seconds() > 0:
+            if self.identity_pause_seconds("主魂") > 0:
                 log.info(
                     "Startup Sync: main soul is paused; skipping main-soul startup checks "
                     "and releasing avatar loops."

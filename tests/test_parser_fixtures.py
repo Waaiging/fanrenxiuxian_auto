@@ -8,7 +8,7 @@ import log_utils
 from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
-from dashboard_server import parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
+from dashboard_server import build_command_panels, parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
 from intelligent_cultivator import Cultivator
 from log_utils import parse_cultivation_delta_text, parse_cultivation_profile_text
 from sub_cultivator import SubCultivator
@@ -164,12 +164,50 @@ class ParserFixtureTests(unittest.TestCase):
         actor.state = {
             "main_soul_pause_until": (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S"),
             "main_soul_pause_reason": "肉体破碎/元婴虚弱",
+            "identity_pauses": {},
         }
         actor.save_state = lambda: None
         actor.custom_command_impending_wait = lambda identity: -1
 
         self.assertGreater(actor.main_soul_pause_seconds(), 0)
         self.assertEqual(actor.get_identity_impending_command_wait("主魂"), 999999)
+
+    def test_identity_pause_blocks_only_that_identity(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["问心子"]
+        actor.state = {
+            "identity_pauses": {
+                "问心子": {
+                    "until": (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "reason": "肉体破碎/元婴虚弱",
+                }
+            },
+            "avatars": {
+                "问心子": {
+                    "next_field_training_time": "",
+                    "in_deep_meditation": True,
+                    "deep_meditation_end_time": (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            },
+        }
+        actor.save_state = lambda: None
+        actor.custom_command_impending_wait = lambda identity: -1
+        actor.get_avatar_state = lambda identity: actor.state["avatars"][identity]
+
+        self.assertEqual(actor.get_identity_impending_command_wait("问心子"), 999999)
+        self.assertNotEqual(actor.get_identity_impending_command_wait("主魂"), 999999)
+
+    def test_dashboard_marks_only_paused_identity_panel(self):
+        pause_until = (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+        state = {
+            "identity_pauses": {"缘生子": {"until": pause_until, "reason": "肉体破碎/元婴虚弱"}},
+            "avatars": {"缘生子": {}, "素心子": {}},
+        }
+        panels = build_command_panels("xiaohao", state)
+        by_identity = {panel["identity"]: panel for panel in panels}
+
+        self.assertEqual(by_identity["缘生子"]["commands"][0]["status"], "元婴虚弱暂停")
+        self.assertNotEqual(by_identity["素心子"]["commands"][0]["status"], "元婴虚弱暂停")
 
     def test_steal_recalls_pastured_candidate_before_deploy(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

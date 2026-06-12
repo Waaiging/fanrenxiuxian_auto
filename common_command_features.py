@@ -145,6 +145,7 @@ def common_command_default_state():
         "next_sect_war_join_time": "",
         "last_sect_war_response": "",
         "custom_command_runs": {},
+        "identity_pauses": {},
     }
 
 
@@ -174,6 +175,116 @@ class CommonCommandMixin:
     def common_command_logger(self):
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
+
+    # ---- 身份级暂停（元婴虚弱等）----
+
+    def ensure_identity_pause_state(self):
+        pauses = self.state.get("identity_pauses")
+        if not isinstance(pauses, dict):
+            pauses = {}
+            self.state["identity_pauses"] = pauses
+            self.save_state()
+        return pauses
+
+    def identity_pause_entry(self, identity):
+        identity = str(identity or "主魂").strip() or "主魂"
+        pauses = self.ensure_identity_pause_state()
+        entry = pauses.get(identity)
+        if not isinstance(entry, dict):
+            entry = {}
+        if identity == "主魂" and not entry.get("until") and self.state.get("main_soul_pause_until"):
+            entry = {
+                "until": self.state.get("main_soul_pause_until", ""),
+                "reason": self.state.get("main_soul_pause_reason", ""),
+            }
+            pauses[identity] = entry
+        return entry
+
+    def identity_pause_seconds(self, identity="主魂"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        entry = self.identity_pause_entry(identity)
+        pause_until = entry.get("until", "")
+        if not pause_until:
+            return 0
+        try:
+            remaining = int((str_to_dt(pause_until) - datetime.now()).total_seconds())
+        except Exception:
+            remaining = 0
+        if remaining > 0:
+            return remaining
+
+        pauses = self.ensure_identity_pause_state()
+        if identity in pauses:
+            pauses.pop(identity, None)
+            if identity == "主魂":
+                self.state["main_soul_pause_until"] = ""
+                self.state["main_soul_pause_reason"] = ""
+            self.save_state()
+            self.common_command_logger().info(f"Identity pause expired for [{identity}].")
+        return 0
+
+    def set_identity_pause(self, identity, seconds, reason):
+        identity = str(identity or "主魂").strip() or "主魂"
+        seconds = max(0, int(seconds or 0))
+        pause_until = add_seconds_str(now_str(), seconds)
+        pauses = self.ensure_identity_pause_state()
+        pauses[identity] = {
+            "until": pause_until,
+            "reason": str(reason or "").strip(),
+        }
+        if identity == "主魂":
+            self.state["main_soul_pause_until"] = pause_until
+            self.state["main_soul_pause_reason"] = str(reason or "").strip()
+        self.save_state()
+        return pause_until
+
+    def set_identity_pause_until(self, identity, pause_until, reason):
+        identity = str(identity or "主魂").strip() or "主魂"
+        pause_until = str(pause_until or "").strip()
+        pauses = self.ensure_identity_pause_state()
+        pauses[identity] = {
+            "until": pause_until,
+            "reason": str(reason or "").strip(),
+        }
+        if identity == "主魂":
+            self.state["main_soul_pause_until"] = pause_until
+            self.state["main_soul_pause_reason"] = str(reason or "").strip()
+        self.save_state()
+        return pause_until
+
+    async def wait_while_identity_paused(self, identity, command=""):
+        """Wait outside physical send locks while one identity is paused."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        last_log = 0.0
+        while getattr(self, "is_running", True):
+            remaining = self.identity_pause_seconds(identity)
+            if remaining <= 0:
+                return True
+            now_mono = time.monotonic()
+            if now_mono - last_log > 300:
+                entry = self.identity_pause_entry(identity)
+                reason = entry.get("reason") or "身份暂停"
+                until = entry.get("until", "")
+                self.common_command_logger().info(
+                    f"Identity [{identity}] command paused ({command or 'unknown'}): "
+                    f"{reason}; resume at {until}."
+                )
+                last_log = now_mono
+            await asyncio.sleep(max(5, min(int(remaining), 300)))
+        return False
+
+    async def sleep_if_identity_paused(self, identity, loop_name="Identity loop"):
+        """Skip one scheduler iteration for a paused identity without holding locks."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        remaining = self.identity_pause_seconds(identity)
+        if remaining <= 0:
+            return False
+        entry = self.identity_pause_entry(identity)
+        reason = entry.get("reason") or "身份暂停"
+        until = entry.get("until", "")
+        self.common_command_logger().info(f"{loop_name} [{identity}] paused: {reason}; resume at {until}.")
+        await asyncio.sleep(max(30, min(int(remaining), 300)))
+        return True
 
     def _future_time_from_last(self, last_time, cd_seconds):
         """Return last_time + cd_seconds only when it is a valid future time."""
@@ -460,6 +571,8 @@ class CommonCommandMixin:
         command = str(entry.get("command") or "").strip()
         if not command:
             return
+        if self.identity_pause_seconds(identity) > 0:
+            return
         log = self.common_command_logger()
         timeout = self.custom_command_timeout_seconds(entry)
         retries = self.custom_command_max_retries(entry)
@@ -488,6 +601,9 @@ class CommonCommandMixin:
                 ran_any = False
                 for identity, entry in self.dashboard_custom_command_entries():
                     if not self.custom_command_enabled(entry):
+                        continue
+                    if self.identity_pause_seconds(identity) > 0:
+                        next_sleep = min(next_sleep, 60)
                         continue
                     command = str(entry.get("command") or "").strip()
                     custom_id = self.clean_custom_command_id(entry)
@@ -890,6 +1006,8 @@ class CommonCommandMixin:
         async with lock:
             self.ensure_common_command_state()
             log = self.common_command_logger()
+            if self.identity_pause_seconds("主魂") > 0:
+                return False
             active_until = self.state.get("sect_war_active_until", "")
             if not active_until or not is_future(active_until):
                 return False
@@ -906,6 +1024,8 @@ class CommonCommandMixin:
         """由消息触发：机器人发送战役消息时，自动查询宗门战况"""
         try:
             log = self.common_command_logger()
+            if self.identity_pause_seconds("主魂") > 0:
+                return
             log.info(f"Sect war keyword detected from bot; sending {SECT_WAR_STATUS_COMMAND}.")
             status_resp = await self.send_and_wait_feedback(SECT_WAR_STATUS_COMMAND, timeout=90)
             self.record_sect_war_status_response(status_resp)
@@ -964,6 +1084,8 @@ class CommonCommandMixin:
         while self.is_running:
             # 只检查本地冷却时不切身份；真正发送主魂命令时由 send_and_wait_feedback 对齐。
             self.ensure_common_command_state()
+            if await self.sleep_if_identity_paused("主魂", "Field training loop"):
+                continue
             repaired_next = self.preserve_cooldown_floor(
                 self.state,
                 "last_field_training_time",
@@ -996,6 +1118,8 @@ class CommonCommandMixin:
         while self.is_running:
             # 只检查本地冷却时不切身份；真正发送主魂命令时由 send_and_wait_feedback 对齐。
             self.ensure_common_command_state()
+            if await self.sleep_if_identity_paused("主魂", "Sect war loop"):
+                continue
             next_join = self.state.get("next_sect_war_join_time", "")
             active_until = self.state.get("sect_war_active_until", "")
             # 宗门战过期：清空缓存

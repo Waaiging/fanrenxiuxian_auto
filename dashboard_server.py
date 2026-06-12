@@ -724,17 +724,32 @@ def concubine_commands(state, include_divination=True, include_voyage=False):
     return rows
 
 
-def apply_xiaohao_main_soul_pause(panel, state):
-    """Show state-level main-soul pauses without affecting avatar panels."""
-    if (panel.get("identity") or "主魂") != "主魂":
-        return panel
-    target = parse_state_time(state.get("main_soul_pause_until", ""))
+def identity_pause_entry(state, identity):
+    """Return active pause metadata for one identity, including legacy main-soul fields."""
+    identity = str(identity or "主魂").strip() or "主魂"
+    pauses = state.get("identity_pauses", {}) if isinstance(state, dict) else {}
+    entry = pauses.get(identity, {}) if isinstance(pauses, dict) else {}
+    if not isinstance(entry, dict):
+        entry = {}
+    if identity == "主魂" and not entry.get("until") and state.get("main_soul_pause_until"):
+        entry = {
+            "until": state.get("main_soul_pause_until", ""),
+            "reason": state.get("main_soul_pause_reason", ""),
+        }
+    return entry
+
+
+def apply_identity_pause(panel, state):
+    """Show state-level identity pauses without affecting other panels."""
+    identity = panel.get("identity") or "主魂"
+    entry = identity_pause_entry(state, identity)
+    target = parse_state_time(entry.get("until", ""))
     if not target or target <= datetime.now():
         return panel
     seconds = max(0, int((target - datetime.now()).total_seconds()))
-    reason = clean_custom_text(state.get("main_soul_pause_reason") or "主魂暂停", 80)
+    reason = clean_custom_text(entry.get("reason") or "身份暂停", 80)
     remaining = format_remaining(seconds)
-    until = state.get("main_soul_pause_until", "")
+    until = entry.get("until", "")
     for row in panel.get("commands") or []:
         old_status = row.get("status", "")
         old_detail = row.get("detail", "")
@@ -944,8 +959,7 @@ def build_command_panels(account, state):
     for panel in panels:
         append_custom_commands(account, panel, custom_commands, root_state=state)
         panel = apply_command_controls(account, panel)
-        if account == "xiaohao":
-            panel = apply_xiaohao_main_soul_pause(panel, state)
+        panel = apply_identity_pause(panel, state)
         result.append(panel)
     return result
 

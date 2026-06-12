@@ -123,6 +123,7 @@ from log_utils import (
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
     text_targets_current_account,       # 判定机器人文本是否明确指向当前账号
+    tracked_command_identity_for_reply, # 识别手动/脚本指令回复对应身份
 )
 
 # ============================================================
@@ -1023,6 +1024,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         return min_wait if min_wait is not None else -1
 
     def get_identity_impending_command_wait(self, identity):
+        if self.identity_pause_seconds(identity) > 0:
+            return 999999
         if identity == "主魂":
             wait = self._state_impending_command_wait(self.state, identity="主魂")
             return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
@@ -1178,6 +1181,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused(getattr(self, "current_identity", "主魂"), message):
+            return None
 
         try:
             target_reply = reply_to.id if hasattr(reply_to, "id") else (reply_to if reply_to else self.topic_id)
@@ -1277,6 +1282,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停守卫：暂停期间阻塞所有自动发送
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused("主魂", message):
+            return None
 
         yield_attempts = 0
         defer_started_at = None
@@ -1313,7 +1320,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command: {message})")
                         switch_resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=30, max_retries=2)
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
-                        if not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", "主魂"]):
+                        passively_confirmed = self.current_identity == "主魂"
+                        if passively_confirmed:
+                            log.info("✅ Auto-switch back to 主魂 passively confirmed.")
+                        if (not passively_confirmed) and (not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", "主魂"])):
                             log.error(f"❌ Auto-switch back to 主魂 FAILED! Blocking main command: {message}. Response: {resp_str[:120]}")
                             return None
                         self.current_identity = "主魂"
@@ -1401,6 +1411,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused(identity, message):
+            return None
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
         high_priority_identity_command = str(message).startswith((".观星", ".改换星移"))
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
@@ -1456,7 +1468,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         log.info(f"[DEBUG-IDENTITY] [{identity}] switch response: {resp_str[:120]!r}")
 
-                        if not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity]):
+                        passively_confirmed = self.current_identity == identity
+                        if passively_confirmed:
+                            log.info(f"✅ Avatar switch passively confirmed: now {identity}")
+                        if (not passively_confirmed) and (not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity])):
                             if allow_unconfirmed_switch:
                                 log.warning(
                                     f"Avatar switch to {identity} has no confirmed feedback; "
@@ -1508,6 +1523,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         if self._main_confirmed or self.current_identity == "主魂":
             return
         if not force:
+            return
+        if self.identity_pause_seconds("主魂") > 0:
+            log.info("switch_back_to_main skipped: main soul is paused.")
             return
         # 整体任务守卫
         current_t = asyncio.current_task()
@@ -2641,6 +2659,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
     # ============================================================
     async def _wait_for_main_identity(self):
         """主循环守卫：只等待正在发送的化身指令完成，不主动切回主魂。"""
+        while getattr(self, "is_running", True):
+            remaining = self.identity_pause_seconds("主魂")
+            if remaining <= 0:
+                break
+            await asyncio.sleep(max(30, min(int(remaining), 300)))
         while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
@@ -3042,26 +3065,33 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         clean = text.replace("**", "").replace(" ", "")
         return (
             "元婴遁逃·虚弱" in clean
+            or ("肉体破碎" in clean and ("元婴虚弱" in clean or "虚弱" in clean))
+            or ("元婴虚弱" in clean and ("肉体" in clean or "神魂" in clean or "虚弱" in clean))
             or ("虚弱期" in clean and "无法进行夺舍" in clean)
             or ("神魂遭受重创" in clean and "虚弱" in clean)
         )
 
-    async def stop_for_rift_weakness(self, response):
+    async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
         """
-        当探寻裂缝触发了元婴虚弱期时，停止整个脚本并发送告警。
+        当探寻裂缝触发了元婴虚弱期时，只暂停触发身份并发送告警。
         这是最严重的错误状态之一，需要人工介入处理。
         """
-        self.state["next_rift_search_time"] = ""  # 清除排期
+        identity = str(identity or "").strip() or "主魂"
+        pause_until = self.set_identity_pause(identity, 6 * 3600, "肉体破碎/元婴虚弱")
+        if identity == "主魂":
+            self.state["next_rift_search_time"] = pause_until
         self.save_state()
         await send_text_alert(
             self,
             "副号探寻裂缝告警",
-            "探寻裂缝触发元婴虚弱期，脚本已停止，请手动处理。\n\n"
-            f"机器人回复：\n{response}",
+            f"探寻裂缝触发元婴虚弱期，副号身份【{identity}】已暂停 6 小时；其他身份继续执行。\n\n"
+            f"恢复时间：{pause_until}\n\n机器人回复：\n{response}",
             log,
         )
-        log.critical(f"Rift weakness detected. Stopping sub script:\n{response}")
-        self.is_running = False  # 停止整个脚本
+        log.critical(
+            f"Rift weakness detected. Identity [{identity}] paused until {pause_until}; "
+            f"other identities continue.\n{response}"
+        )
 
     # ============================================================
     # 元婴出窍循环
@@ -3204,7 +3234,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         f"likely someone else's. Skipping."
                     )
                     continue
-                await self.stop_for_rift_weakness(resp_text)
+                await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
                 break
 
             # 常规冷却处理
@@ -6319,8 +6349,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     record_star_gazing_event("sub", msg, text, sender=sender, is_edited=True, logger=log)
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
-                        log.critical(f"Rift weakness DETECTED in edited message! Stopping immediately.\n{text}")
-                        await self.stop_for_rift_weakness(text)
+                        identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")
+                        log.critical(f"Rift weakness DETECTED in edited message for [{identity}].\n{text}")
+                        await self.stop_for_rift_weakness(text, identity=identity, msg=msg)
                         return
                     await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令，如共历心劫）
@@ -6348,6 +6379,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 # 等 15 秒让客户端稳定下来，避免启动时消息风暴
                 await asyncio.sleep(15)
                 log.info("Startup Sync: Smart check for stale data...")
+                if self.identity_pause_seconds("主魂") > 0:
+                    log.info(
+                        "Startup Sync: main soul is paused; skipping main-soul startup checks "
+                        "and releasing avatar loops."
+                    )
+                    self.startup_done.set()
+                    return
 
                 # 1. 观星台状态校验（副号主魂已迁入元婴宗，默认不再执行星宫观星台）
                 if self.main_star_palace_enabled:

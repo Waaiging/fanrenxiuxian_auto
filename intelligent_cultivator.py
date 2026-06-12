@@ -590,6 +590,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused(getattr(self, "current_identity", "主魂"), message):
+            return None
 
         try:
             target_reply = reply_to if reply_to else self.topic_id
@@ -650,6 +652,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused("主魂", message):
+            return None
 
         yield_attempts = 0
         defer_started_at = None
@@ -698,6 +702,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                                 return None
 
                         is_success = False
+                        if self.current_identity == "主魂":
+                            is_success = True
+                            log.info("✅ Auto-switch back to 主魂 passively confirmed.")
                         if resp_str:
                             if "成功" in resp_str or "已切换" in resp_str or "当前操控" in resp_str or "主魂" in resp_str:
                                 is_success = True
@@ -1658,6 +1665,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         主循环身份守卫：只等待正在发送的化身指令完成。
         不在这里主动切回主魂；真正要发送主魂指令时由 send_and_wait_feedback 对齐身份。
         """
+        while getattr(self, "is_running", True):
+            remaining = self.identity_pause_seconds("主魂")
+            if remaining <= 0:
+                break
+            await asyncio.sleep(max(30, min(int(remaining), 300)))
         while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
@@ -2058,31 +2070,35 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         clean = text.replace("**", "").replace(" ", "")
         return (
             "元婴遁逃·虚弱" in clean
+            or ("肉体破碎" in clean and ("元婴虚弱" in clean or "虚弱" in clean))
+            or ("元婴虚弱" in clean and ("肉体" in clean or "神魂" in clean or "虚弱" in clean))
             or ("虚弱期" in clean and "无法进行夺舍" in clean)
             or ("神魂遭受重创" in clean and "虚弱" in clean)
         )
 
-    async def stop_for_rift_weakness(self, response):
+    async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
         """
-        检测到元婴虚弱期时的紧急停止流程：
-          1. 清空下次探寻裂缝时间（防止重启后继续尝试）
-          2. 发送告警通知用户
-          3. 停止整个脚本（is_running = False）
+        检测到元婴虚弱期时只暂停触发身份：
+          1. 记录身份级暂停时间，防止该身份继续发指令
+          2. 主魂触发时同步推迟下次探寻裂缝
+          3. 发送告警通知用户，其他身份继续执行
 
         参数:
             response: 触发停止的回复文本（附带在告警中供用户参考）
         """
-        self.state["next_rift_search_time"] = ""
+        identity = str(identity or "").strip() or "主魂"
+        pause_until = self.set_identity_pause(identity, 6 * 3600, "肉体破碎/元婴虚弱")
+        if identity == "主魂":
+            self.state["next_rift_search_time"] = pause_until
         self.save_state()
         await send_text_alert(
             self,
             "凌霄宫探寻裂缝告警",
-            "探寻裂缝触发元婴虚弱期，脚本已停止，请手动处理。\n\n"
-            f"机器人回复：\n{response}",
+            f"探寻裂缝触发元婴虚弱期，主号身份【{identity}】已暂停 6 小时；其他身份继续执行。\n\n"
+            f"恢复时间：{pause_until}\n\n机器人回复：\n{response}",
             log,
         )
-        log.critical(f"Rift weakness detected. Stopping main script:\n{response}")
-        self.is_running = False
+        log.critical(f"Rift weakness detected. Identity [{identity}] paused until {pause_until}; other identities continue.\n{response}")
 
     # ------------------------------------------------------------------
     # 元婴出窍循环
@@ -2206,7 +2222,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     log.warning(f"Rift weakness detected but reply_to #{replied_id} != our sent msg, likely someone else's. Skipping.")
                     continue
                 # 确认是我们自己的虚弱期，停止脚本
-                await self.stop_for_rift_weakness(resp_text)
+                await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
                 break
 
             self.record_fixed_cd_command_response(resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS)
@@ -3445,6 +3461,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         return min_wait if min_wait is not None else -1
 
     def get_identity_impending_command_wait(self, identity):
+        if self.identity_pause_seconds(identity) > 0:
+            return 999999
         if identity == "主魂":
             wait = self._state_impending_command_wait(self.state, identity="主魂")
             return self.merge_impending_wait(wait, self.custom_command_impending_wait("主魂"))
@@ -3482,6 +3500,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
         # 暂停阻断守卫
         await self.pause_event.wait()
+        if not await self.wait_while_identity_paused(identity, message):
+            return None
 
         yield_attempts = 0
         defer_started_at = None
@@ -3520,7 +3540,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                             suppress_no_response_alert=high_priority_identity_command,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
-                        if not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity]):
+                        passively_confirmed = self.current_identity == identity
+                        if passively_confirmed:
+                            log.info(f"✅ Avatar switch passively confirmed: now {identity}")
+                        if (not passively_confirmed) and (not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity])):
                             if allow_unconfirmed_switch:
                                 log.warning(
                                     f"Avatar switch to {identity} has no confirmed feedback; "
@@ -3556,6 +3579,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         if self._main_confirmed or self.current_identity == "主魂":
             return
         if not force:
+            return
+        if self.identity_pause_seconds("主魂") > 0:
+            log.info("switch_back_to_main skipped: main soul is paused.")
             return
         if self.avatar_send_lock.locked():
             return
@@ -4371,6 +4397,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             try:
                 await asyncio.sleep(5)
                 log.info("Startup Sync: Smart check for stale data...")
+                if self.identity_pause_seconds("主魂") > 0:
+                    log.info(
+                        "Startup Sync: main soul is paused; skipping main-soul startup checks "
+                        "and releasing avatar loops."
+                    )
+                    self.startup_done.set()
+                    return
 
                 # 1) 天阶状态同步
                 # 只在缓存缺失时补账；过期代表可以直接登阶，不再先查状态。
@@ -4553,8 +4586,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                     record_star_gazing_event("main", msg, text, sender=sender, is_edited=True, logger=log)
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁）
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
-                        log.critical(f"Rift weakness DETECTED in edited message! Stopping immediately.\n{text}")
-                        await self.stop_for_rift_weakness(text)
+                        identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")
+                        log.critical(f"Rift weakness DETECTED in edited message for [{identity}].\n{text}")
+                        await self.stop_for_rift_weakness(text, identity=identity, msg=msg)
                         return
                     manual_reply = is_reply_to_manual_command(self, msg)
                     manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
