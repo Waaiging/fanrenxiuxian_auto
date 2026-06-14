@@ -1299,6 +1299,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
+            switched_this_iteration = False
             async with self.avatar_send_lock:
                 if self.current_identity != "主魂" or not self._main_confirmed:
                     if not command_send_precheck(self, message, log, identity="主魂"):
@@ -1337,9 +1338,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             return None
                         self.current_identity = "主魂"
                         self._main_confirmed = True
+                        switched_this_iteration = True
                         log.info("✅ Auto-switch back to 主魂 confirmed; sending pending command immediately.")
 
-                if not should_yield:
+                if not should_yield and not switched_this_iteration:
                     critical_wait = self.time_critical_defer_wait("主魂", message, timeout=timeout)
                     if critical_wait >= 0:
                         if urgent_defer_started_at is None:
@@ -1459,6 +1461,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
+            switched_this_iteration = False
             lock_wait_start = time.monotonic()
             async with self.avatar_send_lock:
                 _lock_wait = time.monotonic() - lock_wait_start
@@ -1518,11 +1521,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
                         self.current_identity = identity
                         self._main_confirmed = (identity == "主魂")
+                        switched_this_iteration = True
                         log.info(f"✅ Avatar switch confirmed: now {identity}; sending pending command immediately.")
                 else:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] already in correct identity, skip switch")
 
-                if not should_yield:
+                if not should_yield and not switched_this_iteration:
                     critical_wait = self.time_critical_defer_wait(identity, message, timeout=timeout)
                     if critical_wait >= 0:
                         if urgent_defer_started_at is None:

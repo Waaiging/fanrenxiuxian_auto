@@ -7,9 +7,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import concubine_features
+import cultivator_xiaohao
 import dashboard_server
+import intelligent_cultivator
 import log_utils
 import star_gazing_collector
+import sub_cultivator
 from common_command_features import CommonCommandMixin, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
@@ -282,6 +285,62 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["star_gazing_claimed_avatar"], "厚土")
         self.assertTrue(state["pending_star_gazing_target_time"])
         self.assertEqual(len(scheduled), 1)
+
+    def test_main_command_sends_immediately_after_identity_switch_all_accounts(self):
+        async def run_case(actor_cls, actor_module):
+            actor = actor_cls.__new__(actor_cls)
+            actor.avatars = ["缘生子"]
+            actor.state = {
+                "current_identity": "缘生子",
+                "next_star_gazing_time": now_str(),
+            }
+            actor.save_state = lambda: None
+            actor.current_identity = "缘生子"
+            actor._main_confirmed = False
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.active_atomic_task = None
+            actor.dashboard_command_paused = lambda *args, **kwargs: False
+            actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+            actor.check_and_record_switch_ban = lambda *args, **kwargs: False
+            actor.apply_switch_guard_backoff = lambda *args, **kwargs: False
+            sent = []
+
+            async def fake_raw(message, *args, **kwargs):
+                sent.append(message)
+                if message == ".切换 主魂":
+                    return "你已收回神通，神念重归主魂肉身。"
+                return DummyMessage(7401, text="ok")
+
+            actor._send_and_wait_feedback_raw = fake_raw
+            old_precheck = actor_module.command_send_precheck
+            actor_module.command_send_precheck = lambda *args, **kwargs: True
+            try:
+                await asyncio.wait_for(
+                    actor.send_and_wait_feedback(
+                        ".深度闭关",
+                        timeout=5,
+                        max_retries=0,
+                        force_identity_check=True,
+                    ),
+                    timeout=1,
+                )
+            finally:
+                actor_module.command_send_precheck = old_precheck
+            return sent
+
+        cases = [
+            (Cultivator, intelligent_cultivator),
+            (SubCultivator, sub_cultivator),
+            (CultivatorXiaoHao, cultivator_xiaohao),
+        ]
+        for actor_cls, actor_module in cases:
+            with self.subTest(actor=actor_cls.__name__):
+                self.assertEqual(
+                    asyncio.run(run_case(actor_cls, actor_module)),
+                    [".切换 主魂", ".深度闭关"],
+                )
 
     def test_dashboard_outgoing_parser_handles_literal_newline_manual_entries(self):
         entry = {

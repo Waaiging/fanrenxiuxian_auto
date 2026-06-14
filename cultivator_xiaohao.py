@@ -1430,6 +1430,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
+            switched_this_iteration = False
             lock_wait_start = time.monotonic()
             async with self.avatar_send_lock:
                 _lock_wait = time.monotonic() - lock_wait_start
@@ -1503,11 +1504,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         else:
                             log.error(f"❌ Avatar switch to {identity} FAILED! Blocking subsequent command: {message}. Response: {resp_str[:120]}")
                             return None
+                        switched_this_iteration = True
                         log.info(f"✅ Avatar switch ready: now {identity}; sending pending command immediately.")
                     else:
                         log.info(f"[DEBUG-IDENTITY] [{identity}] already in correct identity, skip switch")
 
-                    critical_wait = self.time_critical_defer_wait(identity, message, timeout=timeout)
+                    if switched_this_iteration:
+                        critical_wait = -1
+                    else:
+                        critical_wait = self.time_critical_defer_wait(identity, message, timeout=timeout)
                     if critical_wait >= 0:
                         if urgent_defer_started_at is None:
                             urgent_defer_started_at = time.monotonic()
@@ -1668,9 +1673,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
         yield_attempts = 0
         defer_started_at = None
+        urgent_yield_attempts = 0
+        urgent_defer_started_at = None
         while True:
             should_yield = False
             wait_sec_to_sleep = 0
+            switched_this_iteration = False
             async with self.avatar_send_lock:
                 # 主魂自动身份对齐：如果当前是分身身份，或者主魂未确认，先切回主魂
                 # avatar_send_lock 已防止并发冲突，化身下次 send_and_wait_feedback_identity 会自行切回
@@ -1733,12 +1741,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                         if is_success:
                             self.current_identity = "主魂"
                             self._main_confirmed = True
+                            switched_this_iteration = True
                             log.info("✅ Auto-switch back to 主魂 confirmed; sending pending command immediately.")
                         else:
                             log.error(f"❌ Auto-switch back to 主魂 FAILED! Blocking main command: {message}. Response: {resp_str[:120]}")
                             return None
 
-                if not should_yield:
+                if not should_yield and not switched_this_iteration:
                     critical_wait = self.time_critical_defer_wait("主魂", message, timeout=timeout)
                     if critical_wait >= 0:
                         if urgent_defer_started_at is None:
