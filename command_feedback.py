@@ -12,6 +12,7 @@
 """
 import asyncio
 import time
+from datetime import datetime
 
 from log_utils import (
     cap_command_retries,          # 限制最大重试次数
@@ -126,11 +127,22 @@ async def send_and_wait_feedback_common(
                 sent_msg = await actor.client.send_message(actor.target_chat_id, message, reply_to=target_reply)
                 if not sent_msg:
                     break
+                sent_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 remember_script_sent_message(actor, sent_msg)
                 schedule_command_auto_delete(actor, sent_msg, text=message, logger=logger)
                 msg_id = sent_msg.id
                 final_sent_msg = sent_msg
                 _identity = getattr(actor, "current_identity", None)
+                sent_at_by_key = getattr(actor, "_last_command_sent_at_by_identity_command", None)
+                if sent_at_by_key is None:
+                    sent_at_by_key = {}
+                    setattr(actor, "_last_command_sent_at_by_identity_command", sent_at_by_key)
+                sent_at_by_key[(str(_identity or "主魂"), str(message or "").strip())] = sent_wall
+                sent_at_by_id = getattr(actor, "_last_command_sent_at_by_id", None)
+                if sent_at_by_id is None:
+                    sent_at_by_id = {}
+                    setattr(actor, "_last_command_sent_at_by_id", sent_at_by_id)
+                sent_at_by_id[msg_id] = sent_wall
                 _tag = f" [{_identity}]" if _identity else ""
                 logger.info(f"🟢 OUT{_tag}:\n{message}")
                 if hasattr(actor, "command_avatar_map"):
@@ -178,6 +190,13 @@ async def send_and_wait_feedback_common(
                 record_cultivation_delta_from_text(
                     actor, resp_text, identity=_identity or "主魂", logger=logger, source=message, msg=final_resp_msg
                 )
+                if hasattr(actor, "record_identity_yuanying_recovery_from_text"):
+                    actor.record_identity_yuanying_recovery_from_text(
+                        _identity or "主魂",
+                        resp_text,
+                        source=message,
+                        command=message,
+                    )
                 if is_passive_settlement_response(resp_text):
                     family = command_response_family(message)
                     if family not in {"meditation", ".元婴出窍"}:
@@ -222,6 +241,10 @@ async def send_and_wait_feedback_common(
                 actor.feedback_commands.pop(msg_id, None)
                 actor.feedback_sent_ts.pop(msg_id, None)
                 actor.feedback_senders.pop(msg_id, None)
+                sent_at_by_id = getattr(actor, "_last_command_sent_at_by_id", None)
+                if isinstance(sent_at_by_id, dict) and len(sent_at_by_id) > 300:
+                    for old_id in list(sent_at_by_id.keys())[:-150]:
+                        sent_at_by_id.pop(old_id, None)
                 if hasattr(actor, "feedback_identities"):
                     actor.feedback_identities.pop(msg_id, None)
 

@@ -150,50 +150,7 @@
         .command-visibility-item input { accent-color: var(--accent-color); }
         .command-visibility-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-list-empty { color: var(--text-secondary); text-align: center; padding: 1.4rem 0; border: 1px dashed rgba(255,255,255,0.12); border-radius: 8px; font-size: 0.82rem; }
-        .command-record-section,
-        .message-health-section,
-        .resource-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
-        .message-health-section.status-ok { border-color: rgba(16,185,129,0.32); }
-        .message-health-section.status-warn,
-        .message-health-section.status-stale { border-color: rgba(245,158,11,0.42); }
-        .message-health-section.status-error,
-        .message-health-section.status-missing { border-color: rgba(239,68,68,0.42); }
-        .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.75rem; padding: 0.85rem 1rem 1rem; }
-        .health-card { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.75rem; min-width: 0; }
-        .health-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.55rem; margin-bottom: 0.55rem; }
-        .health-card-name { font-weight: 900; color: var(--text-primary); }
-        .health-card-status { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-secondary); }
-        .health-card.status-warn .health-card-status,
-        .health-card.status-stale .health-card-status { color: #fbbf24; }
-        .health-card.status-error .health-card-status,
-        .health-card.status-missing .health-card-status { color: #fca5a5; }
-        .health-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem 0.6rem; font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; color: var(--text-secondary); }
-        .health-metrics b { color: var(--text-primary); font-weight: 800; }
-        .health-gap-list { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #fbbf24; }
-        .health-gap-item { border-left: 3px solid rgba(245,158,11,0.58); padding-left: 0.42rem; }
-        .health-note { color: var(--text-secondary); font-size: 0.72rem; line-height: 1.45; padding: 0 1rem 0.85rem; }
-        .resource-grid { display: grid; grid-template-columns: minmax(18rem, 1.15fr) minmax(18rem, 0.85fr); gap: 0.85rem; padding: 0.9rem 1rem 1rem; }
-        .resource-card { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.8rem; min-width: 0; }
-        .resource-card-title { display: flex; justify-content: space-between; gap: 0.65rem; align-items: baseline; color: var(--text-primary); font-weight: 900; margin-bottom: 0.65rem; }
-        .resource-card-title span { color: var(--text-secondary); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
-        .resource-list { display: flex; flex-direction: column; gap: 0.45rem; }
-        .resource-event { display: grid; grid-template-columns: minmax(6rem, auto) 1fr; gap: 0.55rem; align-items: start; border-top: 1px solid rgba(255,255,255,0.055); padding-top: 0.45rem; font-size: 0.78rem; }
-        .resource-event:first-child { border-top: 0; padding-top: 0; }
-        .resource-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; white-space: nowrap; font-size: 0.7rem; }
-        .resource-meta b { color: var(--identity-color); font-weight: 900; }
-        .resource-detail { min-width: 0; color: var(--text-primary); }
-        .resource-change { display: inline-flex; align-items: center; gap: 0.2rem; margin-right: 0.35rem; font-family: 'JetBrains Mono', monospace; font-weight: 900; }
-        .resource-change.gain { color: #34d399; }
-        .resource-change.loss { color: #f87171; }
-        .resource-line { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .inventory-group { border-top: 1px solid rgba(255,255,255,0.055); padding-top: 0.5rem; }
-        .inventory-group:first-child { border-top: 0; padding-top: 0; }
-        .inventory-head { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text-primary); font-size: 0.78rem; font-weight: 800; margin-bottom: 0.35rem; }
-        .inventory-head span { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; font-weight: 700; }
-        .inventory-items { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-        .inventory-pill { color: var(--text-primary); background: rgba(0,210,255,0.09); border: 1px solid rgba(0,210,255,0.18); border-radius: 6px; padding: 0.16rem 0.34rem; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; }
-        .resource-note { color: var(--text-secondary); font-size: 0.72rem; line-height: 1.45; padding: 0 1rem 0.85rem; }
-        @media (max-width: 820px) { .resource-grid { grid-template-columns: 1fr; } }
+        .command-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
         .record-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: 0.9rem 1rem; border-bottom: 1px solid var(--border-color); }
         .record-title { font-size: 0.95rem; font-weight: 800; color: var(--text-primary); }
         .record-summary { color: var(--text-secondary); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; text-align: right; }
@@ -205,19 +162,20 @@
         .record-toggle { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; padding-bottom: 0.5rem; }
         .record-toggle input { accent-color: var(--accent-color); }
         .record-table-wrap { max-height: 360px; overflow: auto; }
-        .record-table { width: 100%; border-collapse: collapse; min-width: 940px; font-size: 0.76rem; }
-        .record-table th { position: sticky; top: 0; z-index: 1; background: rgba(15, 23, 42, 0.96); color: var(--text-secondary); text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-color); font-size: 0.7rem; }
+        .record-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1120px; font-size: 0.74rem; }
+        .record-table th { position: sticky; top: 0; z-index: 1; background: rgba(15, 23, 42, 0.96); color: var(--text-secondary); text-align: left; padding: 0.42rem 0.58rem; border-bottom: 1px solid var(--border-color); font-size: 0.68rem; line-height: 1.25; }
         .record-table tbody tr { --identity-color: #93c5fd; --identity-rgb: 147,197,253; }
-        .record-table td { padding: 0.6rem 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.055); vertical-align: top; }
+        .record-table td { padding: 0.44rem 0.58rem; border-bottom: 1px solid rgba(255,255,255,0.055); vertical-align: middle; line-height: 1.25; }
         .record-table tbody td:first-child { border-left: 3px solid rgba(var(--identity-rgb), 0.68); }
         .record-table tr:hover td { background: rgba(var(--identity-rgb),0.055); }
-        .record-account, .record-command { font-weight: 800; color: var(--text-primary); white-space: nowrap; }
+        .record-account { font-weight: 800; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .record-command { font-weight: 800; color: var(--text-primary); white-space: normal; overflow: visible; overflow-wrap: anywhere; word-break: break-word; line-height: 1.32; }
         .record-identity { display: inline-flex; align-items: center; max-width: 100%; font-weight: 900; color: var(--identity-color); background: rgba(var(--identity-rgb),0.13); border: 1px solid rgba(var(--identity-rgb),0.34); border-radius: 7px; padding: 0.12rem 0.42rem; white-space: nowrap; }
-        .record-username { color: var(--identity-color); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; margin-top: 0.18rem; opacity: 0.86; }
-        .record-muted { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; }
-        .record-time, .record-count { font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
-        .record-recent { display: flex; flex-wrap: wrap; gap: 0.28rem; max-width: 24rem; }
-        .record-pill { font-family: 'JetBrains Mono', monospace; color: var(--identity-color); background: rgba(var(--identity-rgb),0.13); border: 1px solid rgba(var(--identity-rgb),0.28); border-radius: 6px; padding: 0.16rem 0.34rem; white-space: nowrap; }
+        .record-username { color: var(--identity-color); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; margin-top: 0.12rem; opacity: 0.86; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .record-muted { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .record-time, .record-count { font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .record-recent { display: flex; flex-wrap: wrap; gap: 0.18rem 0.45rem; max-width: 100%; white-space: normal; overflow: visible; font-family: 'JetBrains Mono', monospace; }
+        .record-pill { display: inline-flex; color: var(--identity-color); white-space: nowrap; line-height: 1.25; }
         .record-empty { color: var(--text-secondary); text-align: center; padding: 1.25rem; font-size: 0.82rem; }
         .identity-records { margin-top: 0.9rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.14); }
         .identity-record-title { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 800; padding: 0.65rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
@@ -419,26 +377,6 @@
 
     <main>
         <div id="account-cards" style="display: contents;"></div>
-        <section class="message-health-section status-unknown" id="message-health-section">
-            <div class="record-header">
-                <div class="record-title">消息采集健康</div>
-                <div class="record-summary" id="message-health-summary">加载中...</div>
-            </div>
-            <div class="health-grid" id="message-health-content">
-                <div class="record-empty">加载中...</div>
-            </div>
-            <div class="health-note" id="message-health-note"></div>
-        </section>
-        <section class="resource-section" id="resource-section">
-            <div class="record-header">
-                <div class="record-title">资源与库存统计</div>
-                <div class="record-summary" id="resource-summary">加载中...</div>
-            </div>
-            <div class="resource-grid" id="resource-content">
-                <div class="record-empty">加载中...</div>
-            </div>
-            <div class="resource-note" id="resource-note"></div>
-        </section>
         <section class="command-record-section">
             <div class="record-header">
                 <div class="record-title">指令执行记录表</div>
@@ -503,25 +441,40 @@
         let currentLogSearch = '';
         let logFetchController = null;
         const LOG_PAGE_SIZE = 80;
+        const POLL_INTERVALS = {
+            status: 15000,
+            logs: 10000,
+            commandRecords: 60000
+        };
+        const pollBusy = {
+            status: false,
+            logs: false,
+            commandRecords: false
+        };
         let logState = {
             lines: [],
             before: null,
             hasMore: false,
             loadingOlder: false,
             total: 0,
-            matched: 0
+            matched: 0,
+            loaded: 0,
+            partial: false
         };
         const COMMAND_VISIBILITY_PREFIX = 'xiuxian.commandVisibility.v1.';
         let commandModalKey = '';
         let commandRecordRows = [];
         let commandRecordUpdatedAt = '';
         let commandRecordAccountNames = {};
-        let resourceStatsUpdatedAt = '';
+
+        function apiUrl(path) {
+            return new URL(path, window.location.origin).toString();
+        }
 
         async function doAction(acc, act) {
             try {
                 if (act === 'clear' && !confirm('确认清除该脚本 35 分钟以前的所有游戏指令（.开头的）？清屏会在后台执行，期间该账号会短暂停止并自动恢复。')) return;
-                const r = await fetch(`/api/action/${acc}/${act}`, {method:'POST'});
+                const r = await fetch(apiUrl(`/api/action/${acc}/${act}`), {method:'POST'});
                 const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
                 if (!r.ok || data.success === false) {
                     alert(data.msg || `操作失败：HTTP ${r.status}`);
@@ -538,7 +491,7 @@
 
         async function pollClearJob(jobId) {
             try {
-                const r = await fetch(`/api/clear-status/${jobId}`, {cache: 'no-store'});
+                const r = await fetch(apiUrl(`/api/clear-status/${jobId}`), {cache: 'no-store'});
                 const data = await r.json();
                 if (data.status === 'running') {
                     setTimeout(() => pollClearJob(jobId), 3000);
@@ -790,6 +743,14 @@
                 .filter(row => row.item?.schedule_type === 'cooldown' && row.seconds !== null && row.item.tone !== 'done')
                 .sort((a, b) => (a.seconds - b.seconds) || (a.index - b.index));
             return rows.length ? commandItemKey(rows[0].item) : '';
+        }
+
+        function nextFutureCommand(commands) {
+            const rows = (commands || [])
+                .map((item, index) => ({item, index, seconds: commandNextSeconds(item)}))
+                .filter(row => row.item?.schedule_type === 'cooldown' && row.seconds !== null && row.seconds > 0 && row.item.tone !== 'done')
+                .sort((a, b) => (a.seconds - b.seconds) || (a.index - b.index));
+            return rows.length ? rows[0] : null;
         }
 
         function commandScheduleText(item) {
@@ -1265,6 +1226,15 @@
             }
             box.innerHTML = `
                 <table class="record-table">
+                    <colgroup>
+                        <col style="width: 7.5rem">
+                        <col style="width: 8.5rem">
+                        <col style="width: 14rem">
+                        <col style="width: 9rem">
+                        <col style="width: 7rem">
+                        <col style="width: 6.5rem">
+                        <col style="width: 24rem">
+                    </colgroup>
                     <thead>
                         <tr>
                             <th>脚本</th>
@@ -1305,177 +1275,16 @@
             `;
         }
 
-        function healthStatusText(status) {
-            return {
-                ok: '正常记录',
-                warn: '有疑似漏记',
-                stale: '最后记录偏旧',
-                error: '读取失败',
-                missing: '消息库不存在',
-                unknown: '未知'
-            }[status || 'unknown'] || status || '未知';
-        }
-
-        function renderMessageHealth(payload) {
-            const section = document.getElementById('message-health-section');
-            const summary = document.getElementById('message-health-summary');
-            const content = document.getElementById('message-health-content');
-            const note = document.getElementById('message-health-note');
-            if (!section || !summary || !content || !note) return;
-            const status = payload?.status || 'unknown';
-            section.className = `message-health-section status-${status}`;
-            const latest = payload?.latest_at ? recordDateText(payload.latest_at) : '无记录';
-            const age = payload?.latest_age_seconds != null ? formatDurationShort(payload.latest_age_seconds) : '--';
-            const gapCount = Number(payload?.gap_count || 0);
-            summary.textContent = `${healthStatusText(status)} · 最后记录 ${latest} · ${age}前 · 可能漏记 ${gapCount} 段`;
-            if (!payload?.ok) {
-                content.innerHTML = `<div class="record-empty">${escapeHtml(payload?.error || '消息库暂不可用。')}</div>`;
-                note.textContent = '这里检查的是日志采集是否可能漏消息，不代表脚本指令出错。';
-                return;
-            }
-            const accounts = Object.entries(payload.accounts || {});
-            if (!accounts.length) {
-                content.innerHTML = '<div class="record-empty">消息库里还没有账号记录。</div>';
-                note.textContent = (payload.notes || []).join(' ');
-                return;
-            }
-            content.innerHTML = accounts.map(([account, item]) => {
-                const latestItem = item.latest || {};
-                const counts = item.counts || {};
-                const itemStatus = item.gap_count ? 'warn' : (Number(item.latest_age_seconds || 0) > 1800 ? 'stale' : 'ok');
-                const latestText = latestItem.created_at ? recordDateText(latestItem.created_at) : '无记录';
-                const latestAge = item.latest_age_seconds != null ? formatDurationShort(item.latest_age_seconds) : '--';
-                const gaps = (item.gaps || []).slice(-3).reverse();
-                return `
-                    <div class="health-card status-${itemStatus}">
-                        <div class="health-card-head">
-                            <div class="health-card-name">${escapeHtml(item.name || account)}</div>
-                            <div class="health-card-status">${escapeHtml(healthStatusText(itemStatus))}</div>
-                        </div>
-                        <div class="health-metrics">
-                            <span>最后记录 <b>${escapeHtml(latestText)}</b></span>
-                            <span>多久前 <b>${escapeHtml(latestAge)}</b></span>
-                            <span>近 24h <b>${Number(counts.since || 0)}</b></span>
-                            <span>累计 <b>${Number(counts.total || 0)}</b></span>
-                            <span>记录消息 <b>${Number(counts.raw || 0)}</b></span>
-                            <span>收到/发出 <b>${Number(counts['in'] || 0)} / ${Number(counts['out'] || 0)}</b></span>
-                            <span>编辑回复 <b>${Number(counts.edited || 0)}</b></span>
-                            <span>机器人回复 <b>${Number(counts.bot || 0)}</b></span>
-                        </div>
-                        ${gaps.length ? `
-                            <div class="health-gap-list">
-                                ${gaps.map(gap => `
-                                    <div class="health-gap-item">
-                                        ${escapeHtml(recordDateText(gap.from_time))} 到 ${escapeHtml(recordDateText(gap.to_time))}
-                                        之间可能漏记约 ${Number(gap.missing_msg_ids || 0)} 条群消息，间隔 ${escapeHtml(formatDurationShort(gap.gap_seconds))}
-                                    </div>
-                                `).join('')}
-                            </div>
-                        ` : ''}
-                    </div>
-                `;
-            }).join('');
-            note.textContent = '这里检查的是日志采集是否可能漏消息，不代表脚本指令出错。出现“可能漏记”时，统计结果要谨慎；如果最后记录时间很新，一般不用处理。';
-        }
-
-        function renderResourceStats(payload) {
-            const summary = document.getElementById('resource-summary');
-            const content = document.getElementById('resource-content');
-            const note = document.getElementById('resource-note');
-            if (!summary || !content || !note) return;
-            if (!payload?.ok) {
-                summary.textContent = payload?.error || '资源统计暂不可用';
-                content.innerHTML = `<div class="record-empty">${escapeHtml(payload?.error || '资源统计暂不可用。')}</div>`;
-                note.textContent = '资源统计只读取消息库，不影响脚本运行。';
-                return;
-            }
-
-            resourceStatsUpdatedAt = payload.updated_at || '';
-            const events = Array.isArray(payload.recent_events) ? payload.recent_events.slice(0, 12) : [];
-            const inventory = [];
-            for (const [account, data] of Object.entries(payload.accounts || {})) {
-                for (const item of (data.inventory || [])) {
-                    inventory.push({
-                        ...item,
-                        account,
-                        account_name: data.name || account
-                    });
-                }
-            }
-            inventory.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
-            summary.textContent = `近 ${Number(payload.since_hours || 72)} 小时 · 资源 ${Number(payload.resource_count || 0)} 项 · 库存快照 ${Number(payload.inventory_count || 0)} 份`;
-
-            const eventHtml = events.length ? events.map(event => {
-                const changes = (event.changes || []).map(change => {
-                    const amount = Number(change.amount || 0);
-                    const cls = amount >= 0 ? 'gain' : 'loss';
-                    return `<span class="resource-change ${cls}">${escapeHtml(change.name)} ${escapeHtml(formatSigned(amount))}</span>`;
-                }).join('');
-                return `
-                    <div class="resource-event" style="${identityColorStyle(event.account, event.identity || '主魂')}">
-                        <div class="resource-meta">
-                            ${escapeHtml(recordDateText(event.time))}<br>
-                            <b>${escapeHtml(event.identity || '主魂')}</b>
-                        </div>
-                        <div class="resource-detail">
-                            <div>${changes || '无变化'}</div>
-                            <div class="resource-line" title="${escapeHtml(event.line || '')}">
-                                ${escapeHtml(event.account_name || event.account || '')}${event.command ? ` · ${escapeHtml(event.command)}` : ''}${event.line ? ` · ${escapeHtml(event.line)}` : ''}
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }).join('') : '<div class="record-empty">最近还没有可识别的资源变化。</div>';
-
-            const inventoryHtml = inventory.length ? inventory.slice(0, 8).map(snapshot => `
-                <div class="inventory-group" style="${identityColorStyle(snapshot.account, snapshot.identity || '主魂')}">
-                    <div class="inventory-head">
-                        <div>${escapeHtml(snapshot.account_name || snapshot.account || '')} · ${escapeHtml(snapshot.identity || '主魂')}</div>
-                        <span>${escapeHtml(recordDateText(snapshot.time))}</span>
-                    </div>
-                    <div class="inventory-items">
-                        ${(snapshot.items || []).slice(0, 18).map(item => `
-                            <span class="inventory-pill">${escapeHtml(item.name)} x${formatNumber(item.amount)}</span>
-                        `).join('')}
-                    </div>
-                </div>
-            `).join('') : '<div class="record-empty">暂无库存快照；发一次储物袋/背包类指令后会显示。</div>';
-
-            content.innerHTML = `
-                <div class="resource-card">
-                    <div class="resource-card-title">最近资源变化 <span>${events.length} 条</span></div>
-                    <div class="resource-list">${eventHtml}</div>
-                </div>
-                <div class="resource-card">
-                    <div class="resource-card-title">最新库存快照 <span>${inventory.length} 份</span></div>
-                    <div class="resource-list">${inventoryHtml}</div>
-                </div>
-            `;
-            note.textContent = (payload.notes || []).join(' ');
-        }
-
-        async function updateResourceStats() {
-            try {
-                const r = await fetch('/api/resource-stats', {cache: 'no-store'});
-                const data = await r.json();
-                renderResourceStats(data || {});
-            } catch (e) {
-                console.error('Resource stats update failed:', e);
-                const summary = document.getElementById('resource-summary');
-                const content = document.getElementById('resource-content');
-                if (summary) summary.textContent = '资源统计加载失败';
-                if (content) content.innerHTML = '<div class="record-empty">资源统计加载失败。</div>';
-            }
-        }
-
         function changeRecordFilters() {
             updateRecordFilterOptions();
             renderCommandRecordTable();
         }
 
         async function updateCommandRecords() {
+            if (document.hidden || pollBusy.commandRecords) return;
+            pollBusy.commandRecords = true;
             try {
-                const r = await fetch('/api/command-records', {cache: 'no-store'});
+                const r = await fetch(apiUrl('/api/command-records'), {cache: 'no-store'});
                 const data = await r.json();
                 const rows = [];
                 commandRecordAccountNames = {};
@@ -1493,6 +1302,8 @@
                 console.error('Command records update failed:', e);
                 const summary = document.getElementById('record-summary');
                 if (summary) summary.textContent = '执行记录加载失败';
+            } finally {
+                pollBusy.commandRecords = false;
             }
         }
 
@@ -1518,7 +1329,7 @@
                 return;
             }
             try {
-                const r = await fetch('/api/custom-command', {
+                const r = await fetch(apiUrl('/api/custom-command'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -1557,7 +1368,7 @@
             if (!customId) return;
             if (!confirm('确认删除这条自定义指令？')) return;
             try {
-                const r = await fetch('/api/custom-command', {
+                const r = await fetch(apiUrl('/api/custom-command'), {
                     method: 'DELETE',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -1581,7 +1392,7 @@
 
         async function toggleCommandPause(panelKey, account, identity, controlKey, command, label, disabled) {
             try {
-                const r = await fetch('/api/command-control', {
+                const r = await fetch(apiUrl('/api/command-control'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -1607,11 +1418,12 @@
         }
 
         async function updateStatus() {
+            if (document.hidden || pollBusy.status) return;
+            pollBusy.status = true;
             try {
-                const r = await fetch('/api/status', {cache: 'no-store'});
+                const r = await fetch(apiUrl('/api/status'), {cache: 'no-store'});
                 const data = await r.json();
                 document.getElementById('server-time').innerText = data.server_time;
-                renderMessageHealth(data.message_health || {});
                 
                 let html = '';
                 window.commandPanelDataMap = {};
@@ -1668,6 +1480,9 @@
                             let statusText = '空闲';
                             let statusClass = 'avatar-status-idle';
                             const now = new Date();
+                            const panelKey = commandIdentityKey(id, name);
+                            const panelCommands = window.commandPanelDataMap?.[panelKey]?.panel?.commands || [];
+                            const panelNext = nextFutureCommand(panelCommands);
 
                             // 收集所有有倒计时的指令
                             const timers = [];
@@ -1679,6 +1494,9 @@
                             }
                             const timerFields = [
                                 ['next_field_training_time', '野外历练'],
+                                ['next_yuanying_out_time', '元婴出窍'],
+                                ['yuanying_out_end_time', '元婴出窍'],
+                                ['next_rift_search_time', '探寻裂缝'],
                                 ['next_dream_map_time', '入梦寻图'],
                                 ['next_heart_trial_time', '共历心劫'],
                                 ['next_star_attraction_time', '星辰牵引'],
@@ -1694,7 +1512,10 @@
                                 }
                             }
 
-                            if (timers.length > 0) {
+                            if (panelNext) {
+                                statusText = `${panelNext.item.label || panelNext.item.command || '指令'} (${formatDurationShort(panelNext.seconds)})`;
+                                statusClass = 'avatar-status-active';
+                            } else if (timers.length > 0) {
                                 // 取最近到期的
                                 timers.sort((a, b) => a.time - b.time);
                                 const nearest = timers[0];
@@ -1785,6 +1606,9 @@
                     }
                 }
             } catch(e){}
+            finally {
+                pollBusy.status = false;
+            }
         }
 
         function splitLogContent(content) {
@@ -1824,7 +1648,7 @@
         }
 
         function resetLogState() {
-            logState = {lines: [], before: null, hasMore: false, loadingOlder: false, total: 0, matched: 0};
+            logState = {lines: [], before: null, hasMore: false, loadingOlder: false, total: 0, matched: 0, loaded: 0, partial: false};
         }
 
         function updateFilterSummary(statusText = '') {
@@ -1833,7 +1657,10 @@
             if (currentLogTag) parts.push(`标签 ${currentLogTag}`);
             if (currentLogSearch) parts.push(`搜索 "${currentLogSearch}"`);
             const scope = parts.length ? parts.join('，') : '全部日志';
-            const countText = logState.total ? `匹配 ${logState.matched} / ${logState.total} 条` : '暂无记录';
+            const loaded = logState.loaded || logState.lines.length || 0;
+            const countText = logState.partial
+                ? `已载入最近 ${loaded} 条${logState.hasMore ? '，向上滚动加载更多' : ''}`
+                : (logState.total ? `匹配 ${logState.matched} / ${logState.total} 条` : '暂无记录');
             el.innerText = statusText ? `${scope}\n${statusText}` : `${scope}\n${countText}`;
         }
 
@@ -1859,7 +1686,7 @@
             if (currentLogSearch) params.set('q', currentLogSearch);
             const options = {cache: 'no-store'};
             if (signal) options.signal = signal;
-            const r = await fetch(`/api/logs/${account}?${params.toString()}`, options);
+            const r = await fetch(apiUrl(`/api/logs/${account}?${params.toString()}`), options);
             return await r.json();
         }
 
@@ -1867,7 +1694,7 @@
             const select = document.getElementById('log-tag-select');
             select.innerHTML = '<option value="">全部标签</option>';
             try {
-                const r = await fetch(`/api/log-tags/${account}`, {cache: 'no-store'});
+                const r = await fetch(apiUrl(`/api/log-tags/${account}?counts=false`), {cache: 'no-store'});
                 const data = await r.json();
                 for (const item of data.tags || []) {
                     const option = document.createElement('option');
@@ -1899,6 +1726,8 @@
                 logState.hasMore = Boolean(data.has_more);
                 logState.total = Number(data.total || 0);
                 logState.matched = Number(data.matched || 0);
+                logState.loaded = logState.lines.length;
+                logState.partial = Boolean(data.partial);
                 renderLogs();
                 c.scrollTop = c.scrollHeight - oldHeight + oldTop;
             } catch (e) {
@@ -1910,6 +1739,8 @@
         }
 
         async function updateLogs(force = false) {
+            if (!force && (document.hidden || pollBusy.logs)) return;
+            pollBusy.logs = true;
             try {
                 const c = document.getElementById('log-content');
                 const nearBottom = c.scrollHeight - c.scrollTop <= c.clientHeight + 80;
@@ -1926,10 +1757,14 @@
                 logState.hasMore = Boolean(data.has_more);
                 logState.total = Number(data.total || 0);
                 logState.matched = Number(data.matched || 0);
+                logState.loaded = logState.lines.length;
+                logState.partial = Boolean(data.partial);
                 renderLogs();
                 if (force || nearBottom) c.scrollTop = c.scrollHeight;
             } catch(e){
                 if (e.name !== 'AbortError') console.error('Log update failed:', e);
+            } finally {
+                pollBusy.logs = false;
             }
         }
 
@@ -1970,10 +1805,9 @@
             updateLogs(true);
         }
 
-        setInterval(updateStatus, 5000);
-        setInterval(updateLogs, 3000);
-        setInterval(updateCommandRecords, 15000);
-        setInterval(updateResourceStats, 30000);
+        setInterval(updateStatus, POLL_INTERVALS.status);
+        setInterval(updateLogs, POLL_INTERVALS.logs);
+        setInterval(updateCommandRecords, POLL_INTERVALS.commandRecords);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
         });
@@ -1981,9 +1815,14 @@
             const c = document.getElementById('log-content');
             if (c.scrollTop < 60) loadOlderLogs();
         });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) return;
+            updateStatus();
+            updateCommandRecords();
+            updateLogs(true);
+        });
         updateStatus();
         updateCommandRecords();
-        updateResourceStats();
         loadLogTags(currentLogAccount);
         updateLogs();
 

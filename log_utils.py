@@ -243,6 +243,56 @@ def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="comm
         pass
 
 
+def command_allowed_during_identity_pause(command):
+    """Recovery/admin commands that may be sent while an identity is paused."""
+    key = str(command or "").strip()
+    if not key:
+        return True
+    return (
+        key.startswith(".自证")
+        or key.startswith(".切换")
+        or key.startswith(".夺舍重生")
+        or key.startswith(".重生")
+        or key in {".止", ".启"}
+    )
+
+
+def is_yuanying_rebirth_success_response(text):
+    """Return True when text confirms a dead/weak Yuanying has been reborn."""
+    clean = str(text or "").replace("**", "").replace("`", "").strip()
+    compact = re.sub(r"\s+", "", clean)
+    if not compact:
+        return False
+    if any(k in compact for k in ["无法夺舍", "无法进行夺舍", "尚在虚弱", "虚弱期"]):
+        return False
+    return (
+        "已成功夺舍重生" in compact
+        or "夺舍重生成功" in compact
+        or ("元婴" in compact and "夺舍" in compact and "重生" in compact and "成功" in compact)
+    )
+
+
+def is_yuanying_rebirth_block_response(text):
+    """Return True for command replies that mean the identity still needs rebirth."""
+    clean = str(text or "").replace("**", "").replace("`", "").strip()
+    compact = re.sub(r"\s+", "", clean)
+    if not compact or is_yuanying_rebirth_success_response(compact):
+        return False
+    if "元婴" not in compact and "残婴" not in compact:
+        return False
+    return (
+        "元婴欲散" in compact
+        or "元婴离体" in compact
+        or "元婴欲夺舍" in compact
+        or "残婴飘荡" in compact
+        or ("虚弱的元婴" in compact and "夺舍" in compact)
+        or ("灵气滞涩" in compact and "元婴" in compact)
+        or ("灵气稀薄" in compact and "夺舍" in compact)
+        or ("神识飘散" in compact and "夺舍" in compact)
+        or ("欲夺舍重生" in compact and ("元婴" in compact or "残婴" in compact))
+    )
+
+
 # =====================================================================
 # 3. 游戏机器人检测
 # =====================================================================
@@ -322,6 +372,20 @@ def identity_plain_usernames(actor, identity=None):
     if expected == "主魂":
         known.update(account_aliases(actor))
     return {_normalize_account_name(v) for v in known if _normalize_account_name(v)}
+
+
+def identity_from_single_username_mention(actor, text):
+    """Infer identity only when exactly one @username maps to a managed identity."""
+    mentions = {_normalize_account_name(v) for v in text_username_mentions(text or "")}
+    mentions = {v for v in mentions if v}
+    if len(mentions) != 1:
+        return ""
+    mention = next(iter(mentions))
+    matches = []
+    for identity, usernames in _identity_profile_usernames(actor).items():
+        if mention in (usernames or set()):
+            matches.append(identity)
+    return matches[0] if len(matches) == 1 else ""
 
 
 def mentions_other_user_for_identity(actor, msg, text=None, identity=None):
@@ -448,7 +512,7 @@ def text_response_family(text):
         "云阶禁制不会为你显现", "你并非凌霄宫弟子",
     ]):
         return "cloud_stairs"
-    if "裂缝" in clean or "时空异兽" in clean or "元婴遁逃" in clean:
+    if any(k in clean for k in ["裂缝", "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃", "元婴遁逃"]):
         return "rift"
     if any(k in clean for k in [
         "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
@@ -509,6 +573,8 @@ def feedback_response_matches_command(command, text):
         return False
     if is_passive_settlement_response(clean):
         return True
+    if is_yuanying_rebirth_block_response(clean) or is_yuanying_rebirth_success_response(clean):
+        return True
 
     if expected == "switch":
         cmd = str(command or "").strip()
@@ -554,7 +620,10 @@ def feedback_response_matches_command(command, text):
             "可立即登阶", "未再聚", "后再试",
         ])
     if expected == "rift":
-        return any(k in clean for k in ["裂缝", "探寻成功", "法则碎片", "法则本源", "元婴遁逃"])
+        return any(k in clean for k in [
+            "裂缝", "探寻成功", "法则碎片", "法则本源", "元婴遁逃",
+            "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃",
+        ])
     if expected == "meditation":
         return any(k in clean for k in [
             "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
@@ -705,6 +774,75 @@ def anti_bot_targets_current_account(actor, msg, text):
     if _anti_bot_reporter_matches_current_account(actor, text):
         return False
     return text_targets_current_account(actor, msg, text)
+
+
+HAN_SOUL_CHOICE_COMMAND = ".献上魂魄"
+
+
+def is_han_soul_choice_prompt(text):
+    """Detect Han Tianzun's soul-choice prompt that requires replying to the prompt message."""
+    clean = str(text or "").replace("**", "").replace("`", "")
+    if not clean:
+        return False
+    return (
+        "神魂" in clean
+        and "180" in clean
+        and "分钟" in clean
+        and "回复本消息" in clean
+        and ".献上魂魄" in clean
+        and ".收敛气息" in clean
+        and any(k in clean for k in ["无法抗拒", "意志锁定", "做出抉择"])
+    )
+
+
+def han_soul_choice_target_identity(actor, msg, text):
+    """Return the managed identity explicitly targeted by Han Tianzun's soul-choice prompt."""
+    if not is_han_soul_choice_prompt(text):
+        return ""
+
+    mapping = _identity_profile_usernames(actor)
+    mentions = [_normalize_account_name(v) for v in text_username_mentions(text)]
+    mentions = [v for v in mentions if v]
+    for mention in mentions:
+        for identity, usernames in mapping.items():
+            if mention in (usernames or set()):
+                return identity
+
+    marker = avatar_marker_identity_from_text(text)
+    if marker and (marker == "主魂" or marker in (getattr(actor, "avatars", []) or [])):
+        return marker
+
+    if mentions_self(actor, msg, text) or text_targets_current_account(actor, msg, text):
+        return "主魂"
+    return ""
+
+
+async def maybe_handle_han_soul_choice(actor, msg, text, sender=None, logger=None):
+    """Automatically choose the high-risk soul option by replying .献上魂魄 with the targeted identity."""
+    identity = han_soul_choice_target_identity(actor, msg, text)
+    if not identity:
+        return False
+    if not claim_message_version(actor, msg, text, purpose=f"han_soul_choice:{identity}", ttl=4 * 3600):
+        return True
+
+    reply_to = getattr(msg, "id", None)
+    send_identity = getattr(actor, "send_and_wait_feedback_identity", None)
+    if not reply_to or not callable(send_identity):
+        if logger:
+            logger.warning(f"Han soul choice detected for {identity}, but no reply sender is available.")
+        return False
+
+    if logger:
+        logger.info(f"Han soul choice detected for {identity}; replying {HAN_SOUL_CHOICE_COMMAND} to msg {reply_to}.")
+    await send_identity(
+        identity,
+        HAN_SOUL_CHOICE_COMMAND,
+        reply_to=reply_to,
+        timeout=30,
+        max_retries=0,
+        suppress_no_response_alert=True,
+    )
+    return True
 
 
 # ---- 告警发送 ----
@@ -1350,6 +1488,23 @@ def command_send_precheck(actor, command, logger=None, identity=None,
         remember_command_guard_block(actor, key, 300, reason="dashboard_disabled", identity=current_id)
         return False
 
+    if (
+        not command_allowed_during_identity_pause(key)
+        and hasattr(actor, "identity_pause_seconds")
+    ):
+        try:
+            pause_wait = int(actor.identity_pause_seconds(current_id))
+        except Exception:
+            pause_wait = 0
+        if pause_wait > 0:
+            if logger:
+                logger.info(
+                    f"Identity [{current_id}] paused; skip pre-switch for [{key}], "
+                    f"retry after {pause_wait}s."
+                )
+            remember_command_guard_block(actor, key, pause_wait, reason="identity_pause", identity=current_id)
+            return False
+
     limit, window, block_seconds, _should_alert = command_guard_policy(key, limit, window, block_seconds)
     guard_key = f"{key} ({current_id})" if current_id != "主魂" else key
 
@@ -1436,6 +1591,22 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
             cache[log_key] = now_for_log
         remember_command_guard_block(actor, key, 300, reason="dashboard_disabled", identity=current_id)
         return False
+
+    if (
+        not command_allowed_during_identity_pause(key)
+        and hasattr(actor, "identity_pause_seconds")
+    ):
+        try:
+            pause_wait = int(actor.identity_pause_seconds(current_id))
+        except Exception:
+            pause_wait = 0
+        if pause_wait > 0:
+            if logger:
+                logger.info(
+                    f"Identity [{current_id}] paused; skip [{key}], retry after {pause_wait}s."
+                )
+            remember_command_guard_block(actor, key, pause_wait, reason="identity_pause", identity=current_id)
+            return False
 
     limit, window, block_seconds, should_alert = command_guard_policy(key, limit, window, block_seconds)
 
@@ -2207,6 +2378,19 @@ def _feedback_candidate_accepts(candidate_fn, command, text):
         return False
 
 
+def _meditation_feedback_matches_identity(actor, text, identity):
+    """Meditation settlements often carry @username; do not claim another identity's summary."""
+    if not str(text or "").strip():
+        return True
+    if not profile_text_matches_identity(actor, text, identity):
+        return False
+    marker = avatar_marker_identity_from_text(text)
+    if marker:
+        expected = str(identity or "").strip() or "主魂"
+        return marker == expected
+    return True
+
+
 def _set_feedback_match(actor, pending_id, msg, text, command, identity, logger=None, label="[FEEDBACK]", reason="reply_to"):
     evt = (getattr(actor, "feedback_events", None) or {}).get(pending_id)
     if evt is None or evt.is_set():
@@ -2258,6 +2442,10 @@ def match_pending_feedback_by_id(
     if _profile_command_key(command) and not profile_text_matches_identity(actor, clean_text, identity):
         if logger:
             logger.info(f"{label} Rejected [{command}]: profile username mismatches [{identity}] (msg {getattr(msg, 'id', None)}).")
+        return False
+    if command in {".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关"} and not _meditation_feedback_matches_identity(actor, clean_text, identity):
+        if logger:
+            logger.info(f"{label} Rejected [{command}]: meditation username mismatches [{identity}] (msg {getattr(msg, 'id', None)}).")
         return False
     if feedback_response_conflicts(command, clean_text) and not feedback_response_matches_command(command, clean_text):
         if logger:
@@ -2485,6 +2673,8 @@ def cultivation_profile_update_is_plausible(actor, profile, identity, is_avatar,
     """Reject username-less profile snapshots that jump far away from the known state."""
     if has_username:
         return True
+    if profile_source_is_direct_profile_command(source):
+        return True
     if is_avatar:
         if not hasattr(actor, "get_avatar_state"):
             return True
@@ -2552,6 +2742,16 @@ def profile_source_allows_usernameless_update(source):
     if command:
         return bool(_profile_command_key(command))
     return "recent profile" in source_text or "edited profile" in source_text
+
+
+def profile_source_is_direct_profile_command(source):
+    """Return True for a tracked/manual identity profile command response."""
+    source_text = str(source or "")
+    command = _profile_source_command(source_text)
+    if not _profile_command_key(command):
+        return False
+    lowered = source_text.lower()
+    return "passive profile" not in lowered and "recent profile" not in lowered
 
 
 def record_recent_profile_command(actor, msg_id, command, identity, source=""):
@@ -2678,6 +2878,7 @@ def record_cultivation_profile_from_text(actor, text, identity=None, logger=None
 
     if "level" in profile:
         set_value("level", profile["level"])
+        set_value("cultivation_level", profile["level"])
     if "current_exp" in profile and "total_exp" in profile:
         set_value("current_exp", profile["current_exp"])
         set_value("total_exp", profile["total_exp"])
@@ -3039,6 +3240,10 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
 
     cmd = command.strip()
     processed = False
+    if hasattr(actor, "record_identity_yuanying_recovery_from_text"):
+        processed = bool(actor.record_identity_yuanying_recovery_from_text(
+            identity, text, source=f"manual {cmd}", command=cmd
+        )) or processed
     if _profile_command_key(cmd):
         processed = record_cultivation_profile_from_text(
             actor, text, identity=identity, logger=logger, source=f"manual {cmd}"
@@ -3049,8 +3254,12 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     elif cmd == ".探寻裂缝":
         if hasattr(actor, "is_rift_weakness_response") and actor.is_rift_weakness_response(text):
             if hasattr(actor, "stop_for_rift_weakness"):
-                await actor.stop_for_rift_weakness(text)
+                await actor.stop_for_rift_weakness(text, identity=identity)
             processed = True
+        elif hasattr(actor, "record_identity_fixed_cd_command_response"):
+            processed = bool(actor.record_identity_fixed_cd_command_response(
+                identity, text, ".探寻裂缝", "last_rift_search_time", "next_rift_search_time", 12 * 3600
+            ))
         elif hasattr(actor, "record_fixed_cd_command_response"):
             processed = bool(actor.record_fixed_cd_command_response(
                 text, ".探寻裂缝", "last_rift_search_time", "next_rift_search_time", 12 * 3600
@@ -3059,22 +3268,22 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
         if hasattr(actor, "record_treasure_touch_response"):
             processed = bool(actor.record_treasure_touch_response(text))
     elif cmd in {".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"}:
-        spirit_tree_avatar = getattr(actor, "spirit_tree_avatar", "缘生子")
-        if identity != spirit_tree_avatar:
-            logger.info(
-                f"Manual spirit tree sync skipped for [{cmd}]: identity {identity} "
-                f"!= {spirit_tree_avatar}."
-            )
-        elif hasattr(actor, "maybe_record_spirit_tree_passive_message") and cmd == ".灵树状态":
-            processed = bool(actor.maybe_record_spirit_tree_passive_message(msg, text, source=f"manual {cmd}"))
+        if hasattr(actor, "maybe_record_spirit_tree_passive_message") and cmd == ".灵树状态":
+            processed = bool(actor.maybe_record_spirit_tree_passive_message(
+                msg, text, source=f"manual {cmd}", identity=identity
+            ))
         elif hasattr(actor, "maybe_record_spirit_tree_passive_message") and cmd == ".灵树灌溉":
-            processed = bool(actor.maybe_record_spirit_tree_passive_message(msg, text, source=f"manual {cmd}"))
+            processed = bool(actor.maybe_record_spirit_tree_passive_message(
+                msg, text, source=f"manual {cmd}", identity=identity
+            ))
             if not processed and hasattr(actor, "record_spirit_tree_irrigation_state"):
-                processed = bool(actor.record_spirit_tree_irrigation_state(text, source=f"manual {cmd}"))
+                processed = bool(actor.record_spirit_tree_irrigation_state(
+                    text, source=f"manual {cmd}", identity=identity
+                ))
         elif cmd == ".采摘灵果" and hasattr(actor, "record_spirit_tree_harvest_response"):
-            processed = bool(actor.record_spirit_tree_harvest_response(text))
+            processed = bool(actor.record_spirit_tree_harvest_response(text, identity=identity))
         elif cmd == ".协同守山" and hasattr(actor, "record_spirit_tree_guard_response"):
-            processed = bool(actor.record_spirit_tree_guard_response(text))
+            processed = bool(actor.record_spirit_tree_guard_response(text, identity=identity))
     elif (
         cmd == ".我的灵兽"
         or cmd == ".灵兽偷菜"
@@ -3092,7 +3301,9 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
         elif cmd.startswith(".灵兽巡游 ") and hasattr(actor, "record_beast_cruise_response"):
             processed = bool(actor.record_beast_cruise_response(text))
     elif cmd == ".元婴出窍":
-        if hasattr(actor, "record_yuanying_out_start_response"):
+        if hasattr(actor, "record_identity_yuanying_out_start_response"):
+            processed = bool(actor.record_identity_yuanying_out_start_response(identity, text))
+        elif hasattr(actor, "record_yuanying_out_start_response"):
             processed = bool(actor.record_yuanying_out_start_response(text))
     elif cmd == ".问道":
         if hasattr(actor, "record_ask_dao_response"):
@@ -3121,8 +3332,12 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
         processed = processed
     elif cmd == ".闯塔":
         processed = _manual_record_tower_reply(actor, text, identity)
-    elif cmd == ".安抚星辰":
-        if hasattr(actor, "record_star_calm_response"):
+    elif cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰"):
+        if identity != "主魂" and hasattr(actor, "record_avatar_star_response_from_text"):
+            processed = bool(actor.record_avatar_star_response_from_text(
+                identity, text, source=f"manual {cmd}"
+            ))
+        elif cmd == ".安抚星辰" and hasattr(actor, "record_star_calm_response"):
             processed = bool(actor.record_star_calm_response(text, "手动安抚星辰同步"))
 
     processed = record_cultivation_delta_from_text(
@@ -3253,6 +3468,11 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
         current_id = actor.get_identity_from_msg(msg) or getattr(actor, "current_identity", "主魂")
     elif current_id == "主魂":
         current_id = getattr(actor, "current_identity", "主魂")
+    if sender is not None and is_game_bot_sender(actor, sender) and hasattr(actor, "record_identity_yuanying_recovery_from_text"):
+        if actor.record_identity_yuanying_recovery_from_text(
+            current_id, text, source=f"mention {msg_id}", command=""
+        ):
+            return True
     if current_id != "主魂":
         text = f"[Avatar: {current_id}]\n{text or ''}"
     if label == "edited":
@@ -3374,6 +3594,12 @@ def match_pending_edited_feedback(
             if logger:
                 logger.info(
                     f"{label} Message {getattr(msg, 'id', None)} profile username mismatches [{identity}], skipping."
+                )
+            continue
+        if command in {".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关"} and not _meditation_feedback_matches_identity(actor, clean_text, identity):
+            if logger:
+                logger.info(
+                    f"{label} Message {getattr(msg, 'id', None)} meditation username mismatches [{identity}], skipping."
                 )
             continue
         if feedback_response_conflicts(command, clean_text) and not feedback_response_matches_command(command, clean_text):
@@ -3535,6 +3761,11 @@ def record_edited_cultivation_state_if_needed(actor, msg, text=None, sender=None
             identity = context.get("identity", "")
 
     if not identity:
+        identity = identity_from_single_username_mention(actor, text)
+        if identity and not command:
+            command = "username"
+
+    if not identity:
         identity = recent_profile_identity_for_text(actor, text, msg_id=_message_id(msg))
         if identity and not command:
             command = "profile"
@@ -3568,6 +3799,8 @@ def is_relevant_game_bot_edited_message(actor, msg, text):
     if was_logged_incoming_message(actor, msg):
         return True
     if is_reply_to_tracked_command(actor, msg):
+        return True
+    if identity_from_single_username_mention(actor, text):
         return True
     if recent_profile_identity_for_text(actor, text, msg_id=_message_id(msg), consume=False):
         return True

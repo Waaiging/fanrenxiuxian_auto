@@ -164,7 +164,7 @@ def _target_manifest_time(event_kind, local_time):
     if event_kind == "news":
         return boundary
     if event_kind == "manifest":
-        return boundary if 0 <= offset <= 30 else _next_boundary_time(local_time)
+        return _next_boundary_time(local_time)
     if event_kind == "shift":
         return boundary if 0 <= offset <= 120 else _next_boundary_time(local_time)
     if event_kind == "control":

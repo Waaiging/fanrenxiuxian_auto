@@ -28,7 +28,7 @@ from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
-from log_utils import command_control_key
+from log_utils import command_control_key, feedback_response_matches_command
 
 app = FastAPI()
 security = HTTPBasic()
@@ -66,25 +66,37 @@ CLEAR_JOBS = {}                          # 清屏任务状态
 CLEAR_LOCK = threading.Lock()            # 清屏任务锁
 COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
+STATUS_CACHE = {}                        # Dashboard 总状态缓存
+STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
+LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
+LOG_PAGE_LOCK = threading.Lock()         # 日志分页接口锁
 CULTIVATION_CACHE = {}                   # 修为统计缓存
 CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
 COMMAND_RECORD_CACHE = {}                # 指令执行记录缓存
 COMMAND_RECORD_LOCK = threading.Lock()   # 指令执行记录锁
+COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令执行记录接口短缓存
+COMMAND_RECORD_ENDPOINT_LOCK = threading.Lock()
 MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
 MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
 RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存
 RESOURCE_STATS_LOCK = threading.Lock()   # 资源/库存统计锁
+RESOURCE_STATS_BUILD_LOCK = threading.Lock()
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
+STATUS_CACHE_SECONDS = 10
+LOG_PAGE_CACHE_SECONDS = 5
+COMMAND_RECORD_ENDPOINT_CACHE_SECONDS = 180
 MESSAGE_HEALTH_CACHE_SECONDS = 30
-RESOURCE_STATS_CACHE_SECONDS = 45
-RESOURCE_STATS_MAX_ROWS = 4000
+RESOURCE_STATS_CACHE_SECONDS = 900
+RESOURCE_STATS_MAX_ROWS = 400
 CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
+LOG_TAIL_INITIAL_BYTES = 192 * 1024
+LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
+ACCOUNT_DISPLAY_NAMES = {"main": "落云宗 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
@@ -169,7 +181,7 @@ ACCOUNT_LOG_TAGS = {
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
         ".召回侍妾", ".安置侍妾", ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".抚摸法宝 青竹蜂云剑",
-        ".野外历练 谨慎", ".宗门战况", ".参战", ".我的侍妾",
+        ".野外历练", ".野外历练 谨慎", ".野外历练 深入", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
@@ -181,7 +193,7 @@ ACCOUNT_LOG_TAGS = {
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰", ".观星", ".改换星移",
         ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".抚摸法宝 青竹蜂云剑",
-        ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
+        ".野外历练", ".野外历练 谨慎", ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
@@ -190,7 +202,7 @@ ACCOUNT_LOG_TAGS = {
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
-        ".野外历练 谨慎", ".宗门战况", ".参战", ".抚摸法宝 青竹蜂云剑",
+        ".野外历练", ".野外历练 谨慎", ".宗门战况", ".参战", ".抚摸法宝 青竹蜂云剑",
         ".元婴出窍", ".元婴归窍", ".探寻裂缝",
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰",
         ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
@@ -638,29 +650,43 @@ def xiaohao_star_attraction_commands(state):
     ]
 
 
-def spirit_tree_command(state):
+def spirit_tree_irrigation_time_for_identity(state, identity="主魂"):
+    times = state.get("spirit_tree_irrigation_times")
+    if isinstance(times, dict):
+        value = times.get(identity or "主魂", "")
+        if value:
+            return value
+    if (identity or "主魂") == "主魂":
+        return state.get("next_spirit_tree_irrigation_time", "")
+    return ""
+
+
+def spirit_tree_command(state, group="落云宗", identity="主魂"):
     status = state.get("spirit_tree_status", "灌溉期")
     mature_until = parse_state_time(state.get("spirit_tree_mature_until", ""))
-    harvested = state.get("spirit_tree_harvested_in_mature_period") or state.get("spirit_tree_harvest_attempted_in_mature_period")
+    harvested = state.get("spirit_tree_harvested_in_mature_period")
+    attempted = state.get("spirit_tree_harvest_attempted_in_mature_period")
     if status == "成熟采摘期" and mature_until and mature_until > datetime.now():
-        detail = "本期已采摘" if harvested else "等待采摘"
+        detail = "本期已采摘" if harvested else ("本期已处理" if attempted else "等待采摘")
         return command_row(
             ".采摘灵果", "灵树状态", "成熟采摘期", "active",
             format_remaining((mature_until - datetime.now()).total_seconds()),
-            str(state.get("spirit_tree_mature_until", "")), detail, "凌霄宫",
+            str(state.get("spirit_tree_mature_until", "")), detail, group,
             schedule_type="cooldown", next_seconds=(mature_until - datetime.now()).total_seconds(),
         )
-    irrigation = time_command(state, "next_spirit_tree_irrigation_time", ".灵树灌溉", "灵树灌溉", group="凌霄宫")
+    display_state = dict(state)
+    display_state["next_spirit_tree_irrigation_time"] = spirit_tree_irrigation_time_for_identity(state, identity)
+    irrigation = time_command(display_state, "next_spirit_tree_irrigation_time", ".灵树灌溉", "灵树灌溉", group=group)
     irrigation["detail"] = status or irrigation.get("detail", "")
     return irrigation
 
 
-def spirit_tree_guard_command(state):
+def spirit_tree_guard_command(state, group="落云宗"):
     invasion = state.get("spirit_tree_invasion_status", "")
     row = time_command(
         state, "next_spirit_tree_guard_time", ".协同守山", "协同守山",
         waiting="守山冷却", ready="待来袭", missing="待来袭",
-        detail=invasion, group="凌霄宫",
+        detail=invasion, group=group,
     )
     if invasion:
         row["status"] = "来袭待处理"
@@ -771,17 +797,15 @@ def main_soul_panel(account, state):
     rows.extend(global_sync_commands())
     if account == "main":
         rows.extend([
-            manual_command(".借天门势", "借天门势", group="凌霄宫"),
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
-            manual_command(".天阶状态", "天阶状态", "查询云阶状态", "凌霄宫"),
-            time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="凌霄宫"),
-            time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="凌霄宫"),
-            time_command(state, "next_heart_time", ".问心台", "问心台", group="凌霄宫"),
             time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", ".抚摸法宝 青竹蜂云剑（神雷版）", "抚摸法宝", group="法宝"),
             time_command(state, "next_nurture_spirit_time", ".温养器灵 青竹蜂云剑（神雷版）", "温养器灵", waiting="6小时冷却", group="法宝"),
+            manual_command(".灵树状态", "灵树状态", "查询灵眼之树状态", "落云宗"),
+            spirit_tree_command(state, group="落云宗", identity="主魂"),
+            spirit_tree_guard_command(state, group="落云宗"),
         ])
         rows.extend(meditation_commands(state))
         rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
@@ -841,6 +865,8 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             manual_command(".推命 闭关", "推命闭关", group="推命"),
             manual_command(".推命 探索", "推命探索", group="推命"),
             time_command(state, "next_field_training_time", ".野外历练 深入", "野外历练", group="通用"),
+            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
             daily_done_command(
                 state,
                 ".观命",
@@ -851,10 +877,16 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             ),
         ])
     else:
-        rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
+        rows.append(time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"))
     rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
     if name == "缘生子":
-        rows.extend([spirit_tree_command(state), spirit_tree_guard_command(state)])
+        tree_state = root_state or state
+        rows.extend([
+            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+            spirit_tree_command(tree_state, identity=name),
+            spirit_tree_guard_command(tree_state),
+        ])
     if name == "素缘子":
         rows.extend(xiaohao_star_attraction_commands(state))
         star_gazing_state = root_state or state
@@ -890,7 +922,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
 def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
-    rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
+    rows.append(time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"))
     rows.extend(meditation_commands(state, include_force_exit=True))
     rows.extend(xiaohao_star_attraction_commands(state))
     rows.extend([
@@ -910,7 +942,7 @@ def xiaohao_avatar_commands(name, state):
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
     rows.extend([
-        time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"),
+        time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"),
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
@@ -1036,7 +1068,7 @@ def outgoing_log_identity(header):
 
 def outgoing_log_command(entry):
     """从 OUT 日志条目提取实际发送的指令。"""
-    text = "\n".join(entry.get("lines") or [])
+    text = "\n".join(entry.get("lines") or []).replace("\\n", "\n")
     commands = list(LOG_COMMAND_RE.findall(text or ""))
     for first, second in commands:
         command = normalize_log_command(first, second)
@@ -1046,7 +1078,10 @@ def outgoing_log_command(entry):
 
 def outgoing_log_command_full(entry):
     """从 OUT 日志条目提取完整指令行，保留参数。"""
-    for raw in (entry.get("lines") or [])[1:]:
+    lines = []
+    for raw in entry.get("lines") or []:
+        lines.extend(str(raw or "").replace("\\n", "\n").splitlines())
+    for raw in lines[1:]:
         line = str(raw or "").strip().strip("`")
         if line.startswith("."):
             return re.sub(r"\s+", " ", line).strip()
@@ -1247,20 +1282,144 @@ def read_log_entries(name):
         return [], "无法读取日志内容。"
     return decorate_log_entries(split_log_entries(lines)), ""
 
+def log_entries_from_bytes(raw, base_offset, end_offset, trim_start=True):
+    """Parse complete log entries from a byte slice and keep byte cursors."""
+    if not raw:
+        return []
+    if trim_start:
+        newline_at = raw.find(b"\n")
+        if newline_at < 0:
+            return []
+        raw = raw[newline_at + 1:]
+        base_offset += newline_at + 1
+
+    raw_line_chunks = raw.splitlines(keepends=True)
+    if not raw_line_chunks:
+        return []
+
+    decoded_lines = [
+        line.rstrip(b"\r\n").decode("utf-8", errors="ignore")
+        for line in raw_line_chunks
+    ]
+    line_offsets = []
+    offset = 0
+    for line in raw_line_chunks:
+        line_offsets.append(offset)
+        offset += len(line)
+
+    first_entry_idx = None
+    for idx, line in enumerate(decoded_lines):
+        if LOG_ENTRY_RE.match(line):
+            first_entry_idx = idx
+            break
+    if first_entry_idx is None:
+        return []
+    if first_entry_idx > 0:
+        base_offset += line_offsets[first_entry_idx]
+        decoded_lines = decoded_lines[first_entry_idx:]
+        line_offsets = [value - line_offsets[first_entry_idx] for value in line_offsets[first_entry_idx:]]
+
+    entries = []
+    current = []
+    current_start_line = 0
+    current_start_byte = base_offset
+    for idx, line in enumerate(decoded_lines):
+        if LOG_ENTRY_RE.match(line) and current:
+            entry_end_byte = base_offset + line_offsets[idx]
+            entries.append({
+                "start_line": current_start_line,
+                "end_line": idx,
+                "start_byte": current_start_byte,
+                "end_byte": entry_end_byte,
+                "lines": current,
+            })
+            current = [line]
+            current_start_line = idx
+            current_start_byte = base_offset + line_offsets[idx]
+        else:
+            if not current:
+                current_start_line = idx
+                current_start_byte = base_offset + line_offsets[idx]
+            current.append(line)
+    if current:
+        entries.append({
+            "start_line": current_start_line,
+            "end_line": len(decoded_lines),
+            "start_byte": current_start_byte,
+            "end_byte": end_offset,
+            "lines": current,
+        })
+    return entries
+
+def read_recent_log_entries(name, before_byte=None, limit=80):
+    """Read recent log entries from the tail without parsing the whole file."""
+    filename = get_log_filename(name)
+    path = os.path.join(CONFIG_DIR, filename)
+    if not os.path.exists(path):
+        return [], f"日志文件 {filename} 不存在。", {"log_size": 0, "partial": True}
+    try:
+        stat = os.stat(path)
+        file_size = int(getattr(stat, "st_size", 0) or 0)
+    except OSError:
+        return [], "无法读取日志内容。", {"log_size": 0, "partial": True}
+
+    if file_size <= 0:
+        return [], "", {"log_size": 0, "partial": True}
+    try:
+        end_byte = file_size if before_byte is None else max(0, min(int(before_byte), file_size))
+    except Exception:
+        end_byte = file_size
+    if end_byte <= 0:
+        return [], "", {"log_size": file_size, "partial": True}
+
+    read_bytes = min(max(LOG_TAIL_INITIAL_BYTES, 16 * 1024), end_byte)
+    parsed = []
+    try:
+        with open(path, "rb") as f:
+            while True:
+                start_byte = max(0, end_byte - read_bytes)
+                f.seek(start_byte)
+                raw = f.read(end_byte - start_byte)
+                parsed = log_entries_from_bytes(raw, start_byte, end_byte, trim_start=start_byte > 0)
+                if len(parsed) >= limit + 1 or start_byte == 0 or read_bytes >= min(LOG_TAIL_MAX_BYTES, end_byte):
+                    break
+                read_bytes = min(read_bytes * 2, end_byte, LOG_TAIL_MAX_BYTES)
+    except Exception:
+        return [], "无法读取日志内容。", {"log_size": file_size, "partial": True}
+
+    page = parsed[-limit:]
+    decorated = decorate_log_entries(page)
+    if page:
+        next_before = page[0].get("start_byte")
+        has_more = bool(next_before and next_before > 0)
+    else:
+        next_before = None
+        has_more = False
+    meta = {
+        "log_size": file_size,
+        "partial": True,
+        "cursor_mode": "byte",
+        "has_more": has_more,
+        "next_before": next_before if has_more else None,
+        "loaded_from_byte": page[0].get("start_byte") if page else end_byte,
+        "loaded_to_byte": page[-1].get("end_byte") if page else end_byte,
+    }
+    return decorated, "", meta
+
 
 # =====================================================================
 # 指令执行记录
 # =====================================================================
 
 def command_record_signature(name):
-    """返回日志文件签名，用于避免重复解析。"""
-    filename = get_log_filename(name)
-    path = os.path.join(CONFIG_DIR, filename)
+    """返回消息库签名，用于避免重复解析指令生效记录。"""
+    path = message_events_db_path()
     try:
         stat = os.stat(path)
     except OSError:
         return None
     return {
+        "account": name,
         "log_size": int(getattr(stat, "st_size", 0) or 0),
         "log_mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or 0),
     }
@@ -1269,13 +1428,71 @@ def command_record_username(account, identity):
     names = account_profile_usernames(account).get(identity or "主魂") or []
     return " / ".join(names)
 
+COMMAND_RECORD_QUERY_COMMANDS = {
+    ".查看闭关",
+    ".灵树状态",
+    ".我的侍妾",
+    ".我的灵兽",
+    ".我的灵根",
+    ".状态",
+    ".宗门战况",
+    ".宗门列表",
+    ".天阶状态",
+    ".观星台",
+    ".储物袋",
+    ".背包",
+    ".物品栏",
+    ".库存",
+}
+
+COMMAND_RECORD_NO_EFFECT_MARKERS = (
+    "冷却", "后再", "请在", "尚未", "尚需", "未复", "未恢复",
+    "灵气尚未平复", "无法", "不能", "不可", "修为不足", "灵石不足",
+    "不存在", "没有名为", "尚无侍妾", "还没有侍妾", "未随行",
+    "你已在深度闭关", "已在深度闭关", "正在深度闭关",
+    "请勿重复", "重复操作", "已经参与", "已在阵中", "没有找到",
+    "无功不受禄",
+    "器灵也是需要休息", "别摸啦",
+)
+
+COMMAND_RECORD_EFFECT_MARKERS = (
+    "成功", "获得", "收获", "增加", "增长", "变化", "完成", "归来",
+    "出窍", "已进入", "开始", "开启", "切换成功", "神念已附着",
+    "神念重归", "注入了", "成熟度", "修为增长", "造化自生",
+    "通关", "战报", "点卯", "不敌败退", "身受重创", "倒退",
+    "失败", "清点所得", "远航归来", "启航", "入渊", "偷菜",
+    "默契", "经验", "亲密", "心情", "羁绊", "忠诚",
+    "召回", "出战", "放养", "巡游",
+)
+
+def command_record_base_command(command):
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    parts = text.split()
+    return parts[0] if parts else text
+
+def command_record_response_effective(command, response_text):
+    """True when a matched reply means the command actually took effect."""
+    clean = str(response_text or "").replace("**", "").replace("`", "").strip()
+    if not clean:
+        return False
+    base = command_record_base_command(command)
+    if base in COMMAND_RECORD_QUERY_COMMANDS:
+        return feedback_response_matches_command(command, clean) or feedback_response_matches_command(base, clean)
+    if any(marker in clean for marker in COMMAND_RECORD_NO_EFFECT_MARKERS):
+        return False
+    if any(marker in clean for marker in COMMAND_RECORD_EFFECT_MARKERS):
+        return feedback_response_matches_command(command, clean) or feedback_response_matches_command(base, clean)
+    return False
+
 def build_account_command_records(name, recent_limit=8):
-    """按身份+指令聚合 OUT 日志，生成执行记录表数据。"""
+    """按身份+指令聚合已生效回复，生成执行记录表数据。"""
     if name not in WINDOW_MAP:
         return {"records": [], "error": "未知账号", "updated_at": datetime.now().strftime(TIME_FORMAT)}
     signature = command_record_signature(name)
     if not signature:
-        return {"records": [], "error": f"日志文件 {get_log_filename(name)} 不存在。", "updated_at": datetime.now().strftime(TIME_FORMAT)}
+        return {"records": [], "error": f"{MESSAGE_EVENTS_DB_FILE} 不存在。", "updated_at": datetime.now().strftime(TIME_FORMAT)}
 
     cache_key = json.dumps(signature, sort_keys=True)
     with COMMAND_RECORD_LOCK:
@@ -1283,20 +1500,60 @@ def build_account_command_records(name, recent_limit=8):
         if cached and cached.get("signature") == cache_key:
             return cached.get("data") or {"records": [], "error": ""}
 
-    entries, error = read_log_entries(name)
+    error = ""
     today = datetime.now().strftime("%Y-%m-%d")
     records = {}
-    for entry in entries:
-        if not is_outgoing_log_entry(entry):
-            continue
-        entry_time = parse_log_entry_time(entry)
-        if not entry_time:
-            continue
-        command = outgoing_log_command_full(entry)
+    path = message_events_db_path()
+    conn = None
+    try:
+        conn = sqlite3.connect(path, timeout=2)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                cl.identity,
+                cl.command,
+                cl.source,
+                cl.sent_at,
+                cl.response_at,
+                cl.response_msg_id,
+                cl.response_hash,
+                COALESCE(me.text, '') AS response_text
+            FROM command_ledger cl
+            LEFT JOIN message_events me
+              ON me.account=cl.account
+             AND me.chat_id IS cl.chat_id
+             AND me.msg_id=cl.response_msg_id
+             AND (cl.response_hash IS NULL OR me.text_hash=cl.response_hash)
+            WHERE cl.account=?
+              AND cl.status='matched'
+              AND COALESCE(cl.response_at, '')!=''
+              AND COALESCE(cl.command, '') LIKE '.%'
+            ORDER BY cl.response_at ASC, cl.command_msg_id ASC
+            """,
+            (name,),
+        ).fetchall()
+    except Exception as exc:
+        rows = []
+        error = f"读取 {MESSAGE_EVENTS_DB_FILE} 失败: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    for item in rows:
+        command = str(item["command"] or "").strip()
         if not command or not command.startswith("."):
             continue
-        header = entry["lines"][0] if entry.get("lines") else ""
-        identity = outgoing_log_identity(header) or "主魂"
+        response_text = item["response_text"] or ""
+        if not command_record_response_effective(command, response_text):
+            continue
+        entry_time = parse_state_time(item["response_at"]) or parse_state_time(item["sent_at"])
+        if not entry_time:
+            continue
+        response_key = item["response_msg_id"] or item["response_hash"] or f"{item['response_at']}:{command}"
+        if not response_key:
+            continue
+        identity = str(item["identity"] or "主魂").strip() or "主魂"
         key = (identity, command)
         row = records.setdefault(key, {
             "account": name,
@@ -1311,10 +1568,14 @@ def build_account_command_records(name, recent_limit=8):
             "last_time": "",
             "last_interval_seconds": None,
             "recent_times": [],
+            "_seen_response_keys": set(),
             "manual_count": 0,
             "auto_count": 0,
             "is_switch": command.startswith(".切换"),
         })
+        if response_key in row["_seen_response_keys"]:
+            continue
+        row["_seen_response_keys"].add(response_key)
         time_text = entry_time.strftime(TIME_FORMAT)
         if not row["first_time"]:
             row["first_time"] = time_text
@@ -1327,7 +1588,8 @@ def build_account_command_records(name, recent_limit=8):
         row["count"] += 1
         if time_text.startswith(today):
             row["today_count"] += 1
-        if "OUT [manual" in header or "[manual" in header:
+        source = str(item["source"] or "")
+        if source == "manual":
             row["manual_count"] += 1
         else:
             row["auto_count"] += 1
@@ -1336,11 +1598,13 @@ def build_account_command_records(name, recent_limit=8):
             row["recent_times"] = row["recent_times"][-recent_limit:]
 
     rows = sorted(records.values(), key=lambda item: item.get("last_time") or "", reverse=True)
+    for row in rows:
+        row.pop("_seen_response_keys", None)
     data = {
         "records": rows,
         "error": error,
         "updated_at": datetime.now().strftime(TIME_FORMAT),
-        "log": get_log_filename(name),
+        "source": MESSAGE_EVENTS_DB_FILE,
         **signature,
     }
     with COMMAND_RECORD_LOCK:
@@ -1385,6 +1649,7 @@ def ensure_message_health_indexes(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_account_msg ON command_ledger(account, command_msg_id)")
 
 def build_message_health(since_hours=24, min_gap_seconds=60, min_missing_msg_ids=20, limit=8):
     """Audit message_events.sqlite3 for lightweight listener/message-box health."""
@@ -1771,12 +2036,29 @@ def empty_resource_account(account):
         "_inventory_map": {},
     }
 
-def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event_limit=60, inventory_limit=40):
+def build_resource_stats(since_hours=12, max_rows=RESOURCE_STATS_MAX_ROWS, event_limit=60, inventory_limit=40):
     """Build a lightweight resource/inventory view from message_events.sqlite3."""
     path = message_events_db_path()
     now = datetime.now()
-    since_hours = max(1, int(since_hours or 72))
-    max_rows = max(100, min(int(max_rows or RESOURCE_STATS_MAX_ROWS), 20000))
+    since_hours = max(1, min(int(since_hours or 12), 168))
+    max_rows = max(100, min(int(max_rows or RESOURCE_STATS_MAX_ROWS), 3000))
+    event_limit = int(event_limit or 60)
+    inventory_limit = int(inventory_limit or 40)
+    cache_key = json.dumps({
+        "since_hours": since_hours,
+        "max_rows": max_rows,
+        "event_limit": event_limit,
+        "inventory_limit": inventory_limit,
+    }, sort_keys=True)
+    with RESOURCE_STATS_LOCK:
+        cached = RESOURCE_STATS_CACHE.get("data")
+        if (
+            cached
+            and RESOURCE_STATS_CACHE.get("key") == cache_key
+            and time.time() - float(RESOURCE_STATS_CACHE.get("at") or 0) < RESOURCE_STATS_CACHE_SECONDS
+        ):
+            return cached
+
     cutoff = (now - timedelta(hours=since_hours)).strftime(TIME_FORMAT)
     try:
         stat = os.stat(path)
@@ -1791,17 +2073,6 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
     except OSError:
         stat = None
         signature = None
-
-    if signature:
-        cache_key = json.dumps(signature, sort_keys=True)
-        with RESOURCE_STATS_LOCK:
-            cached = RESOURCE_STATS_CACHE.get("data")
-            if (
-                cached
-                and RESOURCE_STATS_CACHE.get("key") == cache_key
-                and time.time() - float(RESOURCE_STATS_CACHE.get("at") or 0) < RESOURCE_STATS_CACHE_SECONDS
-            ):
-                return cached
 
     payload = {
         "ok": False,
@@ -1845,7 +2116,7 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
                     me.created_at,
                     CASE WHEN cl.command_msg_id IS NULL THEN 0 ELSE 1 END AS ledger_match
                 FROM message_events me
-                LEFT JOIN command_ledger cl
+                LEFT JOIN command_ledger cl INDEXED BY idx_command_ledger_account_msg
                   ON cl.account=me.account
                  AND cl.command_msg_id=me.reply_to_msg_id
                  AND (cl.chat_id IS me.chat_id OR cl.chat_id IS NULL OR me.chat_id IS NULL)
@@ -1856,13 +2127,6 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
                       COALESCE(me.identity, '') != ''
                       OR COALESCE(me.command, '') != ''
                       OR cl.command_msg_id IS NOT NULL
-                  )
-                  AND (
-                      me.text LIKE '%获得%' OR me.text LIKE '%得到%' OR me.text LIKE '%收获%'
-                      OR me.text LIKE '%带回%' OR me.text LIKE '%消耗%' OR me.text LIKE '%扣除%'
-                      OR me.text LIKE '%花费%' OR me.text LIKE '%储物袋%' OR me.text LIKE '%背包%'
-                      OR me.text LIKE '%物品栏%' OR me.text LIKE '%库存%' OR me.text LIKE '%灵石%'
-                      OR me.text LIKE '%贡献%'
                   )
                 ORDER BY me.created_at DESC, me.id DESC
                 LIMIT ?
@@ -1935,7 +2199,6 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
                     bucket["last_time"] = row["created_at"]
                     bucket["last_line"] = change.get("line", "")
 
-        event_limit = int(event_limit or 60)
         payload["recent_events"] = payload["recent_events"][:event_limit]
         total_resource_rows = 0
         total_inventory_rows = 0
@@ -1960,7 +2223,7 @@ def build_resource_stats(since_hours=72, max_rows=RESOURCE_STATS_MAX_ROWS, event
 
     if signature:
         with RESOURCE_STATS_LOCK:
-            RESOURCE_STATS_CACHE["key"] = json.dumps(signature, sort_keys=True)
+            RESOURCE_STATS_CACHE["key"] = cache_key
             RESOURCE_STATS_CACHE["at"] = time.time()
             RESOURCE_STATS_CACHE["data"] = payload
     return payload
@@ -2315,8 +2578,20 @@ def filter_log_entries(entries, tag="", q=""):
         filtered.append(entry)
     return filtered
 
-def get_log_tags(name):
+def get_log_tags(name, include_counts=True):
     """获取日志可用的分类标签列表"""
+    if not include_counts:
+        seen = set()
+        ordered = []
+        for tag in ACCOUNT_LOG_TAGS.get(name, []):
+            if tag in seen:
+                continue
+            ordered.append({"tag": tag, "count": None})
+            seen.add(tag)
+        if OTHER_LOG_TAG not in seen:
+            ordered.append({"tag": OTHER_LOG_TAG, "count": None})
+        return {"tags": ordered, "error": "", "partial": True}
+
     entries, error = read_log_entries(name)
     counts = {}
     for entry in entries:
@@ -2332,6 +2607,27 @@ def get_log_tags(name):
 def get_log_page(name, before=None, limit=80, tag="", q=""):
     """获取分页的日志内容"""
     limit = max(20, min(int(limit or 80), 200))
+    if not (tag or q):
+        entries, error, meta = read_recent_log_entries(name, before_byte=before, limit=limit)
+        if error:
+            return {"content": error, "entries": [], "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None, "partial": True}
+        return {
+            "content": "\n\n".join(entry["text"] for entry in entries),
+            "entries": [entry["text"] for entry in entries],
+            "start": 0,
+            "end": len(entries),
+            "total": None,
+            "matched": len(entries),
+            "loaded": len(entries),
+            "has_more": bool(meta.get("has_more")),
+            "next_before": meta.get("next_before"),
+            "tag": tag,
+            "q": q,
+            "partial": True,
+            "cursor_mode": meta.get("cursor_mode", "byte"),
+            "log_size": meta.get("log_size", 0),
+        }
+
     entries, error = read_log_entries(name)
     if error:
         return {"content": error, "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None}
@@ -2452,7 +2748,7 @@ def clear_account_history(account):
     return {"success": True, "msg": output or "清屏完成"}
 
 def account_display_name(account):
-    return {"main": "凌霄宫（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
+    return {"main": "落云宗（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
 
 def run_clear_job(job_id, account):
     """后台执行清屏任务"""
@@ -2493,31 +2789,38 @@ def start_clear_job(account):
 # =====================================================================
 
 @app.get("/api/status")
-async def status(username: str = Depends(authenticate)):
+def status(username: str = Depends(authenticate)):
     """获取所有账号的实时状态"""
     try:
-        result = {}
-        for key, info in ACCOUNT_DISPLAY_NAMES.items():
-            state = get_state(key)
-            result[key] = {
-                "name": info,
-                "state": state,
-                "is_alive": get_process_status(key),
-                "cultivation": get_cultivation_summary(key),
-                "command_panels": build_command_panels(key, state),
-                "profile_usernames": account_profile_usernames(key),
+        now_ts = time.time()
+        with STATUS_LOCK:
+            cached = STATUS_CACHE.get("data")
+            if cached and now_ts - float(STATUS_CACHE.get("at") or 0) < STATUS_CACHE_SECONDS:
+                return cached
+            result = {}
+            for key, info in ACCOUNT_DISPLAY_NAMES.items():
+                state = get_state(key)
+                result[key] = {
+                    "name": info,
+                    "state": state,
+                    "is_alive": get_process_status(key),
+                    "cultivation": get_cultivation_summary(key),
+                    "command_panels": build_command_panels(key, state),
+                    "profile_usernames": account_profile_usernames(key),
+                }
+            payload = {
+                "accounts": result,
+                "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-        return {
-            "accounts": result,
-            "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "message_health": build_message_health(),
-        }
+            STATUS_CACHE["at"] = now_ts
+            STATUS_CACHE["data"] = payload
+            return payload
     except Exception as e: return {"error": str(e)}
 
 @app.get("/api/message-health")
-async def message_health(since_hours: int = 24, min_gap_seconds: int = 60,
-                         min_missing_msg_ids: int = 20, limit: int = 8,
-                         username: str = Depends(authenticate)):
+def message_health(since_hours: int = 24, min_gap_seconds: int = 60,
+                   min_missing_msg_ids: int = 20, limit: int = 8,
+                   username: str = Depends(authenticate)):
     """消息箱水位和疑似断层审计。"""
     return build_message_health(
         since_hours=since_hours,
@@ -2527,27 +2830,57 @@ async def message_health(since_hours: int = 24, min_gap_seconds: int = 60,
     )
 
 @app.get("/api/resource-stats")
-async def resource_stats(since_hours: int = 72, max_rows: int = RESOURCE_STATS_MAX_ROWS,
-                         username: str = Depends(authenticate)):
-    """获取最近资源变化和库存快照。"""
-    return build_resource_stats(since_hours=since_hours, max_rows=max_rows)
+def resource_stats(since_hours: int = 12, max_rows: int = RESOURCE_STATS_MAX_ROWS,
+                   username: str = Depends(authenticate)):
+    """资源/库存统计已从 Dashboard 关闭，保留轻量响应兼容旧页面。"""
+    return {
+        "ok": False,
+        "status": "disabled",
+        "error": "资源与库存统计已关闭",
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 @app.get("/api/command-records")
-async def command_records(username: str = Depends(authenticate)):
+def command_records(username: str = Depends(authenticate)):
     """获取各账号按身份/指令聚合的执行记录。"""
-    return build_all_command_records()
+    now_ts = time.time()
+    with COMMAND_RECORD_ENDPOINT_LOCK:
+        cached = COMMAND_RECORD_ENDPOINT_CACHE.get("data")
+        if cached and now_ts - float(COMMAND_RECORD_ENDPOINT_CACHE.get("at") or 0) < COMMAND_RECORD_ENDPOINT_CACHE_SECONDS:
+            return cached
+        payload = build_all_command_records()
+        COMMAND_RECORD_ENDPOINT_CACHE["at"] = now_ts
+        COMMAND_RECORD_ENDPOINT_CACHE["data"] = payload
+        return payload
 
 @app.get("/api/logs/{name}")
-async def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "",
-               username: str = Depends(authenticate)):
+def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "",
+         username: str = Depends(authenticate)):
     """获取账号的分页日志"""
-    return get_log_page(name, before=before, limit=limit, tag=tag, q=q)
+    cache_key = json.dumps({
+        "name": name,
+        "before": before,
+        "limit": max(1, min(int(limit or 80), 300)),
+        "tag": tag or "",
+        "q": q or "",
+    }, sort_keys=True, ensure_ascii=False)
+    now_ts = time.time()
+    with LOG_PAGE_LOCK:
+        cached = LOG_PAGE_CACHE.get(cache_key)
+        if cached and now_ts - float(cached.get("at") or 0) < LOG_PAGE_CACHE_SECONDS:
+            return cached.get("data")
+        payload = get_log_page(name, before=before, limit=limit, tag=tag, q=q)
+        LOG_PAGE_CACHE[cache_key] = {"at": now_ts, "data": payload}
+        if len(LOG_PAGE_CACHE) > 24:
+            oldest_key = min(LOG_PAGE_CACHE, key=lambda key: LOG_PAGE_CACHE[key].get("at", 0))
+            LOG_PAGE_CACHE.pop(oldest_key, None)
+        return payload
 
 @app.get("/api/log-tags/{name}")
-async def log_tags(name: str, username: str = Depends(authenticate)):
+def log_tags(name: str, counts: bool = True, username: str = Depends(authenticate)):
     """获取账号日志的分类标签"""
     if name not in WINDOW_MAP: return {"tags": [], "error": "未知账号"}
-    return get_log_tags(name)
+    return get_log_tags(name, include_counts=counts)
 
 @app.get("/api/clear-status/{job_id}")
 async def clear_status(job_id: str, username: str = Depends(authenticate)):
@@ -2736,4 +3069,4 @@ async def index(username: str = Depends(authenticate)):
 
 if __name__ == "__main__":
     """启动服务（0.0.0.0:8000）"""
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)

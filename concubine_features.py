@@ -50,7 +50,7 @@ DEFAULT_CONCUBINE_NAMES = {
         "主魂": {"瑶光"},
         "厚土": {"霓裳"},
         "缘生子": {"元瑶"},
-        "寻真子": {"银月"},
+        "寻真子": {"若兰"},
     },
     "xiaohao": {
         "主魂": {"洛神"},
@@ -1131,7 +1131,11 @@ class ConcubineMixin:
             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
             return False
         ok = self._record_avatar_concubine_direct_response(avatar, task_key, text)
-        if not ok and not any(k in text for k in ["冷却", "后再", "尚未", "修为不足", "还没有侍妾", "尚无侍妾", "没有侍妾"]):
+        if (
+            not ok
+            and not self.concubine_response_indicates_active_voyage(text)
+            and not any(k in text for k in ["冷却", "后再", "尚未", "修为不足", "还没有侍妾", "尚无侍妾", "没有侍妾"])
+        ):
             notify_unrecognized_response(self, task["command"], text, log, f"{task['label']}[{avatar}]")
             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
         if ok and task_key == "dream" and text and "4/4" in text:
@@ -1503,6 +1507,62 @@ class ConcubineMixin:
             and ("侍妾" in clean or "道侣" in clean)
         )
 
+    def heart_trial_terminal_failure(self, text):
+        """当前心劫锚点已经不可继续，需重查侍妾状态后再排冷却。"""
+        clean = (text or "").replace("**", "")
+        return any(k in clean for k in [
+            "心劫锚点已散",
+            "需重新引动天劫",
+            "无法共历心劫",
+            "尚无侍妾",
+            "还没有侍妾",
+        ])
+
+    async def sync_avatar_heart_trial_cooldown_after_failure(self, avatar, reason, fallback_seconds=600):
+        """化身心劫锚点异常后查询 .我的侍妾，按真实冷却重排。"""
+        if not hasattr(self, "send_and_wait_feedback_identity") or not hasattr(self, "set_avatar_state"):
+            return False
+        log.warning(f"Avatar [{avatar}] heart trial aborted: {reason}; syncing .我的侍妾 cooldown.")
+        status_msg = await self.send_and_wait_feedback_identity(
+            avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
+        )
+        status_text = (
+            getattr(status_msg, "text", "")
+            if hasattr(status_msg, "text")
+            else str(status_msg) if isinstance(status_msg, str) else ""
+        )
+        if not status_text:
+            self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), fallback_seconds))
+            return False
+        if hasattr(self, "concubine_status_matches_identity") and not self.concubine_status_matches_identity(status_text, avatar):
+            self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
+            return False
+        if "尚无侍妾" in status_text or "还没有侍妾" in status_text:
+            self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 24 * 3600))
+            return True
+        voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+        if voyage_block_until:
+            self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
+            return True
+        clean_status = status_text.replace("**", "")
+        heart_match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
+        if heart_match:
+            val = heart_match.group(1).strip()
+            if any(k in val for k in ["无", "可用", "可施展", "已就绪"]):
+                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), fallback_seconds))
+                return True
+            cd = self.parse_wait_time(val)
+            if cd > 0:
+                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), cd + 60))
+                return True
+        cd = self.parse_wait_time(status_text)
+        self.set_avatar_state(
+            avatar,
+            "next_heart_trial_time",
+            add_seconds_str(now_str(), (cd + 60) if cd > 0 else fallback_seconds),
+        )
+        return cd > 0
+
     async def execute_heart_trial(self):
         """
         共历心劫完整流程。
@@ -1581,6 +1641,10 @@ class ConcubineMixin:
         if self.concubine_response_indicates_active_voyage(trial_text):
             self.defer_concubine_task_until_voyage("heart_trial", "主魂")
             return
+        if self.heart_trial_terminal_failure(trial_text):
+            if not await self.refresh_heart_trial_cooldown_after_uncertain("共历心劫终止返回"):
+                self.defer_concubine_task("heart_trial", 600)
+            return
         if self.heart_trial_requires_reply_target(trial_text):
             log.warning("Concubine 共历心劫: bot still requires reply target.")
             notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫回复目标")
@@ -1647,6 +1711,10 @@ class ConcubineMixin:
                                 return
                             if confirmed:
                                 break
+                            if self.heart_trial_terminal_failure(current_text):
+                                if not await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮终止返回"):
+                                    self.defer_concubine_task("heart_trial", 600)
+                                return
                             if self.heart_trial_round_prompt(current_text, idx):
                                 if attempt < 3:
                                     log.warning(f"Concubine 共历心劫: still on round {idx}; retrying.")

@@ -25,6 +25,8 @@ from log_utils import (
     identity_plain_usernames,
     is_game_bot_sender,
     is_reply_to_untracked_message,
+    is_yuanying_rebirth_block_response,
+    is_yuanying_rebirth_success_response,
     notify_unrecognized_response,
     text_targets_current_account,
     text_username_mentions,
@@ -41,10 +43,22 @@ COMMAND_CONTROL_FILE = os.path.join(CONFIG_DIR, "command_controls.json")
 CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
+FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 0  # 空回复时下一轮立即重试
+YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
 SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
+TIME_CRITICAL_COMMAND_PREFIXES = (
+    ".灵树灌溉",
+    ".协同守山",
+    ".采摘灵果",
+    ".观星",
+    ".改换星移",
+    ".观命",
+    ".定命",
+    ".助阵",
+)
 
 STATE_TIME_COMMAND_MAP = {
     "next_rift_search_time": ".探寻裂缝",
@@ -68,6 +82,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_force_exit_time": ".强行出关",
     "next_nurture_spirit_time": ".温养器灵 青竹蜂云剑（神雷版）",
     "next_spirit_tree_irrigation_time": ".灵树灌溉",
+    "next_spirit_tree_guard_time": ".协同守山",
     "next_star_gazing_time": ".观星",
     "pending_star_gazing_target_time": ".观星",
     "pending_star_shift_target_time": ".改换星移",
@@ -252,6 +267,119 @@ class CommonCommandMixin:
         self.save_state()
         return pause_until
 
+    def clear_identity_pause(self, identity="主魂", reason=""):
+        identity = str(identity or "主魂").strip() or "主魂"
+        pauses = self.ensure_identity_pause_state()
+        old_entry = pauses.pop(identity, None)
+        changed = old_entry is not None
+        if identity == "主魂":
+            if self.state.get("main_soul_pause_until") or self.state.get("main_soul_pause_reason"):
+                changed = True
+            self.state["main_soul_pause_until"] = ""
+            self.state["main_soul_pause_reason"] = ""
+        if changed:
+            self.save_state()
+            suffix = f" ({reason})" if reason else ""
+            self.common_command_logger().info(f"Identity pause cleared for [{identity}]{suffix}.")
+        return changed
+
+    def clear_identity_command_guard(self, identity="主魂", commands=None, reason=""):
+        identity = str(identity or "主魂").strip() or "主魂"
+        guard = getattr(self, "_command_send_guard", None)
+        if not isinstance(guard, dict) or not guard:
+            return 0
+
+        def key_for(command):
+            command = str(command or "").strip()
+            return f"{command} ({identity})" if identity != "主魂" else command
+
+        if commands:
+            remove_keys = {key_for(command) for command in commands if str(command or "").strip()}
+        elif identity == "主魂":
+            remove_keys = {key for key in guard if not re.search(r"\s\([^)]+\)$", str(key))}
+        else:
+            suffix = f" ({identity})"
+            remove_keys = {key for key in guard if str(key).endswith(suffix)}
+
+        removed = 0
+        for key in list(remove_keys):
+            if key in guard:
+                guard.pop(key, None)
+                removed += 1
+        if removed:
+            setattr(self, "_command_send_guard", guard)
+            block = getattr(self, "_last_command_guard_block", None)
+            if isinstance(block, dict):
+                block_key = str(block.get("key") or "")
+                block_identity = str(block.get("identity") or "")
+                if block_key in remove_keys or (identity != "主魂" and block_identity == identity):
+                    setattr(self, "_last_command_guard_block", {})
+            suffix = f" ({reason})" if reason else ""
+            self.common_command_logger().info(
+                f"Cleared {removed} command guard entr{'y' if removed == 1 else 'ies'} "
+                f"for [{identity}]{suffix}."
+            )
+        return removed
+
+    def _identity_state_for_update(self, identity):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity != "主魂" and hasattr(self, "get_avatar_state"):
+            return self.get_avatar_state(identity)
+        return self.state
+
+    def _set_identity_state_value(self, identity, key, value):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity != "主魂" and hasattr(self, "set_avatar_state"):
+            self.set_avatar_state(identity, key, value)
+        else:
+            self.state[key] = value
+
+    def _field_training_due_after_recovery(self, identity):
+        state = self._identity_state_for_update(identity)
+        floor = self._future_time_from_last(
+            state.get("last_field_training_time", ""),
+            FIELD_TRAINING_CD_SECONDS,
+        )
+        next_time = state.get("next_field_training_time", "")
+        if not floor and (not next_time or is_future(next_time)):
+            self._set_identity_state_value(identity, "next_field_training_time", now_str())
+
+    def record_identity_yuanying_recovery_from_text(self, identity, text, source="", command=""):
+        identity = str(identity or "主魂").strip() or "主魂"
+        log = self.common_command_logger()
+        if is_yuanying_rebirth_success_response(text):
+            self.clear_identity_pause(identity, reason=f"{source or command or 'rebirth success'}")
+            self.clear_identity_command_guard(identity, reason="yuanying rebirth success")
+            if identity == "主魂":
+                self.state["yuanying_out_active"] = False
+                self.state["yuanying_out_end_time"] = ""
+                self.state["last_yuanying_return_time"] = now_str()
+            self._field_training_due_after_recovery(identity)
+            self.save_state()
+            log.info(f"Yuanying rebirth success synced for [{identity}] from {source or command or 'message'}.")
+            return True
+
+        if not is_yuanying_rebirth_block_response(text):
+            return False
+
+        current_remaining = self.identity_pause_seconds(identity)
+        if current_remaining > YUANYING_REBIRTH_PENDING_PAUSE_SECONDS:
+            pause_until = self.identity_pause_entry(identity).get("until", "")
+        else:
+            pause_until = self.set_identity_pause(
+                identity,
+                YUANYING_REBIRTH_PENDING_PAUSE_SECONDS,
+                "元婴虚弱/待夺舍重生",
+            )
+        self.clear_identity_command_guard(identity, reason="yuanying rebirth pending")
+        self._set_identity_state_value(identity, "next_field_training_time", pause_until)
+        self.save_state()
+        log.warning(
+            f"Yuanying rebirth pending for [{identity}] from {source or command or 'message'}; "
+            f"auto commands paused until {pause_until}."
+        )
+        return True
+
     async def wait_while_identity_paused(self, identity, command=""):
         """Wait outside physical send locks while one identity is paused."""
         identity = str(identity or "主魂").strip() or "主魂"
@@ -345,6 +473,53 @@ class CommonCommandMixin:
         if floor and next_time == floor:
             log.info(f"{next_key}: retry preserved cooldown floor{detail}, next at {next_time}.")
         return next_time
+
+    def meditation_cultivation_retry_seconds(self, text):
+        """Return retry seconds when .闭关修炼 replies with a cultivation cooldown."""
+        clean = str(text or "").replace("**", "").replace(" ", "")
+        if not clean or "闭关" not in clean:
+            return 0
+        if "正在深度闭关" in clean or "已在深度闭关" in clean:
+            return 0
+        cooldown_markers = (
+            "需要打坐",
+            "调息",
+            "方可再次闭关",
+            "方可进行下一次",
+            "冷却",
+            "无法立即",
+            "尚未平复",
+            "心浮气躁",
+        )
+        if not any(marker in clean for marker in cooldown_markers):
+            return 0
+        try:
+            retry_seconds = self.parse_wait_time(text, line_identifier="闭关")
+        except TypeError:
+            retry_seconds = self.parse_wait_time(text)
+        if retry_seconds <= 0:
+            retry_seconds = self.parse_wait_time(text)
+        return retry_seconds if retry_seconds > 0 else 600
+
+    def defer_meditation_after_cultivation_cooldown(self, identity, text, source=".闭关修炼"):
+        """.闭关修炼 rest text is informational; deep meditation must still start immediately."""
+        retry_seconds = self.meditation_cultivation_retry_seconds(text)
+        if retry_seconds <= 0:
+            return 0
+
+        identity = str(identity or "主魂").strip() or "主魂"
+        self.common_command_logger().info(
+            f"[{identity}] {source}: cultivation cooldown detected; "
+            f"continuing to .深度闭关 immediately."
+        )
+        return 0
+
+    def meditation_defer_until(self, state):
+        """Return a future deep-meditation retry time in a state dict."""
+        if not isinstance(state, dict):
+            return ""
+        value = state.get("next_meditation_retry_time", "")
+        return value if value and is_future(value) else ""
 
     # ---- Dashboard 自定义指令调度 ----
 
@@ -466,6 +641,84 @@ class CommonCommandMixin:
     def state_time_command_for_key(self, key):
         return STATE_TIME_COMMAND_MAP.get(str(key or ""))
 
+    def command_matches_prefix(self, command, prefix):
+        command = str(command or "").strip()
+        prefix = str(prefix or "").strip()
+        return bool(command and prefix and (command == prefix or command.startswith(f"{prefix} ")))
+
+    def time_critical_identity_command(self, command):
+        return any(
+            self.command_matches_prefix(command, prefix)
+            for prefix in TIME_CRITICAL_COMMAND_PREFIXES
+        )
+
+    def latest_command_sent_at(self, identity, command):
+        cache = getattr(self, "_last_command_sent_at_by_identity_command", None)
+        if not isinstance(cache, dict):
+            return ""
+        return cache.get((str(identity or "主魂"), str(command or "").strip()), "")
+
+    def time_critical_identity_wait(self, identity, exclude_command=""):
+        identity = str(identity or "主魂").strip() or "主魂"
+        exclude_command = str(exclude_command or "").strip()
+        states = []
+        if identity == "主魂":
+            states.append(getattr(self, "state", {}))
+        elif identity in (getattr(self, "avatars", []) or []) and hasattr(self, "get_avatar_state"):
+            states.append(self.get_avatar_state(identity))
+
+        candidates = []
+        for state in states:
+            if not isinstance(state, dict):
+                continue
+            for key, value in state.items():
+                command = self.state_time_command_for_key(key)
+                if not command or not self.time_critical_identity_command(command):
+                    continue
+                if exclude_command and self.command_matches_prefix(exclude_command, command):
+                    continue
+                if self.state_time_command_paused(key, identity):
+                    continue
+                if isinstance(value, str) and value:
+                    candidates.append(seconds_until(value) if is_future(value) else 0)
+
+            if (
+                (state.get("spirit_tree_guard_pending") or state.get("spirit_tree_invasion_status"))
+                and not self.command_matches_prefix(exclude_command, ".协同守山")
+                and not self.dashboard_command_paused(".协同守山", identity)
+            ):
+                candidates.append(0)
+            if (
+                state.get("spirit_tree_harvest_pending")
+                and not self.command_matches_prefix(exclude_command, ".采摘灵果")
+                and not self.dashboard_command_paused(".采摘灵果", identity)
+            ):
+                candidates.append(0)
+
+        if (
+            hasattr(self, "get_spirit_tree_irrigation_time")
+            and not self.command_matches_prefix(exclude_command, ".灵树灌溉")
+            and not self.dashboard_command_paused(".灵树灌溉", identity)
+        ):
+            value = self.get_spirit_tree_irrigation_time(identity)
+            if value:
+                candidates.append(seconds_until(value) if is_future(value) else 0)
+
+        return min(candidates) if candidates else -1
+
+    def time_critical_defer_wait(self, identity, command, timeout=45):
+        if self.time_critical_identity_command(command):
+            return -1
+        wait = self.time_critical_identity_wait(identity, exclude_command=command)
+        if wait < 0:
+            return -1
+        try:
+            timeout = float(timeout)
+        except Exception:
+            timeout = 45
+        window = min(120, max(10, timeout + 5))
+        return wait if wait <= window else -1
+
     def state_time_command_paused(self, key, identity=""):
         command = self.state_time_command_for_key(key)
         if not command:
@@ -526,7 +779,7 @@ class CommonCommandMixin:
         wait = int(block.get("wait") or 0)
         if reason == "dashboard_disabled":
             wait = wait or default_seconds
-        elif reason in {"command_guard", "bot_health"}:
+        elif reason in {"command_guard", "bot_health", "identity_pause"}:
             wait = wait or 60
         elif reason == "disabled":
             wait = default_seconds
@@ -668,11 +921,16 @@ class CommonCommandMixin:
                 "last_field_training_time",
                 "next_field_training_time",
                 FIELD_TRAINING_CD_SECONDS,
-                600,
+                FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS,
                 "missing response",
             )
             self.save_state()
             log.warning(f"Field training: missing response; retry at {self.state['next_field_training_time']}.")
+            return False
+
+        if self.record_identity_yuanying_recovery_from_text(
+            "主魂", text, source=context, command=FIELD_TRAINING_COMMAND
+        ):
             return False
 
         cd = self.parse_wait_time(text)
@@ -758,11 +1016,16 @@ class CommonCommandMixin:
                 "last_field_training_time",
                 "next_field_training_time",
                 FIELD_TRAINING_CD_SECONDS,
-                600,
+                FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS,
                 f"missing response [{identity}]",
             )
             update_avatar({"next_field_training_time": next_time})
             log.warning(f"Avatar [{identity}] field training: missing response; retry at {next_time}.")
+            return False
+
+        if self.record_identity_yuanying_recovery_from_text(
+            identity, text, source=context, command=FIELD_TRAINING_COMMAND
+        ):
             return False
 
         cd = self.parse_wait_time(text)
@@ -1105,7 +1368,12 @@ class CommonCommandMixin:
             log = self.common_command_logger()
             cmd = getattr(self, 'field_training_command', FIELD_TRAINING_COMMAND)
             log.info(f"Field training due: sending {cmd}.")
-            resp = await self.send_and_wait_feedback(cmd, timeout=90, max_retries=0)
+            resp = await self.send_and_wait_feedback(
+                cmd,
+                timeout=90,
+                max_retries=0,
+                suppress_no_response_alert=True,
+            )
             self.record_field_training_response(resp)
             await asyncio.sleep(5)
 
