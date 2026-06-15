@@ -4952,8 +4952,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         if a_state.get("in_deep_meditation"):
             end_time = a_state.get("deep_meditation_end_time", "")
             suffix = f" until {end_time}" if end_time else ""
-            log.info(f"Avatar [{avatar}] formation assist skipped: in deep meditation{suffix}.")
-            return False
+            log.info(f"Avatar [{avatar}] formation assist: trying direct assist while in deep meditation{suffix}; no force exit before success.")
         return True
 
     def message_effective_time_str(self, msg):

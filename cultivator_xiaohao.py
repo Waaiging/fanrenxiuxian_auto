@@ -4422,10 +4422,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
     async def prepare_avatar_for_formation_assist(self, avatar):
         a_state = self.get_avatar_state(avatar)
-        if not a_state.get("in_deep_meditation"):
-            return True
-        log.info(f"Avatar {avatar}: formation assist skipped; force exit is only scheduled after successful formation.")
-        return False
+        if a_state.get("in_deep_meditation"):
+            log.info(f"Avatar {avatar}: trying direct formation assist while in deep meditation; no force exit before success.")
+        return True
 
     FORMATION_PAIRS = {
         "缘生子": "素心子",

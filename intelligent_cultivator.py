@@ -7039,10 +7039,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
     async def prepare_avatar_for_formation_assist(self, avatar):
             """助阵前检查化身是否可直接助阵；强行出关只在助阵成功 5小时55分后执行。"""
             a_state = self.get_avatar_state(avatar)
-            if not a_state.get("in_deep_meditation"):
-                return True
-            log.info(f"Avatar [{avatar}] formation assist skipped: in deep meditation; force exit is only scheduled after successful formation.")
-            return False
+            if a_state.get("in_deep_meditation"):
+                log.info(f"Avatar [{avatar}] formation assist: trying direct assist while in deep meditation; no force exit before success.")
+            return True
 
     async def maybe_assist_target_formation_invite(self, formation_msg):
             """实时响应副号三分身的阵法邀请。"""

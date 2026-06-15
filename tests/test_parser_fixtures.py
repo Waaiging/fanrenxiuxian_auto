@@ -1174,7 +1174,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.is_formation_pending("【周天星斗大阵-启】正在布设大阵，尚需 2 位道友助阵。"))
         self.assertTrue(actor.is_formation_success("【周天星斗大阵-成】大阵已成，星辉流转。"))
 
-    def test_main_formation_assist_does_not_force_exit_before_assist(self):
+    def test_main_formation_assist_allows_meditation_without_force_exit(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["素缘子"]
         actor.avatar_nicknames = {}
@@ -1188,10 +1188,10 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback_identity = fake_send
 
-        self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("素缘子")))
+        self.assertTrue(asyncio.run(actor.prepare_avatar_for_formation_assist("素缘子")))
         self.assertEqual(sent, [])
 
-    def test_xiaohao_formation_assist_does_not_force_exit_before_assist(self):
+    def test_xiaohao_formation_assist_allows_meditation_without_force_exit(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.avatars = ["素心子"]
         actor.state = {"avatars": {"素心子": {"in_deep_meditation": True}}}
@@ -1204,10 +1204,10 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback_identity = fake_send
 
-        self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("素心子")))
+        self.assertTrue(asyncio.run(actor.prepare_avatar_for_formation_assist("素心子")))
         self.assertEqual(sent, [])
 
-    def test_sub_formation_assist_skips_cooldown_and_meditation(self):
+    def test_sub_formation_assist_skips_cooldown_and_allows_meditation(self):
         actor = SubCultivator.__new__(SubCultivator)
         actor.avatars = ["厚土", "缘生子", "寻真子"]
         actor.avatar_nicknames = {}
@@ -1223,7 +1223,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.formation_invite_actor_identity("@Ding303 正在布设大阵"), "寻真子")
         self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("厚土")))
-        self.assertFalse(asyncio.run(actor.prepare_avatar_for_formation_assist("缘生子")))
+        self.assertTrue(asyncio.run(actor.prepare_avatar_for_formation_assist("缘生子")))
 
     def test_global_spirit_tree_mature_status_from_untracked_reply_is_accepted(self):
         actor = Cultivator.__new__(Cultivator)
@@ -2172,19 +2172,20 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(a_state["next_dream_map_time"])
         self.assertEqual(alerts, [])
 
-    def test_formation_invite_watchlist_includes_xunzhenzi(self):
-        invite = """
+    def test_formation_invite_watchlist_includes_sub_avatars(self):
+        for username in ("Crayonxxin", "Lvdoumiao", "Ding303"):
+            invite = f"""
 **【周天星斗大阵-启】**
-【星宫】弟子 @Ding303 正在布设大阵，尚需 **1** 位同门相助！
+【星宫】弟子 @{username} 正在布设大阵，尚需 **1** 位同门相助！
 请其他星宫弟子在 **60秒** 内回复此消息使用 `.助阵`！
 """
-        main = Cultivator.__new__(Cultivator)
-        main.avatar_usernames = {}
-        self.assertTrue(main.is_target_formation_invite(invite))
+            main = Cultivator.__new__(Cultivator)
+            main.avatar_usernames = {}
+            self.assertTrue(main.is_target_formation_invite(invite))
 
-        xiaohao = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        xiaohao.avatar_usernames = {}
-        self.assertTrue(xiaohao.is_target_formation_invite(invite))
+            xiaohao = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            xiaohao.avatar_usernames = {}
+            self.assertTrue(xiaohao.is_target_formation_invite(invite))
 
     def test_dashboard_shows_wujiuzi_yuanying_and_rift(self):
         panels = build_command_panels("main", {"avatars": {"无咎子": {}}})
