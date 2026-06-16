@@ -3329,6 +3329,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         clean = str(text or "")
         return "尚未派遣任何灵兽出战" in clean or ("无法执行此任务" in clean and "灵兽出战" in clean)
 
+    def is_steal_accepted_response(self, text):
+        """检测灵兽偷菜已受理或已结算的正常回复。"""
+        clean = str(text or "")
+        return any(k in clean for k in [
+            "成功", "获得", "偷菜", "已领命", "潜行",
+            "已锁定目标", "正在准备动手",
+        ])
+
     def handle_beast_deploy_failure_for_steal(self, beast_name, response_text, context):
         """Handle explicit deploy failures before steal without emitting unknown alerts."""
         if not response_text:
@@ -3488,7 +3496,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if s_cd > 0:
                 self.state["last_steal_time"] = add_seconds_str(now_str(), s_cd - 14400)
                 self.state["next_steal_time"] = add_seconds_str(now_str(), s_cd)
-            elif any(k in s_resp for k in ["成功", "获得", "偷菜", "已领命", "潜行"]):
+            elif self.is_steal_accepted_response(s_resp):
                 self.state["last_steal_time"] = now_str()
                 self.state["next_steal_time"] = add_seconds_str(now_str(), 14400)
                 self.set_best_beast_status(best_name, "出战中")
@@ -4137,7 +4145,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 self.state["next_steal_time"] = add_seconds_str(now_str(), 600)
                 self.save_state()
                 return True
-            if any(k in str(text or "") for k in ["成功", "获得", "偷菜", "已领命", "潜行"]):
+            if self.is_steal_accepted_response(text):
                 self.state["last_steal_time"] = now_str()
                 self.state["next_steal_time"] = add_seconds_str(now_str(), 14400)
                 self.save_state()

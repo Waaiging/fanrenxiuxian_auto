@@ -777,6 +777,36 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "出战中")
         self.assertTrue(actor.state.get("next_steal_time"))
 
+    def test_steal_pending_target_lock_counts_as_accepted(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "保龄球", "species": "一阶灵兽", "status": "出战中", "power": 120, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+        pending_text = "灵兽已锁定目标：**@q** 的药园，其中一块灵田种着**【清灵草】**！\n正在准备动手..."
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return pending_text
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
+        self.assertEqual(sent, [".灵兽偷菜"])
+        self.assertTrue(actor.state.get("next_steal_time"))
+
+    def test_manual_steal_pending_target_lock_updates_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        actor.save_state = lambda: None
+        text = "灵兽已锁定目标：**@q** 的药园，其中一块灵田种着**【清灵草】**！\n正在准备动手..."
+
+        self.assertTrue(actor.record_manual_beast_command_response(".灵兽偷菜", text))
+        self.assertTrue(actor.state.get("next_steal_time"))
+
     def test_abyss_prefers_focus_beast_when_healthy(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         cache = [
