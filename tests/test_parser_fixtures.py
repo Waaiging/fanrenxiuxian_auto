@@ -1087,6 +1087,32 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(state["in_deep_meditation"])
         self.assertFalse(state["meditation_restart_pending"])
         self.assertEqual(state["next_meditation_retry_time"], "")
+        self.assertTrue(state["deep_meditation_guard_until"])
+
+    def test_xiaohao_avatar_meditation_guard_suppresses_polluted_check_only(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["素心子"]
+        actor.avatar_nicknames = {"素心子": ""}
+        future = (datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "avatars": {
+                "素心子": {
+                    "in_deep_meditation": False,
+                    "deep_meditation_end_time": "",
+                    "deep_meditation_guard_until": future,
+                    "meditation_restart_pending": True,
+                    "next_meditation_retry_time": "",
+                }
+            }
+        }
+        actor.save_state = lambda: None
+
+        self.assertFalse(actor.avatar_meditation_needs_attention("素心子"))
+
+        actor.mark_avatar_meditation_restart_pending("素心子", "passive settlement")
+        state = actor.get_avatar_state("素心子")
+        self.assertEqual(state["deep_meditation_guard_until"], future)
+        self.assertFalse(actor.avatar_meditation_needs_attention("素心子"))
 
     def test_pasture_precheck_rests_focus_beast_instead_of_deploying(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

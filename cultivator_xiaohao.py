@@ -468,6 +468,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         avatar_default = {
             "in_deep_meditation": False,
             "deep_meditation_end_time": "",
+            "deep_meditation_guard_until": "",
             "meditation_restart_pending": False,
             "meditation_restart_mode": "",
             "next_meditation_retry_time": "",
@@ -530,6 +531,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         def normalize(container):
             nonlocal changed
             end_time = container.get("deep_meditation_end_time", "")
+            guard_time = container.get("deep_meditation_guard_until", "")
+            if guard_time and not is_future(guard_time):
+                container["deep_meditation_guard_until"] = ""
+                changed = True
+                guard_time = ""
+            if end_time and is_future(end_time) and not guard_time:
+                container["deep_meditation_guard_until"] = end_time
+                changed = True
+                guard_time = end_time
+            if not end_time and guard_time and is_future(guard_time):
+                container["deep_meditation_end_time"] = guard_time
+                container["in_deep_meditation"] = True
+                changed = True
+                end_time = guard_time
             if end_time and not is_future(end_time):
                 container["deep_meditation_end_time"] = ""
                 container["in_deep_meditation"] = False
@@ -569,11 +584,22 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         a_state = self.get_avatar_state(avatar)
         a_state["in_deep_meditation"] = False
         a_state["deep_meditation_end_time"] = ""
+        if source != "passive settlement":
+            a_state["deep_meditation_guard_until"] = ""
         a_state["meditation_restart_pending"] = True
         self.save_state()
         log.info(f"Avatar [{avatar}] meditation restart pending ({source}).")
 
+    def avatar_meditation_guard_active(self, avatar):
+        a_state = self.get_avatar_state(avatar)
+        guard_time = a_state.get("deep_meditation_guard_until", "")
+        return bool(guard_time and is_future(guard_time))
+
     def avatar_meditation_needs_attention(self, avatar):
+        # The guard only suppresses early meditation-maintenance checks.
+        # Other avatar commands may still run while deep meditation is active.
+        if self.avatar_meditation_guard_active(avatar):
+            return False
         a_state = self.get_avatar_state(avatar)
         retry_time = self.meditation_defer_until(a_state)
         if retry_time and is_future(retry_time):
@@ -741,8 +767,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             else:
                 cd = self.parse_wait_time(text)
                 if cd > 0:
+                    end_time = add_seconds_str(now, cd)
                     self.update_avatar_states(avatar, {
-                        "deep_meditation_end_time": add_seconds_str(now, cd),
+                        "deep_meditation_end_time": end_time,
+                        "deep_meditation_guard_until": end_time,
                         "in_deep_meditation": True,
                         "meditation_restart_pending": False,
                         "next_meditation_retry_time": "",
@@ -6017,8 +6045,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                     "did not return a remaining time; using 8h fallback."
                 )
 
+        end_time = add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600)
         self.update_avatar_states(avatar, {
-            "deep_meditation_end_time": add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600),
+            "deep_meditation_end_time": end_time,
+            "deep_meditation_guard_until": end_time,
             "in_deep_meditation": True,
             "next_meditation_retry_time": "",
             "next_meditation_time": "",
@@ -6076,8 +6106,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
 
                 if cd > 0:
                     # 仍在闭关中
+                    end_time = add_seconds_str(now_str(), cd)
                     self.update_avatar_states(avatar, {
-                        "deep_meditation_end_time": add_seconds_str(now_str(), cd),
+                        "deep_meditation_end_time": end_time,
+                        "deep_meditation_guard_until": end_time,
                         "in_deep_meditation": True,
                         "next_meditation_retry_time": "",
                         "next_meditation_time": "",
@@ -6125,9 +6157,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             log.info(f"Avatar [{avatar}] .查看闭关: 已在深度闭关中。")
             cd = self.parse_wait_time(check_text)
             if cd > 0:
+                end_time = add_seconds_str(now_str(), cd)
                 self.update_avatar_states(avatar, {
                     "in_deep_meditation": True,
-                    "deep_meditation_end_time": add_seconds_str(now_str(), cd),
+                    "deep_meditation_end_time": end_time,
+                    "deep_meditation_guard_until": end_time,
                     "meditation_restart_pending": False,
                     "next_meditation_retry_time": "",
                     "next_meditation_time": "",
