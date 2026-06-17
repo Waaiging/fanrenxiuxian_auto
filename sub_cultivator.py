@@ -816,17 +816,20 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             )
 
         now = now_str()
+        is_retreat_settlement = "元婴闭关结算" in str(text or "").replace("**", "")
 
         if avatar == "主魂" or attribution_reliable:
-            if self.record_yuanying_out_active_response(text, source=f"passive {avatar}", identity=avatar):
+            if is_retreat_settlement and tracked_command_identity_for_reply(self, msg) != "主魂":
+                log.info("Ignored untracked 元婴闭关结算; reply is not tied to sub main soul.")
+            elif self.record_yuanying_out_active_response(text, source=f"passive {avatar}", identity=avatar):
                 self.save_state()
             elif self.record_yuanying_out_settlement_response(text, source=f"passive {avatar}", identity=avatar):
                 self.save_state()
 
         # ---- 闭关相关（主魂+化身） ----
         # 强行出关 / 明确闭关结算 → 清除深度闭关状态
-        _is_real_exit = any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"])
-        _is_deep_settlement = is_deep_meditation_settlement_response(text)
+        _is_real_exit = (not is_retreat_settlement) and any(k in text for k in ["强行出关", "出关成功", "已出关", "闭关结束"])
+        _is_deep_settlement = (not is_retreat_settlement) and is_deep_meditation_settlement_response(text)
         if _is_real_exit or _is_deep_settlement:
             if avatar == "主魂":
                 self.state["in_deep_meditation"] = False

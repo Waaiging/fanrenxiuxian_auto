@@ -2122,6 +2122,44 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(actor.state["yuanying_out_active"])
         self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
 
+    def test_sub_main_yuanying_retreat_passive_settlement_requires_main_reply(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.avatars = ["厚土", "缘生子", "寻真子"]
+        actor.avatar_usernames = {}
+        actor.identity_usernames = {"主魂": {"gamling33"}}
+        actor.command_avatar_map = {}
+        actor._current_identity = "主魂"
+        actor.my_info = SimpleNamespace(username="Gamling33", first_name="")
+        actor.notify_users = []
+        actor.target_chat_id = -100123456
+        future = (datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "yuanying_out_active": True,
+            "yuanying_out_end_time": future,
+            "next_yuanying_out_time": future,
+            "last_yuanying_out_time": "2020-01-01 00:00:00",
+            "in_deep_meditation": True,
+            "deep_meditation_end_time": future,
+            "avatars": {},
+        }
+        actor.save_state = lambda: None
+
+        text = "@Gamling33\n【元婴闭关结算】元婴闭关结束，获得修为 +2000。"
+        actor.maybe_record_avatar_passive_states(DummyMessage(4101, text=text))
+
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["next_yuanying_out_time"], future)
+        self.assertTrue(actor.state["in_deep_meditation"])
+        self.assertEqual(actor.state["deep_meditation_end_time"], future)
+
+        actor.command_avatar_map = {4001: "主魂"}
+        actor.maybe_record_avatar_passive_states(DummyMessage(4102, text=text, reply_to_msg_id=4001))
+
+        self.assertFalse(actor.state["yuanying_out_active"])
+        self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
+        self.assertTrue(actor.state["in_deep_meditation"])
+        self.assertEqual(actor.state["deep_meditation_end_time"], future)
+
     def test_lingxiao_avatar_yuanying_and_rift_use_avatar_state(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["无咎子"]
