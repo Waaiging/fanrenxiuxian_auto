@@ -485,10 +485,11 @@ class ConcubineMixin:
             names.add(state_name)
         return {name for name in names if name}
 
-    def concubine_status_has_identity_marker(self, text, identity="主魂"):
+    def concubine_status_trusted_for_identity(self, text, identity="主魂"):
+        """Return whether the status text is safely attributable to identity."""
         identity = identity or "主魂"
         if identity == "主魂":
-            return False
+            return not re.search(r"\[Avatar:\s*[^\]\r\n]+\]", str(text or ""))
         return f"[Avatar: {identity}]" in str(text or "")
 
     def record_concubine_name_from_text(self, identity="主魂", text=""):
@@ -499,7 +500,7 @@ class ConcubineMixin:
         expected = self.expected_concubine_names(identity)
         state = self._concubine_state_container(identity)
         if expected and name not in expected:
-            if self.concubine_status_has_identity_marker(text, identity):
+            if self.concubine_status_trusted_for_identity(text, identity):
                 now = now_str()
                 state["concubine_name"] = name
                 state["last_concubine_name_time"] = now
@@ -507,7 +508,7 @@ class ConcubineMixin:
                 state["last_concubine_status_mismatch_time"] = ""
                 self.save_state()
                 log.warning(
-                    f"Concubine status [{identity}] updated trusted avatar concubine "
+                    f"Concubine status [{identity}] updated trusted concubine "
                     f"name from {sorted(expected)} to {name}."
                 )
                 return name
@@ -536,7 +537,7 @@ class ConcubineMixin:
         if not name:
             return True
         if expected and name not in expected:
-            if self.concubine_status_has_identity_marker(clean, identity):
+            if self.concubine_status_trusted_for_identity(clean, identity):
                 self.record_concubine_name_from_text(identity, clean)
                 return True
             state = self._concubine_state_container(identity or "主魂")

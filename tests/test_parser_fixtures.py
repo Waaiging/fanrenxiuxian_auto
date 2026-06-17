@@ -1159,7 +1159,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreater(seconds_until(actor.state["next_dream_map_time"]), 50 * 60)
         self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 50 * 60)
 
-    def test_sub_avatar_concubine_name_migrates_from_trusted_marker(self):
+    def test_trusted_avatar_concubine_name_migrates_for_any_identity(self):
         actor = SubCultivator.__new__(SubCultivator)
         actor.account_key = "sub"
         actor.avatars = ["寻真子"]
@@ -1192,6 +1192,39 @@ class ParserFixtureTests(unittest.TestCase):
         )))
         self.assertEqual(sent, [("寻真子", ".我的侍妾")])
         self.assertGreater(common_seconds_until(actor.state["avatars"]["寻真子"]["next_heart_trial_time"]), 500)
+
+    def test_main_concubine_name_migrates_from_trusted_unmarked_status(self):
+        actor = DummyConcubine()
+        actor.state["concubine_name"] = "慕沛灵"
+        status = """
+**你的道心侍妾: 【南宫婉】** (状态: 随行中)
+
+**【第二期机缘】**
+- 入梦寻图冷却: 479分钟
+- 共历心劫冷却: 可施展
+- 天机代卜冷却: 719分钟
+"""
+
+        self.assertTrue(actor.concubine_status_matches_identity(status, "主魂"))
+        self.assertEqual(actor.state["concubine_name"], "南宫婉")
+        self.assertEqual(actor.state["last_concubine_status_mismatch"], "")
+
+    def test_main_concubine_name_rejects_avatar_marked_status(self):
+        actor = DummyConcubine()
+        actor.state["concubine_name"] = "慕沛灵"
+        status = """
+[Avatar: 缘生子]
+**你的道心侍妾: 【瑶光】** (状态: 随行中)
+
+**【第二期机缘】**
+- 入梦寻图冷却: 479分钟
+- 共历心劫冷却: 可施展
+- 天机代卜冷却: 719分钟
+"""
+
+        self.assertFalse(actor.concubine_status_matches_identity(status, "主魂"))
+        self.assertEqual(actor.state["concubine_name"], "慕沛灵")
+        self.assertIn("got=瑶光", actor.state["last_concubine_status_mismatch"])
 
     def test_main_heart_trial_anchor_lost_syncs_cooldown_without_unknown_alert(self):
         actor = DummyConcubine()
