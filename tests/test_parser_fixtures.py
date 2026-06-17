@@ -1114,6 +1114,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["deep_meditation_guard_until"], future)
         self.assertFalse(actor.avatar_meditation_needs_attention("素心子"))
 
+        main_state = {"deep_meditation_end_time": future, "deep_meditation_guard_until": ""}
+        self.assertTrue(actor.ensure_meditation_guard_from_end_time(main_state))
+        self.assertEqual(main_state["deep_meditation_guard_until"], future)
+        self.assertTrue(actor.meditation_guard_active_for_state(main_state))
+
     def test_pasture_precheck_rests_focus_beast_instead_of_deploying(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

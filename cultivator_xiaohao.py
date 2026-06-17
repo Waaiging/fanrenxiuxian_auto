@@ -400,7 +400,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             "last_hunt_time": "", "last_steal_time": "", "last_abyss_time": "",
             "last_beast_interaction_time": "", "next_beast_interaction_time": "",
             "last_beast_cruise_time": "", "next_beast_cruise_time": "",
-            "deep_meditation_end_time": "", "in_deep_meditation": False,
+            "deep_meditation_end_time": "", "deep_meditation_guard_until": "", "in_deep_meditation": False,
             "concubine_recalled_for_meditation": False, "concubine_recalled_time": "",
             "next_hunt_time": "", "next_steal_time": "", "next_abyss_time": "",
             "next_pasture_time": "", "pasture_pending_count": 0,
@@ -590,10 +590,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         self.save_state()
         log.info(f"Avatar [{avatar}] meditation restart pending ({source}).")
 
+    def meditation_guard_active_for_state(self, state):
+        guard_time = (state or {}).get("deep_meditation_guard_until", "")
+        return bool(guard_time and is_future(guard_time))
+
     def avatar_meditation_guard_active(self, avatar):
         a_state = self.get_avatar_state(avatar)
-        guard_time = a_state.get("deep_meditation_guard_until", "")
-        return bool(guard_time and is_future(guard_time))
+        return self.meditation_guard_active_for_state(a_state)
+
+    def ensure_meditation_guard_from_end_time(self, state):
+        if not isinstance(state, dict):
+            return False
+        end_time = state.get("deep_meditation_end_time", "")
+        guard_time = state.get("deep_meditation_guard_until", "")
+        if end_time and is_future(end_time) and not (guard_time and is_future(guard_time)):
+            state["deep_meditation_guard_until"] = end_time
+            return True
+        return False
 
     def avatar_meditation_needs_attention(self, avatar):
         # The guard only suppresses early meditation-maintenance checks.
@@ -714,6 +727,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             if _is_real_exit or _is_deep_settlement:
                 self.state["in_deep_meditation"] = False
                 self.state["deep_meditation_end_time"] = ""
+                self.state["deep_meditation_guard_until"] = ""
                 self.state["next_meditation_retry_time"] = ""
                 self.state["next_meditation_time"] = ""
                 changed = True
@@ -723,6 +737,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 if is_not_deep_meditation_response(text) or is_deep_meditation_settlement_response(text):
                     self.state["in_deep_meditation"] = False
                     self.state["deep_meditation_end_time"] = ""
+                    self.state["deep_meditation_guard_until"] = ""
                     self.state["next_meditation_retry_time"] = ""
                     self.state["next_meditation_time"] = ""
                     changed = True
@@ -730,7 +745,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 else:
                     cd = self.parse_wait_time(text)
                     if cd > 0:
-                        self.state["deep_meditation_end_time"] = add_seconds_str(now, cd)
+                        end_time = add_seconds_str(now, cd)
+                        self.state["deep_meditation_end_time"] = end_time
+                        self.state["deep_meditation_guard_until"] = end_time
                         self.state["in_deep_meditation"] = True
                         self.state["next_meditation_retry_time"] = ""
                         self.state["next_meditation_time"] = ""
@@ -5982,6 +5999,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             retry_time = self.meditation_defer_until(self.state)
             if retry_time and is_future(retry_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time) + random.randint(10, 30))); continue
+            if self.ensure_meditation_guard_from_end_time(self.state):
+                self.save_state()
+            guard_time = self.state.get("deep_meditation_guard_until", "")
+            if guard_time and is_future(guard_time):
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(guard_time) + random.randint(10, 30))); continue
             end_time = self.state.get("deep_meditation_end_time", "")
             if self.state.get("in_deep_meditation") and end_time and is_future(end_time):
                 await self.sleep_until_meditation_check(end_time); continue
@@ -5996,22 +6018,28 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(3)
                 med_resp = await self.send_and_wait_feedback(".深度闭关"); cd_med = self.parse_wait_time(med_resp)
                 if any(k in med_resp for k in ["冷却", "后再试", "无法立即", "尚未平复"]):
-                    if cd_med > 0: self.state["in_deep_meditation"] = False; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), cd_med); return cd_med + random.randint(10, 30)
+                    if cd_med > 0: self.state["in_deep_meditation"] = False; self.state["deep_meditation_guard_until"] = ""; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), cd_med); return cd_med + random.randint(10, 30)
                 if any(k in med_resp for k in ["已进入", "深度闭关", "已在", "开启", "成功"]):
-                    self.state["deep_meditation_end_time"] = add_seconds_str(now_str(), cd_med if cd_med > 0 else 8 * 3600)
+                    end_time = add_seconds_str(now_str(), cd_med if cd_med > 0 else 8 * 3600)
+                    self.state["deep_meditation_end_time"] = end_time
+                    self.state["deep_meditation_guard_until"] = end_time
                     self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.state["next_meditation_time"] = ""; self.save_state()
                     await self.place_concubine_after_meditation_start(); return 300
                 if med_resp: notify_unrecognized_response(self, ".深度闭关", med_resp, log, "深度闭关")
-                self.state["in_deep_meditation"] = False; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600); self.save_state(); return 600
+                self.state["in_deep_meditation"] = False; self.state["deep_meditation_guard_until"] = ""; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600); self.save_state(); return 600
 
             resp = await self.send_and_wait_feedback(".查看闭关"); cd = self.parse_wait_time(resp); next_sleep = 300
-            if cd > 0: self.state["deep_meditation_end_time"] = add_seconds_str(now_str(), cd); self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.state["next_meditation_time"] = ""; self.save_state(); await self.sleep_until_meditation_check(self.state["deep_meditation_end_time"]); continue
+            if cd > 0:
+                end_time = add_seconds_str(now_str(), cd)
+                self.state["deep_meditation_end_time"] = end_time
+                self.state["deep_meditation_guard_until"] = end_time
+                self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.state["next_meditation_time"] = ""; self.save_state(); await self.sleep_until_meditation_check(self.state["deep_meditation_end_time"]); continue
             elif is_deep_meditation_settlement_response(resp): next_sleep = await settle_and_start_deep()
             elif is_not_deep_meditation_response(resp): next_sleep = await settle_and_start_deep()
             elif is_deep_meditation_ongoing_response(resp): self.state["in_deep_meditation"] = True; self.state["next_meditation_retry_time"] = ""; self.state["next_meditation_time"] = ""; self.save_state(); await asyncio.sleep(scheduler_sleep_seconds(600)); continue
             else:
                 if resp: notify_unrecognized_response(self, ".查看闭关", resp, log, "闭关状态")
-                self.state["in_deep_meditation"] = False; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600); self.save_state(); next_sleep = 600
+                self.state["in_deep_meditation"] = False; self.state["deep_meditation_guard_until"] = ""; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), 600); self.save_state(); next_sleep = 600
             self.save_state(); await asyncio.sleep(scheduler_sleep_seconds(next_sleep))
 
     # ---- 身外化身：分身闭关循环 ----
@@ -6027,6 +6055,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         if not self.is_avatar_deep_meditation_start_success(response_text):
             self.update_avatar_states(avatar, {
                 "in_deep_meditation": False,
+                "deep_meditation_guard_until": "",
                 "meditation_restart_pending": True,
                 "next_meditation_retry_time": add_seconds_str(now_str(), 600),
             })
@@ -6077,6 +6106,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 retry_time = self.meditation_defer_until(a_state)
                 if retry_time and is_future(retry_time):
                     await asyncio.sleep(min(seconds_until(retry_time), 300) + random.randint(10, 30))
+                    continue
+
+                if self.ensure_meditation_guard_from_end_time(a_state):
+                    self.save_state()
+                guard_time = a_state.get("deep_meditation_guard_until", "")
+                if guard_time and is_future(guard_time):
+                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(guard_time) + random.randint(10, 30)))
                     continue
 
                 if a_state.get("meditation_restart_mode") == "deep_only":
@@ -6703,8 +6739,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
                 resp_med = await self.send_and_wait_feedback(".查看闭关")
                 if resp_med:
                     cd_med = self.parse_wait_time(resp_med)
-                    if cd_med > 0: self.state["deep_meditation_end_time"] = add_seconds_str(now_str(), cd_med); self.state["in_deep_meditation"] = True
-                    elif is_deep_meditation_settlement_response(resp_med) or is_not_deep_meditation_response(resp_med): self.state["in_deep_meditation"] = False; self.state["deep_meditation_end_time"] = ""
+                    if cd_med > 0:
+                        end_time = add_seconds_str(now_str(), cd_med)
+                        self.state["deep_meditation_end_time"] = end_time
+                        self.state["deep_meditation_guard_until"] = end_time
+                        self.state["in_deep_meditation"] = True
+                    elif is_deep_meditation_settlement_response(resp_med) or is_not_deep_meditation_response(resp_med):
+                        self.state["in_deep_meditation"] = False
+                        self.state["deep_meditation_end_time"] = ""
+                        self.state["deep_meditation_guard_until"] = ""
             self.save_state(); self.startup_done.set(); log.info("Startup Sync: Finished. All loops released.")
         asyncio.create_task(startup_sync())
         asyncio.create_task(self.restore_pending_star_gazing_after_startup())
