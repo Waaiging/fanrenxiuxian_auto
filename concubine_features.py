@@ -485,6 +485,12 @@ class ConcubineMixin:
             names.add(state_name)
         return {name for name in names if name}
 
+    def concubine_status_has_identity_marker(self, text, identity="主魂"):
+        identity = identity or "主魂"
+        if identity == "主魂":
+            return False
+        return f"[Avatar: {identity}]" in str(text or "")
+
     def record_concubine_name_from_text(self, identity="主魂", text=""):
         identity = identity or "主魂"
         name = self.extract_concubine_name(text)
@@ -493,6 +499,18 @@ class ConcubineMixin:
         expected = self.expected_concubine_names(identity)
         state = self._concubine_state_container(identity)
         if expected and name not in expected:
+            if self.concubine_status_has_identity_marker(text, identity):
+                now = now_str()
+                state["concubine_name"] = name
+                state["last_concubine_name_time"] = now
+                state["last_concubine_status_mismatch"] = ""
+                state["last_concubine_status_mismatch_time"] = ""
+                self.save_state()
+                log.warning(
+                    f"Concubine status [{identity}] updated trusted avatar concubine "
+                    f"name from {sorted(expected)} to {name}."
+                )
+                return name
             now = now_str()
             state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"
             state["last_concubine_status_mismatch_time"] = now
@@ -518,6 +536,9 @@ class ConcubineMixin:
         if not name:
             return True
         if expected and name not in expected:
+            if self.concubine_status_has_identity_marker(clean, identity):
+                self.record_concubine_name_from_text(identity, clean)
+                return True
             state = self._concubine_state_container(identity or "主魂")
             now = now_str()
             state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"

@@ -1159,6 +1159,40 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreater(seconds_until(actor.state["next_dream_map_time"]), 50 * 60)
         self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 50 * 60)
 
+    def test_sub_avatar_concubine_name_migrates_from_trusted_marker(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.account_key = "sub"
+        actor.avatars = ["寻真子"]
+        actor.state = {"avatars": {"寻真子": {"concubine_name": "若兰"}}}
+        actor.save_state = lambda: None
+
+        status = """
+[Avatar: 寻真子]
+**你的道心侍妾: 【辛如音】** (状态: 随行中)
+
+**【第二期机缘】**
+- 入梦寻图冷却: 479分钟
+- 共历心劫冷却: 可施展
+- 天机代卜冷却: 719分钟
+"""
+
+        self.assertTrue(actor.concubine_status_matches_identity(status, "寻真子"))
+        self.assertEqual(actor.state["avatars"]["寻真子"]["concubine_name"], "辛如音")
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            return DummyMessage(2201, text=status)
+
+        actor.send_and_wait_feedback_identity = fake_send
+
+        self.assertTrue(asyncio.run(actor.sync_avatar_heart_trial_cooldown_after_failure(
+            "寻真子",
+            "fixture anchor lost",
+        )))
+        self.assertEqual(sent, [("寻真子", ".我的侍妾")])
+        self.assertGreater(common_seconds_until(actor.state["avatars"]["寻真子"]["next_heart_trial_time"]), 500)
+
     def test_main_heart_trial_anchor_lost_syncs_cooldown_without_unknown_alert(self):
         actor = DummyConcubine()
         ready_status = """
