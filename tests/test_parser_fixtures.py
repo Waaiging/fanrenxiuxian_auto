@@ -2452,6 +2452,35 @@ class ParserFixtureTests(unittest.TestCase):
             ".问心台",
         } & commands)
 
+    def test_nurture_spirit_loop_respects_dashboard_pause(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {"next_nurture_spirit_time": ""}
+        actor.is_running = True
+        actor.startup_done = asyncio.Event()
+        actor.startup_done.set()
+        sent = []
+
+        async def fake_wait_for_main():
+            return None
+
+        async def fake_wait_for_control_change(timeout):
+            actor.is_running = False
+            return True
+
+        async def fake_send(*args, **kwargs):
+            sent.append(args)
+            return ""
+
+        actor._wait_for_main_identity = fake_wait_for_main
+        actor.dashboard_command_paused = (
+            lambda command, identity: command == intelligent_cultivator.NURTURE_SPIRIT_COMMAND
+        )
+        actor.wait_for_dashboard_command_control_change = fake_wait_for_control_change
+        actor.send_and_wait_feedback = fake_send
+
+        asyncio.run(actor.run_nurture_spirit_loop())
+        self.assertEqual(sent, [])
+
     def test_dashboard_uses_identity_spirit_tree_irrigation_times(self):
         state = {
             "spirit_tree_status": "灌溉期",

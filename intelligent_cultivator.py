@@ -2412,6 +2412,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
+            if self.dashboard_command_paused(NURTURE_SPIRIT_COMMAND, "主魂"):
+                log.info(f"Nurture spirit paused by dashboard: {NURTURE_SPIRIT_COMMAND}.")
+                if not await self.wait_for_dashboard_command_control_change(300):
+                    await asyncio.sleep(300)
+                continue
+
             log.info(f"Nurture spirit due: sending {NURTURE_SPIRIT_COMMAND}.")
             resp = await self.send_and_wait_feedback(NURTURE_SPIRIT_COMMAND, timeout=90)
             self.record_nurture_spirit_response(resp)
