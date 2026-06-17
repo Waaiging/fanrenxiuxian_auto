@@ -437,7 +437,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
             "主魂": ["Waaiging"],
         }
         self.avatar_features = {
-            "无咎子": {"meditation_prefix": ".推命", "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True},
+            "无咎子": {"meditation_prefix": ".推命", "training_prefix_commands": [".推命 探索", ".改命 探索"], "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True},
             "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True, "yuanying_out": True, "rift_search": True},
             "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
         }
@@ -4893,7 +4893,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
 
 
     async def _avatar_field_training_check(self, avatar):
-        """化身野外历练检查（单次）。无咎子先发 .推命 探索，再发 .野外历练 深入"""
+        """化身野外历练检查（单次）。无咎子先发探索前置指令，再发 .野外历练 深入"""
         if self.avatar_meditation_needs_attention(avatar):
             log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
             return
@@ -4914,9 +4914,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin):
         training_cmd = features.get("training_cmd", ".野外历练")
         training_level = features.get("training_level", "")
         training_command = " ".join(part for part in (training_cmd, training_level) if part)
-        # 推命前缀：先发 ".推命 探索"，再发 ".野外历练 深入"
-        if prefix:
-            await self.send_and_wait_feedback_identity(avatar, f"{prefix} 探索")
+        training_prefix_commands = features.get("training_prefix_commands")
+        if training_prefix_commands is None:
+            training_prefix_commands = [f"{prefix} 探索"] if prefix else []
+        for prefix_command in training_prefix_commands:
+            await self.send_and_wait_feedback_identity(avatar, prefix_command)
             await asyncio.sleep(3)
         resp = await self.send_and_wait_feedback_identity(
             avatar,

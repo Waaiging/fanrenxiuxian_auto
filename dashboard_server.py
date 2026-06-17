@@ -157,6 +157,7 @@ LOG_SPIRIT_ROOT_RE = re.compile(r"(?:\*\*)?灵根(?:\*\*)?\s*[:：]\s*\**\s*([^\
 # 双段指令（指令+参数需要组合）
 TWO_PART_COMMANDS = {
     (".交换", "法宝"), (".抚摸法宝", "青竹蜂云剑"),
+    (".推命", "探索"), (".改命", "探索"),
     (".野外历练", "谨慎"), (".野外历练", "深入"),
 }
 OTHER_LOG_TAG = "其他"                    # 未分类日志标签
@@ -183,6 +184,7 @@ ACCOUNT_LOG_TAGS = {
         ".抚摸法宝 青竹蜂云剑",
         ".野外历练", ".野外历练 谨慎", ".野外历练 深入", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
+        ".推命 探索", ".改命 探索",
         OTHER_LOG_TAG,
     ],
     "sub": [
@@ -864,6 +866,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
             manual_command(".推命 探索", "推命探索", group="推命"),
+            manual_command(".改命 探索", "改命探索", group="推命"),
             time_command(state, "next_field_training_time", ".野外历练 深入", "野外历练", group="通用"),
             time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),

@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import concubine_features
 import cultivator_xiaohao
@@ -2413,6 +2414,7 @@ class ParserFixtureTests(unittest.TestCase):
         by_identity = {panel.get("identity"): panel for panel in panels}
 
         self.assertIn(".野外历练 深入", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
+        self.assertIn(".改命 探索", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
         self.assertIn(".野外历练", {row.get("command") for row in by_identity["缘生子"].get("commands", [])})
         self.assertIn(".野外历练", {row.get("command") for row in by_identity["素缘子"].get("commands", [])})
         self.assertNotIn(".野外历练 谨慎", {row.get("command") for row in by_identity["缘生子"].get("commands", [])})
@@ -2445,6 +2447,42 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(sent, [("缘生子", ".野外历练")])
         self.assertTrue(actor.state["avatars"]["缘生子"]["next_field_training_time"])
+
+    def test_main_wujiuzi_field_training_sends_destiny_change_before_deep_training(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["无咎子"]
+        actor.avatar_nicknames = {"无咎子": "天星雷总"}
+        actor.avatar_features = {
+            "无咎子": {
+                "meditation_prefix": ".推命",
+                "training_prefix_commands": [".推命 探索", ".改命 探索"],
+                "training_cmd": ".野外历练",
+                "training_level": "深入",
+            }
+        }
+        actor.state = {"avatars": {"无咎子": {"next_field_training_time": "", "last_field_training_time": ""}}}
+        actor.save_state = lambda: None
+        actor.avatar_meditation_needs_attention = lambda avatar: False
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            return "**【野外历练 · 灵机暗藏】**\n本次获得 **157** 点修为。"
+
+        async def fake_sleep(seconds):
+            return None
+
+        actor.send_and_wait_feedback_identity = fake_send
+
+        with patch.object(intelligent_cultivator.asyncio, "sleep", fake_sleep):
+            asyncio.run(actor._avatar_field_training_check("无咎子"))
+
+        self.assertEqual(sent, [
+            ("无咎子", ".推命 探索"),
+            ("无咎子", ".改命 探索"),
+            ("无咎子", ".野外历练 深入"),
+        ])
+        self.assertTrue(actor.state["avatars"]["无咎子"]["next_field_training_time"])
 
     def test_rift_beast_defeat_counts_as_consumed_attempt(self):
         actor = Cultivator.__new__(Cultivator)
