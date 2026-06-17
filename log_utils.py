@@ -469,8 +469,10 @@ def command_response_family(command):
         or cmd.startswith(".放生 ")
     ):
         return "beast"
-    if cmd in {".宗门点卯", ".闯塔", ".元婴出窍"}:
+    if cmd in {".宗门点卯", ".闯塔"}:
         return cmd
+    if cmd in {".元婴出窍", ".元婴闭关"}:
+        return ".元婴出窍"
     return ""
 
 
@@ -560,7 +562,7 @@ def text_response_family(text):
         return ".宗门点卯"
     if any(k in clean for k in ["闯塔", "塔钥", "试炼古塔", "重置古塔", "道心受挫", "挑战失败"]):
         return ".闯塔"
-    if any(k in clean for k in ["元婴出窍", "元神回响", "元神归窍总结", "元婴归窍总结"]):
+    if any(k in clean for k in ["元婴出窍", "元婴闭关", "元神回响", "元神归窍总结", "元婴归窍总结", "元婴闭关结算"]):
         return ".元婴出窍"
     return ""
 
@@ -678,9 +680,9 @@ def feedback_response_matches_command(command, text):
         )
     if expected == ".元婴出窍":
         return any(k in clean for k in [
-            "元婴出窍", "神游", "云游", "出窍", "自动结算",
+            "元婴出窍", "元婴闭关", "神游", "云游", "出窍", "自动结算",
             "尚未凝聚元婴", "无法施展此术", "元神回响",
-            "元神归窍总结", "元婴归窍总结",
+            "元神归窍总结", "元婴归窍总结", "元婴闭关结算",
         ])
     return False
 
@@ -1192,7 +1194,7 @@ def is_yuanying_out_settlement_response(text):
     compact = clean.replace(" ", "")
     if any(k in compact for k in ["尚未凝聚元婴", "无法施展此术"]):
         return False
-    if any(k in clean for k in ["元神归窍总结", "元婴归窍总结", "元神回响"]):
+    if any(k in clean for k in ["元神归窍总结", "元婴归窍总结", "元神回响", "元婴闭关结算"]):
         return True
     return (
         "元婴" in clean

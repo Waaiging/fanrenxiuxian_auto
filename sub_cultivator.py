@@ -205,6 +205,7 @@ MAIN_CONCUBINE_STATE_KEYS = {
 
 # -- 元婴出窍 --
 YUANYING_OUT_CD_SECONDS = 8 * 3600                  # 元婴出窍冷却 8 小时
+YUANYING_RETREAT_COMMAND = ".元婴闭关"              # 副号主魂改用元婴闭关循环
 
 # -- 探寻裂缝 --
 RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小时
@@ -2997,6 +2998,16 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             )
             return True
         now = now_str()
+        if identity == "主魂" and self.yuanying_command_for_identity(identity) == YUANYING_RETREAT_COMMAND:
+            state["last_yuanying_return_time"] = now
+            state["next_yuanying_out_time"] = add_seconds_str(now, 5)
+            state["yuanying_out_active"] = False
+            state["yuanying_out_end_time"] = ""
+            log.info(
+                f"{prefix}{YUANYING_RETREAT_COMMAND}: settlement detected ({source}); "
+                f"retry start at {state['next_yuanying_out_time']}."
+            )
+            return True
         if ".元婴出窍 response" in str(source):
             next_time = add_seconds_str(now, YUANYING_OUT_CD_SECONDS)
             state["last_yuanying_return_time"] = now
@@ -3034,6 +3045,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             return False
         active_markers = [
             "元婴出窍",
+            "元婴闭关",
             "元神出窍",
             "神游",
             "云游",
@@ -3043,6 +3055,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "正在执行`元神出窍`",
             "状态: 元神出窍",
             "状态：元神出窍",
+            "状态: 元婴闭关",
+            "状态：元婴闭关",
             "归来倒计时",
         ]
         if not any(k in clean for k in active_markers):
@@ -3050,7 +3064,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
         now = now_str()
         cd = self.parse_wait_time(clean)
-        start_markers = ["心念一动", "消失在天际", "将在外云游", "自动结算收获"]
+        start_markers = ["心念一动", "消失在天际", "将在外云游", "自动结算收获", "元婴闭关"]
         is_confirmed_start = any(k in clean for k in start_markers)
         already_active_unknown = any(k in clean for k in ["正在执行", "无法分身", "先使用 `.元婴归窍`", "先使用 .元婴归窍"])
         if is_confirmed_start:
@@ -3067,8 +3081,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         state["next_yuanying_out_time"] = next_time
         state["yuanying_out_end_time"] = next_time
         state["yuanying_out_active"] = True
-        log.info(f"{prefix}.元婴出窍: active state synced ({source}), return due at {next_time}.")
+        command_label = YUANYING_RETREAT_COMMAND if YUANYING_RETREAT_COMMAND in str(source) else ".元婴出窍"
+        log.info(f"{prefix}{command_label}: active state synced ({source}), return due at {next_time}.")
         return True
+
+    def yuanying_command_for_identity(self, identity="主魂"):
+        return YUANYING_RETREAT_COMMAND if str(identity or "主魂").strip() == "主魂" else ".元婴出窍"
 
     def record_yuanying_out_start_response(self, resp, identity="主魂"):
         """
@@ -3082,19 +3100,20 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             5. 不匹配 -> 告警，600 秒后重试。
         """
         identity = str(identity or "主魂").strip() or "主魂"
+        command = self.yuanying_command_for_identity(identity)
         state = self.identity_state_for_timed_command(identity)
         prefix = f"[{identity}] " if identity != "主魂" else ""
         if not resp:
             state["next_yuanying_out_time"] = add_seconds_str(now_str(), 3600)
             log.warning(
-                f"{prefix}.元婴出窍: response missing; retry at {state['next_yuanying_out_time']}."
+                f"{prefix}{command}: response missing; retry at {state['next_yuanying_out_time']}."
             )
             return False
 
-        if self.record_yuanying_out_active_response(resp, source=".元婴出窍 response", identity=identity):
+        if self.record_yuanying_out_active_response(resp, source=f"{command} response", identity=identity):
             return True
 
-        if self.record_yuanying_out_settlement_response(resp, source=".元婴出窍 response", identity=identity):
+        if self.record_yuanying_out_settlement_response(resp, source=f"{command} response", identity=identity):
             return False
 
         cd = self.parse_wait_time(resp)
@@ -3103,7 +3122,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             state["yuanying_out_active"] = False
             state["yuanying_out_end_time"] = ""
             log.info(
-                f"{prefix}.元婴出窍: cooldown from response {cd}s, next at "
+                f"{prefix}{command}: cooldown from response {cd}s, next at "
                 f"{state['next_yuanying_out_time']}."
             )
             return False
@@ -3114,17 +3133,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             state["yuanying_out_active"] = False
             state["yuanying_out_end_time"] = ""
             log.info(
-                f"{prefix}.元婴出窍 unavailable: next check at "
+                f"{prefix}{command} unavailable: next check at "
                 f"{state['next_yuanying_out_time']}."
             )
             return False
-        if not any(k in resp for k in ["元婴出窍", "神游", "云游", "出窍", "自动结算"]):
+        if not any(k in resp for k in ["元婴出窍", "元婴闭关", "神游", "云游", "出窍", "自动结算"]):
             state["next_yuanying_out_time"] = add_seconds_str(now, 3600)
             state["yuanying_out_active"] = False
             state["yuanying_out_end_time"] = ""
-            notify_unrecognized_response(self, ".元婴出窍", resp, log, "元婴出窍")
+            notify_unrecognized_response(self, command, resp, log, "元婴")
             log.info(
-                f"{prefix}.元婴出窍: unrecognized response; skipped until "
+                f"{prefix}{command}: unrecognized response; skipped until "
                 f"{state['next_yuanying_out_time']}."
             )
             return False
@@ -3135,7 +3154,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         state["yuanying_out_end_time"] = state["next_yuanying_out_time"]
         state["yuanying_out_active"] = True
         log.info(
-            f"{prefix}.元婴出窍: started, 自动归窍 due at {state['yuanying_out_end_time']}."
+            f"{prefix}{command}: started, due at {state['yuanying_out_end_time']}."
         )
         return True
 
@@ -3306,10 +3325,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
                 continue
 
-            # 冷却到期 -> 重新出窍
-            log.info("Yuanying ability due: sending .元婴出窍.")
-            resp = await self.send_and_wait_feedback(".元婴出窍", timeout=120, max_retries=0)
+            # 冷却到期 -> 重新开始主魂元婴闭关
+            command = self.yuanying_command_for_identity("主魂")
+            log.info(f"Yuanying ability due: sending {command}.")
+            resp = await self.send_and_wait_feedback(command, timeout=120, max_retries=0)
             self.record_yuanying_out_start_response(resp)
+            if command == YUANYING_RETREAT_COMMAND and is_yuanying_out_settlement_response(resp):
+                self.save_state()
+                await asyncio.sleep(5)
+                log.info(f"{command}: settlement consumed trigger message; sending again to start next cycle.")
+                resp = await self.send_and_wait_feedback(command, timeout=120, max_retries=0)
+                self.record_yuanying_out_start_response(resp)
             self.save_state()
             await asyncio.sleep(5)
 

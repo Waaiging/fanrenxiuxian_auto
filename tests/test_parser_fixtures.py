@@ -2083,6 +2083,45 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["yuanying_out_active"])
         self.assertGreater(wait, 7 * 3600)
 
+    def test_sub_main_yuanying_retreat_command_and_settlement_retry(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.state = {
+            "last_yuanying_out_time": "",
+            "next_yuanying_out_time": "",
+            "yuanying_out_end_time": "",
+            "yuanying_out_active": False,
+        }
+        actor.save_state = lambda: None
+
+        self.assertEqual(actor.yuanying_command_for_identity("主魂"), ".元婴闭关")
+        self.assertEqual(actor.yuanying_command_for_identity("厚土"), ".元婴出窍")
+        self.assertEqual(log_utils.command_response_family(".元婴闭关"), ".元婴出窍")
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            ".元婴闭关",
+            "【元婴闭关结算】闭关结束，清点收获。",
+        ))
+
+        self.assertTrue(actor.record_yuanying_out_start_response(
+            "你催动元婴闭关秘法，将在 **8小时** 后出关，下一次发言时将自动结算收获。",
+        ))
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertGreater(common_seconds_until(actor.state["next_yuanying_out_time"]), 7 * 3600)
+
+        actor.state["last_yuanying_out_time"] = "2020-01-01 00:00:00"
+        self.assertFalse(actor.record_yuanying_out_start_response(
+            "【元婴闭关结算】元婴闭关结束，获得修为 +1000。",
+        ))
+        self.assertFalse(actor.state["yuanying_out_active"])
+        self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
+
+        actor.state["last_yuanying_out_time"] = "2020-01-01 00:00:00"
+        self.assertTrue(actor.record_yuanying_out_settlement_response(
+            "【元婴闭关结算】元婴闭关结束，获得修为 +2000。",
+            source="passive 主魂",
+        ))
+        self.assertFalse(actor.state["yuanying_out_active"])
+        self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
+
     def test_lingxiao_avatar_yuanying_and_rift_use_avatar_state(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["无咎子"]
