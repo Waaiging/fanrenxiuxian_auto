@@ -1120,6 +1120,60 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(main_state["deep_meditation_guard_until"], future)
         self.assertTrue(actor.meditation_guard_active_for_state(main_state))
 
+    def test_xiaohao_avatar_guard_skips_early_meditation_check_send(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["素心子"]
+        actor.active_atomic_task = None
+        future = (datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "avatars": {
+                "素心子": {
+                    "in_deep_meditation": True,
+                    "deep_meditation_end_time": future,
+                    "deep_meditation_guard_until": future,
+                }
+            }
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_raw(command, *args, **kwargs):
+            sent.append(command)
+            return "sent"
+
+        actor._send_and_wait_feedback_raw = fake_raw
+
+        resp = asyncio.run(actor.send_and_wait_feedback_identity("素心子", ".查看闭关"))
+
+        self.assertEqual(sent, [])
+        self.assertIn("正在深度闭关", resp)
+        self.assertIn("预计还需", resp)
+
+    def test_xiaohao_main_guard_skips_early_meditation_check_send(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = []
+        actor.active_atomic_task = None
+        future = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "in_deep_meditation": True,
+            "deep_meditation_end_time": future,
+            "deep_meditation_guard_until": future,
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_raw(command, *args, **kwargs):
+            sent.append(command)
+            return "sent"
+
+        actor._send_and_wait_feedback_raw = fake_raw
+
+        resp = asyncio.run(actor.send_and_wait_feedback(".查看闭关"))
+
+        self.assertEqual(sent, [])
+        self.assertIn("正在深度闭关", resp)
+        self.assertIn("预计还需", resp)
+
     def test_pasture_precheck_rests_focus_beast_instead_of_deploying(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

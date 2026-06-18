@@ -594,6 +594,31 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         guard_time = (state or {}).get("deep_meditation_guard_until", "")
         return bool(guard_time and is_future(guard_time))
 
+    def meditation_guard_wait_seconds_for_state(self, state):
+        if not isinstance(state, dict):
+            return 0
+        waits = []
+        guard_time = state.get("deep_meditation_guard_until", "")
+        if guard_time and is_future(guard_time):
+            waits.append(seconds_until(guard_time))
+        end_time = state.get("deep_meditation_end_time", "")
+        if state.get("in_deep_meditation") and end_time and is_future(end_time):
+            waits.append(seconds_until(end_time))
+        return max(waits) if waits else 0
+
+    def early_meditation_check_response(self, identity):
+        state = self.state if identity == "主魂" else self.get_avatar_state(identity)
+        if self.ensure_meditation_guard_from_end_time(state):
+            self.save_state()
+        wait_seconds = self.meditation_guard_wait_seconds_for_state(state)
+        if wait_seconds <= 0:
+            return ""
+        log.info(
+            f"[{identity}] skipped early .查看闭关; meditation guard active for "
+            f"{self.compact_seconds(wait_seconds)}."
+        )
+        return f"你正在深度闭关，预计还需 **{self.compact_seconds(wait_seconds)}** 即可功成圆满。"
+
     def avatar_meditation_guard_active(self, avatar):
         a_state = self.get_avatar_state(avatar)
         return self.meditation_guard_active_for_state(a_state)
@@ -1454,10 +1479,16 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         """
         带身份感知的物理串行发送管线。
         """
+        force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()
         while self.active_atomic_task is not None and self.active_atomic_task != current_t:
             await asyncio.sleep(0.5)
+
+        if str(message or "").strip() == ".查看闭关" and identity in self.avatars and not force_meditation_check:
+            guarded_resp = self.early_meditation_check_response(identity)
+            if guarded_resp:
+                return guarded_resp
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
@@ -1701,7 +1732,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
             log.error(f"Send Error [{message}] reply_to={target_reply}: {e}")
             return None
 
-    async def send_and_wait_feedback(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, force_identity_check=False, suppress_no_response_alert=False):
+    async def send_and_wait_feedback(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, force_identity_check=False, suppress_no_response_alert=False, force_meditation_check=False):
         """
         发送指令并等待回复（带 avatar_send_lock 保护）。
         所有主魂业务通过此方法发送。如果当前身份不是主魂，自动切回主魂再发送。
@@ -1710,6 +1741,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin):
         current_t = asyncio.current_task()
         while self.active_atomic_task is not None and self.active_atomic_task != current_t:
             await asyncio.sleep(0.5)
+
+        if str(message or "").strip() == ".查看闭关" and not force_meditation_check:
+            guarded_resp = self.early_meditation_check_response("主魂")
+            if guarded_resp:
+                return guarded_resp
 
         # 暂停守卫：等待恢复信号
         await self.pause_event.wait()
