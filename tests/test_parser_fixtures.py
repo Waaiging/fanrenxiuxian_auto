@@ -2221,6 +2221,33 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["yuanying_out_active"])
         self.assertGreater(common_seconds_until(actor.state["next_yuanying_out_time"]), 7 * 3600)
 
+        actor.state = {
+            "last_yuanying_out_time": "",
+            "next_yuanying_out_time": "",
+            "yuanying_out_end_time": "",
+            "yuanying_out_active": False,
+        }
+        self.assertTrue(actor.record_yuanying_out_start_response(
+            "你心念一动，元婴已在你丹田的次元空间内开始闭关，它将为你持续提供修为。",
+        ))
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["next_yuanying_out_time"], "")
+        self.assertEqual(actor.state["yuanying_out_end_time"], "")
+
+        actor.state = {
+            "last_yuanying_out_time": "2020-01-01 00:00:00",
+            "next_yuanying_out_time": "",
+            "yuanying_out_end_time": "",
+            "yuanying_out_active": False,
+        }
+        self.assertTrue(actor.record_yuanying_out_start_response(
+            "你的元婴正在执行“元婴闭关”任务，请先使用 `.元婴归窍` 将其召回。",
+        ))
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["last_yuanying_out_time"], "2020-01-01 00:00:00")
+        self.assertEqual(actor.state["next_yuanying_out_time"], "")
+        self.assertEqual(actor.state["yuanying_out_end_time"], "")
+
         actor.state["last_yuanying_out_time"] = "2020-01-01 00:00:00"
         self.assertFalse(actor.record_yuanying_out_start_response(
             "【元婴闭关结算】元婴闭关结束，获得修为 +1000。",
@@ -2235,6 +2262,42 @@ class ParserFixtureTests(unittest.TestCase):
         ))
         self.assertFalse(actor.state["yuanying_out_active"])
         self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
+
+    def test_sub_main_yuanying_retreat_settlement_reply_from_any_main_command(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.command_avatar_map = {5001: "主魂", 5002: "厚土"}
+        future = (datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "yuanying_out_active": True,
+            "yuanying_out_end_time": future,
+            "next_yuanying_out_time": future,
+            "last_yuanying_out_time": "2020-01-01 00:00:00",
+            "avatars": {"厚土": {}},
+        }
+        actor.save_state = lambda: None
+        text = """**【元婴闭关结算】**
+你的元婴在过去 **7** 小时内为你增加了 **7700** 点修为！
+"""
+
+        self.assertTrue(actor.maybe_record_main_yuanying_retreat_settlement_reply(
+            DummyMessage(5101, text=text, reply_to_msg_id=5001),
+            text,
+            source="fixture",
+        ))
+        self.assertFalse(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["yuanying_out_end_time"], "")
+        self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 10)
+
+        actor.state["yuanying_out_active"] = True
+        actor.state["yuanying_out_end_time"] = future
+        actor.state["next_yuanying_out_time"] = future
+        self.assertFalse(actor.maybe_record_main_yuanying_retreat_settlement_reply(
+            DummyMessage(5102, text=text, reply_to_msg_id=5002),
+            text,
+            source="fixture",
+        ))
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["next_yuanying_out_time"], future)
 
     def test_sub_main_yuanying_retreat_passive_settlement_requires_main_reply(self):
         actor = SubCultivator.__new__(SubCultivator)

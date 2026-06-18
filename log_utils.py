@@ -3302,7 +3302,7 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_beast_interaction_response(text))
         elif cmd.startswith(".灵兽巡游 ") and hasattr(actor, "record_beast_cruise_response"):
             processed = bool(actor.record_beast_cruise_response(text))
-    elif cmd == ".元婴出窍":
+    elif cmd in {".元婴出窍", ".元婴闭关"}:
         if hasattr(actor, "record_identity_yuanying_out_start_response"):
             processed = bool(actor.record_identity_yuanying_out_start_response(identity, text))
         elif hasattr(actor, "record_yuanying_out_start_response"):
