@@ -287,6 +287,65 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(state["pending_star_gazing_target_time"])
         self.assertEqual(len(scheduled), 1)
 
+    def test_sub_bad_manifest_cancels_same_round_pending_star_gazing(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 6, 18, 2, 58, 12)
+                return value.replace(tzinfo=tz) if tz else value
+
+        class PendingTask:
+            def __init__(self):
+                self.cancelled = False
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                self.cancelled = True
+
+        async def run_case():
+            actor = SubCultivator.__new__(SubCultivator)
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            task = PendingTask()
+            actor.star_gazing_task = task
+            with patch.object(sub_cultivator, "datetime", FixedDatetime):
+                manifest_dt = actor.star_gazing_target_for_opportunity()
+                manifest_key = manifest_dt.strftime("%Y-%m-%d %H:%M:%S")
+                send_key = (manifest_dt - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
+                actor.state = {
+                    "pending_star_gazing_date": "2026-06-18",
+                    "pending_star_gazing_target_time": send_key,
+                    "pending_star_gazing_scheduled_time": send_key,
+                    "pending_star_gazing_manifest_time": manifest_key,
+                    "pending_star_gazing_fate_type": "Good - 地磁暴动",
+                    "star_gazing_claimed_manifest_time": manifest_key,
+                    "star_gazing_claimed_avatar": "厚土",
+                    "next_star_gazing_time": send_key,
+                }
+                handled = await actor.maybe_handle_star_gazing_opportunity(
+                    DummyMessage(7303),
+                    """**【星盘显化】**
+@foo 闭目凝神，推演天机...星盘之上，天机已然显现！
+
+**下一次天道演化将是**: **【Bad - 心魔大劫】**
+**当前天命所归**: **@bar**
+""",
+                    SimpleNamespace(username="hantianzzzzzz_bot"),
+                )
+            return handled, actor.state, task.cancelled
+
+        handled, state, cancelled = asyncio.run(run_case())
+
+        self.assertTrue(handled)
+        self.assertTrue(cancelled)
+        self.assertEqual(state["pending_star_gazing_target_time"], "")
+        self.assertEqual(state["pending_star_gazing_manifest_time"], "")
+        self.assertEqual(state["star_gazing_claimed_manifest_time"], "")
+        self.assertEqual(state["star_gazing_claimed_avatar"], "")
+        self.assertEqual(state["next_star_gazing_time"], "")
+
     def test_main_command_sends_immediately_after_identity_switch_all_accounts(self):
         async def run_case(actor_cls, actor_module):
             actor = actor_cls.__new__(actor_cls)

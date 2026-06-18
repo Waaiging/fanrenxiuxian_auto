@@ -167,6 +167,7 @@ STAR_GAZING_DAILY_FALLBACK_HOUR = 23                # 每日备用观星时间�
 STAR_GAZING_DAILY_FALLBACK_MINUTE = 59
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
 # 以上关键字表示 Good 级别的观星结果，只有 Good 才触发观星和改换星移
+STAR_GAZING_FATE_RE = re.compile(r"【((?:Good|Bad|Neutral)\s*-\s*[^】]+)】")
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59  # 活跃抢占期缩短为 59 秒。超过这个时间收到消息直接排期到下一轮
 STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
 
@@ -1736,6 +1737,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         """检查文本是否包含 Good 级别的观星结果关键字。只有 Good 才值得触发改换星移。"""
         return bool(text and any(keyword in text for keyword in STAR_GAZING_GOOD_KEYWORDS))
 
+    def star_gazing_manifest_fate_type(self, text):
+        match = STAR_GAZING_FATE_RE.search(text or "")
+        return match.group(1).strip() if match else ""
+
     def star_gazing_pending_fate_type(self, text):
         for keyword in STAR_GAZING_GOOD_KEYWORDS:
             if text and keyword in text:
@@ -2521,7 +2526,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
            调度 .观星 在下一个显化窗口前 1 分钟发送。
         2. 如果文本包含其他 Good 关键词（不在我们的目标列表中），
            且当前有排期中的 .观星，则取消排期以保留每日观星机会给 23:59 兜底。
-           3. 跨日显化按目标显化日/实际发送日判断，避免 0 点机会被前一天记录挡掉。
+        3. 如果同一显化轮次后续变成 Bad/Neutral，则取消已排程的 .观星。
+        4. 跨日显化按目标显化日/实际发送日判断，避免 0 点机会被前一天记录挡掉。
 
         返回:
             True 表示消息已被处理（是 Good 显化类事件），False 表示不是。
@@ -2530,13 +2536,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         is_our_good = self.star_gazing_good_opportunity(text)
         # 检查是否为任意 Good 级别事件（包括不在目标列表中的）
         is_any_good = bool(text and "【Good -" in text)
+        fate_type = self.star_gazing_manifest_fate_type(text)
+        is_manifest_notice = bool(text and "【星盘显化】" in text and fate_type)
 
-        if not is_any_good:
+        if not is_any_good and not is_manifest_notice:
             return False
         if not sender or not is_game_bot_sender(self, sender):
             return False
 
         now = datetime.now()
+        manifest_dt = self.star_gazing_target_for_opportunity(now)
+        manifest_key = dt_to_str(manifest_dt)
         # 构造发送者信息用于日志
         sender_info = (
             f"@{sender.username}"
@@ -2545,12 +2555,31 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         )
         text_preview = (text[:150] + "...") if len(text) > 150 else text
 
+        if is_manifest_notice and not is_any_good:
+            async with self.star_gazing_lock:
+                pending = self.state.get("pending_star_gazing_target_time", "")
+                pending_manifest = (
+                    self.state.get("pending_star_gazing_manifest_time", "")
+                    or self.state.get("star_gazing_claimed_manifest_time", "")
+                )
+                if pending and is_future(pending) and pending_manifest == manifest_key:
+                    self.clear_pending_star_gazing_schedule()
+                    self.clear_star_gazing_round_claim()
+                    if hasattr(self, "star_gazing_task") and self.star_gazing_task and not self.star_gazing_task.done():
+                        self.star_gazing_task.cancel()
+                    self.state["next_star_gazing_time"] = ""
+                    self.save_state()
+                    log.info(
+                        f"Star gazing: CANCELLED pending .观星 (was at {pending}) "
+                        f"for manifest {manifest_key}; updated fate is {fate_type}. "
+                        f"Detected by {sender_info}: {text_preview}"
+                    )
+            return True
+
         if is_our_good:
-            manifest_dt = self.star_gazing_target_for_opportunity(now)
             send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
 
             async with self.star_gazing_lock:
-                manifest_key = dt_to_str(manifest_dt)
                 claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
                 claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
                 if claimed_manifest == manifest_key and claimed_avatar:
