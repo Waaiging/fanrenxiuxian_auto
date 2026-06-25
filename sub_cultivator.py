@@ -4155,25 +4155,21 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def is_formation_success(self, text):
         """检测阵法是否已成（周天星斗大阵-成 或 大阵已成）。"""
-        return bool(text and ("周天星斗大阵-成" in text or "大阵已成" in text))
+        return CommonCommandMixin.is_formation_success(self, text)
 
     def is_formation_pending(self, text):
         """检测阵法是否正在召集助阵（周天星斗大阵-启 或 尚需 或 助阵）。"""
-        return bool(text and ("周天星斗大阵-启" in text or "尚需" in text or "助阵" in text))
+        return CommonCommandMixin.is_formation_pending(self, text)
 
     def formation_invite_actor_username(self, text):
         return CommonCommandMixin.formation_invite_actor_username(self, text)
 
     def formation_invite_actor_identity(self, text):
-        username = self.formation_invite_actor_username(text)
-        return (self.avatar_usernames or {}).get(username, "")
+        return CommonCommandMixin.formation_invite_actor_identity(self, text)
 
     def is_own_formation_invite(self, text):
         """检测阵法邀请是否指向我们自己（通过 @用户名 判断）。"""
-        if not text or not self.my_info:
-            return False
-        username = (getattr(self.my_info, "username", "") or "").lower().lstrip("@")
-        return bool(username and f"@{username}" in text.lower())
+        return CommonCommandMixin.is_own_formation_invite(self, text)
 
     def is_external_formation_invite(self, text):
         """
@@ -4183,15 +4179,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
           2. 不是我们的自己的阵法邀请。
           3. 包含 "周天星斗大阵-启"、"正在布设大阵"、"尚需/助阵" 等关键字。
         """
-        if not text or self.is_formation_success(text):
-            return False
-        if self.is_own_formation_invite(text):
-            return False
-        return (
-            "周天星斗大阵-启" in text
-            and "正在布设大阵" in text
-            and ("尚需" in text or "助阵" in text)
-        )
+        return CommonCommandMixin.is_external_formation_invite(self, text)
 
     def is_raw_formation_command(self, text):
         """检测是否用户直接输入了 .启阵 指令（不是机器人回复）。"""

@@ -229,6 +229,37 @@ class CommonCommandMixin:
         username = self.avatar_username_for_identity(avatar)
         return bool(username and f"@{username}" in (text or "").lower())
 
+    def is_formation_success(self, text):
+        """Return whether a formation message says the formation is complete."""
+        return bool(text and ("周天星斗大阵-成" in text or "大阵已成" in text))
+
+    def is_formation_pending(self, text):
+        """Return whether a formation message is still asking for assists."""
+        return bool(text and ("周天星斗大阵-启" in text or "尚需" in text or "助阵" in text))
+
+    def formation_invite_actor_identity(self, text):
+        username = self.formation_invite_actor_username(text)
+        return (getattr(self, "avatar_usernames", {}) or {}).get(username, "")
+
+    def is_own_formation_invite(self, text):
+        """Return whether a formation invite mentions this account username."""
+        if not text or not getattr(self, "my_info", None):
+            return False
+        username = (getattr(self.my_info, "username", "") or "").lower().lstrip("@")
+        return bool(username and f"@{username}" in text.lower())
+
+    def is_external_formation_invite(self, text):
+        """Return whether text is another account's pending formation invite."""
+        if not text or self.is_formation_success(text):
+            return False
+        if self.is_own_formation_invite(text):
+            return False
+        return (
+            "周天星斗大阵-启" in text
+            and "正在布设大阵" in text
+            and ("尚需" in text or "助阵" in text)
+        )
+
     def common_has_pending_star_gazing_action(self):
         """Return whether .观星 or .改换星移 has a future scheduled action."""
         pending_gazing_target = self.state.get("pending_star_gazing_target_time", "")

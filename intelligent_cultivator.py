@@ -6414,11 +6414,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     def is_formation_success(self, text):
             """检测阵法是否已成（周天星斗大阵-成 或 大阵已成）。"""
-            return bool(text and ("周天星斗大阵-成" in text or "大阵已成" in text))
+            return CommonCommandMixin.is_formation_success(self, text)
 
     def is_formation_pending(self, text):
             """检测阵法是否正在召集助阵（周天星斗大阵-启 或 尚需 或 助阵）。"""
-            return bool(text and ("周天星斗大阵-启" in text or "尚需" in text or "助阵" in text))
+            return CommonCommandMixin.is_formation_pending(self, text)
 
     def is_raw_formation_command(self, text):
             """检测是否用户直接输入了 .启阵 指令（不是机器人回复）。"""

@@ -3461,9 +3461,17 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_formation_success_and_pending_fixtures(self):
         actor = SubCultivator.__new__(SubCultivator)
+        actor.avatar_usernames = {"ding303": "寻真子"}
+        actor.my_info = SimpleNamespace(username="my_self")
 
         self.assertTrue(actor.is_formation_pending("【周天星斗大阵-启】正在布设大阵，尚需 2 位道友助阵。"))
         self.assertTrue(actor.is_formation_success("【周天星斗大阵-成】大阵已成，星辉流转。"))
+        invite = "【周天星斗大阵-启】@Ding303 正在布设大阵，尚需 2 位道友助阵。"
+        own_invite = "【周天星斗大阵-启】@my_self 正在布设大阵，尚需 2 位道友助阵。"
+        self.assertEqual(actor.formation_invite_actor_identity(invite), "寻真子")
+        self.assertTrue(actor.is_external_formation_invite(invite))
+        self.assertTrue(actor.is_own_formation_invite(own_invite))
+        self.assertFalse(actor.is_external_formation_invite(own_invite))
 
     def test_main_formation_assist_allows_meditation_without_force_exit(self):
         actor = Cultivator.__new__(Cultivator)
