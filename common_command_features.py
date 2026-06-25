@@ -229,6 +229,51 @@ class CommonCommandMixin:
         username = self.avatar_username_for_identity(avatar)
         return bool(username and f"@{username}" in (text or "").lower())
 
+    def common_has_pending_star_gazing_action(self):
+        """Return whether .观星 or .改换星移 has a future scheduled action."""
+        pending_gazing_target = self.state.get("pending_star_gazing_target_time", "")
+        pending_shift_target = self.state.get("pending_star_shift_target_time", "")
+        return bool(
+            (pending_gazing_target and is_future(pending_gazing_target))
+            or (pending_shift_target and is_future(pending_shift_target))
+        )
+
+    def common_clear_pending_star_gazing_schedule(self):
+        """Clear scheduled account-level .观星 fields."""
+        self.state["pending_star_gazing_date"] = ""
+        self.state["pending_star_gazing_target_time"] = ""
+        self.state["pending_star_gazing_scheduled_time"] = ""
+        self.state["pending_star_gazing_manifest_time"] = ""
+        self.state["pending_star_gazing_fate_type"] = ""
+
+    def common_clear_star_gazing_round_claim(self):
+        """Clear account-level .观星 round claim fields."""
+        self.state["star_gazing_claimed_manifest_time"] = ""
+        self.state["star_gazing_claimed_avatar"] = ""
+        self.state["pending_star_gazing_manifest_time"] = ""
+        self.state["pending_star_gazing_fate_type"] = ""
+
+    def common_star_gazing_claim_matches(self, avatar, manifest_dt, default_identity="主魂"):
+        """Return whether the current account-level claim still belongs to identity."""
+        if not manifest_dt:
+            return True
+        manifest_key = dt_to_str(manifest_dt)
+        expected_avatar = avatar if avatar is not None else default_identity
+        return (
+            self.state.get("star_gazing_claimed_manifest_time", "") == manifest_key
+            and self.state.get("star_gazing_claimed_avatar", "") == expected_avatar
+        )
+
+    def common_claimed_star_gazing_pending_due(self, avatar, pending, now=None):
+        """Return whether a claimed .观星 send time is due."""
+        if not avatar:
+            return False
+        pending_dt = str_to_dt(pending)
+        if not pending_dt:
+            return False
+        now = now or datetime.now()
+        return now >= pending_dt - timedelta(seconds=1)
+
     # ---- 状态管理 ----
 
     def ensure_common_command_state(self):

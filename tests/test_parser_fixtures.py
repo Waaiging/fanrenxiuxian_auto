@@ -39,7 +39,7 @@ from yinluo_features import (
     parse_yinluo_status,
     parse_yinluo_summon_shadow,
 )
-from common_command_features import CommonCommandMixin, add_seconds_str, now_str, seconds_until as common_seconds_until
+from common_command_features import CommonCommandMixin, add_seconds_str, dt_to_str, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
 from dashboard_server import build_command_panels, outgoing_log_command_full, parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
@@ -209,6 +209,35 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.avatar_username_for_identity("缘生子"), "sub_avatar")
         self.assertTrue(actor.formation_result_includes_avatar("大阵已成，@Sub_Avatar 已助阵。", "缘生子"))
         self.assertFalse(actor.formation_result_includes_avatar("大阵已成，@Other 已助阵。", "缘生子"))
+
+    def test_common_star_gazing_pending_and_claim_helpers(self):
+        actor = DummyCommon()
+        now = datetime.now()
+        actor.state = {
+            "pending_star_gazing_target_time": add_seconds_str(now_str(), 60),
+            "pending_star_shift_target_time": "",
+            "pending_star_gazing_scheduled_time": "",
+            "pending_star_gazing_manifest_time": dt_to_str(now),
+            "pending_star_gazing_fate_type": "Good - 星辰异象",
+            "pending_star_gazing_date": "2026-06-25",
+            "star_gazing_claimed_manifest_time": dt_to_str(now),
+            "star_gazing_claimed_avatar": "缘生子",
+        }
+
+        self.assertTrue(actor.common_has_pending_star_gazing_action())
+        self.assertTrue(actor.common_star_gazing_claim_matches("缘生子", now))
+        self.assertFalse(actor.common_star_gazing_claim_matches("厚土", now))
+        self.assertTrue(actor.common_claimed_star_gazing_pending_due(
+            "缘生子",
+            dt_to_str(now + timedelta(seconds=1)),
+            now=now,
+        ))
+        actor.common_clear_pending_star_gazing_schedule()
+        self.assertEqual(actor.state["pending_star_gazing_target_time"], "")
+        self.assertEqual(actor.state["pending_star_gazing_fate_type"], "")
+        actor.common_clear_star_gazing_round_claim()
+        self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
+        self.assertEqual(actor.state["star_gazing_claimed_manifest_time"], "")
 
     def test_common_avatar_yuanying_check_uses_shared_plan_sender(self):
         class DummyTimedAvatar(DummyAvatarCommon):

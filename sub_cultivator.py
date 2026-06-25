@@ -1944,30 +1944,18 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def has_pending_star_gazing_action(self):
         """检查是否有排期中的观星或改换星移操作（任何一项在未来有效）。"""
-        pending_gazing_target = self.state.get("pending_star_gazing_target_time", "")
-        pending_shift_target = self.state.get("pending_star_shift_target_time", "")
-        return bool(
-            (pending_gazing_target and is_future(pending_gazing_target))
-            or (pending_shift_target and is_future(pending_shift_target))
-        )
+        return self.common_has_pending_star_gazing_action()
 
     def pending_daily_star_gazing_fallback_dt(self, now=None):
         return self.common_pending_daily_star_gazing_fallback_dt(now or datetime.now())
 
     def clear_pending_star_gazing_schedule(self):
         """清除所有排期中的观星数据。"""
-        self.state["pending_star_gazing_date"] = ""
-        self.state["pending_star_gazing_target_time"] = ""
-        self.state["pending_star_gazing_scheduled_time"] = ""
-        self.state["pending_star_gazing_manifest_time"] = ""
-        self.state["pending_star_gazing_fate_type"] = ""
+        self.common_clear_pending_star_gazing_schedule()
 
     def clear_star_gazing_round_claim(self):
         """清除账号级观星轮次占用。"""
-        self.state["star_gazing_claimed_manifest_time"] = ""
-        self.state["star_gazing_claimed_avatar"] = ""
-        self.state["pending_star_gazing_manifest_time"] = ""
-        self.state["pending_star_gazing_fate_type"] = ""
+        self.common_clear_star_gazing_round_claim()
 
     def clear_stale_star_gazing_claim_before_manifest(self, manifest_dt, sender_info="", text_preview=""):
         """Clear an old claimed .观星 round before scheduling the current manifest."""
@@ -1997,28 +1985,15 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def star_gazing_claim_matches(self, avatar, manifest_dt):
         """确认当前任务仍是本账号在该显化轮次被指派的唯一身份。"""
-        if not manifest_dt:
-            return True
-        manifest_key = dt_to_str(manifest_dt)
-        expected_avatar = avatar or "主魂"
-        return (
-            self.state.get("star_gazing_claimed_manifest_time", "") == manifest_key
-            and self.state.get("star_gazing_claimed_avatar", "") == expected_avatar
-        )
+        return self.common_star_gazing_claim_matches(avatar, manifest_dt)
 
     def claimed_star_gazing_pending_due(self, avatar, now=None):
         """Return true when a claimed .观星 send is due and may surface as a passive result."""
-        if not avatar:
-            return False
         pending = (
             self.state.get("pending_star_gazing_scheduled_time", "")
             or self.state.get("pending_star_gazing_target_time", "")
         )
-        pending_dt = str_to_dt(pending)
-        if not pending_dt:
-            return False
-        now = now or datetime.now()
-        return now >= pending_dt - timedelta(seconds=1)
+        return self.common_claimed_star_gazing_pending_due(avatar, pending, now)
 
     def star_gazing_observer_identity(self, text):
         return self.common_star_gazing_observer_identity(text)

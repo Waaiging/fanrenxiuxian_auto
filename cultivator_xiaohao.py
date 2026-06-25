@@ -4406,20 +4406,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def clear_star_gazing_round_claim(self):
         """清除账号级观星轮次占用。"""
-        self.state["star_gazing_claimed_manifest_time"] = ""
-        self.state["star_gazing_claimed_avatar"] = ""
-        self.state["pending_star_gazing_manifest_time"] = ""
-        self.state["pending_star_gazing_fate_type"] = ""
+        self.common_clear_star_gazing_round_claim()
 
     def star_gazing_claim_matches(self, avatar, manifest_dt):
         """确认当前任务仍是本账号在该显化轮次被指派的唯一身份。"""
-        if not manifest_dt:
-            return True
-        manifest_key = dt_to_str(manifest_dt)
-        return (
-            self.state.get("star_gazing_claimed_manifest_time", "") == manifest_key
-            and self.state.get("star_gazing_claimed_avatar", "") == avatar
-        )
+        return self.common_star_gazing_claim_matches(avatar, manifest_dt, default_identity="")
 
     def clear_avatar_star_gazing_pending(self, avatar):
         if not avatar:
@@ -4430,14 +4421,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def claimed_star_gazing_pending_due(self, avatar, now=None):
         """Return true when a claimed .观星 send is due and may surface as a passive result."""
-        if not avatar:
-            return False
         pending = self.get_avatar_state(avatar).get("pending_star_gazing_target_time", "")
-        pending_dt = str_to_dt(pending)
-        if not pending_dt:
-            return False
-        now = now or datetime.now()
-        return now >= pending_dt - timedelta(seconds=1)
+        return self.common_claimed_star_gazing_pending_due(avatar, pending, now)
 
     def star_gazing_observer_identity(self, text):
         return self.common_star_gazing_observer_identity(text)
