@@ -2081,29 +2081,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         提升法宝与主人的亲密度/默契度。
         仅在主魂身份时执行，化身身份时跳过等待。
         """
-        await self.startup_done.wait()
-        plan = self.treasure_touch_plan(TREASURE_TOUCH_COMMAND)
-        while self.is_running:
-            # 等待正在发送的化身指令完成
-            await self._wait_for_main_identity()
-            next_time = self.state.get(plan.next_key, "")
-            if next_time and is_future(next_time):
-                wait_time = seconds_until(next_time)
-                log.info(f"Treasure touch loop complete. Sleep {int(min(wait_time, 600))}s.")
-                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
-                continue
-
-            log.info(f"Treasure touch due: sending {plan.command}.")
-            resp = await self.send_and_wait_feedback(
-                plan.command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                force_identity_check=plan.force_identity_check,
-            )
-            self.record_treasure_touch_response(resp)
-            self.save_state()
-            wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
-            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
+        return await self.run_common_treasure_touch_loop(
+            TREASURE_TOUCH_COMMAND,
+            sleep_func=scheduler_sleep_seconds,
+        )
 
 
     def record_nurture_spirit_response(self, resp):

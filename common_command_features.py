@@ -1602,6 +1602,34 @@ class CommonCommandMixin:
     def treasure_touch_cd_seconds(self):
         return int(getattr(self, "treasure_touch_cd", TREASURE_TOUCH_CD_SECONDS) or TREASURE_TOUCH_CD_SECONDS)
 
+    async def run_common_treasure_touch_loop(self, command=None, sleep_func=None, pause_label=""):
+        """Run the shared main-soul treasure touch cooldown loop."""
+        await self.startup_done.wait()
+        plan = self.treasure_touch_plan(command)
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            if (
+                pause_label
+                and hasattr(self, "sleep_if_main_soul_paused")
+                and await self.sleep_if_main_soul_paused(pause_label)
+            ):
+                continue
+
+            await self._wait_for_main_identity()
+            next_time = self.state.get(plan.next_key, "")
+            if next_time and is_future(next_time):
+                wait_time = seconds_until(next_time)
+                log.info(f"Treasure touch loop complete. Sleep {int(min(wait_time, 600))}s.")
+                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+                continue
+
+            log.info(f"Treasure touch due: sending {plan.command}.")
+            resp = await self.send_timed_command_plan(plan, "主魂")
+            self.record_treasure_touch_response(resp, plan.command)
+            self.save_state()
+            wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
+            await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+
     def record_treasure_touch_response(self, resp, command=None):
         """Parse .抚摸法宝 response and update the shared main-soul cooldown state."""
         plan = self.treasure_touch_plan(command)

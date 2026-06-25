@@ -2037,26 +2037,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def run_treasure_touch_loop(self):
         """抚摸法宝循环：到冷却发指令"""
-        await self.startup_done.wait()
-        plan = self.treasure_touch_plan(TREASURE_TOUCH_COMMAND)
-        while self.is_running:
-            if await self.sleep_if_main_soul_paused("Treasure touch loop"):
-                continue
-            await self._wait_for_main_identity()
-            next_time = self.state.get(plan.next_key, "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-            log.info(f"Treasure touch due: sending {plan.command}.")
-            resp = await self.send_and_wait_feedback(
-                plan.command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                force_identity_check=plan.force_identity_check,
-            )
-            self.record_treasure_touch_response(resp)
-            self.save_state()
-            await asyncio.sleep(scheduler_sleep_seconds(seconds_until(self.state.get(plan.next_key, "")) or 600))
+        return await self.run_common_treasure_touch_loop(
+            TREASURE_TOUCH_COMMAND,
+            sleep_func=scheduler_sleep_seconds,
+            pause_label="Treasure touch loop",
+        )
 
     async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
         """检测到元婴虚弱期：只暂停触发身份，其他身份继续执行。"""
