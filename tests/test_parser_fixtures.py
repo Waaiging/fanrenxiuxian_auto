@@ -239,6 +239,41 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
         self.assertEqual(actor.state["star_gazing_claimed_manifest_time"], "")
 
+    def test_common_clear_stale_star_gazing_claim_cancels_old_task(self):
+        class FakeTask:
+            def __init__(self):
+                self.cancelled = False
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                self.cancelled = True
+
+        actor = DummyCommon()
+        saved = []
+        actor.save_state = lambda: saved.append(True)
+        old_manifest = datetime(2026, 6, 25, 6, 0, 0)
+        new_manifest = datetime(2026, 6, 25, 9, 0, 0)
+        actor.state = {
+            "pending_star_gazing_date": "2026-06-25",
+            "pending_star_gazing_target_time": "2026-06-25 05:59:00",
+            "pending_star_gazing_scheduled_time": "2026-06-25 05:59:00",
+            "pending_star_gazing_manifest_time": dt_to_str(old_manifest),
+            "pending_star_gazing_fate_type": "Good - 星辰异象",
+            "star_gazing_claimed_manifest_time": dt_to_str(old_manifest),
+            "star_gazing_claimed_avatar": "缘生子",
+            "next_star_gazing_time": "2026-06-25 05:59:00",
+        }
+        actor.star_gazing_task = FakeTask()
+
+        self.assertTrue(actor.common_clear_stale_star_gazing_claim_before_manifest(new_manifest))
+        self.assertTrue(actor.star_gazing_task.cancelled)
+        self.assertEqual(saved, [True])
+        self.assertEqual(actor.state["pending_star_gazing_target_time"], "")
+        self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
+        self.assertEqual(actor.state["next_star_gazing_time"], "")
+
     def test_common_avatar_yuanying_check_uses_shared_plan_sender(self):
         class DummyTimedAvatar(DummyAvatarCommon):
             def __init__(self):

@@ -1959,29 +1959,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def clear_stale_star_gazing_claim_before_manifest(self, manifest_dt, sender_info="", text_preview=""):
         """Clear an old claimed .观星 round before scheduling the current manifest."""
-        claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
-        pending_manifest = self.state.get("pending_star_gazing_manifest_time", "") or claimed_manifest
-        if not pending_manifest or not manifest_dt:
-            return False
-        pending_manifest_dt = str_to_dt(pending_manifest)
-        if pending_manifest_dt >= manifest_dt:
-            return False
-
-        pending = self.state.get("pending_star_gazing_target_time", "")
-        claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
-        self.clear_pending_star_gazing_schedule()
-        self.clear_star_gazing_round_claim()
-        if hasattr(self, "star_gazing_task") and self.star_gazing_task and not self.star_gazing_task.done():
-            self.star_gazing_task.cancel()
-        self.state["next_star_gazing_time"] = ""
-        self.save_state()
-        log.info(
-            f"Star gazing: cleared stale pending .观星 (was at {pending or 'none'}) "
-            f"for manifest {pending_manifest}, claimed by {claimed_avatar or 'none'}; "
-            f"handling current manifest {dt_to_str(manifest_dt)}. "
-            f"Triggered by {sender_info}: {text_preview}"
+        return self.common_clear_stale_star_gazing_claim_before_manifest(
+            manifest_dt,
+            sender_info=sender_info,
+            text_preview=text_preview,
+            logger=log,
         )
-        return True
 
     def star_gazing_claim_matches(self, avatar, manifest_dt):
         """确认当前任务仍是本账号在该显化轮次被指派的唯一身份。"""

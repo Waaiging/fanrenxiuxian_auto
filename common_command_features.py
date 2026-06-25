@@ -305,6 +305,38 @@ class CommonCommandMixin:
         now = now or datetime.now()
         return now >= pending_dt - timedelta(seconds=1)
 
+    def common_clear_stale_star_gazing_claim_before_manifest(
+        self,
+        manifest_dt,
+        sender_info="",
+        text_preview="",
+        logger=None,
+    ):
+        """Clear an older claimed .观星 round before handling a newer manifest."""
+        claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+        pending_manifest = self.state.get("pending_star_gazing_manifest_time", "") or claimed_manifest
+        if not pending_manifest or not manifest_dt:
+            return False
+        pending_manifest_dt = str_to_dt(pending_manifest)
+        if pending_manifest_dt >= manifest_dt:
+            return False
+
+        pending = self.state.get("pending_star_gazing_target_time", "")
+        claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+        self.common_clear_pending_star_gazing_schedule()
+        self.common_clear_star_gazing_round_claim()
+        if hasattr(self, "star_gazing_task") and self.star_gazing_task and not self.star_gazing_task.done():
+            self.star_gazing_task.cancel()
+        self.state["next_star_gazing_time"] = ""
+        self.save_state()
+        (logger or self.common_command_logger()).info(
+            f"Star gazing: cleared stale pending .观星 (was at {pending or 'none'}) "
+            f"for manifest {pending_manifest}, claimed by {claimed_avatar or 'none'}; "
+            f"handling current manifest {dt_to_str(manifest_dt)}. "
+            f"Triggered by {sender_info}: {text_preview}"
+        )
+        return True
+
     # ---- 状态管理 ----
 
     def ensure_common_command_state(self):
