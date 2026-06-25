@@ -65,6 +65,7 @@ def yinluo_default_state():
         "reserves": {},
         "slots": {},
         "appease_suppressed_until": {},
+        "imprison_sync_pending": False,
         "last_daily_sacrifice_date": "",
         "last_collected_at": "",
     }
@@ -172,7 +173,7 @@ def parse_yinluo_summon_shadow(text):
     cooldown = re.search(r"请在\s*([^后]+?)\s*后再行召唤", clean)
     if cooldown:
         return {"matched": True, "status": "cooldown", "cooldown_seconds": _parse_duration_seconds(cooldown.group(1)), "soul": ""}
-    if "召唤成功" in clean and "镇压成功" in clean:
+    if ("召唤成功" in clean and "镇压成功" in clean) or ("魔影被你成功击溃" in clean and "阴罗幡" in clean):
         soul_match = re.search(r"【([^】]+)】", clean)
         return {
             "matched": True,
@@ -298,7 +299,6 @@ class YinluoMixin:
         waits = []
         for key in (
             "next_action_at",
-            "next_sync_at",
             "next_daily_sacrifice_time",
             "next_blood_wash_time",
             "next_summon_shadow_time",
@@ -380,7 +380,7 @@ class YinluoMixin:
                 if not is_future(until) or str(slot) not in exhausted_slots:
                     suppressed.pop(slot, None)
         state["last_sync_at"] = now
-        state["next_sync_at"] = add_seconds_str(now, YINLUO_SYNC_SECONDS)
+        state["next_sync_at"] = ""
         state["last_status"] = "synced"
         state["last_detail"] = f"煞气 {state.get('sha_current', 0)}/{state.get('sha_max', 0)}，凶兽戾魄 {state.get('reserves', {}).get(YINLUO_SOUL, 0)}"
         self.save_state()
@@ -435,7 +435,13 @@ class YinluoMixin:
             reserves = state.setdefault("reserves", {})
             reserves[soul] = int(reserves.get(soul, 0)) + 1
             state["next_summon_shadow_time"] = add_seconds_str(now_str(), int(parsed.get("cooldown_seconds") or 8 * 3600))
-            self.yinluo_set_status(identity, "summoned", f"召唤魔影获得 {soul}", 5, text)
+            if soul == YINLUO_SOUL:
+                state["imprison_sync_pending"] = True
+                state["next_sync_at"] = ""
+                detail = f"召唤魔影获得 {soul}，囚禁前校准阴罗幡"
+            else:
+                detail = f"召唤魔影获得 {soul}"
+            self.yinluo_set_status(identity, "summoned", detail, 5, text)
             return True
         if parsed.get("status") == "cooldown":
             wait = max(60, int(parsed.get("cooldown_seconds") or YINLUO_RETRY_SECONDS))
@@ -500,6 +506,15 @@ class YinluoMixin:
         state = self.get_yinluo_state(identity)
         if parsed.get("status") == "success":
             state["last_collected_at"] = now_str()
+            for slot, item in list((state.get("slots") or {}).items()):
+                if isinstance(item, dict) and item.get("status") == "精华已成":
+                    state.setdefault("slots", {})[slot] = {
+                        "status": "空闲",
+                        "soul": "",
+                        "remaining_seconds": 0,
+                        "remaining_text": "",
+                        "due_at": "",
+                    }
             state["next_sync_at"] = ""
             self.yinluo_set_status(identity, "collected", "已收取阴罗幡精华", 5, text)
             return True
@@ -550,8 +565,13 @@ class YinluoMixin:
             return wait
 
         state = self.get_yinluo_state(identity)
-        if not state.get("last_sync_at") or not is_future(state.get("next_sync_at", "")):
-            await self.yinluo_sync_banner(identity)
+        if state.get("imprison_sync_pending"):
+            if is_future(state.get("next_action_at", "")):
+                return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 300))
+            if await self.yinluo_sync_banner(identity):
+                state = self.get_yinluo_state(identity)
+                state["imprison_sync_pending"] = False
+                self.save_state()
             return 5
 
         if self.yinluo_completed_slots(identity):

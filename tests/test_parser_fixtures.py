@@ -1070,6 +1070,9 @@ class ParserFixtureTests(unittest.TestCase):
         summon_cd = parse_yinluo_summon_shadow("魔域裂隙尚未平复，请在 **7小时56分钟13秒** 后再行召唤。")
         self.assertEqual(summon_cd["status"], "cooldown")
         self.assertEqual(summon_cd["cooldown_seconds"], 28573)
+        summon_success = parse_yinluo_summon_shadow("魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
+        self.assertEqual(summon_success["status"], "success")
+        self.assertEqual(summon_success["soul"], YINLUO_SOUL)
 
         imprison = parse_yinluo_imprison("一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
         self.assertEqual(imprison["status"], "success")
@@ -1083,7 +1086,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(appease_noop["status"], "success")
         self.assertEqual(appease_noop["count"], 0)
 
-    def test_yinluo_tick_ignores_deep_meditation_for_avatar(self):
+    def test_yinluo_tick_ignores_deep_meditation_and_does_not_periodic_sync(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
                 super().__init__()
@@ -1091,6 +1094,15 @@ class ParserFixtureTests(unittest.TestCase):
                 self.state["avatars"]["缘生子"].update({
                     "in_deep_meditation": True,
                     "deep_meditation_end_time": add_seconds_str(now_str(), 8 * 3600),
+                    "yinluo": {
+                        "last_sync_at": "",
+                        "next_sync_at": "",
+                        "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                        "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                        "next_summon_shadow_time": "",
+                        "reserves": {},
+                        "slots": {},
+                    },
                 })
 
             def identity_pause_seconds(self, identity):
@@ -1101,21 +1113,9 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
-                return DummyMessage(
-                    301,
-                    text=(
-                        "**【缘生子的阴罗幡】**\n\n"
-                        "**本命魔兵**: 阴罗本幡\n"
-                        "**幡体等阶**: 三阶中品\n"
-                        "**煞气池**: 1800 / 25000 (7%)\n"
-                        "**主魂流派**: 阴罗本幡\n"
-                        "**幡魂总炼化**: 2 缕\n\n"
-                        "**魂魄储备**:\n"
-                        " - 凶兽戾魄: 1 缕\n\n"
-                        "**炼化槽:**\n"
-                        "**1号槽**: [空闲]\n"
-                    ),
-                )
+                if command != ".召唤魔影":
+                    raise AssertionError(f"unexpected command: {command}")
+                return DummyMessage(301, text="魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
 
         actor = DummyYinluo()
         wait = asyncio.run(actor.yinluo_tick("缘生子"))
@@ -1123,10 +1123,97 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(wait, 5)
         self.assertEqual(actor.sent[0][0], "缘生子")
-        self.assertEqual(actor.sent[0][1], YINLUO_MASTER_COMMAND)
+        self.assertEqual(actor.sent[0][1], ".召唤魔影")
         self.assertTrue(actor.sent[0][2]["return_response_msg"])
-        self.assertEqual(yinluo_state["last_status"], "synced")
+        self.assertEqual(yinluo_state["last_status"], "summoned")
+        self.assertTrue(yinluo_state["imprison_sync_pending"])
         self.assertNotEqual(yinluo_state["last_status"], "meditation_blocked")
+
+    def test_yinluo_summon_triggers_single_pre_imprison_sync(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": "",
+                    "reserves": {},
+                    "slots": {},
+                    "sha_current": 0,
+                    "sha_max": 0,
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                if command == ".召唤魔影":
+                    return DummyMessage(401, text="魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
+                if command == YINLUO_MASTER_COMMAND:
+                    return DummyMessage(
+                        402,
+                        text=(
+                            "**【缘生子的阴罗幡】**\n\n"
+                            "**煞气池**: 1800 / 25000 (7%)\n"
+                            "**幡魂总炼化**: 2 缕\n\n"
+                            "**魂魄储备**:\n"
+                            " - 凶兽戾魄: 1 缕\n\n"
+                            "**炼化槽:**\n"
+                            "**1号槽**: [空闲]\n"
+                        ),
+                    )
+                if command == ".囚禁魂魄 1 凶兽戾魄":
+                    return DummyMessage(403, text="一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        actor.get_yinluo_state("缘生子")["next_action_at"] = ""
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+
+        self.assertEqual(
+            [item[1] for item in actor.sent],
+            [".召唤魔影", YINLUO_MASTER_COMMAND, ".囚禁魂魄 1 凶兽戾魄"],
+        )
+        yinluo_state = actor.get_yinluo_state("缘生子")
+        self.assertFalse(yinluo_state["imprison_sync_pending"])
+        self.assertEqual(yinluo_state["last_status"], "imprisoned")
+
+    def test_yinluo_expired_sync_time_does_not_send_master_command(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_sync_at": add_seconds_str(now_str(), -3600),
+                    "next_sync_at": add_seconds_str(now_str(), -60),
+                    "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": add_seconds_str(now_str(), 3600),
+                    "reserves": {},
+                    "slots": {},
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return DummyMessage(404, text="")
+
+        actor = DummyYinluo()
+        wait = asyncio.run(actor.yinluo_tick("缘生子"))
+        self.assertEqual(actor.sent, [])
+        self.assertGreaterEqual(wait, 3000)
 
     def test_yinluo_appease_clears_exhausted_slot_state(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
