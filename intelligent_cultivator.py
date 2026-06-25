@@ -4708,52 +4708,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     async def _avatar_field_training_check(self, avatar):
         """化身野外历练检查（单次）。无咎子先发探索前置指令，再发 .野外历练 深入"""
-        if self.avatar_meditation_needs_attention(avatar):
-            log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
-            return
-        a_state = self.get_avatar_state(avatar)
-        repaired_nt = self.preserve_cooldown_floor(
-            a_state,
-            "last_field_training_time",
-            "next_field_training_time",
-            2 * 3600,
-            f"avatar field training [{avatar}]",
-        )
-        if repaired_nt and is_future(repaired_nt):
-            return
-        nt = a_state.get("next_field_training_time", "")
-        if nt and is_future(nt): return
-        plan = self.field_training_plan(avatar)
-        training_command = plan.command
-        for step in plan.pre_steps:
-            await self.send_and_wait_feedback_identity(avatar, step.command)
-            if step.delay_after:
-                await asyncio.sleep(step.delay_after)
-        resp = await self.send_and_wait_feedback_identity(
+        await self.common_avatar_field_training_tick(
             avatar,
-            training_command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-            force_identity_check=plan.force_identity_check,
-            suppress_no_response_alert=plan.suppress_no_response_alert,
-            return_response_msg=plan.return_response_msg,
+            handle_insufficient_cultivation=True,
         )
-        resp = await self.wait_for_field_training_settlement(resp, avatar)
-        resp_text = self.response_text(resp)
-        if "修为不足" in resp_text:
-            async def rt(): return await self.send_and_wait_feedback_identity(
-                avatar,
-                training_command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                force_identity_check=plan.force_identity_check,
-                suppress_no_response_alert=plan.suppress_no_response_alert,
-                return_response_msg=plan.return_response_msg,
-            )
-            success, resp_text = await self.handle_修为不足(avatar, rt, cooldown_key="next_field_training_time")
-            if not success: return
-        self.record_identity_field_training_response(avatar, resp_text, "野外历练")
-        await self.maybe_run_bushi_wentian_after_field_training(avatar, resp_text)
 
     async def _avatar_yuanying_out_check(self, avatar):
         """化身元婴出窍检查。无咎子目前启用，状态写入化身自己的 state。"""

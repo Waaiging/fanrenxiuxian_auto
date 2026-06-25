@@ -6293,83 +6293,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def run_avatar_field_training_loop(self, avatar, initial_delay=0):
         """化身野外历练独立循环，按该化身自己的冷却时间执行。"""
-        await self.startup_done.wait()
-        if initial_delay > 0:
-            log.info(f"Avatar [{avatar}] field training loop: waiting {initial_delay}s before start...")
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                await self.pause_event.wait()
-                a_state = self.get_avatar_state(avatar)
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
-                    await asyncio.sleep(60)
-                    continue
-                repaired_next = self.preserve_cooldown_floor(
-                    a_state,
-                    "last_field_training_time",
-                    "next_field_training_time",
-                    2 * 3600,
-                    f"avatar field training [{avatar}]",
-                )
-                if repaired_next and is_future(repaired_next):
-                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired_next), minimum=60))
-                    continue
-                next_time = a_state.get("next_field_training_time", "")
-                if next_time and is_future(next_time):
-                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time), minimum=60))
-                    continue
-
-                plan = self.field_training_plan(avatar)
-                for step in plan.pre_steps:
-                    await self.send_and_wait_feedback_identity(avatar, step.command)
-                    if step.delay_after:
-                        await asyncio.sleep(step.delay_after)
-                field_training_cmd = plan.command
-                log.info(f"Avatar [{avatar}] field training due: sending {field_training_cmd}")
-                ft_resp = await self.send_and_wait_feedback_identity(
-                    avatar,
-                    field_training_cmd,
-                    timeout=plan.timeout,
-                    max_retries=plan.max_retries,
-                    force_identity_check=plan.force_identity_check,
-                    suppress_no_response_alert=plan.suppress_no_response_alert,
-                    return_response_msg=plan.return_response_msg,
-                )
-                ft_resp = await self.wait_for_field_training_settlement(ft_resp, avatar)
-                ft_text = self.response_text(ft_resp)
-
-                if "修为不足" in ft_text:
-                    async def retry_field_training():
-                        return await self.send_and_wait_feedback_identity(
-                            avatar,
-                            field_training_cmd,
-                            timeout=plan.timeout,
-                            max_retries=plan.max_retries,
-                            force_identity_check=plan.force_identity_check,
-                            suppress_no_response_alert=plan.suppress_no_response_alert,
-                            return_response_msg=plan.return_response_msg,
-                        )
-
-                    success, ft_text = await self.handle_修为不足(
-                        avatar,
-                        retry_field_training,
-                        cooldown_key="next_field_training_time",
-                        cooldown_hours=2,
-                    )
-                    ft_text = self.response_text(ft_text)
-                    if not success:
-                        self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 7200))
-                        await asyncio.sleep(60)
-                        continue
-
-                self.record_identity_field_training_response(avatar, ft_text, "野外历练")
-                await self.maybe_run_bushi_wentian_after_field_training(avatar, ft_text)
-                await asyncio.sleep(5)
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] field training loop error: {e}", exc_info=True)
-                await asyncio.sleep(300)
+        return await self.run_common_avatar_field_training_loop(
+            avatar,
+            initial_delay=initial_delay,
+            sleep_func=scheduler_sleep_seconds,
+            handle_insufficient_cultivation=True,
+        )
 
     # ============================================================
     # 身外化身：闯塔循环（每日23点执行）

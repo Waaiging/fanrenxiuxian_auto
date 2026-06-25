@@ -6190,68 +6190,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         对指定分身定时发送 .野外历练 指令。
         每个分身有独立的冷却状态，存储在 state.avatars[avatar] 中。
         """
-        await self.startup_done.wait()
-        self._avatar_loop_count += 1
-        if initial_delay > 0:
-            log.info(f"Avatar [{avatar}] field training loop: waiting {initial_delay}s before start...")
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                await self.pause_event.wait()
-                a_state = self.get_avatar_state(avatar)
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
-                    await asyncio.sleep(60)
-                    continue
-                repaired_next = self.preserve_cooldown_floor(
-                    a_state,
-                    "last_field_training_time",
-                    "next_field_training_time",
-                    2 * 3600,
-                    f"avatar field training [{avatar}]",
-                )
-                if repaired_next and is_future(repaired_next):
-                    wait_sec = seconds_until(repaired_next)
-                    await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
-                    continue
-                next_time = a_state.get("next_field_training_time", "")
-
-                if next_time and is_future(next_time):
-                    wait_sec = seconds_until(next_time)
-                    await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
-                    continue
-
-                plan = self.field_training_plan(avatar)
-                for step in plan.pre_steps:
-                    await self.send_and_wait_feedback_identity(avatar, step.command)
-                    if step.delay_after:
-                        await asyncio.sleep(step.delay_after)
-                cmd = plan.command
-                log.info(f"Avatar [{avatar}] field training due: sending {cmd}")
-                resp = await self.send_and_wait_feedback_identity(
-                    avatar,
-                    cmd,
-                    timeout=plan.timeout,
-                    max_retries=plan.max_retries,
-                    force_identity_check=plan.force_identity_check,
-                    suppress_no_response_alert=plan.suppress_no_response_alert,
-                    return_response_msg=plan.return_response_msg,
-                )
-                resp = await self.wait_for_field_training_settlement(resp, avatar)
-
-                # 解析回复并更新分身独立冷却
-                resp_text = self.response_text(resp)
-                self.record_identity_field_training_response(
-                    avatar, resp_text, "野外历练"
-                )
-                await self.maybe_run_bushi_wentian_after_field_training(avatar, resp_text)
-
-                await asyncio.sleep(5)
-
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] field training loop error: {e}")
-                await asyncio.sleep(300)
+        return await self.run_common_avatar_field_training_loop(
+            avatar,
+            initial_delay=initial_delay,
+            sleep_func=scheduler_sleep_seconds,
+            handle_insufficient_cultivation=False,
+        )
 
     # ---- 身外化身：分身闯塔循环 ----
 
