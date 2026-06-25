@@ -1980,23 +1980,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def record_sect_skill_response(self, resp):
         """解析宗门传功回复，更新已传功次数"""
-        if not resp:
-            return "unknown"
-        count_match = re.search(r'今日已传功\s*\**\s*(\d+)\s*/\s*3', resp)
-        if count_match:
-            self.state["sect_skill_count"] = max(self.state.get("sect_skill_count", 0), int(count_match.group(1)))
-            return "counted"
-        if any(k in resp for k in ["次数不足", "明日再来", "已经", "过于频繁"]):
-            self.state["sect_skill_count"] = SECT_SKILL_MAX_DAILY
-            return "done"
-        if any(k in resp for k in ["失败", "需回复", "主魂"]):
-            log.warning(f"Sect skill reply target invalid: {resp[:80]}...")
-            return "invalid"
-        if any(k in resp for k in ["成功", "元神", "传功", "玉简"]):
-            self.state["sect_skill_count"] = min(SECT_SKILL_MAX_DAILY, self.state.get("sect_skill_count", 0) + 1)
-            return "counted"
-        notify_unrecognized_response(self, ".宗门传功", resp, log, "宗门传功")
-        return "unknown"
+        return self.common_record_sect_skill_response(resp, max_daily=SECT_SKILL_MAX_DAILY)
 
     async def _wait_for_main_identity(self):
         """

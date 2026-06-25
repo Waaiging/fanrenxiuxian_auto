@@ -66,6 +66,7 @@ YUANYING_OUT_CD_SECONDS = 8 * 3600
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 ASK_DAO_CD_SECONDS = 12 * 3600
 ASK_DAO_RETRY_SECONDS = 10 * 60
+SECT_SKILL_MAX_DAILY = 3
 MEDITATION_SETTLEMENT_GRACE_SECONDS = 3 * 60      # 闭关到点后给机器人结算状态留 3 分钟余量
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
@@ -2471,6 +2472,35 @@ class CommonCommandMixin:
             await asyncio.sleep(
                 self.common_scheduler_sleep_seconds(600, sleep_func=sleep_func)
             )
+
+    def common_record_sect_skill_response(self, resp, max_daily=SECT_SKILL_MAX_DAILY):
+        """Parse .宗门传功 response and update today's sect skill count."""
+        if not resp:
+            return "unknown"
+        resp = str(resp)
+        count_match = re.search(r"今日已传功\s*\**\s*(\d+)\s*/\s*3", resp)
+        if count_match:
+            self.state["sect_skill_count"] = max(
+                self.state.get("sect_skill_count", 0),
+                int(count_match.group(1)),
+            )
+            return "counted"
+        if any(k in resp for k in ["次数不足", "明日再来", "已经", "过于频繁"]):
+            self.state["sect_skill_count"] = max_daily
+            return "done"
+        if any(k in resp for k in ["失败", "需回复", "主魂"]):
+            self.common_command_logger().warning(
+                f"Sect skill reply target invalid: {resp[:80]}..."
+            )
+            return "invalid"
+        if any(k in resp for k in ["传功玉简已记录", "今日已传功", "成功", "元神", "传功", "玉简"]):
+            self.state["sect_skill_count"] = min(
+                max_daily,
+                self.state.get("sect_skill_count", 0) + 1,
+            )
+            return "counted"
+        notify_unrecognized_response(self, ".宗门传功", resp, self.common_command_logger(), "宗门传功")
+        return "unknown"
 
     async def wait_for_field_training_settlement(
         self,

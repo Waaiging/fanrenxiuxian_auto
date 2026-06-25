@@ -448,6 +448,24 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["done"], [".宗门点卯"])
         self.assertEqual(actor.state["last_dianmao_msg_id"], 9901)
 
+    def test_common_record_sect_skill_response_updates_count(self):
+        actor = DummyCommon()
+        actor.state = {"sect_skill_count": 0}
+
+        self.assertEqual(actor.common_record_sect_skill_response("今日已传功 **2/3**"), "counted")
+        self.assertEqual(actor.state["sect_skill_count"], 2)
+
+        self.assertEqual(actor.common_record_sect_skill_response("传功玉简已记录！获得了贡献。"), "counted")
+        self.assertEqual(actor.state["sect_skill_count"], 3)
+
+        actor.state["sect_skill_count"] = 1
+        self.assertEqual(actor.common_record_sect_skill_response("今日次数不足，明日再来。"), "done")
+        self.assertEqual(actor.state["sect_skill_count"], 3)
+
+        actor.state["sect_skill_count"] = 1
+        self.assertEqual(actor.common_record_sect_skill_response("传功失败，需回复主魂消息。"), "invalid")
+        self.assertEqual(actor.state["sect_skill_count"], 1)
+
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()
         state = actor.get_avatar_state("缘生子")

@@ -1705,34 +1705,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             匹配"失败/需回复/主魂"则说明传功目标不对。
             匹配"成功/传功玉简已记录"等则计数 +1。
         """
-        if not resp:
-            return "unknown"
-        # 尝试匹配 "今日已传功 X/3" 格式（游戏机器人有时直接返回当前进度）
-        count_match = re.search(r'今日已传功\s*\**\s*(\d+)\s*/\s*3', resp)
-        if count_match:
-            self.state["sect_skill_count"] = max(
-                self.state.get("sect_skill_count", 0),
-                int(count_match.group(1))
-            )
-            return "counted"
-        # 次数不足等关键词 -> 今日已满
-        if any(k in resp for k in ["次数不足", "明日再来", "已经", "过于频繁"]):
-            self.state["sect_skill_count"] = SECT_SKILL_MAX_DAILY
-            return "done"
-        # 需要回复主魂消息 -> 传功目标不对
-        if any(k in resp for k in ["失败", "需回复", "主魂"]):
-            log.warning(f"Sect skill reply target invalid: {resp[:80]}...")
-            return "invalid"
-        # 成功传功
-        if any(k in resp for k in ["传功玉简已记录", "今日已传功", "成功", "元神", "传功", "玉简"]):
-            self.state["sect_skill_count"] = min(
-                SECT_SKILL_MAX_DAILY,
-                self.state.get("sect_skill_count", 0) + 1
-            )
-            return "counted"
-        # 完全无法识别的回复，上报告警
-        notify_unrecognized_response(self, ".宗门传功", resp, log, "宗门传功")
-        return "unknown"
+        return self.common_record_sect_skill_response(resp, max_daily=SECT_SKILL_MAX_DAILY)
 
     # ============================================================
     # 星盘显现时间计算

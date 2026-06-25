@@ -993,34 +993,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             str: "counted" 已计数、"done" 已满、"invalid" 无效目标、
                  "unknown" 无法识别
         """
-        if not resp:
-            return "unknown"
-        # 模式1：回复包含明确计数 "今日已传功 1 / 3"
-        count_match = re.search(r'今日已传功\s*\**\s*(\d+)\s*/\s*3', resp)
-        if count_match:
-            self.state["sect_skill_count"] = max(
-                self.state.get("sect_skill_count", 0),
-                int(count_match.group(1))
-            )
-            return "counted"
-        # 模式2：今日次数已用完
-        if any(k in resp for k in ["次数不足", "明日再来", "已经", "过于频繁"]):
-            self.state["sect_skill_count"] = SECT_SKILL_MAX_DAILY
-            return "done"
-        # 模式3：回复目标无效（需要回复某条消息，但我们回复错了）
-        if any(k in resp for k in ["失败", "需回复", "主魂"]):
-            log.warning(f"Sect skill reply target invalid: {resp[:80]}...")
-            return "invalid"
-        # 模式4：传功成功
-        if any(k in resp for k in ["成功", "元神", "传功", "玉简"]):
-            self.state["sect_skill_count"] = min(
-                SECT_SKILL_MAX_DAILY,
-                self.state.get("sect_skill_count", 0) + 1
-            )
-            return "counted"
-        # 无法识别的回复：记录到日志，但不要因此停止
-        notify_unrecognized_response(self, ".宗门传功", resp, log, "宗门传功")
-        return "unknown"
+        return self.common_record_sect_skill_response(resp, max_daily=SECT_SKILL_MAX_DAILY)
 
     # ------------------------------------------------------------------
     # 游戏消息处理核心
