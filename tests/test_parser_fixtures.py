@@ -314,6 +314,52 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual([item[1] for item in actor.sent], [".闯塔", ".闯塔"])
         self.assertNotIn("last_tower_date", actor.get_avatar_state("缘生子"))
 
+    def test_common_avatar_daily_checkin_waits_for_daily_start(self):
+        class DummyDailyAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "点卯成功。"
+
+        actor = DummyDailyAvatar()
+
+        self.assertFalse(asyncio.run(actor.common_avatar_daily_checkin(
+            "缘生子",
+            daily_start_wait_func=lambda now: 300,
+        )))
+        self.assertEqual(actor.sent, [])
+
+    def test_common_avatar_daily_checkin_records_done_on_response(self):
+        class DummyDailyAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "宗门点卯成功。"
+
+        actor = DummyDailyAvatar()
+
+        self.assertTrue(asyncio.run(actor.common_avatar_daily_checkin(
+            "缘生子",
+            daily_start_wait_func=lambda now: 0,
+        )))
+        self.assertEqual(actor.sent[0][1], ".宗门点卯")
+        self.assertEqual(
+            actor.get_avatar_state("缘生子")["last_dianmao_date"],
+            datetime.now().strftime("%Y-%m-%d"),
+        )
+
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()
         state = actor.get_avatar_state("缘生子")

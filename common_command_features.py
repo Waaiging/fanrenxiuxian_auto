@@ -2378,6 +2378,22 @@ class CommonCommandMixin:
                 log.error(f"Avatar [{avatar}] tower loop error: {exc}", exc_info=True)
                 await asyncio.sleep(300)
 
+    async def common_avatar_daily_checkin(self, avatar, daily_start_wait_func=None):
+        """Run one avatar .宗门点卯 check after the account's daily start time."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if daily_start_wait_func is not None and daily_start_wait_func(datetime.now()) > 0:
+            return False
+        if self.get_avatar_state(avatar).get("last_dianmao_date") == today:
+            return False
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(".宗门点卯", avatar):
+            return False
+        resp = await self.send_and_wait_feedback_identity(avatar, ".宗门点卯", timeout=60)
+        resp_text = self.timed_command_response_text(resp)
+        if resp_text:
+            self.set_avatar_state(avatar, "last_dianmao_date", today)
+            return True
+        return False
+
     async def wait_for_field_training_settlement(
         self,
         resp,

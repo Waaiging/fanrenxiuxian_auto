@@ -6219,15 +6219,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # ============================================================
 
     async def _avatar_daily_checkin(self, avatar):
-        today = datetime.now().strftime("%Y-%m-%d")
-        if seconds_until_daily_task_start(datetime.now()) > 0:
-            return
-        if self.get_avatar_state(avatar).get("last_dianmao_date") == today:
-            return
-        resp = await self.send_and_wait_feedback_identity(avatar, ".宗门点卯", timeout=60)
-        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-        if resp_text:
-            self.set_avatar_state(avatar, "last_dianmao_date", today)
+        return await self.common_avatar_daily_checkin(
+            avatar,
+            daily_start_wait_func=seconds_until_daily_task_start,
+        )
 
     @safe_bg_task
     async def delayed_avatar_force_exit(self, avatar, delay_sec):
