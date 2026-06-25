@@ -62,6 +62,7 @@ def fishing_default_state():
         "nest_blocked": {},
         "bait_purchase_date": "",
         "bait_purchase_done": False,
+        "daily_done_basket_sync_date": "",
         "active": False,
         "active_bait": "",
         "active_started_at": "",
@@ -595,6 +596,7 @@ class FishingMixin:
             if missing_name in FISHING_BAIT_NAMES and missing_count > 0:
                 if await self.fishing_buy_bait(identity, missing_name, missing_count):
                     return await self.fishing_try_nest(identity)
+                return False
             state.setdefault("nest_blocked", {})[nest] = _today()
             self.fishing_set_status(identity, "nest_blocked", f"{nest} 缺少 {missing_name}x{missing_count}", 60, text)
             return False
@@ -645,6 +647,7 @@ class FishingMixin:
             state["last_status"] = "daily_done"
             state["last_detail"] = f"今日已垂钓 {state['today_count']}/{state['daily_limit']}"
             self.save_state()
+            await self.fishing_sync_daily_done_basket(identity)
             return True
         if status == "no_rod":
             state["rod_owned"] = False
@@ -660,6 +663,21 @@ class FishingMixin:
             return True
         self.fishing_set_status(identity, "start_unrecognized", "钓鱼回复未识别", FISHING_RETRY_SECONDS, text)
         return False
+
+    async def fishing_sync_daily_done_basket(self, identity):
+        state = self.get_fishing_state(identity)
+        today = _today()
+        if state.get("daily_done_basket_sync_date") == today:
+            return True
+        ok = await self.fishing_sync_basket(identity)
+        state = self.get_fishing_state(identity)
+        if ok:
+            state["daily_done_basket_sync_date"] = today
+        state["last_status"] = "daily_done"
+        state["last_detail"] = f"今日已垂钓 {state.get('today_count')}/{state.get('daily_limit')}"
+        state["next_action_at"] = _next_day_action_time()
+        self.save_state()
+        return ok
 
     async def fishing_raise_rod(self, identity):
         resp = await self.send_fishing_command(identity, ".提竿", timeout=60)
@@ -695,6 +713,8 @@ class FishingMixin:
         else:
             state["next_action_at"] = add_seconds_str(now_str(), 5)
         self.save_state()
+        if int(state.get("today_count") or 0) >= int(state.get("daily_limit") or FISHING_DAILY_LIMIT):
+            await self.fishing_sync_daily_done_basket(identity)
         return parsed.get("matched", False)
 
     async def fishing_tick(self, identity):
@@ -723,10 +743,7 @@ class FishingMixin:
             return 3600
 
         if int(state.get("today_count") or 0) >= int(state.get("daily_limit") or FISHING_DAILY_LIMIT):
-            state["next_action_at"] = _next_day_action_time()
-            state["last_status"] = "daily_done"
-            state["last_detail"] = f"今日已垂钓 {state.get('today_count')}/{state.get('daily_limit')}"
-            self.save_state()
+            await self.fishing_sync_daily_done_basket(identity)
             return self.fishing_wait_from_state(identity, 3600)
 
         if state.get("active"):

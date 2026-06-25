@@ -256,6 +256,108 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rod["status"], "success")
         self.assertEqual(rod["catch"], "银须灵鲢")
 
+    def test_fishing_missing_nest_bait_retry_does_not_skip_nest(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".打窝 灵草窝":
+                    return "打窝失败，资源不足：灵米饵x3。"
+                if command == ".买鱼饵 灵米饵 3":
+                    return ""
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing["nest_counts"] = {"妖腥窝": 1}
+
+        self.assertFalse(asyncio.run(actor.fishing_try_nest("主魂")))
+        self.assertEqual(actor.commands, [".打窝 灵草窝", ".买鱼饵 灵米饵 3"])
+        self.assertNotEqual(
+            actor.get_fishing_state("主魂").get("nest_blocked", {}).get("灵草窝"),
+            datetime.now().strftime("%Y-%m-%d"),
+        )
+        self.assertEqual(actor.fishing_next_nest("主魂"), "灵草窝")
+
+    def test_fishing_daily_done_syncs_basket_after_twentieth_rod(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".提竿":
+                    return "**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！"
+                if command == ".鱼篓":
+                    return (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**20/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼饵**\n- 灵虫饵 x0\n\n"
+                        "**鱼获**\n- 银须灵鲢 x1\n"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "today_count": 19,
+            "daily_limit": 20,
+            "active": True,
+            "active_due_at": now_str(),
+        })
+
+        self.assertTrue(asyncio.run(actor.fishing_raise_rod("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(actor.commands, [".提竿", ".鱼篓"])
+        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["daily_limit"], 20)
+        self.assertEqual(fishing["last_status"], "daily_done")
+        self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
+
+    def test_fishing_daily_limit_start_response_syncs_basket(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".钓鱼 灵虫饵":
+                    return "你今日已垂钓 **20/20** 竿，神识已乏，明日再来。"
+                if command == ".鱼篓":
+                    return (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**20/20**\n"
+                        "当前窝料：**灵草窝**（剩余 5 竿）\n\n"
+                        "**鱼饵**\n- 灵虫饵 x0\n\n"
+                        "**鱼获**\n- 银须灵鲢 x1\n"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        self.assertTrue(asyncio.run(actor.fishing_start_round("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(actor.commands, [".钓鱼 灵虫饵", ".鱼篓"])
+        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["last_status"], "daily_done")
+        self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
+
     def test_dashboard_fishing_default_paused_can_be_enabled_explicitly(self):
         self.assertTrue(dashboard_server.command_control_disabled(
             {},
