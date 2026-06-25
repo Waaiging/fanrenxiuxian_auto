@@ -120,13 +120,16 @@ def parse_yinluo_status(text):
                 result["reserves"][reserve_match.group(1).strip()] = int(reserve_match.group(2))
             continue
         if section == "slots":
-            slot_match = re.match(r"(?:\*)?(\d+)号槽(?:\*)?:\s*\[([^\]]+)\](?:\s*-\s*([^\(]+?))?(?:\s*\(剩余:\s*([^\)]+)\))?\s*$", line)
+            slot_match = re.match(r"(?:\*)?(\d+)号槽(?:\*)?:\s*\[([^\]]+)\]\s*(.*)$", line)
             if not slot_match:
                 continue
             slot = int(slot_match.group(1))
             status = slot_match.group(2).strip()
-            soul = (slot_match.group(3) or "").strip()
-            remaining_text = (slot_match.group(4) or "").strip()
+            tail = (slot_match.group(3) or "").strip()
+            remaining_match = re.search(r"\(剩余:\s*([^\)]+)\)", tail)
+            soul_match = re.match(r"-\s*(.*?)(?:\s*\(剩余:|$)", tail)
+            soul = (soul_match.group(1) if soul_match else "").strip().strip("!！❗")
+            remaining_text = (remaining_match.group(1) if remaining_match else "").strip()
             remaining = _parse_duration_seconds(remaining_text)
             result["slots"][slot] = {
                 "status": status,
@@ -487,6 +490,17 @@ class YinluoMixin:
         text = await self.send_yinluo_command(identity, f".安抚幡灵 {slot}", timeout=60)
         parsed = parse_yinluo_appease(text)
         if parsed.get("matched"):
+            state = self.get_yinluo_state(identity)
+            slots = state.setdefault("slots", {})
+            slots.pop(slot, None)
+            slots[str(slot)] = {
+                "status": "空闲",
+                "soul": "",
+                "remaining_seconds": 0,
+                "remaining_text": "",
+                "due_at": "",
+            }
+            state["next_sync_at"] = ""
             self.yinluo_set_status(identity, "appeased", f"安抚 {slot}号槽", 5, text)
             return True
         self.yinluo_set_status(identity, "appease_failed", f"安抚 {slot}号槽失败", YINLUO_RETRY_SECONDS, text)

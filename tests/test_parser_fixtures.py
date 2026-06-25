@@ -1044,6 +1044,22 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(status["slots"][1]["status"], "精华已成")
         self.assertEqual(status["slots"][4]["remaining_seconds"], 12069)
 
+        exhausted = parse_yinluo_status(
+            "**【缘生子的阴罗幡】**\n\n"
+            "**煞气池**: 800 / 25000 (3%)\n"
+            "**幡魂总炼化**: 5 缕\n\n"
+            "**魂魄储备**:\n"
+            " - 妖兽精魄: 2 缕\n\n"
+            "**炼化槽:**\n"
+            "**1号槽**: [魂力枯竭] ❗\n"
+            "**2号槽**: [空闲]\n"
+        )
+        self.assertTrue(exhausted["matched"])
+        self.assertEqual(exhausted["reserves"]["妖兽精魄"], 2)
+        self.assertEqual(exhausted["slots"][1]["status"], "魂力枯竭")
+        self.assertEqual(exhausted["slots"][1]["soul"], "")
+        self.assertEqual(exhausted["slots"][2]["status"], "空闲")
+
         blood = parse_yinluo_blood_wash(
             "**【血洗功成】**\n成功捕获了 **2** 缕【妖兽精魄】！"
         )
@@ -1103,6 +1119,33 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.sent[0][2]["return_response_msg"])
         self.assertEqual(yinluo_state["last_status"], "synced")
         self.assertNotEqual(yinluo_state["last_status"], "meditation_blocked")
+
+    def test_yinluo_appease_clears_exhausted_slot_state(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子")["slots"] = {
+                    "1": {"status": "魂力枯竭", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""}
+                }
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return DummyMessage(
+                    302,
+                    text="[Avatar: 缘生子]\n**安抚成功！**\n你消耗了 **50** 点修为，成功安抚了 1 个炼化槽。",
+                )
+
+        actor = DummyYinluo()
+        self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [1])
+        self.assertTrue(asyncio.run(actor.yinluo_appease_slot("缘生子", 1)))
+        yinluo_state = actor.get_yinluo_state("缘生子")
+
+        self.assertEqual(actor.sent[0][1], ".安抚幡灵 1")
+        self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [])
+        self.assertEqual(yinluo_state["slots"]["1"]["status"], "空闲")
+        self.assertEqual(yinluo_state["next_sync_at"], "")
+        self.assertEqual(yinluo_state["last_status"], "appeased")
 
     def test_dashboard_main_yuanshengzi_yinluo_commands_enabled_by_default(self):
         state = {
