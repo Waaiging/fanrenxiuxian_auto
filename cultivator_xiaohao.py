@@ -600,16 +600,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def early_meditation_check_response(self, identity):
         state = self.state if identity == "主魂" else self.get_avatar_state(identity)
-        if self.ensure_meditation_guard_from_end_time(state):
-            self.save_state()
-        wait_seconds = self.meditation_guard_wait_seconds_for_state(state)
-        if wait_seconds <= 0:
-            return ""
-        log.info(
-            f"[{identity}] skipped early .查看闭关; meditation guard active for "
-            f"{self.compact_duration_text(wait_seconds)}."
-        )
-        return f"你正在深度闭关，预计还需 **{self.compact_duration_text(wait_seconds)}** 即可功成圆满。"
+        return self.early_meditation_check_response_for_state(identity, state, logger=log)
 
     def avatar_meditation_guard_active(self, avatar):
         a_state = self.get_avatar_state(avatar)
