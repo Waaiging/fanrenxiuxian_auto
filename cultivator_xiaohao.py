@@ -2096,35 +2096,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def run_avatar_yuanying_rift_loop(self, avatar, initial_delay=0):
         """Run avatar .元婴出窍 and .探寻裂缝 on their independent cooldowns."""
-        await self.startup_done.wait()
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                await self.pause_event.wait()
-                if avatar not in self.avatars:
-                    log.warning(f"Avatar yuanying/rift loop disabled: unknown avatar [{avatar}].")
-                    return
-
-                if self.identity_pause_seconds(avatar) <= 0:
-                    await self._avatar_yuanying_out_check(avatar)
-                if self.identity_pause_seconds(avatar) <= 0:
-                    await self._avatar_rift_search_check(avatar)
-
-                wait_sec = self.avatar_yuanying_rift_wait_seconds(avatar)
-                log.info(
-                    f"Avatar [{avatar}] yuanying/rift loop sleeping {int(wait_sec)}s."
-                )
-                await asyncio.sleep(
-                    scheduler_sleep_seconds(wait_sec + random.randint(10, 30), minimum=60)
-                )
-            except Exception as e:
-                log.error(
-                    f"Avatar [{avatar}] yuanying/rift loop error: {e}",
-                    exc_info=True,
-                )
-                await asyncio.sleep(300)
+        return await self.run_common_avatar_yuanying_rift_loop(
+            avatar,
+            initial_delay=initial_delay,
+            sleep_func=scheduler_sleep_seconds,
+        )
 
     async def run_yuanying_out_loop(self):
         """元婴出窍循环：到点自动归窍，再重新出窍"""

@@ -1251,6 +1251,45 @@ class CommonCommandMixin:
 
         return max(60, int(min(waits or [600])))
 
+    def common_scheduler_sleep_seconds(self, seconds, minimum=1, sleep_func=None):
+        scheduler = sleep_func or globals().get("scheduler_sleep_seconds")
+        if callable(scheduler):
+            return scheduler(seconds, minimum=minimum)
+        seconds = max(minimum, float(seconds or 0))
+        return max(minimum, min(seconds, 600))
+
+    async def run_common_avatar_yuanying_rift_loop(self, avatar, initial_delay=0, sleep_func=None):
+        """Run avatar .元婴出窍 and .探寻裂缝 with shared cooldown scheduling."""
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            try:
+                await self.pause_event.wait()
+                if avatar not in getattr(self, "avatars", []):
+                    log.warning(f"Avatar yuanying/rift loop disabled: unknown avatar [{avatar}].")
+                    return
+
+                if self.identity_pause_seconds(avatar) <= 0:
+                    await self._avatar_yuanying_out_check(avatar)
+                if self.identity_pause_seconds(avatar) <= 0:
+                    await self._avatar_rift_search_check(avatar)
+
+                wait_sec = self.avatar_yuanying_rift_wait_seconds(avatar)
+                log.info(f"Avatar [{avatar}] yuanying/rift loop sleeping {int(wait_sec)}s.")
+                await asyncio.sleep(
+                    self.common_scheduler_sleep_seconds(
+                        wait_sec + random.randint(10, 30),
+                        minimum=60,
+                        sleep_func=sleep_func,
+                    )
+                )
+            except Exception as exc:
+                log.error(f"Avatar [{avatar}] yuanying/rift loop error: {exc}", exc_info=True)
+                await asyncio.sleep(300)
+
     def identity_state_for_timed_command(self, identity):
         identity = str(identity or "主魂").strip() or "主魂"
         if identity != "主魂" and identity in getattr(self, "avatars", []):
