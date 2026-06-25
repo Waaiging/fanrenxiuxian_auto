@@ -29,6 +29,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from log_utils import command_control_key, feedback_response_matches_command
+from command_modules import (
+    ASK_DAO_COMMAND,
+    NURTURE_SPIRIT_COMMAND,
+    RIFT_SEARCH_COMMAND,
+    YUANYING_OUT_COMMAND,
+    field_training_plan_from_features,
+    treasure_touch_plan,
+    yuanying_out_plan,
+)
 from fishing_features import FISHING_DAILY_LIMIT, FISHING_MASTER_COMMAND
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
@@ -155,6 +164,18 @@ LOG_OUT_IDENTITY_RE = re.compile(r"OUT(?:\s*\[([^\]]+)\])?\s*:")
 LOG_LEVEL_RE = re.compile(r"(?:\*\*)?(?:当前)?境界(?:\*\*)?\s*[:：]\s*\**\s*([^\n\r*]+)")
 LOG_CULTIVATION_RE = re.compile(r"(?:\*\*)?(?:当前)?修为(?:\*\*)?\s*[:：]\s*\**\s*([\d,]+)\s*/\s*\**\s*([\d,]+)")
 LOG_SPIRIT_ROOT_RE = re.compile(r"(?:\*\*)?灵根(?:\*\*)?\s*[:：]\s*\**\s*([^\n\r*]+)")
+MAIN_TREASURE_TOUCH_COMMAND = treasure_touch_plan(".抚摸法宝 玄天斩灵剑").command
+SUB_TREASURE_TOUCH_COMMAND = treasure_touch_plan(".抚摸法宝 青竹蜂云剑").command
+MAIN_FIELD_TRAINING_COMMAND = field_training_plan_from_features("主魂", main_command=".野外历练 谨慎").command
+DEFAULT_AVATAR_FIELD_TRAINING_COMMAND = field_training_plan_from_features("缘生子").command
+WUJIUZI_FIELD_TRAINING_COMMAND = field_training_plan_from_features(
+    "无咎子",
+    {
+        "training_cmd": ".野外历练",
+        "training_level": "深入",
+    },
+).command
+SUB_MAIN_YUANYING_COMMAND = yuanying_out_plan("主魂", main_command=".元婴闭关").command
 
 # 双段指令（指令+参数需要组合）
 TWO_PART_COMMANDS = {
@@ -183,22 +204,22 @@ ACCOUNT_LOG_TAGS = {
         ".闯塔", ".借天门势", ".宗门点卯", ".宗门传功",
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
-        ".召回侍妾", ".安置侍妾", ".元婴出窍", ".元婴归窍", ".探寻裂缝",
-        ".抚摸法宝 玄天斩灵剑",
-        ".野外历练", ".野外历练 谨慎", ".野外历练 深入", ".宗门战况", ".参战", ".我的侍妾",
+        ".召回侍妾", ".安置侍妾", YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
+        MAIN_TREASURE_TOUCH_COMMAND,
+        DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, WUJIUZI_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         ".推命 探索", ".改命 探索",
         OTHER_LOG_TAG,
     ],
     "sub": [
-        ".闯塔", ".宗门点卯", ".宗门传功", ".问道",
+        ".闯塔", ".宗门点卯", ".宗门传功", ASK_DAO_COMMAND,
         ".启阵", ".助阵", ".强行出关",
         ".查看闭关", ".闭关修炼", ".深度闭关",
         ".召回侍妾", ".安置侍妾", ".每日问安",
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰", ".观星", ".改换星移",
-        ".元婴出窍", ".元婴归窍", ".探寻裂缝",
-        ".抚摸法宝 青竹蜂云剑",
-        ".野外历练", ".野外历练 谨慎", ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
+        SUB_MAIN_YUANYING_COMMAND, YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
+        SUB_TREASURE_TOUCH_COMMAND,
+        DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
@@ -207,8 +228,8 @@ ACCOUNT_LOG_TAGS = {
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
-        ".野外历练", ".野外历练 谨慎", ".宗门战况", ".参战", ".抚摸法宝 青竹蜂云剑",
-        ".元婴出窍", ".元婴归窍", ".探寻裂缝",
+        DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", SUB_TREASURE_TOUCH_COMMAND,
+        YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰",
         ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
@@ -966,10 +987,10 @@ def main_soul_panel(account, state):
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
-            time_command(state, "next_treasure_touch_time", ".抚摸法宝 玄天斩灵剑", "抚摸法宝", group="法宝"),
-            time_command(state, "next_nurture_spirit_time", ".温养器灵 斩灵", "温养器灵", waiting="6小时冷却", group="法宝"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
+            time_command(state, "next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "温养器灵", waiting="6小时冷却", group="法宝"),
             time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="天阶"),
             time_command(state, "next_heart_time", ".问心台", "问心台", group="天阶"),
             manual_command(".天阶状态", "天阶状态", "查询天阶状态", "天阶"),
@@ -977,7 +998,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
+        rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
@@ -987,10 +1008,10 @@ def main_soul_panel(account, state):
         rows.extend([
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
-            time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"),
-            time_command(state, "next_ask_dao_time", ".问道", "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
+            time_command(state, "next_yuanying_out_time", SUB_MAIN_YUANYING_COMMAND, "元婴闭关", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
+            time_command(state, "next_ask_dao_time", ASK_DAO_COMMAND, "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -1001,10 +1022,10 @@ def main_soul_panel(account, state):
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
-            time_command(state, "next_treasure_touch_time", ".抚摸法宝 青竹蜂云剑", "抚摸法宝", group="法宝"),
-            time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_treasure_touch_time", SUB_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
+            time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -1039,9 +1060,9 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             manual_command(".推命 闭关", "推命闭关", group="推命"),
             manual_command(".推命 探索", "推命探索", group="推命"),
             manual_command(".改命 探索", "改命探索", group="推命"),
-            time_command(state, "next_field_training_time", ".野外历练 深入", "野外历练", group="通用"),
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+            time_command(state, "next_field_training_time", WUJIUZI_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             daily_done_command(
                 state,
                 ".观命",
@@ -1052,13 +1073,13 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             ),
         ])
     else:
-        rows.append(time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"))
+        rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
     if name == "缘生子":
         tree_state = root_state or state
         rows.extend([
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             spirit_tree_command(tree_state, identity=name),
             spirit_tree_guard_command(tree_state),
         ])
@@ -1097,11 +1118,11 @@ def lingxiao_avatar_commands(name, state, root_state=None):
 def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
-    rows.append(time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"))
+    rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     if name == "缘生子":
         rows.extend([
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
     rows.append(fishing_command(state))
     rows.extend(meditation_commands(state, include_force_exit=True))
@@ -1123,14 +1144,14 @@ def xiaohao_avatar_commands(name, state):
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
     rows.extend([
-        time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"),
+        time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
     if name == "缘生子":
         rows.extend([
-            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
-            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
     rows.append(fishing_command(state))
     if name == "问心子":
