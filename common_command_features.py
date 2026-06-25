@@ -2551,6 +2551,16 @@ class CommonCommandMixin:
     def common_star_observatory_needs_calm(self, text):
         return bool(text and ("紊乱" in text or "黯淡" in text))
 
+    def common_compact_seconds(self, seconds):
+        seconds = max(0, int(seconds or 0))
+        hours, rem = divmod(seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours}小时{minutes}分钟"
+        if minutes:
+            return f"{minutes}分钟{seconds}秒"
+        return f"{seconds}秒"
+
     def common_star_gazing_sent_on_date(self, date_str=None):
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
         return self.state.get("last_gazing_date") == date_str
@@ -2618,6 +2628,333 @@ class CommonCommandMixin:
         if now >= fallback_dt + timedelta(minutes=1):
             return None
         return fallback_dt
+
+    def common_parse_avatar_star_observatory(self, text):
+        clean = (text or "").replace("**", "").replace("`", "")
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        disk_lines = [
+            line for line in lines
+            if "引星盘" in line
+            and ":" in line
+            and "观星台" not in line
+            and "总数" not in line
+            and not line.startswith("使用")
+        ]
+        valid = "【星宫 · 观星台】" in clean or ("观星台" in clean and bool(disk_lines))
+        if not valid and not disk_lines:
+            return {"valid": False}
+
+        total_match = re.search(r"总数\s*[:：]\s*(\d+)\s*座", clean)
+        total_count = int(total_match.group(1)) if total_match else len(disk_lines)
+        empty_count = 0
+        occupied_count = 0
+        collect_ready = False
+        needs_appease = False
+        remaining_values = []
+        stars = set()
+
+        for line in disk_lines:
+            status = line.split(":", 1)[1].strip()
+            if "空闲" in status:
+                empty_count += 1
+                continue
+            occupied_count += 1
+            star_match = re.search(r":\s*([^-:：\n]+?)\s*(?:-|$)", line)
+            if star_match:
+                star_name = star_match.group(1).strip()
+                if star_name and "空闲" not in star_name:
+                    stars.add(star_name)
+            if "精华已成" in status:
+                collect_ready = True
+            if any(k in status for k in ["星光黯淡", "元磁紊乱", "狂暴星力", "黯淡", "紊乱"]):
+                needs_appease = True
+            cd = self.parse_wait_time(line)
+            if cd and cd > 0 and "剩余" in line:
+                remaining_values.append(cd)
+
+        min_remaining = min(remaining_values) if remaining_values else None
+        if collect_ready:
+            summary = "精华已成"
+        elif min_remaining is not None:
+            summary = f"凝聚中，剩余{self.common_compact_seconds(min_remaining)}"
+        elif needs_appease:
+            summary = "需安抚"
+        elif total_count and empty_count >= total_count:
+            summary = "全部空闲"
+        elif occupied_count:
+            summary = "已占用，待复查"
+        else:
+            summary = "未知"
+
+        return {
+            "valid": True,
+            "total_count": total_count,
+            "empty_count": empty_count,
+            "occupied_count": occupied_count,
+            "collect_ready": collect_ready,
+            "needs_appease": needs_appease,
+            "min_remaining": min_remaining,
+            "stars": sorted(stars),
+            "summary": summary,
+        }
+
+    def common_record_avatar_star_observatory(
+        self,
+        avatar,
+        text,
+        source="观星台",
+        star_target="天雷星",
+        pre_appease_lead_seconds=30 * 60,
+        status_retry_seconds=10 * 60,
+        logger=None,
+    ):
+        info = self.parse_avatar_star_observatory(text)
+        if not info.get("valid"):
+            return False
+
+        now = now_str()
+        updates = {
+            "last_star_observatory_time": now,
+            "star_observatory_summary": info.get("summary", ""),
+            "star_observatory_needs_refresh": False,
+            "star_target": star_target,
+            "star_pre_collect_appeased_for": "",
+        }
+
+        min_remaining = info.get("min_remaining")
+        if info.get("collect_ready"):
+            updates["next_star_collect_time"] = now
+            if info.get("needs_appease"):
+                updates["next_star_appease_time"] = now
+            updates["next_star_check_time"] = now
+        elif min_remaining is not None:
+            collect_time = add_seconds_str(now, min_remaining)
+            appease_delay = max(0, min_remaining - pre_appease_lead_seconds)
+            appease_time = add_seconds_str(now, appease_delay)
+            updates["next_star_collect_time"] = collect_time
+            updates["next_star_attraction_time"] = collect_time
+            if info.get("needs_appease"):
+                updates["next_star_appease_time"] = now
+                updates["next_star_check_time"] = now
+            else:
+                updates["next_star_appease_time"] = appease_time
+                updates["next_star_check_time"] = appease_time
+        elif info.get("total_count") and info.get("empty_count", 0) >= info.get("total_count", 0):
+            updates["next_star_collect_time"] = ""
+            updates["next_star_appease_time"] = ""
+            next_attraction = self.get_avatar_state(avatar).get("next_star_attraction_time", "")
+            if not is_future(next_attraction):
+                updates["next_star_attraction_time"] = now
+                updates["next_star_check_time"] = now
+            else:
+                updates["next_star_check_time"] = next_attraction
+        elif info.get("needs_appease"):
+            updates["next_star_appease_time"] = now
+            updates["next_star_check_time"] = now
+        else:
+            updates["next_star_check_time"] = add_seconds_str(now, status_retry_seconds)
+
+        self.update_avatar_states(avatar, updates)
+        (logger or self.common_command_logger()).info(
+            f"Avatar [{avatar}] star observatory synced ({source}): {info.get('summary', '')}"
+        )
+        return True
+
+    def common_star_cycle_collect_time_from_now(self, cooldown_seconds):
+        return add_seconds_str(now_str(), cooldown_seconds)
+
+    def common_record_avatar_star_pull_response(
+        self,
+        avatar,
+        text,
+        source,
+        star_command,
+        star_target="天雷星",
+        pre_appease_lead_seconds=30 * 60,
+        status_retry_seconds=10 * 60,
+        cooldown_seconds=36 * 3600,
+        logger=None,
+    ):
+        log = logger or self.common_command_logger()
+        if not text:
+            retry_at = add_seconds_str(now_str(), status_retry_seconds)
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": retry_at,
+                "next_star_attraction_time": retry_at,
+                "next_star_check_time": retry_at,
+            })
+            return "empty"
+
+        clean = text.replace("**", "")
+        now = now_str()
+        if "修为不足" in clean:
+            self.update_avatar_states(avatar, {
+                "star_attraction_retry_time": now,
+                "next_star_attraction_time": now,
+            })
+            return "insufficient"
+
+        if "已无空闲" in clean and "引星盘" in clean:
+            self.update_avatar_states(avatar, {
+                "star_observatory_needs_refresh": True,
+                "next_star_check_time": now,
+            })
+            return "no_free"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            due = add_seconds_str(now, cd)
+            appease_time = add_seconds_str(now, max(0, cd - pre_appease_lead_seconds))
+            self.update_avatar_states(avatar, {
+                "next_star_attraction_time": due,
+                "next_star_collect_time": due,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+                "star_pre_collect_appeased_for": "",
+                "star_attraction_retry_time": "",
+                "star_attraction_force_exit_tried": False,
+            })
+            return "cooldown"
+
+        if any(k in clean for k in ["牵引成功", "成功在", "牵引了", "开始牵引"]):
+            collect_time = self.common_star_cycle_collect_time_from_now(cooldown_seconds)
+            appease_time = add_seconds_str(collect_time, -pre_appease_lead_seconds)
+            self.update_avatar_states(avatar, {
+                "last_star_attraction_time": now,
+                "next_star_attraction_time": collect_time,
+                "next_star_collect_time": collect_time,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+                "star_pre_collect_appeased_for": "",
+                "star_attraction_retry_time": "",
+                "star_attraction_force_exit_tried": False,
+                "star_observatory_needs_refresh": False,
+                "star_observatory_summary": f"{star_target}凝聚中",
+            })
+            return "success"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+        })
+        notify_unrecognized_response(self, star_command, text, log, source)
+        return "unknown"
+
+    def common_record_avatar_star_appease_response(
+        self,
+        avatar,
+        text,
+        source=".安抚星辰",
+        status_retry_seconds=10 * 60,
+        logger=None,
+    ):
+        now = now_str()
+        clean = (text or "").replace("**", "")
+        if clean and any(k in clean for k in ["成功安抚", "安抚了", "没有需要安抚", "无需安抚", "不需要安抚"]):
+            state = self.get_avatar_state(avatar)
+            next_collect = state.get("next_star_collect_time", "")
+            self.update_avatar_states(avatar, {
+                "last_star_appease_time": now,
+                "next_star_appease_time": "",
+                "next_star_check_time": next_collect if next_collect else add_seconds_str(now, status_retry_seconds),
+            })
+            return "success"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            due = add_seconds_str(now, cd)
+            self.update_avatar_states(avatar, {
+                "next_star_appease_time": due,
+                "next_star_check_time": due,
+            })
+            return "cooldown"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+        })
+        if text:
+            notify_unrecognized_response(self, ".安抚星辰", text, logger or self.common_command_logger(), source)
+        return "unknown"
+
+    def common_record_avatar_star_collect_response(
+        self,
+        avatar,
+        text,
+        source=".收集精华",
+        pre_appease_lead_seconds=30 * 60,
+        logger=None,
+    ):
+        now = now_str()
+        clean = (text or "").replace("**", "")
+        if clean and any(k in clean for k in ["收集完成", "成功从", "获得了"]):
+            self.update_avatar_states(avatar, {
+                "last_star_collect_time": now,
+                "next_star_collect_time": "",
+                "next_star_appease_time": "",
+                "next_star_attraction_time": now,
+                "next_star_check_time": now,
+                "star_pre_collect_appeased_for": "",
+                "star_observatory_needs_refresh": False,
+                "star_attraction_force_exit_tried": False,
+            })
+            return "success"
+
+        if clean and any(k in clean for k in ["没有已凝聚", "没有可供收集", "暂无精华"]):
+            self.update_avatar_states(avatar, {
+                "star_observatory_needs_refresh": True,
+                "next_star_check_time": now,
+                "star_pre_collect_appeased_for": "",
+            })
+            return "not_ready"
+
+        cd = self.parse_wait_time(clean)
+        if cd and cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余"]):
+            collect_time = add_seconds_str(now, cd)
+            appease_time = add_seconds_str(now, max(0, cd - pre_appease_lead_seconds))
+            self.update_avatar_states(avatar, {
+                "next_star_collect_time": collect_time,
+                "next_star_appease_time": appease_time,
+                "next_star_check_time": appease_time,
+                "star_pre_collect_appeased_for": "",
+            })
+            return "cooldown"
+
+        self.update_avatar_states(avatar, {
+            "star_observatory_needs_refresh": True,
+            "next_star_check_time": now,
+            "star_pre_collect_appeased_for": "",
+        })
+        if text:
+            notify_unrecognized_response(self, ".收集精华", text, logger or self.common_command_logger(), source)
+        return "unknown"
+
+    def common_record_avatar_star_response_from_text(
+        self,
+        avatar,
+        text,
+        source="star sync",
+        star_avatars=(),
+        star_target="天雷星",
+    ):
+        if avatar not in star_avatars or not text:
+            return False
+        clean = text.replace("**", "")
+        if "已无空闲" in clean and "引星盘" in clean:
+            return self.record_avatar_star_pull_response(avatar, text, source) in {"no_free"}
+        if "观星台" in clean and "引星盘" in clean:
+            return self.record_avatar_star_observatory(avatar, text, source)
+        if (
+            any(k in clean for k in ["牵引成功", "牵引了", "开始牵引", "牵引星辰"])
+            or ("修为不足" in clean and star_target in clean)
+            or ("冷却" in clean and "牵引" in clean)
+        ):
+            return self.record_avatar_star_pull_response(avatar, text, source) in {"success", "cooldown", "no_free", "insufficient"}
+        if "安抚" in clean and ("引星盘" in clean or "星辰" in clean or "狂暴星力" in clean):
+            return self.record_avatar_star_appease_response(avatar, text, source) in {"success", "cooldown"}
+        if "收集" in clean or "精华" in clean:
+            return self.record_avatar_star_collect_response(avatar, text, source) in {"success", "cooldown", "not_ready"}
+        return False
 
     async def wait_for_field_training_settlement(
         self,

@@ -466,6 +466,49 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.common_record_sect_skill_response("传功失败，需回复主魂消息。"), "invalid")
         self.assertEqual(actor.state["sect_skill_count"], 1)
 
+    def test_common_avatar_star_observatory_parser_extracts_remaining(self):
+        actor = DummyAvatarCommon()
+        text = """
+【星宫 · 观星台】
+总数: 2座
+一号引星盘: 天雷星 - 凝聚中，剩余 1小时
+二号引星盘: 空闲
+"""
+
+        info = actor.common_parse_avatar_star_observatory(text)
+
+        self.assertTrue(info["valid"])
+        self.assertEqual(info["total_count"], 2)
+        self.assertEqual(info["empty_count"], 1)
+        self.assertEqual(info["occupied_count"], 1)
+        self.assertEqual(info["min_remaining"], 3600)
+        self.assertEqual(info["stars"], ["天雷星"])
+
+    def test_common_avatar_star_observatory_record_marks_collect_and_appease_due(self):
+        class DummyStar(DummyAvatarCommon):
+            def parse_avatar_star_observatory(self, text):
+                return self.common_parse_avatar_star_observatory(text)
+
+        actor = DummyStar()
+        text = """
+【星宫 · 观星台】
+总数: 1座
+一号引星盘: 天雷星 - 精华已成，星光黯淡
+"""
+
+        self.assertTrue(actor.common_record_avatar_star_observatory(
+            "缘生子",
+            text,
+            star_target="天雷星",
+            pre_appease_lead_seconds=1800,
+            status_retry_seconds=600,
+        ))
+        state = actor.get_avatar_state("缘生子")
+        self.assertEqual(state["star_observatory_summary"], "精华已成")
+        self.assertEqual(state["next_star_collect_time"], state["next_star_check_time"])
+        self.assertEqual(state["next_star_appease_time"], state["next_star_check_time"])
+        self.assertFalse(state["star_observatory_needs_refresh"])
+
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()
         state = actor.get_avatar_state("缘生子")
