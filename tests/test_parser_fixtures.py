@@ -3,6 +3,7 @@ import unittest
 import os
 import sqlite3
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -508,6 +509,43 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["next_star_collect_time"], state["next_star_check_time"])
         self.assertEqual(state["next_star_appease_time"], state["next_star_check_time"])
         self.assertFalse(state["star_observatory_needs_refresh"])
+
+    def test_common_avatar_star_guard_backoff_updates_retry_fields(self):
+        actor = DummyAvatarCommon()
+        actor._last_command_guard_block = {
+            "at": time.monotonic(),
+            "key": ".观星台",
+            "wait": 30,
+            "blocked_until": time.monotonic() + 45,
+        }
+
+        self.assertTrue(actor.common_apply_avatar_star_guard_backoff(
+            "缘生子",
+            command=".观星台",
+            fields=["next_star_collect_time"],
+        ))
+        state = actor.get_avatar_state("缘生子")
+        self.assertTrue(state["star_observatory_needs_refresh"])
+        self.assertEqual(state["next_star_check_time"], state["next_star_collect_time"])
+        self.assertGreater(common_seconds_until(state["next_star_check_time"]), 0)
+
+    def test_common_next_avatar_star_wait_seconds_handles_refresh_and_due_times(self):
+        class DummyStar(DummyAvatarCommon):
+            def avatar_meditation_needs_attention(self, avatar):
+                return False
+
+        actor = DummyStar()
+        state = actor.get_avatar_state("缘生子")
+        state["star_observatory_needs_refresh"] = True
+        self.assertEqual(actor.common_next_avatar_star_wait_seconds("缘生子"), 0)
+
+        state.clear()
+        state["last_star_observatory_time"] = now_str()
+        state["next_star_collect_time"] = add_seconds_str(now_str(), 120)
+        state["next_star_attraction_time"] = add_seconds_str(now_str(), 3600)
+        wait = actor.common_next_avatar_star_wait_seconds("缘生子")
+        self.assertGreater(wait, 0)
+        self.assertLessEqual(wait, 120)
 
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()

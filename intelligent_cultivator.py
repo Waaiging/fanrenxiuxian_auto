@@ -6058,57 +6058,32 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     # ---- 化身星辰牵引 / 安抚 / 收集（素缘子，观星抢占逻辑保持独立不变）----
 
     def response_text(self, resp):
-            if hasattr(resp, "text"):
-                return resp.text or ""
-            if isinstance(resp, str):
-                return resp
-            return str(resp) if resp else ""
+            return self.common_response_text(resp)
 
     def recent_command_guard_wait(self, command="", max_age_seconds=15):
-            block = getattr(self, "_last_command_guard_block", {}) or {}
-            at = block.get("at", 0) or 0
-            if not at or time.monotonic() - at > max_age_seconds:
-                return 0
-            key = str(block.get("key", "") or "")
-            if command and not key.startswith(str(command).strip()):
-                return 0
-            wait = int(block.get("wait", 0) or 0)
-            blocked_until = float(block.get("blocked_until", 0) or 0)
-            if blocked_until > time.monotonic():
-                wait = max(wait, int(blocked_until - time.monotonic()))
-            return max(0, wait)
+            return self.common_recent_command_guard_wait(command, max_age_seconds=max_age_seconds)
 
     def apply_avatar_star_guard_backoff(self, avatar, command="", fields=None, reason="command guard"):
-            wait = self.recent_command_guard_wait(command)
-            if wait <= 0:
-                return False
-            retry_at = add_seconds_str(now_str(), max(60, wait + 5))
-            updates = {"next_star_check_time": retry_at}
-            for field in fields or []:
-                updates[field] = retry_at
-            if not command or str(command).startswith(".观星台"):
-                updates["star_observatory_needs_refresh"] = True
-            self.update_avatar_states(avatar, updates)
-            key = (getattr(self, "_last_command_guard_block", {}) or {}).get("key", command)
-            log.info(f"Avatar [{avatar}] star cycle backed off by command guard [{key}] until {retry_at} ({reason}).")
-            return True
+            return self.common_apply_avatar_star_guard_backoff(
+                avatar,
+                command=command,
+                fields=fields,
+                reason=reason,
+                logger=log,
+            )
 
     def compact_seconds(self, seconds):
             return self.common_compact_seconds(seconds)
 
     def avatar_star_due(self, avatar, key):
-            value = self.get_avatar_state(avatar).get(key, "")
-            return bool(value and not is_future(value))
+            return self.common_avatar_star_due(avatar, key)
 
     def avatar_star_recently_appeased(self, avatar, window_seconds=180):
-            value = self.get_avatar_state(avatar).get("last_star_appease_time", "")
-            if not value:
-                return False
-            try:
-                elapsed = (datetime.now() - datetime.strptime(value, TIME_FORMAT)).total_seconds()
-                return 0 <= elapsed <= window_seconds
-            except Exception:
-                return False
+            return self.common_avatar_star_recently_appeased(
+                avatar,
+                window_seconds=window_seconds,
+                now=datetime.now(),
+            )
 
     def parse_avatar_star_observatory(self, text):
             return self.common_parse_avatar_star_observatory(text)
@@ -6374,37 +6349,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     return
 
     def next_avatar_star_wait_seconds(self, avatar):
-            state = self.get_avatar_state(avatar)
-            if self.avatar_meditation_needs_attention(avatar):
-                return 60
-            check_time = state.get("next_star_check_time", "")
-            if state.get("star_observatory_needs_refresh") and (not check_time or not is_future(check_time)):
-                return 0
-            if (
-                not state.get("last_star_observatory_time")
-                and not state.get("next_star_collect_time")
-                and not is_future(state.get("next_star_attraction_time", ""))
-            ):
-                return 0
-
-            waits = []
-            for key in [
-                "star_attraction_retry_time",
-                "next_star_check_time",
-                "next_star_appease_time",
-                "next_star_collect_time",
-                "next_star_attraction_time",
-            ]:
-                value = state.get(key, "")
-                if not value:
-                    continue
-                if is_future(value):
-                    waits.append(seconds_until(value))
-                else:
-                    waits.append(0)
-            if not waits:
-                return 0
-            return max(0, min(waits))
+            return self.common_next_avatar_star_wait_seconds(avatar)
 
     async def run_avatar_star_attraction_loop(self, avatar, initial_delay=0):
             """星宫化身观星台牵引循环：牵引 -> 安抚 -> 收集 -> 再牵引。"""
