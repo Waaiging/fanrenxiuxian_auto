@@ -29,6 +29,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from log_utils import command_control_key, feedback_response_matches_command
+from fishing_features import FISHING_DAILY_LIMIT, FISHING_MASTER_COMMAND
+from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
 security = HTTPBasic()
@@ -96,7 +98,7 @@ CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshot
 LOG_TAIL_INITIAL_BYTES = 192 * 1024
 LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-ACCOUNT_DISPLAY_NAMES = {"main": "落云宗 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
+ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
@@ -156,7 +158,8 @@ LOG_SPIRIT_ROOT_RE = re.compile(r"(?:\*\*)?灵根(?:\*\*)?\s*[:：]\s*\**\s*([^\
 
 # 双段指令（指令+参数需要组合）
 TWO_PART_COMMANDS = {
-    (".交换", "法宝"), (".抚摸法宝", "青竹蜂云剑"),
+    (".交换", "法宝"), (".抚摸法宝", "青竹蜂云剑"), (".抚摸法宝", "斩灵"),
+    (".抚摸法宝", "玄天斩灵剑"),
     (".推命", "探索"), (".改命", "探索"),
     (".野外历练", "谨慎"), (".野外历练", "深入"),
 }
@@ -181,7 +184,7 @@ ACCOUNT_LOG_TAGS = {
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
         ".召回侍妾", ".安置侍妾", ".元婴出窍", ".元婴归窍", ".探寻裂缝",
-        ".抚摸法宝 青竹蜂云剑",
+        ".抚摸法宝 玄天斩灵剑",
         ".野外历练", ".野外历练 谨慎", ".野外历练 深入", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         ".推命 探索", ".改命 探索",
@@ -432,21 +435,21 @@ def append_custom_commands(account, panel, custom_commands, root_state=None):
     return panel
 
 
-def command_control_disabled(controls, account, identity, control_key):
+def command_control_disabled(controls, account, identity, control_key, default_disabled=False):
     account_controls = controls.get(account, {}) if isinstance(controls, dict) else {}
     if not isinstance(account_controls, dict):
-        return False
+        return bool(default_disabled)
     for ident in (identity or "主魂", "*"):
         ident_controls = account_controls.get(ident, {})
         if not isinstance(ident_controls, dict):
             continue
+        if control_key not in ident_controls:
+            continue
         entry = ident_controls.get(control_key)
         if isinstance(entry, dict):
-            if entry.get("disabled"):
-                return True
-        elif entry:
-            return True
-    return False
+            return bool(entry.get("disabled"))
+        return bool(entry)
+    return bool(default_disabled)
 
 
 def apply_command_controls(account, panel):
@@ -456,7 +459,13 @@ def apply_command_controls(account, panel):
     for row in commands:
         control_key = command_control_key(row.get("command", ""))
         row["control_key"] = control_key
-        row["control_disabled"] = command_control_disabled(controls, account, identity, control_key)
+        row["control_disabled"] = command_control_disabled(
+            controls,
+            account,
+            identity,
+            control_key,
+            default_disabled=bool(row.get("default_paused")),
+        )
         if row["control_disabled"]:
             row["status"] = "已暂停"
             row["tone"] = "paused"
@@ -512,6 +521,7 @@ def command_row(
     group="",
     schedule_type="",
     next_seconds=None,
+    default_paused=False,
 ):
     """Build one command-row object for the dashboard."""
     row = {
@@ -528,6 +538,8 @@ def command_row(
         row["schedule_type"] = schedule_type
     if next_seconds is not None:
         row["next_seconds"] = max(0, int(next_seconds))
+    if default_paused:
+        row["default_paused"] = True
     return row
 
 
@@ -592,6 +604,159 @@ def manual_command(command, label=None, detail="按需发送", group=""):
 
 def flow_command(command, label=None, detail="流程内自动发送", group=""):
     return command_row(command, label, "流程内", "flow", detail=detail, group=group)
+
+
+def fishing_command(state):
+    fishing = state.get("fishing", {}) if isinstance(state, dict) else {}
+    if not isinstance(fishing, dict):
+        fishing = {}
+    today_count = int(fishing.get("today_count") or 0)
+    daily_limit = int(fishing.get("daily_limit") or FISHING_DAILY_LIMIT)
+    detail_parts = [f"今日 {today_count}/{daily_limit}", f"饵料 {FISHING_MASTER_COMMAND.split()[-1]}"]
+    current_nest = str(fishing.get("current_nest") or "").strip()
+    nest_remaining = int(fishing.get("current_nest_remaining") or 0)
+    if current_nest and nest_remaining > 0:
+        detail_parts.append(f"{current_nest} 剩余 {nest_remaining}竿")
+    last_detail = str(fishing.get("last_detail") or "").strip()
+    if last_detail:
+        detail_parts.append(last_detail)
+
+    active_due = parse_state_time(fishing.get("active_due_at", ""))
+    if fishing.get("active") and active_due and active_due > datetime.now():
+        next_seconds = max(0, int((active_due - datetime.now()).total_seconds()))
+        return command_row(
+            FISHING_MASTER_COMMAND,
+            "钓鱼",
+            "等鱼讯",
+            "cooldown",
+            format_remaining(next_seconds),
+            str(fishing.get("active_due_at") or ""),
+            " · ".join(detail_parts),
+            "钓鱼",
+            schedule_type="cooldown",
+            next_seconds=next_seconds,
+            default_paused=True,
+        )
+
+    next_action = parse_state_time(fishing.get("next_action_at", ""))
+    if next_action and next_action > datetime.now():
+        next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
+        status = "今日已满" if fishing.get("last_status") == "daily_done" else "等待中"
+        return command_row(
+            FISHING_MASTER_COMMAND,
+            "钓鱼",
+            status,
+            "cooldown",
+            format_remaining(next_seconds),
+            str(fishing.get("next_action_at") or ""),
+            " · ".join(detail_parts),
+            "钓鱼",
+            schedule_type="cooldown",
+            next_seconds=next_seconds,
+            default_paused=True,
+        )
+
+    status_map = {
+        "caught": "提竿成功",
+        "empty": "空竿",
+        "synced": "已校准",
+        "bait_bought": "已买饵",
+        "nested": "已打窝",
+        "fishing": "等鱼讯",
+        "yielding": "让路中",
+        "meditation_blocked": "闭关中",
+        "no_rod": "无鱼竿",
+        "daily_done": "今日已满",
+        "paused": "已暂停",
+    }
+    last_status = str(fishing.get("last_status") or "paused")
+    return command_row(
+        FISHING_MASTER_COMMAND,
+        "钓鱼",
+        status_map.get(last_status, "就绪"),
+        "ready" if last_status not in {"no_rod", "paused"} else "unknown",
+        "0秒",
+        str(fishing.get("next_action_at") or ""),
+        " · ".join(detail_parts),
+        "钓鱼",
+        schedule_type="cooldown",
+        next_seconds=0,
+        default_paused=True,
+    )
+
+
+def yinluo_commands(state):
+    yinluo = state.get("yinluo", {}) if isinstance(state, dict) else {}
+    if not isinstance(yinluo, dict):
+        yinluo = {}
+    sha_current = int(yinluo.get("sha_current") or 0)
+    sha_max = int(yinluo.get("sha_max") or 0)
+    reserves = yinluo.get("reserves", {}) if isinstance(yinluo.get("reserves"), dict) else {}
+    slots = yinluo.get("slots", {}) if isinstance(yinluo.get("slots"), dict) else {}
+    fierce = int(reserves.get(YINLUO_SOUL, 0) or 0)
+    empty = sum(1 for item in slots.values() if isinstance(item, dict) and item.get("status") == "空闲")
+    ready = sum(1 for item in slots.values() if isinstance(item, dict) and item.get("status") == "精华已成")
+    exhausted = sum(1 for item in slots.values() if isinstance(item, dict) and "魂力枯竭" in str(item.get("status") or ""))
+    detail = f"煞气 {sha_current}/{sha_max} · {YINLUO_SOUL} {fierce} · 空槽 {empty} · 可收 {ready}"
+    if exhausted:
+        detail += f" · 枯竭 {exhausted}"
+    if yinluo.get("rank"):
+        detail += f" · {yinluo.get('rank')}"
+    if yinluo.get("last_detail"):
+        detail += f" · {yinluo.get('last_detail')}"
+
+    status_map = {
+        "init": "待校准",
+        "synced": "已校准",
+        "yielding": "让路中",
+        "meditation_blocked": "闭关中",
+        "sacrificed": "已献祭",
+        "sacrifice_done": "今日已献祭",
+        "blood_wash": "血洗完成",
+        "blood_wash_cd": "血洗冷却",
+        "summoned": "魔影成功",
+        "summon_cd": "魔影冷却",
+        "converted": "已化煞",
+        "imprisoned": "炼化中",
+        "collected": "已收取",
+        "appeased": "已安抚",
+    }
+    next_action = parse_state_time(yinluo.get("next_action_at", ""))
+    tone = "ready"
+    remaining = "0秒"
+    next_seconds = 0
+    if next_action and next_action > datetime.now():
+        tone = "cooldown"
+        next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
+        remaining = format_remaining(next_seconds)
+    rows = [
+        command_row(
+            YINLUO_MASTER_COMMAND,
+            "阴罗幡",
+            status_map.get(str(yinluo.get("last_status") or "init"), "就绪"),
+            tone,
+            remaining,
+            str(yinluo.get("next_action_at") or ""),
+            detail,
+            "阴罗宗",
+            schedule_type="cooldown",
+            next_seconds=next_seconds,
+        )
+    ]
+    rows.append(daily_done_command(
+        yinluo,
+        ".每日献祭",
+        "每日献祭",
+        date_key="last_daily_sacrifice_date",
+        detail=f"煞气池 +500，当前 {sha_current}/{sha_max}",
+        group="阴罗宗",
+    ))
+    rows.append(time_command(yinluo, "next_blood_wash_time", ".血洗山林", "血洗山林", group="阴罗宗"))
+    rows.append(time_command(yinluo, "next_summon_shadow_time", ".召唤魔影", "召唤魔影", group="阴罗宗"))
+    rows.append(command_row(".一键收取精华", "收取精华", "可收取" if ready else "按需", "ready" if ready else "manual", detail=f"精华已成槽 {ready}", group="阴罗宗"))
+    rows.append(command_row(f".囚禁魂魄 <槽位> {YINLUO_SOUL}", "囚禁凶兽", "可炼化" if empty and fierce else "等待", "ready" if empty and fierce else "manual", detail=f"只囚禁{YINLUO_SOUL}；空槽 {empty}，储备 {fierce}", group="阴罗宗"))
+    rows.append(command_row(YINLUO_CONVERT_COMMAND, "化功为煞", "煞气不足时", "manual", detail="仅囚禁凶兽戾魄且煞气不足时自动使用", group="阴罗宗"))
+    return rows
 
 
 def deep_meditation_command(state, command=".深度闭关", label="深度闭关", group="闭关"):
@@ -803,13 +968,15 @@ def main_soul_panel(account, state):
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
-            time_command(state, "next_treasure_touch_time", ".抚摸法宝 青竹蜂云剑（神雷版）", "抚摸法宝", group="法宝"),
-            time_command(state, "next_nurture_spirit_time", ".温养器灵 青竹蜂云剑（神雷版）", "温养器灵", waiting="6小时冷却", group="法宝"),
-            manual_command(".灵树状态", "灵树状态", "查询灵眼之树状态", "落云宗"),
-            spirit_tree_command(state, group="落云宗", identity="主魂"),
-            spirit_tree_guard_command(state, group="落云宗"),
+            time_command(state, "next_treasure_touch_time", ".抚摸法宝 玄天斩灵剑", "抚摸法宝", group="法宝"),
+            time_command(state, "next_nurture_spirit_time", ".温养器灵 斩灵", "温养器灵", waiting="6小时冷却", group="法宝"),
+            time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="天阶"),
+            time_command(state, "next_heart_time", ".问心台", "问心台", group="天阶"),
+            manual_command(".天阶状态", "天阶状态", "查询天阶状态", "天阶"),
+            time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="天阶"),
         ])
         rows.extend(meditation_commands(state))
+        rows.append(fishing_command(state))
         rows.append(time_command(state, "next_field_training_time", ".野外历练 谨慎", "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -827,6 +994,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
+        rows.append(fishing_command(state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
@@ -840,6 +1008,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
+        rows.append(fishing_command(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
@@ -862,6 +1031,9 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     root_state = root_state or {}
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
+    rows.append(fishing_command(state))
+    if name == YINLUO_IDENTITY:
+        rows.extend(yinluo_commands(state))
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
@@ -926,6 +1098,12 @@ def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
     rows.append(time_command(state, "next_field_training_time", ".野外历练", "野外历练", group="通用"))
+    if name == "缘生子":
+        rows.extend([
+            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+        ])
+    rows.append(fishing_command(state))
     rows.extend(meditation_commands(state, include_force_exit=True))
     rows.extend(xiaohao_star_attraction_commands(state))
     rows.extend([
@@ -949,6 +1127,12 @@ def xiaohao_avatar_commands(name, state):
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
+    if name == "缘生子":
+        rows.extend([
+            time_command(state, "next_yuanying_out_time", ".元婴出窍", "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", ".探寻裂缝", "探寻裂缝", group="通用"),
+        ])
+    rows.append(fishing_command(state))
     if name == "问心子":
         rows.extend([
             time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="天阶"),
@@ -2751,7 +2935,7 @@ def clear_account_history(account):
     return {"success": True, "msg": output or "清屏完成"}
 
 def account_display_name(account):
-    return {"main": "落云宗（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
+    return {"main": "凌霄宫（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
 
 def run_clear_job(job_id, account):
     """后台执行清屏任务"""
@@ -2902,6 +3086,7 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
     label = str(payload.get("label") or command).strip()
     control_key = str(payload.get("control_key") or command_control_key(command)).strip()
     disabled = bool(payload.get("disabled"))
+    default_paused = bool(payload.get("default_paused"))
     if account not in WINDOW_MAP:
         return {"success": False, "msg": "未知账号"}
     if not command or not control_key:
@@ -2920,12 +3105,23 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
                 "updated_by": username,
             }
         else:
-            identity_controls.pop(control_key, None)
-            if not identity_controls:
-                account_controls.pop(identity, None)
-            if not account_controls:
-                data.pop(account, None)
+            if default_paused:
+                identity_controls[control_key] = {
+                    "disabled": False,
+                    "command": command,
+                    "label": label,
+                    "updated_at": datetime.now().strftime(TIME_FORMAT),
+                    "updated_by": username,
+                }
+            else:
+                identity_controls.pop(control_key, None)
+                if not identity_controls:
+                    account_controls.pop(identity, None)
+                if not account_controls:
+                    data.pop(account, None)
         save_command_controls(data)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
     return {
         "success": True,
         "account": account,

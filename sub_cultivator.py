@@ -76,6 +76,8 @@ from command_feedback import send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 #   侍妾功能混入类：提供侍妾召回/安置/每日问安等方法的默认状态和基础实现
 
+from fishing_features import FishingMixin
+
 from star_gazing_collector import record_star_gazing_event
 
 from log_utils import (
@@ -83,6 +85,7 @@ from log_utils import (
     cap_command_retries,        # 限制重试次数，防止无限重试
     command_send_allowed,       # 检查指令发送频率是否允许
     command_send_precheck,      # 不记录发送次数的切换前预检
+    handle_clear_history_command, # 处理清屏指令
     handle_anti_bot_challenge,  # 处理游戏机器人的反机器人验证
     is_deep_meditation_ongoing_response,       # 检测"闭关进行中"回复
     is_deep_meditation_settlement_response,    # 检测"闭关结算"回复
@@ -125,6 +128,7 @@ from log_utils import (
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
     text_targets_current_account,       # 判定机器人文本是否明确指向当前账号
     tracked_command_identity_for_reply, # 识别手动/脚本指令回复对应身份
+    tracked_command_text_for_reply, # 识别手动/脚本指令回复对应指令
 )
 
 # ============================================================
@@ -158,8 +162,8 @@ STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机
 STAR_GAZING_INTERVAL_HOURS = 3                      # 星盘显现间隔 3 小时（每 3 小时整点一次）
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60           # 在显现前 3 分钟开始监听消息
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60               # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (22, 24)    # 副号在显现后 22~24 秒发出，覆盖高竞争延迟窗口
-STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 最晚发送秒数，用于窗口截止判断
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (22, 24)    # 副号在显现后 22~24 秒发出，抢显化后的机缘窗口
+STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                 # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1                  # 改换星移只发 1 次（晚发策略不需要重试）
 STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS = 3       # 重复间隔（虽然只发 1 次，但必须定义否则 schedule_star_shift 会 NameError）
@@ -173,7 +177,7 @@ STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮
 
 
 def star_gazing_shift_dt(target_dt, now=None):
-    """Return a shift send time within this account's configured post-manifest window."""
+    """Return a shift send time within this account's post-manifest window."""
     now = now or datetime.now()
     min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
     elapsed = (now - target_dt).total_seconds()
@@ -210,6 +214,7 @@ YUANYING_RETREAT_COMMAND = ".元婴闭关"              # 副号主魂改用元�
 
 # -- 探寻裂缝 --
 RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小时
+AVATAR_YUANYING_RIFT_AVATARS = {"缘生子"}           # 启用化身元婴出窍/探寻裂缝
 
 # -- 抚摸法宝 --
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"      # 抚摸本命法宝指令
@@ -386,7 +391,7 @@ class AtomicTaskContext:
 # 继承自 CommonCommandMixin（通用指令方法）和 ConcubineMixin（侍妾管理方法）
 # ============================================================
 
-class SubCultivator(CommonCommandMixin, ConcubineMixin):
+class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     """星宫副号修仙脚本主类，管理所有自动循环与事件响应。"""
 
     def __init__(self, session_name='sub_account_session'):
@@ -583,9 +588,20 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "last_meditation_time": "",    # 上次执行闭关修炼的时间
             "level": "",                   # 当前境界
             "next_field_training_time": "",  # 下次野外历练时间
+            "last_field_training_time": "",
+            "last_yuanying_out_time": "",
+            "next_yuanying_out_time": "",
+            "yuanying_out_active": False,
+            "yuanying_out_end_time": "",
+            "last_rift_search_time": "",
+            "next_rift_search_time": "",
+            "bushi_wentian_date": "",
+            "bushi_wentian_count": 0,
+            "bushi_wentian_exchange_count": 0,
             "nickname": "",                # 化身昵称（Dashboard 显示用）
             "in_deep_meditation": False,   # 是否处于深度闭关中
             "deep_meditation_end_time": "", # 深度闭关结束时间
+            "deep_meditation_guard_until": "",
             "meditation_restart_pending": False, # 被动结算后等待重开
             "meditation_restart_mode": "",
             "next_meditation_retry_time": "", # 闭关异常/冷却后的重试时间
@@ -669,14 +685,19 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
     def mark_avatar_meditation_restart_pending(self, avatar, source=""):
         a_state = self.get_avatar_state(avatar)
+        self.ensure_meditation_guard_from_end_time(a_state)
         a_state["in_deep_meditation"] = False
         a_state["deep_meditation_end_time"] = ""
+        if source != "passive settlement":
+            a_state["deep_meditation_guard_until"] = ""
         a_state["meditation_restart_pending"] = True
         self.save_state()
         log.info(f"Avatar [{avatar}] meditation restart pending ({source}).")
 
     def avatar_meditation_needs_attention(self, avatar):
         a_state = self.get_avatar_state(avatar)
+        if self.meditation_guard_active_for_state(a_state):
+            return False
         retry_time = self.meditation_defer_until(a_state)
         if retry_time and is_future(retry_time):
             return False
@@ -768,6 +789,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         if is_reply_to_untracked_message(self, msg):
             return
 
+        if self.record_passive_concubine_voyage_response(text):
+            log.info("Passive concubine voyage state synced from loose bot message.")
+            return
+
         # 关键过滤：如果消息不针对本账号，直接忽略（防止其他玩家消息污染化身数据）
         recent_identity = recent_profile_identity_for_text(self, text, msg_id=getattr(msg, "id", None))
         if not self.text_targets_self(msg, text) and not recent_identity:
@@ -835,6 +860,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             if avatar == "主魂":
                 self.state["in_deep_meditation"] = False
                 self.state["deep_meditation_end_time"] = ""
+                self.state["deep_meditation_guard_until"] = ""
                 self.state["next_meditation_retry_time"] = ""
                 self.state["next_meditation_time"] = ""
             else:
@@ -848,6 +874,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 if avatar == "主魂":
                     self.state["in_deep_meditation"] = False
                     self.state["deep_meditation_end_time"] = ""
+                    self.state["deep_meditation_guard_until"] = ""
                     self.state["next_meditation_retry_time"] = ""
                     self.state["next_meditation_time"] = ""
                 else:
@@ -856,19 +883,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             else:
                 cd = self.parse_wait_time(text)
                 if cd > 0:
+                    end_time = add_seconds_str(now, cd)
                     if avatar == "主魂":
-                        self.state["in_deep_meditation"] = True
-                        self.state["deep_meditation_end_time"] = add_seconds_str(now, cd)
-                        self.state["next_meditation_retry_time"] = ""
-                        self.state["next_meditation_time"] = ""
+                        self.state.update(self.meditation_active_state_values(end_time, clear_restart=False))
                     else:
-                        self.update_avatar_states(avatar, {
-                            "in_deep_meditation": True,
-                            "deep_meditation_end_time": add_seconds_str(now, cd),
-                            "meditation_restart_pending": False,
-                            "next_meditation_retry_time": "",
-                            "next_meditation_time": "",
-                        })
+                        self.update_avatar_states(avatar, self.meditation_active_state_values(end_time))
                     log.info(f"[{avatar}] passive: deep meditation active, {cd}s remaining.")
 
         # 闭关冷却中 → 更新 next_meditation_time
@@ -1082,6 +1101,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             "last_collection_time": past_time,    # 上次收集精华时间
             "in_deep_meditation": False,          # 是否处于深度闭关中
             "deep_meditation_end_time": "",       # 深度闭关结束时间
+            "deep_meditation_guard_until": "",
             "formation_active_until": past_time,  # 阵法增益有效期截止时间
             "next_force_exit_time": "",           # 下一次强行出关时间（增益结束前 5 分钟）
             "next_star_check_time": past_time,    # 下一次检查观星台时间
@@ -1157,6 +1177,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     retry_time = s.get("next_formation_retry_time", "")
                     if retry_time and is_future(retry_time):
                         s["next_formation_time"] = retry_time
+                    self.ensure_meditation_guard_from_end_time(s)
                     return s
             except Exception:
                 pass  # 文件损坏或解析失败时忽略异常，返回默认状态
@@ -1261,7 +1282,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                                       return_sent=False, delete_after=True,
                                       return_response_msg=False,
                                       suppress_no_response_alert=False,
-                                      force_identity_check=False):
+                                      force_identity_check=False,
+                                      force_meditation_check=False):
         """
         发送指令并等待游戏机器人的回复反馈。
         这是本脚本中最核心的通信方法，几乎所有自动化操作都通过此方法完成。
@@ -1291,6 +1313,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         current_t = asyncio.current_task()
         while self.active_atomic_task is not None and self.active_atomic_task != current_t:
             await asyncio.sleep(0.5)
+
+        if str(message or "").strip() == ".查看闭关" and not force_meditation_check:
+            guarded_resp = self.early_meditation_check_response_for_state("主魂", self.state, log)
+            if guarded_resp:
+                return guarded_resp
 
         # 暂停守卫：暂停期间阻塞所有自动发送
         await self.pause_event.wait()
@@ -1444,10 +1471,18 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         带身份感知的指令发送：先切换到目标化身，再发送指令。
         使用 avatar_send_lock 确保同一时间只有一个化身在操作。
         """
+        force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         # 整体任务守卫
         current_t = asyncio.current_task()
         while self.active_atomic_task is not None and self.active_atomic_task != current_t:
             await asyncio.sleep(0.5)
+
+        if str(message or "").strip() == ".查看闭关" and identity in self.avatars and not force_meditation_check:
+            guarded_resp = self.early_meditation_check_response_for_state(
+                identity, self.get_avatar_state(identity), log
+            )
+            if guarded_resp:
+                return guarded_resp
 
         # 暂停阻断守卫
         await self.pause_event.wait()
@@ -1750,7 +1785,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
     def is_star_gazing_final_report(self, text):
         """天机阁快报表示本轮整点演化已经结算，之后不应再改换星移。"""
         clean = str(text or "").replace("**", "")
-        return "【天机阁快报" in clean and "天机演化结果" in clean
+        return "【天机阁快报" in clean
 
     def current_star_report_manifest_dt(self, now=None):
         now = now or datetime.now()
@@ -1953,6 +1988,22 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             target_dt += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
         return target_dt
 
+    def star_gazing_manifest_for_notice(self, now=None):
+        """Return the manifest round a Good notice may still use, or None after final news."""
+        now = now or datetime.now()
+        current = now.replace(minute=0, second=0, microsecond=0)
+        if current.hour % STAR_GAZING_INTERVAL_HOURS == 0:
+            post_boundary_noise_end = current + timedelta(seconds=120)
+            if current <= now <= post_boundary_noise_end:
+                if self.star_gazing_final_report_seen(current):
+                    return None
+                return current
+            if self.star_gazing_final_report_seen(current):
+                return None
+
+        target_dt = self.next_star_manifest_dt(now)
+        return None if self.star_gazing_final_report_seen(target_dt) else target_dt
+
     def daily_star_gazing_fallback_dt(self, now=None):
         """
         计算每日备用观星时间（23:59）。
@@ -2015,6 +2066,32 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         self.state["pending_star_gazing_manifest_time"] = ""
         self.state["pending_star_gazing_fate_type"] = ""
 
+    def clear_stale_star_gazing_claim_before_manifest(self, manifest_dt, sender_info="", text_preview=""):
+        """Clear an old claimed .观星 round before scheduling the current manifest."""
+        claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+        pending_manifest = self.state.get("pending_star_gazing_manifest_time", "") or claimed_manifest
+        if not pending_manifest or not manifest_dt:
+            return False
+        pending_manifest_dt = str_to_dt(pending_manifest)
+        if pending_manifest_dt >= manifest_dt:
+            return False
+
+        pending = self.state.get("pending_star_gazing_target_time", "")
+        claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+        self.clear_pending_star_gazing_schedule()
+        self.clear_star_gazing_round_claim()
+        if hasattr(self, "star_gazing_task") and self.star_gazing_task and not self.star_gazing_task.done():
+            self.star_gazing_task.cancel()
+        self.state["next_star_gazing_time"] = ""
+        self.save_state()
+        log.info(
+            f"Star gazing: cleared stale pending .观星 (was at {pending or 'none'}) "
+            f"for manifest {pending_manifest}, claimed by {claimed_avatar or 'none'}; "
+            f"handling current manifest {dt_to_str(manifest_dt)}. "
+            f"Triggered by {sender_info}: {text_preview}"
+        )
+        return True
+
     def star_gazing_claim_matches(self, avatar, manifest_dt):
         """确认当前任务仍是本账号在该显化轮次被指派的唯一身份。"""
         if not manifest_dt:
@@ -2025,6 +2102,86 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             self.state.get("star_gazing_claimed_manifest_time", "") == manifest_key
             and self.state.get("star_gazing_claimed_avatar", "") == expected_avatar
         )
+
+    def claimed_star_gazing_pending_due(self, avatar, now=None):
+        """Return true when a claimed .观星 send is due and may surface as a passive result."""
+        if not avatar:
+            return False
+        pending = (
+            self.state.get("pending_star_gazing_scheduled_time", "")
+            or self.state.get("pending_star_gazing_target_time", "")
+        )
+        pending_dt = str_to_dt(pending)
+        if not pending_dt:
+            return False
+        now = now or datetime.now()
+        return now >= pending_dt - timedelta(seconds=1)
+
+    def star_gazing_observer_identity(self, text):
+        match = re.search(r"@([A-Za-z0-9_]+)\s+闭目凝神", text or "")
+        if not match:
+            return ""
+        return (getattr(self, "avatar_usernames", {}) or {}).get(match.group(1).lower(), "")
+
+    def claimed_star_gazing_reply_msg_id(self, avatar, msg, text):
+        msg_id = getattr(msg, "id", 0)
+        if not msg_id:
+            return 0
+
+        observer = self.star_gazing_observer_identity(text)
+        if observer and observer != avatar:
+            log.info(
+                f"Star gazing [{avatar}]: ignoring passive result msg {msg_id}; "
+                f"observer belongs to {observer}."
+            )
+            return 0
+
+        command = str(tracked_command_text_for_reply(self, msg) or "").strip()
+        identity = tracked_command_identity_for_reply(self, msg) or ""
+        if command:
+            if command == ".观星" and (not identity or identity == avatar):
+                return msg_id
+            log.info(
+                f"Star gazing [{avatar}]: ignoring passive result msg {msg_id}; "
+                f"reply target is [{identity or 'unknown'}] {command!r}."
+            )
+            return 0
+
+        if observer == avatar:
+            return msg_id
+
+        log.info(
+            f"Star gazing [{avatar}]: ignoring passive result msg {msg_id}; "
+            "not tied to our pending .观星 command."
+        )
+        return 0
+
+    def maybe_record_passive_claimed_star_gazing_result(self, avatar, manifest_dt, gazing_date, msg, text=""):
+        """Treat a passive 星盘显化 message as the result for a due claimed .观星 command."""
+        if not avatar or self.get_avatar_state(avatar).get("last_gazing_date") == gazing_date:
+            return False
+        if not self.claimed_star_gazing_pending_due(avatar):
+            return False
+
+        reply_msg_id = self.claimed_star_gazing_reply_msg_id(avatar, msg, text)
+        if not reply_msg_id:
+            return False
+
+        self.set_avatar_state(avatar, "last_gazing_date", gazing_date)
+        self.set_avatar_state(avatar, "last_gazing_time", now_str())
+        self.state["last_gazing_date"] = gazing_date
+        self.state["last_gazing_time"] = now_str()
+        self.clear_pending_star_gazing_schedule()
+        self.state["next_star_gazing_time"] = ""
+        self.save_state()
+
+        log.info(
+            f"Star gazing [{avatar}]: passive .观星 result observed for "
+            f"{dt_to_str(manifest_dt)}; marked {gazing_date}."
+        )
+        if manifest_dt and self.get_avatar_state(avatar).get("last_star_shift_date") != gazing_date:
+            asyncio.create_task(self.avatar_schedule_star_shift(avatar, reply_msg_id, manifest_dt, gazing_date))
+        return True
 
     def choose_star_gazing_avatar_for_today(self, today):
         """按轮换顺序选择今天尚未观星的一个化身。"""
@@ -2183,6 +2340,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         log.info(f"🔒 [ATOMIC LOCK] Acquired by StarShift-{avatar}")
         try:
             if self.get_avatar_state(avatar).get("last_star_shift_date") == today:
+                return
+            if not self.star_gazing_claim_matches(avatar, target_dt):
+                log.info(
+                    f"Star gazing [{avatar}]: pending shift for {dt_to_str(target_dt)} "
+                    "no longer owns the round; skipping .改换星移."
+                )
                 return
             if self.star_gazing_final_report_seen(target_dt):
                 log.info(
@@ -2356,6 +2519,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             f"configured send window ended at {dt_to_str(shift_dt)}."
                         )
                         return
+                    who = avatar or "主魂"
+                    if avatar and not self.star_gazing_claim_matches(avatar, current_manifest_dt):
+                        log.info(
+                            f"Star gazing [{who}]: round claim cleared for "
+                            f"{dt_to_str(current_manifest_dt)}; skipping .改换星移."
+                        )
+                        return
                     if self.star_gazing_final_report_seen(current_manifest_dt):
                         who = avatar or "主魂"
                         log.info(
@@ -2407,7 +2577,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     if avatar:
                         if self.get_avatar_state(avatar).get("last_star_shift_date") != target_day:
                             log.info(
-                                f"Star gazing [{avatar}]: GOOD result; scheduling .改换星移 before {dt_to_str(target_dt)}."
+                                f"Star gazing [{avatar}]: GOOD result; scheduling .改换星移 for manifest {dt_to_str(target_dt)}."
                             )
                             asyncio.create_task(
                                 self.avatar_schedule_star_shift(avatar, resp_msg.id, target_dt, target_day)
@@ -2419,7 +2589,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             self.state["pending_star_shift_msg_id"] = resp_msg.id
                             self.save_state()
                             log.info(
-                                f"Star gazing: GOOD result; scheduling .改换星移 before {dt_to_str(target_dt)}."
+                                f"Star gazing: GOOD result; scheduling .改换星移 for manifest {dt_to_str(target_dt)}."
                             )
                             self.star_shift_task = asyncio.create_task(
                                 self.schedule_star_shift(resp_msg.id, target_dt, target_day)
@@ -2501,7 +2671,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     self.save_state()
                     log.info(
                         f"Star gazing fallback: GOOD result detected; "
-                        f"scheduling .改换星移 before {dt_to_str(target_dt)}."
+                        f"scheduling .改换星移 for manifest {dt_to_str(target_dt)}."
                     )
                     self.star_shift_task = asyncio.create_task(
                         self.schedule_star_shift(resp_msg.id, target_dt, target_day)
@@ -2545,7 +2715,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             return False
 
         now = datetime.now()
-        manifest_dt = self.star_gazing_target_for_opportunity(now)
+        notice_manifest_dt = self.star_gazing_manifest_for_notice(now)
+        manifest_dt = notice_manifest_dt or self.star_gazing_target_for_opportunity(now)
         manifest_key = dt_to_str(manifest_dt)
         # 构造发送者信息用于日志
         sender_info = (
@@ -2562,7 +2733,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     self.state.get("pending_star_gazing_manifest_time", "")
                     or self.state.get("star_gazing_claimed_manifest_time", "")
                 )
-                if pending and is_future(pending) and pending_manifest == manifest_key:
+                pending_manifest_dt = str_to_dt(pending_manifest)
+                current_manifest_dt = self.current_star_report_manifest_dt(now)
+                cancels_pending_manifest = (
+                    pending_manifest == manifest_key
+                    or bool(pending_manifest_dt and pending_manifest_dt <= current_manifest_dt)
+                )
+                if pending_manifest and cancels_pending_manifest:
                     self.clear_pending_star_gazing_schedule()
                     self.clear_star_gazing_round_claim()
                     if hasattr(self, "star_gazing_task") and self.star_gazing_task and not self.star_gazing_task.done():
@@ -2577,12 +2754,39 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             return True
 
         if is_our_good:
+            if notice_manifest_dt is None:
+                log.info(
+                    f"Star gazing: target Good notice arrived after this round's final report; "
+                    f"ignoring without consuming .观星. Triggered by {sender_info}: {text_preview}"
+                )
+                return True
+
             send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
+            immediate_shift = True
 
             async with self.star_gazing_lock:
+                self.clear_stale_star_gazing_claim_before_manifest(
+                    manifest_dt,
+                    sender_info=sender_info,
+                    text_preview=text_preview,
+                )
                 claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
                 claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+                if claimed_manifest and claimed_avatar and self.claimed_star_gazing_pending_due(claimed_avatar, now):
+                    claimed_manifest_dt = str_to_dt(claimed_manifest)
+                    if claimed_manifest_dt:
+                        manifest_dt = claimed_manifest_dt
+                        manifest_key = claimed_manifest
+                        gazing_date = self.state.get("pending_star_gazing_date", "") or gazing_date
                 if claimed_manifest == manifest_key and claimed_avatar:
+                    if self.maybe_record_passive_claimed_star_gazing_result(
+                        claimed_avatar,
+                        manifest_dt,
+                        gazing_date,
+                        msg,
+                        text,
+                    ):
+                        return True
                     log.info(
                         f"Star gazing: manifest {manifest_key} already assigned to {claimed_avatar}; "
                         f"skip duplicate trigger from {sender_info}: {text_preview}"
@@ -2687,6 +2891,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
             _chat_id_match = (msg.chat_id == self.target_chat_id or msg.chat_id == int(f"-100{self.target_chat_id}"))
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
+                if await handle_clear_history_command(self, msg, text, sender_check, log):
+                    return
                 _sender_id = getattr(msg, "sender_id", None)
                 if _sender_id and _sender_id in self.pause_admins:
                     stripped = text.strip()
@@ -3228,6 +3434,171 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
     def record_identity_yuanying_out_start_response(self, identity, resp):
         return self.record_yuanying_out_start_response(resp, identity=identity)
+
+    def avatar_yuanying_rift_wait_seconds(self, avatar):
+        """Return the next wakeup for avatar yuanying/rift checks."""
+        pause_left = self.identity_pause_seconds(avatar)
+        if pause_left > 0:
+            return max(60, min(int(pause_left), 600))
+
+        a_state = self.get_avatar_state(avatar)
+        waits = []
+
+        if a_state.get("yuanying_out_active"):
+            end_time = (
+                a_state.get("yuanying_out_end_time")
+                or a_state.get("next_yuanying_out_time", "")
+            )
+            if end_time and is_future(end_time):
+                waits.append(seconds_until(end_time))
+            else:
+                waits.append(0 if end_time else 600)
+        else:
+            next_yuanying = a_state.get("next_yuanying_out_time", "")
+            waits.append(
+                seconds_until(next_yuanying)
+                if next_yuanying and is_future(next_yuanying)
+                else 0
+            )
+
+        next_rift = a_state.get("next_rift_search_time", "")
+        waits.append(
+            seconds_until(next_rift)
+            if next_rift and is_future(next_rift)
+            else 0
+        )
+
+        return max(60, int(min(waits or [600])))
+
+    async def _avatar_yuanying_out_check(self, avatar):
+        """化身元婴出窍检查，状态写入化身自己的 state。"""
+        if avatar not in self.avatars:
+            return
+        if self.identity_pause_seconds(avatar) > 0:
+            return
+        if self.dashboard_command_paused(".元婴出窍", avatar):
+            return
+        if (
+            hasattr(self, "avatar_meditation_needs_attention")
+            and self.avatar_meditation_needs_attention(avatar)
+        ):
+            log.info(f"Avatar [{avatar}] yuanying skipped: meditation needs restart first.")
+            return
+
+        a_state = self.get_avatar_state(avatar)
+        end_time = (
+            a_state.get("yuanying_out_end_time")
+            or a_state.get("next_yuanying_out_time", "")
+        )
+        active = a_state.get("yuanying_out_active")
+        if active and end_time and is_future(end_time):
+            return
+        if active:
+            repaired = self._repair_yuanying_out_from_last_start(
+                "avatar active expiry guard", identity=avatar
+            )
+            if repaired:
+                self.save_state()
+                return
+            a_state["yuanying_out_active"] = False
+            a_state["yuanying_out_end_time"] = ""
+            self.save_state()
+
+        next_time = a_state.get("next_yuanying_out_time", "")
+        if next_time and is_future(next_time):
+            return
+        repaired = self._repair_yuanying_out_from_last_start(
+            "avatar pre-send guard", identity=avatar
+        )
+        if repaired:
+            self.save_state()
+            return
+
+        log.info(f"Avatar [{avatar}] yuanying out due: sending .元婴出窍.")
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, ".元婴出窍", timeout=120, max_retries=0
+        )
+        self.record_yuanying_out_start_response(self.response_text(resp), identity=avatar)
+        self.save_state()
+
+    async def _avatar_rift_search_check(self, avatar):
+        """化身探寻裂缝检查；虚弱结果只暂停触发身份。"""
+        if avatar not in self.avatars:
+            return
+        if self.identity_pause_seconds(avatar) > 0:
+            return
+        if self.dashboard_command_paused(".探寻裂缝", avatar):
+            return
+        if (
+            hasattr(self, "avatar_meditation_needs_attention")
+            and self.avatar_meditation_needs_attention(avatar)
+        ):
+            log.info(f"Avatar [{avatar}] rift search skipped: meditation needs restart first.")
+            return
+
+        a_state = self.get_avatar_state(avatar)
+        repaired_next = self.preserve_cooldown_floor(
+            a_state,
+            "last_rift_search_time",
+            "next_rift_search_time",
+            RIFT_SEARCH_CD_SECONDS,
+            f"avatar rift search [{avatar}]",
+        )
+        if repaired_next and is_future(repaired_next):
+            return
+        next_time = a_state.get("next_rift_search_time", "")
+        if next_time and is_future(next_time):
+            return
+
+        log.info(f"Avatar [{avatar}] rift search due: sending .探寻裂缝.")
+        resp = await self.send_and_wait_feedback_identity(
+            avatar, ".探寻裂缝", timeout=120, max_retries=0
+        )
+        resp_text = self.response_text(resp)
+        if self.is_rift_weakness_response(resp_text):
+            await self.stop_for_rift_weakness(resp_text, identity=avatar)
+            return
+        self.record_identity_fixed_cd_command_response(
+            avatar,
+            resp_text,
+            ".探寻裂缝",
+            "last_rift_search_time",
+            "next_rift_search_time",
+            RIFT_SEARCH_CD_SECONDS,
+        )
+        self.save_state()
+
+    async def run_avatar_yuanying_rift_loop(self, avatar, initial_delay=0):
+        """Run avatar .元婴出窍 and .探寻裂缝 on their independent cooldowns."""
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self.is_running:
+            try:
+                await self.pause_event.wait()
+                if avatar not in self.avatars:
+                    log.warning(f"Avatar yuanying/rift loop disabled: unknown avatar [{avatar}].")
+                    return
+
+                if self.identity_pause_seconds(avatar) <= 0:
+                    await self._avatar_yuanying_out_check(avatar)
+                if self.identity_pause_seconds(avatar) <= 0:
+                    await self._avatar_rift_search_check(avatar)
+
+                wait_sec = self.avatar_yuanying_rift_wait_seconds(avatar)
+                log.info(
+                    f"Avatar [{avatar}] yuanying/rift loop sleeping {int(wait_sec)}s."
+                )
+                await asyncio.sleep(
+                    scheduler_sleep_seconds(wait_sec + random.randint(10, 30), minimum=60)
+                )
+            except Exception as e:
+                log.error(
+                    f"Avatar [{avatar}] yuanying/rift loop error: {e}",
+                    exc_info=True,
+                )
+                await asyncio.sleep(300)
 
     # ============================================================
     # 抚摸法宝响应解析
@@ -4184,10 +4555,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             if is_deep_meditation_ongoing_response(check_text) or "预计还需" in check_text:
                 cd = self.parse_wait_time(check_text)
                 if cd > 0:
-                    self.update_avatar_states(avatar, {
-                        "in_deep_meditation": True,
-                        "deep_meditation_end_time": add_seconds_str(now_str(), cd),
-                    })
+                    self.update_avatar_states(
+                        avatar,
+                        self.meditation_active_state_values(add_seconds_str(now_str(), cd)),
+                    )
                 return
             await asyncio.sleep(3)
             cultivation_resp = await self.send_and_wait_feedback_identity(avatar, ".闭关修炼", timeout=45, max_retries=1)
@@ -4656,10 +5027,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         注意：此方法原本设计在等待期间召回侍妾，但当前版本中召回逻辑已被分离。
         当前仅返回等待时间，实际等待由调用方处理。
         """
-        remaining = seconds_until(end_time)
+        protected_until = self.meditation_protected_until({"deep_meditation_end_time": end_time}) or end_time
+        remaining = seconds_until(protected_until)
         if remaining <= 0:
             return 0
-        return seconds_until(end_time) + random.randint(10, 30)
+        return remaining + random.randint(10, 30)
 
     async def record_deep_meditation_start(self, response_text, place_reason):
         """
@@ -4699,12 +5071,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     "a remaining time; using 8h fallback."
                 )
 
-        self.state["in_deep_meditation"] = True
-        self.state["deep_meditation_end_time"] = add_seconds_str(
-            now_str(), cd if cd > 0 else 8 * 3600
+        self.state.update(
+            self.meditation_active_state_values(
+                add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600),
+                clear_restart=False,
+            )
         )
-        self.state["next_meditation_retry_time"] = ""
-        self.state["next_meditation_time"] = ""
         self.save_state()
         await self.place_concubine_in_cave(place_reason)
         return True
@@ -5465,13 +5837,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 await asyncio.sleep(wait_sec)
                 continue
 
+            if self.ensure_meditation_guard_from_end_time(self.state):
+                self.save_state()
+            guard_wait = self.meditation_guard_wait_seconds_for_state(self.state)
             end_time_str = self.state.get("deep_meditation_end_time", "")
-            if is_future(end_time_str):
+            if guard_wait > 0:
                 # 缓存的闭关结束时间在未来，跳过 .查看闭关，直接等待
                 log.info(
-                    f"Meditation is future, skipping .查看闭关. Next event at {end_time_str}"
+                    f"Meditation protected, skipping .查看闭关 for "
+                    f"{self.compact_duration_text(guard_wait)}."
                 )
-                med_cd = seconds_until(end_time_str)
+                med_cd = guard_wait
                 check_resp = "Skip"  # 占位符，避免进入后续解析逻辑
             else:
                 log.info("Checking meditation status via .查看闭关...")
@@ -5483,16 +5859,16 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
 
             if check_resp == "Skip":
                 # 跳过 .查看闭关，直接等待缓存的闭关结束时间
-                med_wait = await self.meditation_wait_with_concubine_recall(
-                    end_time_str, "Meditation cached"
-                )
+                med_wait = guard_wait + random.randint(10, 30)
                 allow_short_wait = med_wait < 60
             elif med_cd > 0 and is_deep_meditation_ongoing_response(check_resp):
                 log.info(f"Deep meditation in progress, remaining {med_cd}s.")
-                self.state["in_deep_meditation"] = True
-                self.state["deep_meditation_end_time"] = add_seconds_str(now_str(), med_cd)
-                self.state["next_meditation_retry_time"] = ""
-                self.state["next_meditation_time"] = ""
+                self.state.update(
+                    self.meditation_active_state_values(
+                        add_seconds_str(now_str(), med_cd),
+                        clear_restart=False,
+                    )
+                )
                 self.save_state()
                 med_wait = await self.meditation_wait_with_concubine_recall(
                     self.state["deep_meditation_end_time"], "Meditation status"
@@ -5533,12 +5909,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             elif is_deep_meditation_ongoing_response(check_resp):
                 if med_cd > 0:
                     log.info(f"Deep meditation in progress, remaining {med_cd}s.")
-                    self.state["in_deep_meditation"] = True
-                    self.state["deep_meditation_end_time"] = add_seconds_str(
-                        now_str(), med_cd
+                    self.state.update(
+                        self.meditation_active_state_values(
+                            add_seconds_str(now_str(), med_cd),
+                            clear_restart=False,
+                        )
                     )
-                    self.state["next_meditation_retry_time"] = ""
-                    self.state["next_meditation_time"] = ""
                     med_wait = await self.meditation_wait_with_concubine_recall(
                         self.state["deep_meditation_end_time"], "Meditation status"
                     )
@@ -5563,9 +5939,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 if med_cd > 0:
                     log.info(f"Deep meditation on cooldown: {med_cd}s.")
                     self.state["in_deep_meditation"] = False
-                    self.state["deep_meditation_end_time"] = add_seconds_str(
-                        now_str(), med_cd
-                    )
+                    self.state["deep_meditation_end_time"] = ""
+                    self.state["deep_meditation_guard_until"] = ""
+                    self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), med_cd)
                     med_wait = med_cd + random.randint(10, 30)
                     self.save_state()
                 else:
@@ -5716,14 +6092,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     f"did not return a remaining time; using 8h fallback."
                 )
 
-        self.update_avatar_states(avatar, {
-            "in_deep_meditation": True,
-            "deep_meditation_end_time": add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600),
-            "meditation_restart_pending": False,
-            "meditation_restart_mode": "",
-            "next_meditation_retry_time": "",
-            "next_meditation_time": "",
-        })
+        self.update_avatar_states(
+            avatar,
+            self.meditation_active_state_values(
+                add_seconds_str(now_str(), cd if cd > 0 else 8 * 3600)
+            ),
+        )
         return True
 
     # ============================================================
@@ -6378,16 +6752,22 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     continue
 
                 # 检查缓存的深度闭关结束时间
+                if self.ensure_meditation_guard_from_end_time(a_state):
+                    self.save_state()
+                guard_wait = self.meditation_guard_wait_seconds_for_state(a_state)
                 med_end = a_state.get("deep_meditation_end_time", "")
-                if a_state.get("meditation_restart_pending"):
+                if a_state.get("meditation_restart_pending") and guard_wait <= 0:
                     med_end = ""
                     log.info(f"Avatar [{avatar}] meditation restart pending; checking immediately.")
-                if is_future(med_end):
+                if guard_wait > 0:
                     # 缓存的闭关结束时间在未来，跳过 .查看闭关
                     # ⚠️ 不能直接 sleep 到闭关结束，否则野外历练会被跳过
                     # 短睡后重新循环，确保野外历练等冷却到期的功能不被阻塞
-                    log.info(f"Avatar [{avatar}] deep meditation cached until {med_end}, short sleep then recheck.")
-                    med_wait = min(seconds_until(med_end), 1800)  # 最多睡 30 分钟
+                    log.info(
+                        f"Avatar [{avatar}] deep meditation protected for "
+                        f"{self.compact_duration_text(guard_wait)}, short sleep then recheck."
+                    )
+                    med_wait = min(guard_wait, 1800)  # 最多睡 30 分钟
                 else:
                     # 缓存无效或已过期，通过 .查看闭关 确认实际状态
                     log.info(f"Avatar [{avatar}] checking meditation status via .查看闭关...")
@@ -6400,13 +6780,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     if med_cd > 0 and is_deep_meditation_ongoing_response(check_text):
                         # 闭关进行中，记录结束时间
                         log.info(f"Avatar [{avatar}] deep meditation in progress, remaining {med_cd}s.")
-                        self.update_avatar_states(avatar, {
-                            "in_deep_meditation": True,
-                            "deep_meditation_end_time": add_seconds_str(now_str(), med_cd),
-                            "next_meditation_retry_time": "",
-                            "next_meditation_time": "",
-                            "meditation_restart_pending": False,
-                        })
+                        self.update_avatar_states(
+                            avatar,
+                            self.meditation_active_state_values(add_seconds_str(now_str(), med_cd)),
+                        )
                         med_wait = med_cd + random.randint(10, 30)
 
                     elif is_not_deep_meditation_response(check_text):
@@ -6451,13 +6828,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         # 闭关进行中但 med_cd == 0（时间到），结算并重新开启
                         if med_cd > 0:
                             log.info(f"Avatar [{avatar}] deep meditation in progress, remaining {med_cd}s.")
-                            self.update_avatar_states(avatar, {
-                                "in_deep_meditation": True,
-                                "deep_meditation_end_time": add_seconds_str(now_str(), med_cd),
-                                "next_meditation_retry_time": "",
-                                "next_meditation_time": "",
-                                "meditation_restart_pending": False,
-                            })
+                            self.update_avatar_states(
+                                avatar,
+                                self.meditation_active_state_values(add_seconds_str(now_str(), med_cd)),
+                            )
                             med_wait = med_cd + random.randint(10, 30)
                         else:
                             log.info(f"Avatar [{avatar}] meditation time up. Settling and restarting...")
@@ -6482,7 +6856,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         if med_cd > 0:
                             log.info(f"Avatar [{avatar}] deep meditation on cooldown: {med_cd}s.")
                             self.set_avatar_state(avatar, "in_deep_meditation", False)
-                            self.set_avatar_state(avatar, "deep_meditation_end_time", add_seconds_str(now_str(), med_cd))
+                            self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+                            self.set_avatar_state(avatar, "deep_meditation_guard_until", "")
+                            self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), med_cd))
                             self.set_avatar_state(avatar, "meditation_restart_pending", True)
                             med_wait = med_cd + random.randint(10, 30)
                         else:
@@ -6611,7 +6987,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     max_retries=0,
                     force_identity_check=True,
                     suppress_no_response_alert=True,
+                    return_response_msg=True,
                 )
+                ft_resp = await self.wait_for_field_training_settlement(ft_resp, avatar)
                 ft_text = self.response_text(ft_resp)
 
                 if "修为不足" in ft_text:
@@ -6623,6 +7001,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                             max_retries=0,
                             force_identity_check=True,
                             suppress_no_response_alert=True,
+                            return_response_msg=True,
                         )
 
                     success, ft_text = await self.handle_修为不足(
@@ -6638,6 +7017,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                         continue
 
                 self.record_identity_field_training_response(avatar, ft_text, "野外历练")
+                await self.maybe_run_bushi_wentian_after_field_training(avatar, ft_text)
                 await asyncio.sleep(5)
             except Exception as e:
                 log.error(f"Avatar [{avatar}] field training loop error: {e}", exc_info=True)
@@ -6835,8 +7215,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                 old_med = self.state.get("next_deep_meditation_time", "")
                 end_med = self.state.get("deep_meditation_end_time", "") or old_med
 
-                if end_med and is_future(end_med):
+                if end_med and self.meditation_protected_until({"deep_meditation_end_time": end_med}):
                     self.state["deep_meditation_end_time"] = end_med
+                    self.ensure_meditation_guard_from_end_time(self.state)
                     log.info(
                         f"Startup Sync: Local meditation time valid ({end_med}). Skipping check."
                     )
@@ -6846,16 +7227,19 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
                     if resp_med:
                         cd_med = self.parse_wait_time(resp_med)
                         if cd_med > 0:
-                            self.state["deep_meditation_end_time"] = add_seconds_str(
-                                now_str(), cd_med
+                            self.state.update(
+                                self.meditation_active_state_values(
+                                    add_seconds_str(now_str(), cd_med),
+                                    clear_restart=False,
+                                )
                             )
-                            self.state["in_deep_meditation"] = True
                         elif (
                             is_deep_meditation_settlement_response(resp_med)
                             or is_not_deep_meditation_response(resp_med)
                         ):
                             self.state["in_deep_meditation"] = False
                             self.state["deep_meditation_end_time"] = ""
+                            self.state["deep_meditation_guard_until"] = ""
 
                 # 3. 阵法 CD 对账（副号主魂不再执行星宫阵法）
                 last_form = self.state.get("last_formation_time", "")
@@ -6979,6 +7363,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
         asyncio.create_task(self.run_ask_dao_loop())           # 元婴宗问道
         asyncio.create_task(self.run_yuanying_out_loop())     # 元婴出窍
         asyncio.create_task(self.run_rift_search_loop())      # 探寻裂缝
+        asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
         if self.main_star_palace_enabled:
             asyncio.create_task(self.run_treasure_touch_loop())   # 抚摸法宝
         # 化身闭关修炼循环（深度闭关模式，各化身错开启动避免冲突）
@@ -6986,6 +7371,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin):
             asyncio.create_task(self.run_avatar_loop(avatar_name, initial_delay=i * 10))
             asyncio.create_task(self.run_avatar_field_training_loop(avatar_name, initial_delay=i * 10))
             asyncio.create_task(self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
+            asyncio.create_task(self.run_fishing_loop(avatar_name, initial_delay=30 + i * 10))
+            if avatar_name in AVATAR_YUANYING_RIFT_AVATARS:
+                asyncio.create_task(self.run_avatar_yuanying_rift_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:
                 asyncio.create_task(self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
 

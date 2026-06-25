@@ -22,7 +22,7 @@ import time
 import urllib.request
 from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import deque  # 用于手动指令 ID 的固定大小队列
 
 
@@ -32,6 +32,7 @@ from collections import deque  # 用于手动指令 ID 的固定大小队列
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 LOG_RETENTION_HOURS = 7 * 24               # 日志保留 7 天
 COMMAND_AUTO_DELETE_SECONDS = 120           # 指令发送后 2 分钟自动删除
+CLEAR_HISTORY_OLDER_THAN_MINUTES = 35       # 清屏：只删除 35 分钟以前的点号指令
 MAX_COMMAND_RETRIES = 3                     # 最大重试次数
 DISABLED_AUTO_COMMANDS = {".召回侍妾"}      # 禁用的自动指令（防止误操作）
 COMMAND_CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command_controls.json")
@@ -42,6 +43,13 @@ USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 COMMAND_GUARD_WINDOW_SECONDS = 30 * 60      # 监控窗口 30 分钟
 COMMAND_GUARD_BLOCK_SECONDS = 60 * 60       # 触发守卫后拦截 1 小时
 COMMAND_GUARD_POLICY_OVERRIDES = {
+    ".协同守山": {                           # 守山按机器人回执保护，正常成功/短冷却不按发送次数拦截
+        "limit": 9999,
+        "window": 30 * 60,
+        "block_seconds": 60 * 60,
+        "identity_scoped": False,
+        "track_sends": False,
+    },
     ".宗门传功": {"limit": 6},               # 宗门传功放宽到 6 次
     ".稳": {"limit": 6},                     # 心劫.稳放宽到 6 次
     ".查看闭关": {                           # 闭关状态查询：允许频繁
@@ -69,6 +77,8 @@ PARAM_COMMAND_ROOTS = {
     ".探渊",
     ".灵兽出战",
     ".灵兽休息",
+    ".囚禁魂魄",
+    ".安抚幡灵",
 }
 _COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
 
@@ -82,6 +92,7 @@ BOT_ACTIVITY_LOG_INTERVAL_SECONDS = 60      # 等待日志间隔
 BOT_ACTIVITY_ALERT_INTERVAL_SECONDS = 10 * 60  # 失联告警间隔
 BOT_ACTIVITY_HISTORY_SCAN_INTERVAL_SECONDS = 30  # 历史消息扫描间隔
 BOT_ACTIVITY_HISTORY_SCAN_LIMIT = 40        # 扫描最近 40 条消息
+CLIENT_DISCONNECT_ABORT_SECONDS = 2 * 60    # 本地 Telegram 客户端断线超过 2 分钟就释放发送锁
 
 # 游戏机器人账号列表
 DEFAULT_GAME_BOT_USERNAMES = {
@@ -221,11 +232,26 @@ def command_guard_policy(command, limit, window, block_seconds):
                 policy = override_policy
                 break
     return (
-        max(int(limit), int(policy.get("limit", limit))),
+        int(policy.get("limit", limit)),
         int(policy.get("window", window)),
         int(policy.get("block_seconds", block_seconds)),
         bool(policy.get("alert", True)),
+        bool(policy.get("identity_scoped", True)),
+        bool(policy.get("track_sends", True)),
     )
+
+
+def command_guard_key(command, identity="主魂", limit=MAX_COMMAND_RETRIES,
+                      window=COMMAND_GUARD_WINDOW_SECONDS,
+                      block_seconds=COMMAND_GUARD_BLOCK_SECONDS):
+    """Return the in-memory rate-limit key and policy for a command."""
+    key = str(command or "").strip()
+    current_id = str(identity or "主魂").strip() or "主魂"
+    limit, window, block_seconds, should_alert, identity_scoped, track_sends = command_guard_policy(
+        key, limit, window, block_seconds
+    )
+    guard_key = f"{key} ({current_id})" if identity_scoped and current_id != "主魂" else key
+    return guard_key, limit, window, block_seconds, should_alert, track_sends
 
 
 def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="command_guard", identity=None):
@@ -241,6 +267,54 @@ def remember_command_guard_block(actor, key, wait, blocked_until=0, reason="comm
         })
     except Exception:
         pass
+
+
+def force_command_guard_block(actor, command, wait, logger=None, identity=None,
+                              reason="response_error", alert=False, reason_text=""):
+    """Set a command-guard block from domain-specific response parsing."""
+    try:
+        wait = max(0, int(wait or 0))
+    except Exception:
+        wait = 0
+    if wait <= 0:
+        return
+    guard_key, limit, window, block_seconds, _should_alert, _track_sends = command_guard_key(
+        command, identity or getattr(actor, "current_identity", "主魂")
+    )
+    now = time.monotonic()
+    guard = getattr(actor, "_command_send_guard", None)
+    if guard is None:
+        guard = {}
+        setattr(actor, "_command_send_guard", guard)
+    entry = guard.get(guard_key, {"times": [], "blocked_until": 0, "last_warn": 0})
+    entry["blocked_until"] = max(float(entry.get("blocked_until", 0) or 0), now + wait)
+    entry["last_warn"] = now
+    guard[guard_key] = entry
+    remember_command_guard_block(actor, guard_key, wait, entry["blocked_until"], reason=reason, identity=identity)
+    if logger:
+        logger.warning(f"Command guard forced block [{guard_key}] for {wait}s ({reason}).")
+    if alert:
+        _notify_command_guard_blocked(
+            actor, guard_key, limit, window, wait, logger, reason_text=reason_text
+        )
+
+
+def clear_command_guard_block(actor, command, logger=None, identity=None, reason=""):
+    """Clear a response-driven command-guard block when new valid state arrives."""
+    guard_key, _limit, _window, _block_seconds, _should_alert, _track_sends = command_guard_key(
+        command, identity or getattr(actor, "current_identity", "主魂")
+    )
+    guard = getattr(actor, "_command_send_guard", None)
+    if not isinstance(guard, dict) or guard_key not in guard:
+        return
+    entry = guard.get(guard_key) or {}
+    if entry.get("blocked_until", 0):
+        entry["blocked_until"] = 0
+        entry["last_warn"] = 0
+        guard[guard_key] = entry
+        if logger:
+            suffix = f" ({reason})" if reason else ""
+            logger.info(f"Command guard cleared [{guard_key}]{suffix}.")
 
 
 def command_allowed_during_identity_pause(command):
@@ -456,6 +530,10 @@ def command_response_family(command):
         return "concubine_voyage"
     if cmd == ".天机代卜":
         return "divination"
+    if cmd == ".卜筮问天":
+        return "bushi_wentian"
+    if cmd == ".换取":
+        return "bushi_exchange"
     if cmd == ".宗门传功":
         return "sect_skill"
     if cmd in {".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"}:
@@ -473,6 +551,15 @@ def command_response_family(command):
         return cmd
     if cmd in {".元婴出窍", ".元婴闭关"}:
         return ".元婴出窍"
+    if cmd in {".渔具铺", ".鱼篓", ".钓鱼状态"} or cmd.startswith(".买鱼饵") or cmd.startswith(".钓鱼") or cmd.startswith(".垂钓") or cmd.startswith(".打窝") or cmd == ".提竿":
+        return "fishing"
+    if (
+        cmd in {".我的阴罗幡", ".升级阴罗幡", ".每日献祭", ".血洗山林", ".召唤魔影", ".一键收取精华", ".一键收取"}
+        or cmd.startswith(".囚禁魂魄")
+        or cmd.startswith(".安抚幡灵")
+        or cmd.startswith(".化功为煞")
+    ):
+        return "yinluo"
     return ""
 
 
@@ -544,6 +631,10 @@ def text_response_family(text):
         "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
     ]):
         return "concubine_voyage"
+    if any(k in clean for k in ["卜筮问天", "神物现世", "天道示警"]):
+        return "bushi_wentian"
+    if "换取" in clean and any(k in clean for k in ["天道认可", "获取此等逆天之物", "机缘"]):
+        return "bushi_exchange"
     if "卦象" in clean:
         return "divination"
     if "天机代卜" in clean or "天机链路" in clean:
@@ -564,6 +655,20 @@ def text_response_family(text):
         return ".闯塔"
     if any(k in clean for k in ["元婴出窍", "元婴闭关", "元神回响", "元神归窍总结", "元婴归窍总结", "元婴闭关结算"]):
         return ".元婴出窍"
+    if any(k in clean for k in [
+        "灵溪垂钓", "鱼篓", "渔具铺", "青竹钓竿", "钓术", "鱼讯",
+        "提竿成功", "空竿", "打窝已成", "打窝失败", "窝料已经用尽",
+        "你挂上", "抛竿入水", "今日已垂钓", "鱼获已入鱼篓",
+    ]):
+        return "fishing"
+    if any(k in clean for k in [
+        "阴罗幡", "阴罗宗", "阴罗本幡", "血煞幡", "炼化槽",
+        "每日献祭", "九幽煞气", "血洗功成", "血洗山林",
+        "魔影", "魔域裂隙", "召唤成功", "镇压成功",
+        "囚禁魂魄", "被强行打入", "煞气不足", "化功为煞",
+        "幡魂谱系精进",
+    ]):
+        return "yinluo"
     return ""
 
 
@@ -651,6 +756,16 @@ def feedback_response_matches_command(command, text):
         ])
     if expected == "divination":
         return any(k in clean for k in ["天机代卜", "天机链路", "卜算", "代卜", "卦象"])
+    if expected == "bushi_wentian":
+        return any(k in clean for k in [
+            "卜筮问天", "神物现世", "天道示警", "天机罗盘", "卦象显示",
+            "回复本消息", "换取", "今日次数", "次数已用尽",
+        ])
+    if expected == "bushi_exchange":
+        return any(k in clean for k in [
+            "换取成功", "天道认可", "获取此等逆天之物", "机缘消散",
+            "材料不足", "超时", "来确认", "献上祭品", "祭品", "收入囊中",
+        ]) or ("换取" in clean and any(k in clean for k in ["获得", "消耗", "机缘"]))
     if expected == "sect_skill":
         return any(k in clean for k in ["宗门传功", "传功玉简", "元神", "传功"])
     if expected == "spirit_tree":
@@ -683,6 +798,24 @@ def feedback_response_matches_command(command, text):
             "元婴出窍", "元婴闭关", "神游", "云游", "出窍", "自动结算",
             "尚未凝聚元婴", "无法施展此术", "元神回响",
             "元神归窍总结", "元婴归窍总结", "元婴闭关结算",
+        ])
+    if expected == "fishing":
+        return any(k in clean for k in [
+            "灵溪垂钓", "鱼篓", "渔具铺", "青竹钓竿", "钓术", "鱼讯",
+            "提竿成功", "空竿", "打窝已成", "打窝失败", "窝料已经用尽",
+            "你挂上", "抛竿入水", "今日已垂钓", "鱼获已入鱼篓",
+            "购得 【", "鱼篓中没有", "已有一竿尚未收起", "尚无【青竹钓竿】",
+        ])
+    if expected == "yinluo":
+        return any(k in clean for k in [
+            "阴罗幡", "阴罗宗", "阴罗本幡", "血煞幡", "炼化槽",
+            "每日献祭", "九幽煞气", "今日已献祭",
+            "血洗功成", "血洗山林", "山林的生灵尚未恢复",
+            "魔影", "魔域裂隙", "召唤成功", "镇压成功",
+            "被强行打入", "煞气不足", "魂魄袋中没有",
+            "化功为煞", "转化成功", "开始运转魔功",
+            "安抚成功", "收取成功", "幡魂谱系精进",
+            "升级成功", "缺少材料",
         ])
     return False
 
@@ -886,6 +1019,165 @@ async def send_text_alert(actor, title, text, logger=None):
     return sent
 
 
+def _chat_matches_actor_target(actor, msg):
+    chat_id = getattr(msg, "chat_id", None)
+    target_chat_id = getattr(actor, "target_chat_id", None)
+    if chat_id is None or target_chat_id is None:
+        return False
+    if chat_id == target_chat_id:
+        return True
+    try:
+        return int(chat_id) == int(f"-100{target_chat_id}")
+    except Exception:
+        return False
+
+
+def _message_in_topic(msg, topic_id):
+    if not topic_id:
+        return True
+    reply_to = getattr(msg, "reply_to", None)
+    candidates = [
+        getattr(msg, "reply_to_msg_id", None),
+        getattr(msg, "reply_to_top_id", None),
+    ]
+    if reply_to is not None:
+        candidates.extend([
+            getattr(reply_to, "reply_to_msg_id", None),
+            getattr(reply_to, "reply_to_top_id", None),
+        ])
+    return topic_id in candidates
+
+
+def is_clear_history_command(actor, msg, text, sender=None):
+    """Return True for the admin-only clear-screen command: plain `c`."""
+    if str(text or "").strip().lower() != "c":
+        return False
+    if sender is not None and is_game_bot_sender(actor, sender):
+        return False
+    if not _chat_matches_actor_target(actor, msg):
+        return False
+    sender_id = getattr(msg, "sender_id", None)
+    admins = getattr(actor, "pause_admins", set()) or set()
+    return bool(sender_id and sender_id in admins)
+
+
+async def clear_actor_command_history(actor, older_than_minutes=CLEAR_HISTORY_OLDER_THAN_MINUTES, scan_limit=None, topic_only=False, logger=None):
+    """Delete this account's old outgoing dot-commands from its configured game chat."""
+    client = getattr(actor, "client", None)
+    chat_id = getattr(actor, "target_chat_id", None)
+    if not client or chat_id is None:
+        raise RuntimeError("missing client or target chat")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(0, int(older_than_minutes)))
+    scanned = outgoing = game_commands = old_enough = in_topic = selected = deleted = 0
+    batch = []
+    me = await client.get_me()
+
+    async for msg in client.iter_messages(chat_id, limit=scan_limit, from_user=me):
+        scanned += 1
+        if not getattr(msg, "out", False):
+            continue
+        outgoing += 1
+
+        body = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "").strip()
+        if not body.startswith("."):
+            continue
+        game_commands += 1
+
+        msg_date = getattr(msg, "date", None)
+        if msg_date is None:
+            continue
+        if msg_date.tzinfo is None:
+            msg_date = msg_date.replace(tzinfo=timezone.utc)
+        if msg_date > cutoff:
+            continue
+        old_enough += 1
+
+        msg_in_topic = _message_in_topic(msg, getattr(actor, "topic_id", None))
+        if msg_in_topic:
+            in_topic += 1
+        if topic_only and not msg_in_topic:
+            continue
+
+        selected += 1
+        batch.append(msg.id)
+        if len(batch) >= 100:
+            await client.delete_messages(chat_id, batch, revoke=True)
+            deleted += len(batch)
+            batch.clear()
+
+    if batch:
+        await client.delete_messages(chat_id, batch, revoke=True)
+        deleted += len(batch)
+
+    if logger:
+        logger.info(
+            f"Clear history complete: scanned={scanned}, outgoing={outgoing}, "
+            f"commands={game_commands}, old={old_enough}, selected={selected}, deleted={deleted}."
+        )
+    return {
+        "scanned": scanned,
+        "outgoing": outgoing,
+        "game_commands": game_commands,
+        "old_enough": old_enough,
+        "in_topic": in_topic,
+        "selected": selected,
+        "deleted": deleted,
+    }
+
+
+def clear_history_account_label(actor):
+    key = getattr(actor, "account_key", "")
+    return {
+        "main": "凌霄宫（主号）",
+        "sub": "元婴宗（副号）",
+        "xiaohao": "万灵宗（小号）",
+    }.get(key, key or actor.__class__.__name__)
+
+
+async def _run_clear_history_command(actor, label, logger=None):
+    try:
+        result = await clear_actor_command_history(actor, logger=logger)
+        msg = (
+            f"{label}清屏完成。\n"
+            f"仅处理 {CLEAR_HISTORY_OLDER_THAN_MINUTES} 分钟以前的 . 开头游戏指令。\n"
+            f"扫描自己消息={result['scanned']}，自己发言={result['outgoing']}，"
+            f"游戏指令={result['game_commands']}，超过阈值={result['old_enough']}，"
+            f"选中={result['selected']}，已删除={result['deleted']}。"
+        )
+        await send_text_alert(actor, "清屏完成", msg, logger)
+    except Exception as exc:
+        if logger:
+            logger.exception(f"Clear history command failed: {exc}")
+        await send_text_alert(actor, "清屏失败", f"{label}清屏失败：{exc}", logger)
+
+
+async def handle_clear_history_command(actor, msg, text, sender=None, logger=None):
+    """Handle admin `c` command and start an account-local clear-history job."""
+    if not is_clear_history_command(actor, msg, text, sender):
+        return False
+
+    client = getattr(actor, "client", None)
+    chat_id = getattr(actor, "target_chat_id", None)
+    if client and chat_id is not None:
+        try:
+            await client.delete_messages(chat_id, msg)
+        except Exception:
+            pass
+
+    label = clear_history_account_label(actor)
+    existing = getattr(actor, "_clear_history_task", None)
+    if existing and not existing.done():
+        await send_text_alert(actor, "清屏进行中", f"{label}已有清屏任务在运行，请稍等。", logger)
+        return True
+
+    task = asyncio.create_task(_run_clear_history_command(actor, label, logger))
+    setattr(actor, "_clear_history_task", task)
+    if logger:
+        logger.info(f"Clear history command accepted for {label}.")
+    return True
+
+
 async def handle_anti_bot_challenge(actor, msg, text, sender, logger=None, title="自证告警"):
     """
     处理反机器人挑战的入口函数。
@@ -974,6 +1266,40 @@ async def refresh_recent_game_bot_activity(actor, stale_seconds=BOT_ACTIVITY_STA
     return False
 
 
+async def ensure_client_connected_before_send(actor, command="", logger=None):
+    client = getattr(actor, "client", None)
+    if not client or not hasattr(client, "is_connected"):
+        return True
+    try:
+        if client.is_connected():
+            return True
+    except Exception:
+        return True
+
+    now = time.monotonic()
+    last_attempt = getattr(actor, "_client_reconnect_attempt_last", 0) or 0
+    if now - last_attempt < BOT_ACTIVITY_POLL_SECONDS:
+        return False
+    setattr(actor, "_client_reconnect_attempt_last", now)
+
+    if logger:
+        logger.warning(f"Telegram client disconnected before [{command}]; attempting reconnect.")
+    try:
+        await client.connect()
+        if hasattr(client, "is_user_authorized") and not await client.is_user_authorized():
+            if logger:
+                logger.error("Telegram client reconnect failed: session is not authorized.")
+            return False
+        if client.is_connected():
+            if logger:
+                logger.info("Telegram client reconnect succeeded.")
+            return True
+    except Exception as exc:
+        if logger:
+            logger.error(f"Telegram client reconnect failed before [{command}]: {exc}")
+    return False
+
+
 def is_bot_health_paused(actor):
     """判断是否因机器人不健康而暂停"""
     until = getattr(actor, "_bot_unhealthy_until", 0) or 0
@@ -1006,7 +1332,23 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
     if key in {".自证", ".强行出关"}:
         return True
 
+    disconnected_since = 0
     while getattr(actor, "is_running", True):
+        if not await ensure_client_connected_before_send(actor, key, logger):
+            now = time.monotonic()
+            if not disconnected_since:
+                disconnected_since = now
+            if now - disconnected_since >= CLIENT_DISCONNECT_ABORT_SECONDS:
+                if logger:
+                    logger.error(
+                        f"Telegram client remained disconnected for "
+                        f"{int(now - disconnected_since)}s before [{key}]; aborting send."
+                    )
+                return False
+            await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
+            continue
+        disconnected_since = 0
+
         if not is_bot_activity_recent(actor, stale_seconds):
             await refresh_recent_game_bot_activity(actor, stale_seconds, logger)
         if is_bot_activity_recent(actor, stale_seconds):
@@ -1227,7 +1569,7 @@ def is_deep_meditation_ongoing_response(text):
 # 8. 命令守卫
 # =====================================================================
 
-def _notify_command_guard_blocked(actor, command, limit, window, block_seconds, logger=None):
+def _notify_command_guard_blocked(actor, command, limit, window, block_seconds, logger=None, reason_text=""):
     """当命令守卫拦截指令时，发送告警给用户"""
     now = time.monotonic()
     cache = getattr(actor, "_command_guard_alert_cache", None)
@@ -1248,11 +1590,15 @@ def _notify_command_guard_blocked(actor, command, limit, window, block_seconds, 
         or getattr(info, "username", None)
         or actor.__class__.__name__
     )
+    reason_line = reason_text or (
+        f"{int(window // 60)} 分钟内已发送 {limit} 次，"
+        f"已暂停该命令 {int(block_seconds // 60)} 分钟。"
+    )
     text = (
         "【命令保护提醒】\\n"
         f"账号：{account}\\n"
         f"命令：{command}\\n"
-        f"原因：{int(window // 60)} 分钟内已发送 {limit} 次，已暂停该命令 {int(block_seconds // 60)} 分钟。"
+        f"原因：{reason_line}"
     )
     sent = False
     if bot_token:
@@ -1507,8 +1853,9 @@ def command_send_precheck(actor, command, logger=None, identity=None,
             remember_command_guard_block(actor, key, pause_wait, reason="identity_pause", identity=current_id)
             return False
 
-    limit, window, block_seconds, _should_alert = command_guard_policy(key, limit, window, block_seconds)
-    guard_key = f"{key} ({current_id})" if current_id != "主魂" else key
+    guard_key, limit, window, block_seconds, _should_alert, track_sends = command_guard_key(
+        key, current_id, limit, window, block_seconds
+    )
 
     if not guard_key.startswith(".自证") and is_bot_health_paused(actor):
         wait = bot_health_pause_remaining(actor)
@@ -1530,6 +1877,9 @@ def command_send_precheck(actor, command, logger=None, identity=None,
             setattr(actor, "_command_send_guard", guard)
         remember_command_guard_block(actor, guard_key, wait, blocked_until, reason="command_guard")
         return False
+
+    if not track_sends:
+        return True
 
     times = [ts for ts in entry.get("times", []) if now - ts <= window]
     if len(times) >= limit:
@@ -1610,10 +1960,9 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
             remember_command_guard_block(actor, key, pause_wait, reason="identity_pause", identity=current_id)
             return False
 
-    limit, window, block_seconds, should_alert = command_guard_policy(key, limit, window, block_seconds)
-
-    if current_id != "主魂":
-        key = f"{key} ({current_id})"
+    key, limit, window, block_seconds, should_alert, track_sends = command_guard_key(
+        key, current_id, limit, window, block_seconds
+    )
 
     if not key.startswith(".自证") and is_bot_health_paused(actor):
         wait = bot_health_pause_remaining(actor)
@@ -1641,6 +1990,9 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
         guard[key] = entry
         remember_command_guard_block(actor, key, wait, blocked_until, reason="command_guard")
         return False
+
+    if not track_sends:
+        return True
 
     times = [ts for ts in entry.get("times", []) if now - ts <= window]
     if len(times) >= limit:
