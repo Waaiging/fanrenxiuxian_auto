@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import concubine_features
+import common_command_features
 import cultivator_xiaohao
 import dashboard_server
 import intelligent_cultivator
@@ -359,6 +360,93 @@ class ParserFixtureTests(unittest.TestCase):
             actor.get_avatar_state("缘生子")["last_dianmao_date"],
             datetime.now().strftime("%Y-%m-%d"),
         )
+
+    def test_common_daily_tasks_main_marks_done_before_send_and_keeps_lingxiao_buff(self):
+        class DummyDailyLoop(DummyCommon):
+            def __init__(self):
+                super().__init__()
+                self.state = {"date": "2026-06-24", "done": [], "heart_platform_date": "2026-06-24"}
+                self.startup_done = asyncio.Event()
+                self.startup_done.set()
+                self.is_running = True
+                self.lingxiao_enabled = True
+                self.sent = []
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append((command, kwargs))
+                if command == ".闯塔":
+                    return None
+                return SimpleNamespace(id=8801)
+
+        actor = DummyDailyLoop()
+
+        async def fake_sleep(seconds):
+            if seconds >= 600:
+                actor.is_running = False
+
+        async def no_wait_main():
+            return None
+
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            asyncio.run(actor.run_common_daily_tasks_loop(
+                lambda now: 0,
+                lambda: "07:00",
+                [".闯塔", ".宗门点卯"],
+                pre_loop_func=no_wait_main,
+                send_kwargs_func=lambda command: {"return_msg": True},
+                mark_done_before_send=True,
+                use_lingxiao_tower_buff=True,
+                reset_heart_platform_date=True,
+            ))
+
+        self.assertEqual([item[0] for item in actor.sent], [".借天门势", ".闯塔", ".宗门点卯"])
+        self.assertIn(".闯塔", actor.state["done"])
+        self.assertIn(".宗门点卯", actor.state["done"])
+        self.assertEqual(actor.state["last_dianmao_msg_id"], 8801)
+        self.assertEqual(actor.state["heart_platform_date"], "")
+
+    def test_common_daily_tasks_success_only_mode_preserves_send_kwargs(self):
+        class DummyDailyLoop(DummyCommon):
+            def __init__(self):
+                super().__init__()
+                self.state = {"date": "2026-06-24", "done": []}
+                self.startup_done = asyncio.Event()
+                self.startup_done.set()
+                self.is_running = True
+                self.sent = []
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append((command, kwargs))
+                if command == ".闯塔":
+                    return None
+                return SimpleNamespace(id=9901)
+
+        actor = DummyDailyLoop()
+
+        async def fake_sleep(seconds):
+            if seconds >= 600:
+                actor.is_running = False
+
+        async def no_wait_main():
+            return None
+
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            asyncio.run(actor.run_common_daily_tasks_loop(
+                lambda now: 0,
+                lambda: "07:15",
+                [".宗门点卯", ".闯塔"],
+                pre_loop_func=no_wait_main,
+                send_kwargs_func=lambda command: {
+                    "return_sent": True,
+                    "delete_after": command != ".宗门点卯",
+                },
+                mark_done_before_send=False,
+            ))
+
+        self.assertEqual(actor.sent[0], (".宗门点卯", {"return_sent": True, "delete_after": False}))
+        self.assertEqual(actor.sent[1], (".闯塔", {"return_sent": True, "delete_after": True}))
+        self.assertEqual(actor.state["done"], [".宗门点卯"])
+        self.assertEqual(actor.state["last_dianmao_msg_id"], 9901)
 
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()

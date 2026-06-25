@@ -3065,51 +3065,18 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
         检测到新的一天时重置任务计数。
         """
-        await self.startup_done.wait()  # 等待启动同步完成
-        while self.is_running:
-            await self._wait_for_main_identity()
-            now = datetime.now()
-            daily_wait = seconds_until_daily_task_start(now)
-            if daily_wait > 0:
-                next_run = now + timedelta(seconds=daily_wait)
-                log.info(
-                    f"Daily tasks paused before {daily_task_start_label()}. "
-                    f"Next check at {dt_to_str(next_run)}."
-                )
-                await asyncio.sleep(scheduler_sleep_seconds(daily_wait + random.randint(0, 30)))
-                continue
-
-            today = now.strftime('%Y-%m-%d')
-
-            # 检测到新的一天，重置每日状态
-            if self.state.get("date") != today:
-                log.info(f"New Day Detected: {today}. Resetting daily tasks...")
-                self.state["date"] = today
-                self.state["done"] = []
-                self.state["sect_skill_count"] = 0
-                self.save_state()
-
-            # ---- 执行点卯和闯塔 ----
-            tasks = [
-                (".宗门点卯", "宗门点卯"),
-                (".闯塔", "闯塔")
-            ]
-            dianmao_msg_id = None
-            for cmd, name in tasks:
-                if cmd not in self.state["done"]:
-                    sent_msg = await self.send_and_wait_feedback(
-                        cmd,
-                        return_sent=True,
-                        delete_after=(cmd != ".宗门点卯")  # 点卯消息需要留着做传功回复目标
-                    )
-                    if sent_msg:
-                        self.state["done"].append(cmd)
-                        if cmd == ".宗门点卯":
-                            self.state["last_dianmao_msg_id"] = sent_msg.id
-                        self.save_state()
-                    await asyncio.sleep(5)
-
-            await asyncio.sleep(scheduler_sleep_seconds(600))  # 分段复查，防止状态变化后睡过头
+        return await self.run_common_daily_tasks_loop(
+            seconds_until_daily_task_start,
+            daily_task_start_label,
+            [".宗门点卯", ".闯塔"],
+            pre_loop_func=self._wait_for_main_identity,
+            sleep_func=scheduler_sleep_seconds,
+            send_kwargs_func=lambda command: {
+                "return_sent": True,
+                "delete_after": command != ".宗门点卯",
+            },
+            mark_done_before_send=False,
+        )
 
     def maybe_record_main_yuanying_retreat_settlement_reply(self, msg, text, source="message"):
         """Record passive main-soul .元婴闭关 settlement when it replies to our main command."""

@@ -2394,6 +2394,84 @@ class CommonCommandMixin:
             return True
         return False
 
+    async def run_common_daily_tasks_loop(
+        self,
+        daily_start_wait_func,
+        daily_start_label_func,
+        task_commands,
+        pre_loop_func=None,
+        sleep_func=None,
+        send_kwargs_func=None,
+        mark_done_before_send=False,
+        use_lingxiao_tower_buff=False,
+        reset_heart_platform_date=False,
+    ):
+        """Run shared main-soul daily tasks while preserving account-specific send policy."""
+        await self.startup_done.wait()
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            if pre_loop_func is not None:
+                should_continue = await pre_loop_func()
+                if should_continue:
+                    continue
+
+            now = datetime.now()
+            daily_wait = daily_start_wait_func(now)
+            if daily_wait > 0:
+                next_run = now + timedelta(seconds=daily_wait)
+                log.info(
+                    f"Daily tasks paused before {daily_start_label_func()}. "
+                    f"Next check at {dt_to_str(next_run)}."
+                )
+                await asyncio.sleep(
+                    self.common_scheduler_sleep_seconds(
+                        daily_wait + random.randint(0, 30),
+                        sleep_func=sleep_func,
+                    )
+                )
+                continue
+
+            today = now.strftime("%Y-%m-%d")
+            if self.state.get("date") != today:
+                log.info(f"New Day Detected ({today}): Resetting state.")
+                self.state["date"] = today
+                self.state["done"] = []
+                self.state["sect_skill_count"] = 0
+                if reset_heart_platform_date and self.state.get("heart_platform_date") != today:
+                    self.state["heart_platform_date"] = ""
+                self.save_state()
+
+            done = self.state.setdefault("done", [])
+            for command in task_commands:
+                if command in done:
+                    continue
+
+                if mark_done_before_send:
+                    done.append(command)
+                    self.save_state()
+
+                if (
+                    command == ".闯塔"
+                    and use_lingxiao_tower_buff
+                    and getattr(self, "lingxiao_enabled", False)
+                ):
+                    await self.send_and_wait_feedback(".借天门势")
+                    await asyncio.sleep(5)
+
+                kwargs = send_kwargs_func(command) if callable(send_kwargs_func) else {}
+                sent_msg = await self.send_and_wait_feedback(command, **(kwargs or {}))
+                if sent_msg:
+                    if not mark_done_before_send and command not in done:
+                        done.append(command)
+                    if command == ".宗门点卯":
+                        self.state["last_dianmao_msg_id"] = sent_msg.id
+                    self.save_state()
+                await asyncio.sleep(5)
+
+            await asyncio.sleep(
+                self.common_scheduler_sleep_seconds(600, sleep_func=sleep_func)
+            )
+
     async def wait_for_field_training_settlement(
         self,
         resp,

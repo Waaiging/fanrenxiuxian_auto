@@ -1937,39 +1937,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         1. 闯塔
         2. 宗门点卯
         """
-        await self.startup_done.wait()
-        while self.is_running:
-            if await self.sleep_if_main_soul_paused("Daily tasks"):
-                continue
-            now = datetime.now()
-            daily_wait = seconds_until_daily_task_start(now)
-            if daily_wait > 0:
-                next_run = now + timedelta(seconds=daily_wait)
-                log.info(f"Daily tasks paused before {daily_task_start_label()}. Next check at {dt_to_str(next_run)}.")
-                await asyncio.sleep(scheduler_sleep_seconds(daily_wait + random.randint(0, 30)))
-                continue
-
-            today = now.strftime('%Y-%m-%d')
-            if self.state.get("date") != today:
-                log.info(f"New Day Detected ({today}): Resetting state.")
-                self.state["date"] = today
-                self.state["done"] = []
-                self.state["sect_skill_count"] = 0
-                self.save_state()
-
-            # 1. 每日任务
-            dianmao_msg_id = None
-            for t in [".闯塔", ".宗门点卯"]:
-                if t not in self.state["done"]:
-                    sent_msg = await self.send_and_wait_feedback(t, return_msg=True)
-                    if sent_msg:
-                        self.state["done"].append(t)
-                        if t == ".宗门点卯":
-                            self.state["last_dianmao_msg_id"] = sent_msg.id
-                        self.save_state()
-                    await asyncio.sleep(5)
-
-            await asyncio.sleep(scheduler_sleep_seconds(600))
+        return await self.run_common_daily_tasks_loop(
+            seconds_until_daily_task_start,
+            daily_task_start_label,
+            [".闯塔", ".宗门点卯"],
+            pre_loop_func=lambda: self.sleep_if_main_soul_paused("Daily tasks"),
+            sleep_func=scheduler_sleep_seconds,
+            send_kwargs_func=lambda command: {"return_msg": True},
+            mark_done_before_send=False,
+        )
 
     # ---- 指令解析工具 ----
 

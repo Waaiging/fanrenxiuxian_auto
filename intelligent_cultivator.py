@@ -2180,51 +2180,17 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
           - 使用 state["done"] 记录今日已完成的任务，防止重复执行
           - 闯塔前先 .借天门势（增加成功率）
         """
-        await self.startup_done.wait()
-        while self.is_running:
-            await self._wait_for_main_identity()
-            now = datetime.now()
-            daily_wait = seconds_until_daily_task_start(now)
-            if daily_wait > 0:
-                next_run = now + timedelta(seconds=daily_wait)
-                log.info(f"Daily tasks paused before {daily_task_start_label()}. Next check at {dt_to_str(next_run)}.")
-                await asyncio.sleep(scheduler_sleep_seconds(daily_wait + random.randint(0, 30)))
-                continue
-
-            today = now.strftime('%Y-%m-%d')
-
-            # 每日状态重置：每当日期变化时重置
-            if self.state.get("date") != today:
-                log.info(f"New Day Detected ({today}): Resetting state.")
-                self.state["date"] = today
-                self.state["done"] = []
-                self.state["sect_skill_count"] = 0
-                if self.state.get("heart_platform_date") != today:
-                    self.state["heart_platform_date"] = ""
-                self.save_state()
-
-            # ---- 1. 执行每日任务（闯塔、宗门点卯） ----
-            dianmao_msg_id = None
-            for t in [".闯塔", ".宗门点卯"]:
-                if t not in self.state["done"]:
-                    # 预先占位，防止高频重复（即使执行失败也不会反复重试）
-                    self.state["done"].append(t)
-                    self.save_state()
-
-                    if t == ".闯塔" and self.lingxiao_enabled:
-                        # 凌霄宫时期闯塔前先借天门势；退出凌霄宫后不再发送。
-                        await self.send_and_wait_feedback(".借天门势")
-                        await asyncio.sleep(5)
-
-                    sent_msg = await self.send_and_wait_feedback(t, return_msg=True)
-                    if sent_msg:
-                        if t == ".宗门点卯":
-                            # 保存点卯消息的 ID，后续传功需要回复这条消息
-                            self.state["last_dianmao_msg_id"] = sent_msg.id
-                        self.save_state()
-                    await asyncio.sleep(5)
-
-            await asyncio.sleep(scheduler_sleep_seconds(600))  # 分段复查，防止状态变化后睡过头
+        return await self.run_common_daily_tasks_loop(
+            seconds_until_daily_task_start,
+            daily_task_start_label,
+            [".闯塔", ".宗门点卯"],
+            pre_loop_func=self._wait_for_main_identity,
+            sleep_func=scheduler_sleep_seconds,
+            send_kwargs_func=lambda command: {"return_msg": True},
+            mark_done_before_send=True,
+            use_lingxiao_tower_buff=True,
+            reset_heart_platform_date=True,
+        )
 
     # ------------------------------------------------------------------
     # 闭关循环（核心玩法之一）
