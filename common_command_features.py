@@ -1099,6 +1099,153 @@ class CommonCommandMixin:
     def ask_dao_plan(self, command=None):
         return ask_dao_plan(command or getattr(self, "ask_dao_command", None))
 
+    async def send_timed_command_plan(self, plan, identity="主魂"):
+        """Send a TimedCommandPlan using the right identity-aware sender."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        kwargs = {
+            "timeout": plan.timeout,
+            "max_retries": plan.max_retries,
+            "force_identity_check": plan.force_identity_check,
+            "return_response_msg": plan.return_response_msg,
+        }
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
+        return await self.send_and_wait_feedback(plan.command, **kwargs)
+
+    def timed_command_response_text(self, resp):
+        if hasattr(self, "response_text"):
+            return self.response_text(resp)
+        if hasattr(resp, "text"):
+            return resp.text or ""
+        if isinstance(resp, str):
+            return resp
+        return str(resp) if resp else ""
+
+    def avatar_timed_command_available(self, avatar, plan, action_name="", require_meditation_ready=False):
+        """Shared precheck for avatar timed command loops."""
+        avatar = str(avatar or "").strip()
+        log = self.common_command_logger()
+        if not avatar or avatar not in getattr(self, "avatars", []):
+            return False
+        if self.identity_pause_seconds(avatar) > 0:
+            return False
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(plan.command, avatar):
+            return False
+        if (
+            require_meditation_ready
+            and hasattr(self, "avatar_meditation_needs_attention")
+            and self.avatar_meditation_needs_attention(avatar)
+        ):
+            label = action_name or plan.command
+            log.info(f"Avatar [{avatar}] {label} skipped: meditation needs restart first.")
+            return False
+        return True
+
+    async def common_avatar_yuanying_out_check(self, avatar, require_meditation_ready=False):
+        """Run one shared avatar .元婴出窍 check."""
+        plan = self.yuanying_out_plan(avatar)
+        if not self.avatar_timed_command_available(
+            avatar,
+            plan,
+            action_name="yuanying",
+            require_meditation_ready=require_meditation_ready,
+        ):
+            return False
+
+        a_state = self.get_avatar_state(avatar)
+        end_time = a_state.get("yuanying_out_end_time") or a_state.get("next_yuanying_out_time", "")
+        active = a_state.get("yuanying_out_active")
+        if active and end_time and is_future(end_time):
+            return False
+        if active:
+            repaired = self._repair_yuanying_out_from_last_start("avatar active expiry guard", identity=avatar)
+            if repaired:
+                self.save_state()
+                return False
+            a_state["yuanying_out_active"] = False
+            a_state["yuanying_out_end_time"] = ""
+            self.save_state()
+
+        next_time = a_state.get(plan.next_key, "")
+        if next_time and is_future(next_time):
+            return False
+        repaired = self._repair_yuanying_out_from_last_start("avatar pre-send guard", identity=avatar)
+        if repaired:
+            self.save_state()
+            return False
+
+        self.common_command_logger().info(f"Avatar [{avatar}] yuanying out due: sending {plan.command}.")
+        resp = await self.send_timed_command_plan(plan, avatar)
+        self.record_yuanying_out_start_response(self.timed_command_response_text(resp), identity=avatar)
+        self.save_state()
+        return True
+
+    async def common_avatar_rift_search_check(self, avatar, cd_seconds, require_meditation_ready=False):
+        """Run one shared avatar .探寻裂缝 check."""
+        plan = self.rift_search_plan(avatar)
+        if not self.avatar_timed_command_available(
+            avatar,
+            plan,
+            action_name="rift search",
+            require_meditation_ready=require_meditation_ready,
+        ):
+            return False
+
+        a_state = self.get_avatar_state(avatar)
+        repaired_next = self.preserve_cooldown_floor(
+            a_state,
+            plan.last_key,
+            plan.next_key,
+            cd_seconds,
+            f"avatar rift search [{avatar}]",
+        )
+        if repaired_next and is_future(repaired_next):
+            return False
+        next_time = a_state.get(plan.next_key, "")
+        if next_time and is_future(next_time):
+            return False
+
+        self.common_command_logger().info(f"Avatar [{avatar}] rift search due: sending {plan.command}.")
+        resp = await self.send_timed_command_plan(plan, avatar)
+        resp_text = self.timed_command_response_text(resp)
+        if self.is_rift_weakness_response(resp_text):
+            await self.stop_for_rift_weakness(resp_text, identity=avatar)
+            return True
+        self.record_identity_fixed_cd_command_response(
+            avatar,
+            resp_text,
+            plan.command,
+            plan.last_key,
+            plan.next_key,
+            cd_seconds,
+        )
+        self.save_state()
+        return True
+
+    def avatar_yuanying_rift_wait_seconds(self, avatar):
+        """Return the next wakeup for avatar yuanying/rift checks."""
+        pause_left = self.identity_pause_seconds(avatar)
+        if pause_left > 0:
+            return max(60, min(int(pause_left), 600))
+
+        a_state = self.get_avatar_state(avatar)
+        waits = []
+
+        if a_state.get("yuanying_out_active"):
+            end_time = a_state.get("yuanying_out_end_time") or a_state.get("next_yuanying_out_time", "")
+            if end_time and is_future(end_time):
+                waits.append(seconds_until(end_time))
+            else:
+                waits.append(0 if end_time else 600)
+        else:
+            next_yuanying = a_state.get("next_yuanying_out_time", "")
+            waits.append(seconds_until(next_yuanying) if next_yuanying and is_future(next_yuanying) else 0)
+
+        next_rift = a_state.get("next_rift_search_time", "")
+        waits.append(seconds_until(next_rift) if next_rift and is_future(next_rift) else 0)
+
+        return max(60, int(min(waits or [600])))
+
     def is_field_training_response(self, text):
         """判断游戏回复是否为野外历练相关的消息"""
         clean = (text or "").replace("**", "")

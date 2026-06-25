@@ -191,6 +191,71 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(ask_dao.max_retries, 1)
         self.assertTrue(ask_dao.force_identity_check)
 
+    def test_common_avatar_yuanying_check_uses_shared_plan_sender(self):
+        class DummyTimedAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def _repair_yuanying_out_from_last_start(self, reason="", identity="主魂"):
+                return ""
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "元婴出窍成功，云游 8 小时。"
+
+            def record_yuanying_out_start_response(self, text, identity="主魂"):
+                state = self.get_avatar_state(identity)
+                state["yuanying_out_active"] = True
+                state["last_yuanying_out_time"] = now_str()
+
+        actor = DummyTimedAvatar()
+        self.assertTrue(asyncio.run(actor.common_avatar_yuanying_out_check("缘生子")))
+        self.assertEqual(actor.sent[0][0], "缘生子")
+        self.assertEqual(actor.sent[0][1], ".元婴出窍")
+        self.assertTrue(actor.sent[0][2]["force_identity_check"])
+        self.assertFalse(actor.sent[0][2]["return_response_msg"])
+        self.assertTrue(actor.get_avatar_state("缘生子")["yuanying_out_active"])
+
+    def test_common_avatar_timed_check_can_require_meditation_ready(self):
+        class DummyTimedAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def avatar_meditation_needs_attention(self, avatar):
+                return True
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "OK"
+
+        actor = DummyTimedAvatar()
+        self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("缘生子", 12 * 3600, require_meditation_ready=True)))
+        self.assertEqual(actor.sent, [])
+
+    def test_common_avatar_yuanying_rift_wait_seconds(self):
+        actor = DummyAvatarCommon()
+        state = actor.get_avatar_state("缘生子")
+
+        self.assertEqual(actor.avatar_yuanying_rift_wait_seconds("缘生子"), 60)
+
+        state["yuanying_out_active"] = True
+        state["yuanying_out_end_time"] = add_seconds_str(now_str(), 120)
+        state["next_rift_search_time"] = add_seconds_str(now_str(), 3600)
+        wait = actor.avatar_yuanying_rift_wait_seconds("缘生子")
+        self.assertGreaterEqual(wait, 60)
+        self.assertLessEqual(wait, 120)
+
+        actor.set_identity_pause("缘生子", 3600, "fixture")
+        self.assertEqual(actor.avatar_yuanying_rift_wait_seconds("缘生子"), 600)
+
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):
             def __init__(self):

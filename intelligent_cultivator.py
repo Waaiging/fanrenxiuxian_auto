@@ -5249,84 +5249,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     async def _avatar_yuanying_out_check(self, avatar):
         """化身元婴出窍检查。无咎子目前启用，状态写入化身自己的 state。"""
-        if self.identity_pause_seconds(avatar) > 0:
-            return
-        plan = self.yuanying_out_plan(avatar)
-        if self.dashboard_command_paused(plan.command, avatar):
-            return
-        a_state = self.get_avatar_state(avatar)
-        end_time = a_state.get("yuanying_out_end_time") or a_state.get("next_yuanying_out_time", "")
-        active = a_state.get("yuanying_out_active")
-        if active and end_time and is_future(end_time):
-            return
-        if active:
-            repaired = self._repair_yuanying_out_from_last_start("avatar active expiry guard", identity=avatar)
-            if repaired:
-                self.save_state()
-                return
-            a_state["yuanying_out_active"] = False
-            a_state["yuanying_out_end_time"] = ""
-            self.save_state()
-
-        next_time = a_state.get("next_yuanying_out_time", "")
-        if next_time and is_future(next_time):
-            return
-        repaired = self._repair_yuanying_out_from_last_start("avatar pre-send guard", identity=avatar)
-        if repaired:
-            self.save_state()
-            return
-
-        log.info(f"Avatar [{avatar}] yuanying out due: sending {plan.command}.")
-        resp = await self.send_and_wait_feedback_identity(
-            avatar,
-            plan.command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-        )
-        self.record_yuanying_out_start_response(self.response_text(resp), identity=avatar)
-        self.save_state()
+        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=False)
 
     async def _avatar_rift_search_check(self, avatar):
         """化身探寻裂缝检查。虚弱结果由回复/edited 监听暂停对应身份。"""
-        if self.identity_pause_seconds(avatar) > 0:
-            return
-        plan = self.rift_search_plan(avatar)
-        if self.dashboard_command_paused(plan.command, avatar):
-            return
-        a_state = self.get_avatar_state(avatar)
-        repaired_next = self.preserve_cooldown_floor(
-            a_state,
-            plan.last_key,
-            plan.next_key,
-            RIFT_SEARCH_CD_SECONDS,
-            f"avatar rift search [{avatar}]",
-        )
-        if repaired_next and is_future(repaired_next):
-            return
-        next_time = a_state.get(plan.next_key, "")
-        if next_time and is_future(next_time):
-            return
-
-        log.info(f"Avatar [{avatar}] rift search due: sending {plan.command}.")
-        resp = await self.send_and_wait_feedback_identity(
+        return await self.common_avatar_rift_search_check(
             avatar,
-            plan.command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-        )
-        resp_text = self.response_text(resp)
-        if self.is_rift_weakness_response(resp_text):
-            await self.stop_for_rift_weakness(resp_text, identity=avatar)
-            return
-        self.record_identity_fixed_cd_command_response(
-            avatar,
-            resp_text,
-            plan.command,
-            plan.last_key,
-            plan.next_key,
             RIFT_SEARCH_CD_SECONDS,
+            require_meditation_ready=False,
         )
-        self.save_state()
 
     async def _get_avatar_min_cd_seconds(self):
         """计算所有化身中最早到期的CD时间（秒），用于替代固定30分钟sleep"""

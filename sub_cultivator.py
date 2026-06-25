@@ -3458,146 +3458,17 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def record_identity_yuanying_out_start_response(self, identity, resp):
         return self.record_yuanying_out_start_response(resp, identity=identity)
 
-    def avatar_yuanying_rift_wait_seconds(self, avatar):
-        """Return the next wakeup for avatar yuanying/rift checks."""
-        pause_left = self.identity_pause_seconds(avatar)
-        if pause_left > 0:
-            return max(60, min(int(pause_left), 600))
-
-        a_state = self.get_avatar_state(avatar)
-        waits = []
-
-        if a_state.get("yuanying_out_active"):
-            end_time = (
-                a_state.get("yuanying_out_end_time")
-                or a_state.get("next_yuanying_out_time", "")
-            )
-            if end_time and is_future(end_time):
-                waits.append(seconds_until(end_time))
-            else:
-                waits.append(0 if end_time else 600)
-        else:
-            next_yuanying = a_state.get("next_yuanying_out_time", "")
-            waits.append(
-                seconds_until(next_yuanying)
-                if next_yuanying and is_future(next_yuanying)
-                else 0
-            )
-
-        next_rift = a_state.get("next_rift_search_time", "")
-        waits.append(
-            seconds_until(next_rift)
-            if next_rift and is_future(next_rift)
-            else 0
-        )
-
-        return max(60, int(min(waits or [600])))
-
     async def _avatar_yuanying_out_check(self, avatar):
         """化身元婴出窍检查，状态写入化身自己的 state。"""
-        if avatar not in self.avatars:
-            return
-        if self.identity_pause_seconds(avatar) > 0:
-            return
-        plan = self.yuanying_out_plan(avatar)
-        if self.dashboard_command_paused(plan.command, avatar):
-            return
-        if (
-            hasattr(self, "avatar_meditation_needs_attention")
-            and self.avatar_meditation_needs_attention(avatar)
-        ):
-            log.info(f"Avatar [{avatar}] yuanying skipped: meditation needs restart first.")
-            return
-
-        a_state = self.get_avatar_state(avatar)
-        end_time = (
-            a_state.get("yuanying_out_end_time")
-            or a_state.get("next_yuanying_out_time", "")
-        )
-        active = a_state.get("yuanying_out_active")
-        if active and end_time and is_future(end_time):
-            return
-        if active:
-            repaired = self._repair_yuanying_out_from_last_start(
-                "avatar active expiry guard", identity=avatar
-            )
-            if repaired:
-                self.save_state()
-                return
-            a_state["yuanying_out_active"] = False
-            a_state["yuanying_out_end_time"] = ""
-            self.save_state()
-
-        next_time = a_state.get("next_yuanying_out_time", "")
-        if next_time and is_future(next_time):
-            return
-        repaired = self._repair_yuanying_out_from_last_start(
-            "avatar pre-send guard", identity=avatar
-        )
-        if repaired:
-            self.save_state()
-            return
-
-        log.info(f"Avatar [{avatar}] yuanying out due: sending {plan.command}.")
-        resp = await self.send_and_wait_feedback_identity(
-            avatar,
-            plan.command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-        )
-        self.record_yuanying_out_start_response(self.response_text(resp), identity=avatar)
-        self.save_state()
+        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=True)
 
     async def _avatar_rift_search_check(self, avatar):
         """化身探寻裂缝检查；虚弱结果只暂停触发身份。"""
-        if avatar not in self.avatars:
-            return
-        if self.identity_pause_seconds(avatar) > 0:
-            return
-        plan = self.rift_search_plan(avatar)
-        if self.dashboard_command_paused(plan.command, avatar):
-            return
-        if (
-            hasattr(self, "avatar_meditation_needs_attention")
-            and self.avatar_meditation_needs_attention(avatar)
-        ):
-            log.info(f"Avatar [{avatar}] rift search skipped: meditation needs restart first.")
-            return
-
-        a_state = self.get_avatar_state(avatar)
-        repaired_next = self.preserve_cooldown_floor(
-            a_state,
-            plan.last_key,
-            plan.next_key,
-            RIFT_SEARCH_CD_SECONDS,
-            f"avatar rift search [{avatar}]",
-        )
-        if repaired_next and is_future(repaired_next):
-            return
-        next_time = a_state.get(plan.next_key, "")
-        if next_time and is_future(next_time):
-            return
-
-        log.info(f"Avatar [{avatar}] rift search due: sending {plan.command}.")
-        resp = await self.send_and_wait_feedback_identity(
+        return await self.common_avatar_rift_search_check(
             avatar,
-            plan.command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-        )
-        resp_text = self.response_text(resp)
-        if self.is_rift_weakness_response(resp_text):
-            await self.stop_for_rift_weakness(resp_text, identity=avatar)
-            return
-        self.record_identity_fixed_cd_command_response(
-            avatar,
-            resp_text,
-            plan.command,
-            plan.last_key,
-            plan.next_key,
             RIFT_SEARCH_CD_SECONDS,
+            require_meditation_ready=True,
         )
-        self.save_state()
 
     async def run_avatar_yuanying_rift_loop(self, avatar, initial_delay=0):
         """Run avatar .元婴出窍 and .探寻裂缝 on their independent cooldowns."""
