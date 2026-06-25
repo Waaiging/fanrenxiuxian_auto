@@ -15,6 +15,7 @@ import log_utils
 import star_gazing_collector
 import sub_cultivator
 from fishing_features import (
+    FishingMixin,
     parse_buy_bait,
     parse_fishing_basket,
     parse_fishing_start,
@@ -114,6 +115,30 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_fishing_active_round_blocks_switch_until_raise(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing["active"] = True
+        fishing["active_due_at"] = add_seconds_str(now_str(), 30)
+
+        wait = actor.fishing_active_switch_wait("主魂", target_identity="问心子", command=".登天阶")
+        self.assertGreaterEqual(wait, 30)
+        self.assertEqual(
+            actor.fishing_active_switch_wait("主魂", target_identity="主魂", command=".登天阶"),
+            0,
+        )
+        self.assertEqual(
+            actor.fishing_active_switch_wait("主魂", target_identity="问心子", command=".提竿"),
+            0,
+        )
+
     def test_fishing_parsers_cover_core_flow(self):
         basket = parse_fishing_basket(
             "**【鱼篓】**\n"

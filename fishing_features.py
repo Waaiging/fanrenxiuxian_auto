@@ -22,6 +22,7 @@ FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
 FISHING_CROSS_IDENTITY_YIELD_SECONDS = 45
 FISHING_CROSS_IDENTITY_YIELD_COOLDOWN_SECONDS = 120
+FISHING_ACTIVE_SWITCH_BUFFER_SECONDS = 10
 FISHING_RETRY_SECONDS = 10 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 
@@ -467,6 +468,28 @@ class FishingMixin:
             return seconds_until(add_seconds_str(last_at, FISHING_CROSS_IDENTITY_YIELD_COOLDOWN_SECONDS)) > 0
         except Exception:
             return False
+
+    def fishing_active_switch_wait(self, identity, target_identity="", command=""):
+        """Return seconds to delay switching away from an unfinished fishing round."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        target_identity = str(target_identity or "").strip()
+        if target_identity and target_identity == identity:
+            return 0
+        if str(command or "").strip() == ".提竿":
+            return 0
+        try:
+            state = self.get_fishing_state(identity)
+        except Exception:
+            return 0
+        if not state.get("active"):
+            return 0
+        due_at = state.get("active_due_at", "")
+        if due_at and is_future(due_at):
+            return max(1, min(
+                seconds_until(due_at) + FISHING_ACTIVE_SWITCH_BUFFER_SECONDS,
+                300,
+            ))
+        return FISHING_ACTIVE_SWITCH_BUFFER_SECONDS
 
     async def fishing_sync_basket(self, identity):
         resp = await self.send_fishing_command(identity, ".鱼篓", timeout=60)

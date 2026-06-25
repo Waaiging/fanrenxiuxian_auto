@@ -1549,8 +1549,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     should_yield = True
                     wait_sec_to_sleep = 0.5
                 elif self.current_identity and self.current_identity != identity:
+                    fishing_wait = self.fishing_active_switch_wait(
+                        self.current_identity, target_identity=identity, command=message
+                    )
+                    if fishing_wait > 0:
+                        log.info(
+                            f"Avatar switch deferred: {self.current_identity} is fishing; "
+                            f"wait {fishing_wait:.1f}s for .提竿 before switching to {identity}."
+                        )
+                        should_yield = True
+                        wait_sec_to_sleep = fishing_wait
+
                     wait_sec = self.get_identity_impending_command_wait(self.current_identity)
-                    if 0 <= wait_sec <= 60 and not high_priority_identity_command:
+                    if not should_yield and 0 <= wait_sec <= 60 and not high_priority_identity_command:
                         if defer_started_at is None:
                             defer_started_at = time.monotonic()
                         deferred_for = time.monotonic() - defer_started_at
@@ -1800,9 +1811,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     if not command_send_precheck(self, message, log, identity="主魂"):
                         log.info(f"Skip auto-switch to 主魂: main command is not sendable now ({message}).")
                         return None
+                    fishing_wait = self.fishing_active_switch_wait(
+                        self.current_identity, target_identity="主魂", command=message
+                    )
+                    if fishing_wait > 0:
+                        log.info(
+                            f"Auto-switch to 主魂 deferred: {self.current_identity} is fishing; "
+                            f"wait {fishing_wait:.1f}s for .提竿 before switching."
+                        )
+                        should_yield = True
+                        wait_sec_to_sleep = fishing_wait
                     if not force_identity_check and self.current_identity in self.avatars:
                         wait_sec = self.get_identity_impending_command_wait(self.current_identity)
-                        if 0 <= wait_sec <= 60:
+                        if not should_yield and 0 <= wait_sec <= 60:
                             if defer_started_at is None:
                                 defer_started_at = time.monotonic()
                             deferred_for = time.monotonic() - defer_started_at
