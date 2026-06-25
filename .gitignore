@@ -67,6 +67,15 @@ PROJECT_MEMORY.md
 PROJECT_CODE_AUDIT_*.md
 ANTY_MEMORY.md
 
+# Local AI/Codex/Claude tooling noise
+.codex/
+=
+CLAUDE.md
+package.json
+package-lock.json
+switch-codex-provider.ps1
+watch-codex-provider-model.ps1
+
 # Local editor/system files
 .DS_Store
 Thumbs.db

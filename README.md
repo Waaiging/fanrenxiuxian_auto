@@ -26,10 +26,23 @@ cp config_sub.example.json config_sub.json
 
 不要提交 Telegram session、日志、state、cache、bot token 或 VPS 密钥。
 
-## 部署流程
+## 必要工作流程
 
-1. 本地修改代码并提交 Git。
-2. 同步代码到 VPS `/home/ubuntu/deploy`。
-3. 在 VPS 上运行 `python3 -m py_compile` 验证。
-4. 重启对应 tmux pane。
-5. 将 VPS 上的 state/log/cache 下载回本地覆盖，session 不下载。
+真实运行环境在 VPS：`ubuntu@VPS_HOST:/home/ubuntu/deploy`。本地改完不代表线上已生效。
+
+1. 修改前查看 `git status --short --branch`，必要时先查 VPS 日志或 state。
+2. 本地修改代码，优先复用通用模块。
+3. 本地运行 `python -m py_compile ...` 和相关测试。
+4. 用 `scp -O -i C:\path\to\vps-key.pem` 上传改动文件到 VPS。
+5. 在 VPS 用 `/home/ubuntu/deploy/venv/bin/python -m py_compile ...` 复查。
+6. 重启对应 tmux：`xiuxian:0` 主号，`xiuxian:1` 副号，`xiuxian:2` 小号，`xiuxian:3` dashboard。
+7. 检查 VPS 进程、tmux、日志或 dashboard，确认线上已生效。
+8. 将 VPS 上的 `state_*.json` 和 `*.log` 下载回本地覆盖，session 不下载。
+9. 只 stage 本次相关文件，commit 并 push；如果不能提交或推送，必须明确说明原因。
+
+SSH/SCP 必须显式带 key：
+
+```powershell
+ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST
+scp -O -i C:\path\to\vps-key.pem .\changed_file.py ubuntu@VPS_HOST:/home/ubuntu/deploy/
+```
