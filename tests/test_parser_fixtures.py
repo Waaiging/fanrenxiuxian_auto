@@ -380,6 +380,37 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(actor._main_confirmed)
         self.assertTrue(actor.state["last_treasure_touch_error"])
 
+    def test_common_ask_dao_response_records_success_and_cooldown(self):
+        actor = DummyCommon()
+
+        self.assertTrue(actor.record_ask_dao_response("你于元婴宗问道参悟，获得大道感悟。"))
+        self.assertTrue(actor.state["last_ask_dao_time"])
+        self.assertGreater(common_seconds_until(actor.state["next_ask_dao_time"]), 11 * 3600)
+
+        self.assertTrue(actor.record_ask_dao_response("问道尚在冷却，请在 10分钟 后再试。"))
+        self.assertLessEqual(common_seconds_until(actor.state["next_ask_dao_time"]), 10 * 60)
+
+    def test_common_ask_dao_tick_sends_due_command(self):
+        class DummyAskDao(DummyCommon):
+            async def _wait_for_main_identity(self):
+                return None
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return "问道参悟成功，道韵萦绕。"
+
+        actor = DummyAskDao()
+        actor.sent = []
+
+        wait = asyncio.run(actor.common_ask_dao_tick())
+
+        self.assertEqual(actor.sent, [".问道"])
+        self.assertEqual(wait, 5)
+        self.assertTrue(actor.state["last_ask_dao_time"])
+
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):
             def __init__(self):

@@ -35,6 +35,7 @@ from log_utils import (
 )
 from command_modules import (
     ask_dao_plan,
+    ASK_DAO_COMMAND,
     field_training_plan_from_features,
     nurture_spirit_plan,
     rift_search_plan,
@@ -63,6 +64,8 @@ BUSHI_WENTIAN_DAILY_LIMIT = 10
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 YUANYING_OUT_CD_SECONDS = 8 * 3600
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
+ASK_DAO_CD_SECONDS = 12 * 3600
+ASK_DAO_RETRY_SECONDS = 10 * 60
 MEDITATION_SETTLEMENT_GRACE_SECONDS = 3 * 60      # 闭关到点后给机器人结算状态留 3 分钟余量
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
@@ -1747,6 +1750,92 @@ class CommonCommandMixin:
         self.record_fixed_cd_command_response(resp_text, command, plan.last_key, plan.next_key, cd_seconds)
         self.save_state()
         return seconds_until(self.state.get(plan.next_key, "")) or 600
+
+    def ask_dao_cd_seconds(self):
+        return int(getattr(self, "ask_dao_cd", ASK_DAO_CD_SECONDS) or ASK_DAO_CD_SECONDS)
+
+    def ask_dao_retry_seconds(self):
+        return int(getattr(self, "ask_dao_retry", ASK_DAO_RETRY_SECONDS) or ASK_DAO_RETRY_SECONDS)
+
+    def is_ask_dao_response(self, text):
+        """Return True when text looks like a .问道 bot response."""
+        clean = (text or "").replace("**", "")
+        if not clean:
+            return False
+        direct_keywords = ["问道", "元婴宗", "悟道", "论道", "道韵", "大道", "参悟"]
+        if any(k in clean for k in direct_keywords):
+            return True
+        if any(k in clean for k in ["冷却", "后再", "尚需", "剩余", "不足", "无法", "尚未", "未加入"]):
+            return True
+        return "获得" in clean and any(k in clean for k in ["感悟", "道心", "贡献"])
+
+    def record_ask_dao_response(self, resp, source=None):
+        """Record .问道 response; success uses 12h cooldown, cooldown text uses parsed remaining time."""
+        source = source or ASK_DAO_COMMAND
+        now = now_str()
+        plan = self.ask_dao_plan(source)
+        log = self.common_command_logger()
+        next_key = plan.next_key
+        last_key = plan.last_key
+        if not resp:
+            self.state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
+            log.info(f"{source}: no response; retry at {self.state[next_key]}.")
+            return False
+
+        cd = self.parse_wait_time(resp)
+        if any(k in resp for k in ["冷却", "后再", "尚需", "剩余", "请在"]):
+            delay = cd if cd > 0 else self.ask_dao_retry_seconds()
+            self.state[next_key] = add_seconds_str(now, delay)
+            log.info(f"{source}: cooldown from response {delay}s, next at {self.state[next_key]}.")
+            return True
+
+        if any(k in resp for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
+            self.state[next_key] = add_seconds_str(now, 60 * 60)
+            self.state["last_ask_dao_error"] = resp[:200]
+            self.state["last_ask_dao_error_time"] = now
+            log.info(f"{source}: unavailable; retry at {self.state[next_key]}.")
+            return True
+
+        if self.is_ask_dao_response(resp):
+            self.state[last_key] = now
+            self.state[next_key] = add_seconds_str(now, self.ask_dao_cd_seconds())
+            self.state["last_ask_dao_error"] = ""
+            log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
+            return True
+
+        self.state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
+        notify_unrecognized_response(self, ASK_DAO_COMMAND, resp, log, source)
+        log.info(f"{source}: unrecognized response; retry at {self.state[next_key]}.")
+        return False
+
+    async def common_ask_dao_tick(self, command=None):
+        """Run one main-soul .问道 scheduling step and return next wait seconds."""
+        plan = self.ask_dao_plan(command)
+        await self._wait_for_main_identity()
+        if self.dashboard_command_paused(plan.command, "主魂"):
+            return 300
+
+        next_time = self.state.get(plan.next_key, "")
+        if next_time and is_future(next_time):
+            return seconds_until(next_time)
+
+        log = self.common_command_logger()
+        log.info(f"Ask Dao due: sending {plan.command}.")
+        resp = await self.send_timed_command_plan(plan, "主魂")
+        if resp is None and await self.sleep_after_blocked_command(plan.command, "Ask Dao"):
+            return 0
+        self.record_ask_dao_response(self.timed_command_response_text(resp), plan.command)
+        self.save_state()
+        return 5
+
+    async def run_common_ask_dao_loop(self, command=None, sleep_func=None, initial_jitter=True):
+        """Run the shared main-soul .问道 loop."""
+        await self.startup_done.wait()
+        if initial_jitter:
+            await asyncio.sleep(random.randint(20, 80))
+        while getattr(self, "is_running", True):
+            wait_time = await self.common_ask_dao_tick(command)
+            await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
 
     def record_treasure_touch_response(self, resp, command=None):
         """Parse .抚摸法宝 response and update the shared main-soul cooldown state."""

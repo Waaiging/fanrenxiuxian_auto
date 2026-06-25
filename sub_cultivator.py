@@ -3345,83 +3345,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # 元婴宗问道循环
     # ============================================================
 
-    def is_ask_dao_response(self, text):
-        """判断文本是否像 .问道 的机器人反馈。"""
-        clean = (text or "").replace("**", "")
-        if not clean:
-            return False
-        direct_keywords = ["问道", "元婴宗", "悟道", "论道", "道韵", "大道", "参悟"]
-        if any(k in clean for k in direct_keywords):
-            return True
-        if any(k in clean for k in ["冷却", "后再", "尚需", "剩余", "不足", "无法", "尚未", "未加入"]):
-            return True
-        return "获得" in clean and any(k in clean for k in ["感悟", "道心", "贡献"])
-
-    def record_ask_dao_response(self, resp, source=ASK_DAO_COMMAND):
-        """记录 .问道 反馈；成功按 12 小时冷却，冷却回复按剩余时间排程。"""
-        now = now_str()
-        plan = self.ask_dao_plan(ASK_DAO_COMMAND)
-        next_key = plan.next_key
-        last_key = plan.last_key
-        if not resp:
-            self.state[next_key] = add_seconds_str(now, ASK_DAO_RETRY_SECONDS)
-            log.info(f"{source}: no response; retry at {self.state[next_key]}.")
-            return False
-
-        cd = self.parse_wait_time(resp)
-        if any(k in resp for k in ["冷却", "后再", "尚需", "剩余", "请在"]):
-            delay = cd if cd > 0 else ASK_DAO_RETRY_SECONDS
-            self.state[next_key] = add_seconds_str(now, delay)
-            log.info(f"{source}: cooldown from response {delay}s, next at {self.state[next_key]}.")
-            return True
-
-        if any(k in resp for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
-            self.state[next_key] = add_seconds_str(now, 60 * 60)
-            self.state["last_ask_dao_error"] = resp[:200]
-            self.state["last_ask_dao_error_time"] = now
-            log.info(f"{source}: unavailable; retry at {self.state[next_key]}.")
-            return True
-
-        if self.is_ask_dao_response(resp):
-            self.state[last_key] = now
-            self.state[next_key] = add_seconds_str(now, ASK_DAO_CD_SECONDS)
-            self.state["last_ask_dao_error"] = ""
-            log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
-            return True
-
-        self.state[next_key] = add_seconds_str(now, ASK_DAO_RETRY_SECONDS)
-        notify_unrecognized_response(self, ASK_DAO_COMMAND, resp, log, source)
-        log.info(f"{source}: unrecognized response; retry at {self.state[next_key]}.")
-        return False
-
     async def run_ask_dao_loop(self):
         """元婴宗主魂 .问道 循环，每 12 小时一次。"""
-        await self.startup_done.wait()
-        await asyncio.sleep(random.randint(20, 80))
-        plan = self.ask_dao_plan(ASK_DAO_COMMAND)
-        while self.is_running:
-            await self._wait_for_main_identity()
-            if self.dashboard_command_paused(plan.command, "主魂"):
-                await asyncio.sleep(300)
-                continue
-
-            next_time = self.state.get(plan.next_key, "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-
-            log.info(f"Ask Dao due: sending {plan.command}.")
-            resp = await self.send_and_wait_feedback(
-                plan.command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                force_identity_check=plan.force_identity_check,
-            )
-            if resp is None and await self.sleep_after_blocked_command(plan.command, "Ask Dao"):
-                continue
-            self.record_ask_dao_response(resp, plan.command)
-            self.save_state()
-            await asyncio.sleep(5)
+        return await self.run_common_ask_dao_loop(
+            ASK_DAO_COMMAND,
+            sleep_func=scheduler_sleep_seconds,
+        )
 
     # ============================================================
     # 观星监听循环（全天候）
