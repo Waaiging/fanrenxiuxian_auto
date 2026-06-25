@@ -25,6 +25,7 @@ from log_utils import (
     identity_plain_usernames,
     is_game_bot_sender,
     is_reply_to_untracked_message,
+    is_yuanying_out_settlement_response,
     is_yuanying_rebirth_block_response,
     is_yuanying_rebirth_success_response,
     notify_unrecognized_response,
@@ -38,6 +39,8 @@ from command_modules import (
     nurture_spirit_plan,
     rift_search_plan,
     treasure_touch_plan,
+    YUANYING_OUT_COMMAND,
+    YUANYING_RETREAT_COMMAND,
     yuanying_command_for_identity,
     yuanying_out_plan,
 )
@@ -58,6 +61,8 @@ BUSHI_WENTIAN_COMMAND = ".卜筮问天"
 BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
 BUSHI_WENTIAN_DAILY_LIMIT = 10
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
+YUANYING_OUT_CD_SECONDS = 8 * 3600
+TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 MEDITATION_SETTLEMENT_GRACE_SECONDS = 3 * 60      # 闭关到点后给机器人结算状态留 3 分钟余量
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
@@ -1245,6 +1250,365 @@ class CommonCommandMixin:
         waits.append(seconds_until(next_rift) if next_rift and is_future(next_rift) else 0)
 
         return max(60, int(min(waits or [600])))
+
+    def identity_state_for_timed_command(self, identity):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity != "主魂" and identity in getattr(self, "avatars", []):
+            return self.get_avatar_state(identity)
+        return self.state
+
+    def record_fixed_cd_command_response(self, resp, command, last_key, next_key, cd_seconds):
+        return self.record_identity_fixed_cd_command_response(
+            "主魂",
+            resp,
+            command,
+            last_key,
+            next_key,
+            cd_seconds,
+        )
+
+    def record_identity_fixed_cd_command_response(self, identity, resp, command, last_key, next_key, cd_seconds):
+        """Shared parser for simple fixed-cooldown command responses."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.identity_state_for_timed_command(identity)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        if not resp:
+            state[next_key] = add_seconds_str(now_str(), 600)
+            self.save_state()
+            log.warning(f"{prefix}{command}: response missing; retry scheduled at {state[next_key]}.")
+            return False
+
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+            state[next_key] = add_seconds_str(now_str(), cd)
+            self.save_state()
+            log.info(f"{prefix}{command}: cooldown from response {cd}s, next at {state[next_key]}.")
+            return False
+
+        if any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+            state[next_key] = add_seconds_str(now_str(), 600)
+            self.save_state()
+            log.warning(f"{prefix}{command}: unavailable but no cooldown parsed; retry at {state[next_key]}.")
+            return False
+
+        now = now_str()
+        success_keywords = [
+            "成功", "探寻", "裂缝", "收获", "空间", "发现",
+            "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃",
+        ]
+        if not any(k in resp for k in success_keywords):
+            state[next_key] = add_seconds_str(now, 600)
+            self.save_state()
+            notify_unrecognized_response(self, command, resp, log, "固定冷却指令")
+            log.warning(f"{prefix}{command}: unrecognized response; retry scheduled at {state[next_key]}.")
+            return False
+
+        state[last_key] = now
+        state[next_key] = add_seconds_str(now, cd_seconds)
+        self.save_state()
+        log.info(f"{prefix}{command}: recorded success/response, next at {state[next_key]}.")
+        return True
+
+    def yuanying_out_cd_seconds(self):
+        return int(getattr(self, "yuanying_out_cd", YUANYING_OUT_CD_SECONDS) or YUANYING_OUT_CD_SECONDS)
+
+    def yuanying_is_retreat_command(self, identity="主魂"):
+        return self.yuanying_command_for_identity(identity) == YUANYING_RETREAT_COMMAND
+
+    def _yuanying_future_from_last_start(self, identity="主魂"):
+        """Return inferred out-end time when the last confirmed start is still active."""
+        if self.yuanying_is_retreat_command(identity):
+            return ""
+        state = self.identity_state_for_timed_command(identity)
+        last = state.get("last_yuanying_out_time", "")
+        if not last:
+            return ""
+        inferred = add_seconds_str(last, self.yuanying_out_cd_seconds())
+        return inferred if inferred and is_future(inferred) else ""
+
+    def _yuanying_existing_future_time(self, identity="主魂"):
+        state = self.identity_state_for_timed_command(identity)
+        candidates = [
+            state.get("yuanying_out_end_time", ""),
+            state.get("next_yuanying_out_time", ""),
+            self._yuanying_future_from_last_start(identity),
+        ]
+        futures = [value for value in candidates if value and is_future(value)]
+        if not futures:
+            return ""
+        return max(futures, key=lambda value: str_to_dt(value))
+
+    def _recent_yuanying_start_future(self, window_seconds=180, identity="主魂"):
+        state = self.identity_state_for_timed_command(identity)
+        last = state.get("last_yuanying_out_time", "")
+        if not last:
+            return ""
+        try:
+            age = (datetime.now() - str_to_dt(last)).total_seconds()
+        except Exception:
+            return ""
+        if 0 <= age <= window_seconds:
+            return self._yuanying_future_from_last_start(identity)
+        return ""
+
+    def _repair_yuanying_out_from_last_start(self, reason="", identity="主魂"):
+        if self.yuanying_is_retreat_command(identity):
+            return ""
+        state = self.identity_state_for_timed_command(identity)
+        inferred = self._yuanying_future_from_last_start(identity)
+        if not inferred:
+            return ""
+        changed = (
+            state.get("next_yuanying_out_time") != inferred
+            or state.get("yuanying_out_end_time") != inferred
+            or not state.get("yuanying_out_active")
+        )
+        state["next_yuanying_out_time"] = inferred
+        state["yuanying_out_end_time"] = inferred
+        state["yuanying_out_active"] = True
+        if changed:
+            prefix = f"[{identity}] " if identity != "主魂" else ""
+            self.common_command_logger().info(
+                f"{prefix}{YUANYING_OUT_COMMAND}: repaired active state from last start ({reason}), "
+                f"return due at {inferred}."
+            )
+        return inferred
+
+    def record_yuanying_out_settlement_response(self, resp, source="passive", identity="主魂"):
+        """Record yuanying return/retreat settlement and schedule the next start."""
+        if not is_yuanying_out_settlement_response(resp):
+            return False
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.identity_state_for_timed_command(identity)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        command = self.yuanying_command_for_identity(identity)
+
+        recent_start_due = self._recent_yuanying_start_future(identity=identity)
+        if recent_start_due:
+            state["next_yuanying_out_time"] = recent_start_due
+            state["yuanying_out_end_time"] = recent_start_due
+            state["yuanying_out_active"] = True
+            log.info(
+                f"{prefix}{command}: ignored stale settlement after fresh start ({source}); "
+                f"return due at {recent_start_due}."
+            )
+            return True
+
+        now = now_str()
+        if identity == "主魂" and self.yuanying_is_retreat_command(identity):
+            state["last_yuanying_return_time"] = now
+            state["next_yuanying_out_time"] = add_seconds_str(now, 5)
+            state["yuanying_out_active"] = False
+            state["yuanying_out_end_time"] = ""
+            log.info(f"{prefix}{command}: settlement detected ({source}); retry start at {state['next_yuanying_out_time']}.")
+            return True
+
+        if f"{command} response" in str(source) or ".元婴出窍 response" in str(source):
+            next_time = add_seconds_str(now, self.yuanying_out_cd_seconds())
+            state["last_yuanying_return_time"] = now
+            state["last_yuanying_out_time"] = now
+            state["next_yuanying_out_time"] = next_time
+            state["yuanying_out_end_time"] = next_time
+            state["yuanying_out_active"] = True
+            log.info(f"{prefix}{command}: settlement response followed by start command; assuming active until {next_time}.")
+            return True
+
+        state["last_yuanying_return_time"] = now
+        state["next_yuanying_out_time"] = add_seconds_str(now, 90)
+        state["yuanying_out_active"] = False
+        state["yuanying_out_end_time"] = ""
+        log.info(f"{prefix}{command}: return settlement detected ({source}); retry at {state['next_yuanying_out_time']}.")
+        return True
+
+    def record_yuanying_out_active_response(self, resp, source="passive", identity="主魂"):
+        """Sync yuanying active state from a direct or passive response."""
+        if not resp:
+            return False
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.identity_state_for_timed_command(identity)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        command = self.yuanying_command_for_identity(identity)
+        is_retreat = self.yuanying_is_retreat_command(identity)
+        clean = str(resp).replace("**", "")
+        if is_yuanying_out_settlement_response(clean):
+            return False
+        compact = clean.replace(" ", "")
+        if any(k in compact for k in ["尚未凝聚元婴", "无法施展此术"]):
+            return False
+        active_markers = [
+            "元婴出窍",
+            "元婴闭关",
+            "元神出窍",
+            "神游",
+            "云游",
+            "消失在天际",
+            "将在外云游",
+            "正在执行“元神出窍”",
+            "正在执行`元神出窍`",
+            "状态: 元神出窍",
+            "状态：元神出窍",
+            "状态: 元婴闭关",
+            "状态：元婴闭关",
+            "开始闭关",
+            "持续提供修为",
+            "归来倒计时",
+        ]
+        if not any(k in clean for k in active_markers):
+            return False
+
+        now = now_str()
+        cd = self.parse_wait_time(clean)
+        already_active_unknown = any(k in clean for k in ["正在执行", "无法分身", "先使用 `.元婴归窍`", "先使用 .元婴归窍"])
+        start_markers = ["心念一动", "消失在天际", "将在外云游", "自动结算收获", "开始闭关", "持续提供修为"]
+        if not is_retreat:
+            start_markers.append("元婴闭关")
+        is_confirmed_start = any(k in clean for k in start_markers) and not already_active_unknown
+
+        if is_confirmed_start:
+            if cd > 0:
+                next_time = add_seconds_str(now, cd)
+            elif is_retreat:
+                next_time = ""
+            else:
+                next_time = add_seconds_str(now, self.yuanying_out_cd_seconds())
+            state["last_yuanying_out_time"] = now
+        elif cd > 0:
+            next_time = add_seconds_str(now, cd)
+        else:
+            next_time = self._yuanying_existing_future_time(identity)
+            if not next_time:
+                if is_retreat:
+                    next_time = ""
+                else:
+                    retry_seconds = 3600 if already_active_unknown else self.yuanying_out_cd_seconds()
+                    next_time = add_seconds_str(now, retry_seconds)
+
+        state["next_yuanying_out_time"] = next_time
+        state["yuanying_out_end_time"] = next_time
+        state["yuanying_out_active"] = True
+        if next_time:
+            log.info(f"{prefix}{command}: active state synced ({source}), return due at {next_time}.")
+        else:
+            log.info(f"{prefix}{command}: active state synced ({source}); waiting for settlement reply.")
+        return True
+
+    def record_yuanying_out_start_response(self, resp, identity="主魂"):
+        """Parse .元婴出窍/.元婴闭关 start response and update state."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        command = self.yuanying_command_for_identity(identity)
+        state = self.identity_state_for_timed_command(identity)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        if not resp:
+            state["next_yuanying_out_time"] = add_seconds_str(now_str(), 3600)
+            log.warning(f"{prefix}{command}: response missing; retry at {state['next_yuanying_out_time']}.")
+            return False
+
+        if self.record_yuanying_out_active_response(resp, source=f"{command} response", identity=identity):
+            return True
+        if self.record_yuanying_out_settlement_response(resp, source=f"{command} response", identity=identity):
+            return False
+
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+            state["next_yuanying_out_time"] = add_seconds_str(now_str(), cd)
+            state["yuanying_out_active"] = False
+            state["yuanying_out_end_time"] = ""
+            log.info(f"{prefix}{command}: cooldown from response {cd}s, next at {state['next_yuanying_out_time']}.")
+            return False
+
+        now = now_str()
+        if any(k in resp for k in ["尚未凝聚元婴", "无法施展此术"]):
+            state["next_yuanying_out_time"] = add_seconds_str(now, 6 * 3600)
+            state["yuanying_out_active"] = False
+            state["yuanying_out_end_time"] = ""
+            log.info(f"{prefix}{command} unavailable: next check at {state['next_yuanying_out_time']}.")
+            return False
+
+        success_markers = ["元婴出窍", "元婴闭关", "神游", "云游", "出窍", "自动结算", "开始闭关", "持续提供修为"]
+        if not any(k in resp for k in success_markers):
+            state["next_yuanying_out_time"] = add_seconds_str(now, 3600)
+            state["yuanying_out_active"] = False
+            state["yuanying_out_end_time"] = ""
+            notify_unrecognized_response(self, command, resp, log, "元婴")
+            log.info(f"{prefix}{command}: unrecognized response; skipped until {state['next_yuanying_out_time']}.")
+            return False
+
+        cd = cd if cd > 0 else self.yuanying_out_cd_seconds()
+        state["last_yuanying_out_time"] = now
+        state["next_yuanying_out_time"] = add_seconds_str(now, cd)
+        state["yuanying_out_end_time"] = state["next_yuanying_out_time"]
+        state["yuanying_out_active"] = True
+        log.info(f"{prefix}{command}: started, due at {state['yuanying_out_end_time']}.")
+        return True
+
+    def record_identity_yuanying_out_start_response(self, identity, resp):
+        return self.record_yuanying_out_start_response(resp, identity=identity)
+
+    def is_rift_weakness_response(self, text):
+        if not text:
+            return False
+        clean = text.replace("**", "").replace(" ", "")
+        return (
+            "元婴遁逃·虚弱" in clean
+            or ("肉体破碎" in clean and ("元婴虚弱" in clean or "虚弱" in clean))
+            or ("元婴虚弱" in clean and ("肉体" in clean or "神魂" in clean or "虚弱" in clean))
+            or ("虚弱期" in clean and "无法进行夺舍" in clean)
+            or ("神魂遭受重创" in clean and "虚弱" in clean)
+        )
+
+    def treasure_touch_cd_seconds(self):
+        return int(getattr(self, "treasure_touch_cd", TREASURE_TOUCH_CD_SECONDS) or TREASURE_TOUCH_CD_SECONDS)
+
+    def record_treasure_touch_response(self, resp, command=None):
+        """Parse .抚摸法宝 response and update the shared main-soul cooldown state."""
+        plan = self.treasure_touch_plan(command)
+        command = plan.command
+        next_key = plan.next_key
+        last_key = plan.last_key
+        log = self.common_command_logger()
+        if not resp:
+            self.state[next_key] = add_seconds_str(now_str(), 600)
+            log.warning(f"{command}: response missing; retry scheduled at {self.state[next_key]}.")
+            return False
+
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in resp for k in ["休息", "冷却", "后再", "尚需", "还需", "互动"]):
+            self.state[next_key] = add_seconds_str(now_str(), cd)
+            log.info(f"{command}: cooldown from response {cd}s, next at {self.state[next_key]}.")
+            return False
+
+        if any(k in resp for k in ["联系更加紧密", "器灵传来了喜悦", "默契", "经验", "与它互动", "微微颤动"]):
+            now = now_str()
+            self.state[last_key] = now
+            self.state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
+            log.info(f"{command}: recorded success, next at {self.state[next_key]}.")
+            return True
+
+        if (
+            "没有这件拥有器灵的法宝" in resp
+            or "名字输入错误" in resp
+            or ("没有这件" in resp and "器灵" in resp)
+        ):
+            now = now_str()
+            self.state["last_treasure_touch_error"] = resp[:200]
+            self.state["last_treasure_touch_error_time"] = now
+            self.state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
+            if hasattr(self, "_main_confirmed"):
+                self._main_confirmed = False
+            log.warning(
+                f"{command}: definite failure ({resp[:80]}), next at "
+                f"{self.state[next_key]}; main identity will be re-confirmed."
+            )
+            return False
+
+        self.state[next_key] = add_seconds_str(now_str(), 600)
+        notify_unrecognized_response(self, command, resp, log, "抚摸法宝")
+        log.warning(f"{command}: unrecognized response; skipped and retry scheduled at {self.state[next_key]}.")
+        return False
 
     def is_field_training_response(self, text):
         """判断游戏回复是否为野外历练相关的消息"""

@@ -256,6 +256,58 @@ class ParserFixtureTests(unittest.TestCase):
         actor.set_identity_pause("缘生子", 3600, "fixture")
         self.assertEqual(actor.avatar_yuanying_rift_wait_seconds("缘生子"), 600)
 
+    def test_common_fixed_cd_response_records_identity_state(self):
+        actor = DummyAvatarCommon()
+        self.assertTrue(actor.record_identity_fixed_cd_command_response(
+            "缘生子",
+            "探寻裂缝成功，发现一处空间裂缝。",
+            ".探寻裂缝",
+            "last_rift_search_time",
+            "next_rift_search_time",
+            12 * 3600,
+        ))
+        state = actor.get_avatar_state("缘生子")
+        self.assertTrue(state["last_rift_search_time"])
+        self.assertGreater(common_seconds_until(state["next_rift_search_time"]), 11 * 3600)
+
+    def test_common_yuanying_retreat_waits_for_settlement(self):
+        class DummyRetreat(DummyCommon):
+            yuanying_main_command = ".元婴闭关"
+
+        actor = DummyRetreat()
+        self.assertTrue(actor.record_yuanying_out_start_response("开始闭关，持续提供修为。"))
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["next_yuanying_out_time"], "")
+        self.assertEqual(actor.state["yuanying_out_end_time"], "")
+
+        self.assertTrue(actor.record_yuanying_out_settlement_response("元婴闭关结算，修为增加。"))
+        self.assertFalse(actor.state["yuanying_out_active"])
+        self.assertGreaterEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 0)
+        self.assertLessEqual(common_seconds_until(actor.state["next_yuanying_out_time"]), 5)
+
+    def test_common_yuanying_out_start_records_cooldown(self):
+        actor = DummyAvatarCommon()
+        self.assertTrue(actor.record_yuanying_out_start_response(
+            "心念一动，元婴出窍，将在外云游 8小时。",
+            identity="缘生子",
+        ))
+        state = actor.get_avatar_state("缘生子")
+        self.assertTrue(state["yuanying_out_active"])
+        self.assertGreater(common_seconds_until(state["next_yuanying_out_time"]), 7 * 3600)
+
+    def test_common_treasure_touch_response_records_success_and_failure(self):
+        actor = DummyCommon()
+        actor.treasure_touch_command = ".抚摸法宝 青竹蜂云剑"
+        actor._main_confirmed = True
+
+        self.assertTrue(actor.record_treasure_touch_response("器灵微微颤动，与你默契提升。"))
+        self.assertTrue(actor.state["last_treasure_touch_time"])
+        self.assertGreater(common_seconds_until(actor.state["next_treasure_touch_time"]), 3600)
+
+        self.assertFalse(actor.record_treasure_touch_response("没有这件拥有器灵的法宝。"))
+        self.assertFalse(actor._main_confirmed)
+        self.assertTrue(actor.state["last_treasure_touch_error"])
+
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
