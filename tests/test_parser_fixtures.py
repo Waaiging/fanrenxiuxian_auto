@@ -36,6 +36,7 @@ from yinluo_features import (
     YINLUO_MASTER_COMMAND,
     YINLUO_SOUL,
     YinluoMixin,
+    parse_yinluo_appease,
     parse_yinluo_blood_wash,
     parse_yinluo_imprison,
     parse_yinluo_status,
@@ -1075,6 +1076,13 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(imprison["slot"], 1)
         self.assertEqual(imprison["soul"], YINLUO_SOUL)
 
+        appease_done = parse_yinluo_appease("**安抚成功！**\n你消耗了 **50** 点修为，成功安抚了 1 个炼化槽。")
+        self.assertEqual(appease_done["status"], "success")
+        self.assertEqual(appease_done["count"], 1)
+        appease_noop = parse_yinluo_appease("**安抚成功！**\n你消耗了 **0** 点修为，成功安抚了 0 个炼化槽。")
+        self.assertEqual(appease_noop["status"], "success")
+        self.assertEqual(appease_noop["count"], 0)
+
     def test_yinluo_tick_ignores_deep_meditation_for_avatar(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
@@ -1146,6 +1154,33 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(yinluo_state["slots"]["1"]["status"], "空闲")
         self.assertEqual(yinluo_state["next_sync_at"], "")
         self.assertEqual(yinluo_state["last_status"], "appeased")
+
+    def test_yinluo_appease_noop_suppresses_same_slot_repeat(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子")["slots"] = {
+                    "1": {"status": "魂力枯竭", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""}
+                }
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return DummyMessage(
+                    303,
+                    text="[Avatar: 缘生子]\n**安抚成功！**\n你消耗了 **0** 点修为，成功安抚了 0 个炼化槽。",
+                )
+
+        actor = DummyYinluo()
+        self.assertTrue(asyncio.run(actor.yinluo_appease_slot("缘生子", 1)))
+        yinluo_state = actor.get_yinluo_state("缘生子")
+
+        self.assertEqual(yinluo_state["last_status"], "appease_noop")
+        self.assertEqual(yinluo_state["slots"]["1"]["status"], "空闲")
+        self.assertGreater(common_seconds_until(yinluo_state["appease_suppressed_until"]["1"]), 60)
+
+        yinluo_state["slots"]["1"]["status"] = "魂力枯竭"
+        self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [])
 
     def test_dashboard_main_yuanshengzi_yinluo_commands_enabled_by_default(self):
         state = {

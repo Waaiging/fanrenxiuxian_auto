@@ -13,6 +13,7 @@ YINLUO_CONVERT_COMMAND = ".化功为煞 10000"
 YINLUO_RETRY_SECONDS = 10 * 60
 YINLUO_SYNC_SECONDS = 30 * 60
 YINLUO_IMPENDING_GUARD_SECONDS = 120
+YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS = 30 * 60
 
 
 def _strip_markdown(text):
@@ -63,6 +64,7 @@ def yinluo_default_state():
         "total_refined": 0,
         "reserves": {},
         "slots": {},
+        "appease_suppressed_until": {},
         "last_daily_sacrifice_date": "",
         "last_collected_at": "",
     }
@@ -332,8 +334,19 @@ class YinluoMixin:
         return sorted(int(slot) for slot, item in slots.items() if isinstance(item, dict) and item.get("status") == "精华已成")
 
     def yinluo_exhausted_slots(self, identity):
-        slots = self.get_yinluo_state(identity).get("slots") or {}
-        return sorted(int(slot) for slot, item in slots.items() if isinstance(item, dict) and "魂力枯竭" in str(item.get("status") or ""))
+        state = self.get_yinluo_state(identity)
+        slots = state.get("slots") or {}
+        suppressed = state.get("appease_suppressed_until") or {}
+        exhausted = []
+        for slot, item in slots.items():
+            if not isinstance(item, dict) or "魂力枯竭" not in str(item.get("status") or ""):
+                continue
+            slot_num = int(slot)
+            until = suppressed.get(str(slot_num)) or suppressed.get(slot_num)
+            if until and is_future(until):
+                continue
+            exhausted.append(slot_num)
+        return sorted(exhausted)
 
     async def yinluo_sync_banner(self, identity):
         text = await self.send_yinluo_command(identity, YINLUO_MASTER_COMMAND, timeout=60)
@@ -356,6 +369,16 @@ class YinluoMixin:
                 slot["due_at"] = add_seconds_str(now, int(slot.get("remaining_seconds") or 0))
             else:
                 slot["due_at"] = ""
+        suppressed = state.get("appease_suppressed_until")
+        if isinstance(suppressed, dict):
+            exhausted_slots = {
+                str(slot)
+                for slot, item in (state.get("slots") or {}).items()
+                if isinstance(item, dict) and "魂力枯竭" in str(item.get("status") or "")
+            }
+            for slot, until in list(suppressed.items()):
+                if not is_future(until) or str(slot) not in exhausted_slots:
+                    suppressed.pop(slot, None)
         state["last_sync_at"] = now
         state["next_sync_at"] = add_seconds_str(now, YINLUO_SYNC_SECONDS)
         state["last_status"] = "synced"
@@ -490,6 +513,7 @@ class YinluoMixin:
         text = await self.send_yinluo_command(identity, f".安抚幡灵 {slot}", timeout=60)
         parsed = parse_yinluo_appease(text)
         if parsed.get("matched"):
+            count = int(parsed.get("count") or 0)
             state = self.get_yinluo_state(identity)
             slots = state.setdefault("slots", {})
             slots.pop(slot, None)
@@ -501,7 +525,14 @@ class YinluoMixin:
                 "due_at": "",
             }
             state["next_sync_at"] = ""
-            self.yinluo_set_status(identity, "appeased", f"安抚 {slot}号槽", 5, text)
+            suppressed = state.setdefault("appease_suppressed_until", {})
+            if count > 0:
+                suppressed.pop(str(slot), None)
+                self.yinluo_set_status(identity, "appeased", f"安抚 {slot}号槽成功", 5, text)
+            else:
+                suppressed[str(slot)] = add_seconds_str(now_str(), YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS)
+                detail = f"{slot}号槽无需安抚，{YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS // 60}分钟内不重复"
+                self.yinluo_set_status(identity, "appease_noop", detail, 5, text)
             return True
         self.yinluo_set_status(identity, "appease_failed", f"安抚 {slot}号槽失败", YINLUO_RETRY_SECONDS, text)
         return False
