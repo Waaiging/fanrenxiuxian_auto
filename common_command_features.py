@@ -2261,10 +2261,6 @@ class CommonCommandMixin:
     async def common_avatar_field_training_tick(self, avatar, handle_insufficient_cultivation=False):
         """Run one avatar field-training scheduling step and return next wait seconds."""
         log = self.common_command_logger()
-        if self.avatar_meditation_needs_attention(avatar):
-            log.info(f"Avatar [{avatar}] field training skipped: meditation needs restart first.")
-            return 60
-
         a_state = self.get_avatar_state(avatar)
         repaired_next = self.preserve_cooldown_floor(
             a_state,
@@ -2766,8 +2762,6 @@ class CommonCommandMixin:
 
     def common_next_avatar_star_wait_seconds(self, avatar):
         state = self.get_avatar_state(avatar)
-        if self.avatar_meditation_needs_attention(avatar):
-            return 60
         check_time = state.get("next_star_check_time", "")
         if state.get("star_observatory_needs_refresh") and (not check_time or not is_future(check_time)):
             return 0

@@ -996,6 +996,22 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         watch_keys = {"deep_meditation_end_time"}
         min_wait = None
         for key, value in state.items():
+            if (
+                key in ("next_yuanying_out_time", "next_rift_search_time")
+                and identity in getattr(self, "avatars", [])
+                and identity not in AVATAR_YUANYING_RIFT_AVATARS
+            ):
+                continue
+            if key in ("next_heart_time", "heart_platform_time"):
+                today = datetime.now().strftime("%Y-%m-%d")
+                if state.get("heart_platform_date") == today:
+                    continue
+                if hasattr(self, "is_heart_platform_fallback_due") and not self.is_heart_platform_fallback_due(today):
+                    continue
+            if key == "next_force_exit_time":
+                active_until = state.get("formation_active_until", "")
+                if not (active_until and is_future(active_until)):
+                    continue
             if identity == "主魂":
                 if not self.main_star_palace_enabled and key in MAIN_STAR_PALACE_STATE_KEYS:
                     continue
@@ -2929,14 +2945,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def _avatar_yuanying_out_check(self, avatar):
         """化身元婴出窍检查，状态写入化身自己的 state。"""
-        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=True)
+        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=False)
 
     async def _avatar_rift_search_check(self, avatar):
         """化身探寻裂缝检查；虚弱结果只暂停触发身份。"""
         return await self.common_avatar_rift_search_check(
             avatar,
             RIFT_SEARCH_CD_SECONDS,
-            require_meditation_ready=True,
+            require_meditation_ready=False,
         )
 
     async def run_avatar_yuanying_rift_loop(self, avatar, initial_delay=0):
@@ -3552,15 +3568,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     async def maybe_run_avatar_star_cycle(self, avatar):
         if avatar not in STAR_ATTRACTION_AVATARS:
             return
-        if self.avatar_meditation_needs_attention(avatar):
-            log.info(f"Avatar [{avatar}] star cycle skipped: meditation needs restart first.")
-            return
 
         async with AtomicTaskContext(self, f"AvatarStarAttraction-{avatar}"):
             for _ in range(5):
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] star cycle interrupted: meditation needs restart first.")
-                    return
                 state = self.get_avatar_state(avatar)
                 retry_time = state.get("star_attraction_retry_time", "")
                 if retry_time and is_future(retry_time):
@@ -5540,17 +5550,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             try:
                 a_state = self.get_avatar_state(avatar)
 
-                # 被动结算可能由任意指令触发；已有闭关待续时，先跳过非闭关任务。
-                if not self.avatar_meditation_needs_attention(avatar):
-                    # ---- 宗门点卯（每日一次，07:15 后） ----
-                    await self._avatar_daily_checkin(avatar)
+                # 被动结算可能由任意指令触发；闭关链路独立负责续上，不阻塞其他任务。
+                await self._avatar_daily_checkin(avatar)
 
-                if not self.avatar_meditation_needs_attention(avatar):
-                    # ---- 启阵（12小时冷却，迁移自主循环） ----
-                    try:
-                        await self.execute_avatar_formation(avatar)
-                    except Exception as e:
-                        log.error(f"Avatar [{avatar}] formation error: {e}")
+                try:
+                    await self.execute_avatar_formation(avatar)
+                except Exception as e:
+                    log.error(f"Avatar [{avatar}] formation error: {e}")
 
                 # ---- 深度闭关状态管理（精细版） ----
                 # 重新读取 state（野外历练可能已更新了状态）
@@ -5705,10 +5711,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         med_wait = 600
 
                 # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ----
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] concubine chain skipped: meditation needs restart first.")
-                else:
-                    await self.execute_avatar_concubine_chain(avatar)
+                await self.execute_avatar_concubine_chain(avatar)
 
                 # ---- 等待下次循环 ----
                 # 考虑深度闭关、闭关冷却、野外历练冷却、阵法冷却、心劫冷却、入梦冷却，取最小值

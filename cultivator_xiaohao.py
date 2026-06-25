@@ -1372,6 +1372,22 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         for k in keys_to_check:
             if k == "next_switch_allowed_time":
                 continue
+            if (
+                k in ("next_yuanying_out_time", "next_rift_search_time")
+                and identity in getattr(self, "avatars", [])
+                and identity not in AVATAR_YUANYING_RIFT_AVATARS
+            ):
+                continue
+            if k in ("next_heart_time", "heart_platform_time", "next_heart_platform_time"):
+                today = datetime.now().strftime("%Y-%m-%d")
+                if state.get("heart_platform_date") == today:
+                    continue
+                if hasattr(self, "is_heart_platform_fallback_due") and not self.is_heart_platform_fallback_due(today):
+                    continue
+            if k == "next_force_exit_time":
+                active_until = state.get("formation_active_until", "")
+                if not (active_until and is_future(active_until)):
+                    continue
             if identity in FORMATION_ASSIST_AVATARS and k in ("next_formation_time", "next_formation_retry_time"):
                 continue
             if (
@@ -2020,14 +2036,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def _avatar_yuanying_out_check(self, avatar):
         """分身元婴出窍检查，状态写入分身自己的 state。"""
-        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=True)
+        return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=False)
 
     async def _avatar_rift_search_check(self, avatar):
         """分身探寻裂缝检查；虚弱结果只暂停触发身份。"""
         return await self.common_avatar_rift_search_check(
             avatar,
             RIFT_SEARCH_CD_SECONDS,
-            require_meditation_ready=True,
+            require_meditation_ready=False,
         )
 
     async def run_avatar_yuanying_rift_loop(self, avatar, initial_delay=0):
@@ -2375,15 +2391,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return dt_to_str(max(candidates))
 
     def defer_beast_actions_while_pastured(self, beast_name=BEAST_FOCUS_NAME, reason=""):
-        """六翼放养中时，暂停会撞状态的灵兽指令直到放养冷却结束。"""
+        """灵兽放养中时，仅暂停依赖该放养状态的低优先级动作。"""
         beast_name = beast_name or BEAST_FOCUS_NAME
         if self.beast_name_matches(beast_name, BEAST_FOCUS_NAME):
             return self.defer_focus_beast_personal_actions_while_pastured(reason)
 
         target_time = self.pasture_block_until()
         self.set_best_beast_status(beast_name, "放养中")
-        self.set_next_abyss_not_before(target_time)
-        self.set_next_steal_not_before(target_time)
         for key in (
             "next_beast_interaction_time",
             "next_beast_cruise_time",
@@ -3267,7 +3281,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         if last_abyss: candidates.append(str_to_dt(last_abyss) + timedelta(seconds=21600))
         chosen = max(candidates)
         self.state["next_abyss_time"] = dt_to_str(chosen)
-        self.state["last_abyss_time"] = dt_to_str(chosen - timedelta(seconds=21600))
 
     def set_next_steal_not_before(self, target_time):
         """设置下次偷菜不早于目标时间"""
@@ -3280,7 +3293,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         if last_steal: candidates.append(str_to_dt(last_steal) + timedelta(seconds=14400))
         chosen = max(candidates)
         self.state["next_steal_time"] = dt_to_str(chosen)
-        self.state["last_steal_time"] = dt_to_str(chosen - timedelta(seconds=14400))
 
     def schedule_abyss_retry(self, retry_seconds=None):
         """安排探渊重试时间"""
@@ -4174,13 +4186,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             next_form = a_state.get("next_formation_time", "")
             if next_form and is_future(next_form):
                 log.info(f"[互助阵] {partner} formation CD until {next_form}, skipping assist for {initiator}")
-                return
-
-            # 检查深度闭关
-            in_med = a_state.get("in_deep_meditation", False)
-            end_time = a_state.get("deep_meditation_end_time", "")
-            if in_med and end_time and is_future(end_time):
-                log.info(f"[互助阵] {partner} in deep meditation until {end_time}, skipping assist for {initiator}")
                 return
 
             log.info(f"[互助阵] {initiator} 启阵 → {partner} 助阵 (msg_id={msg_id})")
@@ -5231,15 +5236,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     async def maybe_run_avatar_star_cycle(self, avatar):
         if avatar not in STAR_ATTRACTION_AVATARS:
             return
-        if self.avatar_meditation_needs_attention(avatar):
-            log.info(f"Avatar [{avatar}] star cycle skipped: meditation needs restart first.")
-            return
 
         async with AtomicTaskContext(self, f"AvatarStarAttraction-{avatar}"):
             for _ in range(5):
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] star cycle interrupted: meditation needs restart first.")
-                    return
                 state = self.get_avatar_state(avatar)
                 retry_time = state.get("star_attraction_retry_time", "")
                 if retry_time and is_future(retry_time):
@@ -5811,7 +5810,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             initial_delay=initial_delay,
             timeout=90,
             handle_insufficient_cultivation=False,
-            require_meditation_ready=True,
+            require_meditation_ready=False,
             sleep_func=scheduler_sleep_seconds,
         )
 
@@ -6035,27 +6034,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 log.info(f"DEBUG: run_avatar_star_palace_loop iteration for {avatar}")
                 state = self.get_avatar_state(avatar)
                 is_star_palace = avatar in ["素心子", "缘生子"]
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar {avatar}: star palace loop skipped; meditation needs restart first.")
-                    await asyncio.sleep(60)
-                    continue
 
                 # --- 宗门点卯（每日一次，07:30 后） ---
                 await self._avatar_daily_checkin(avatar)
                 state = self.get_avatar_state(avatar)
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar {avatar}: star palace loop interrupted by meditation settlement after checkin.")
-                    await asyncio.sleep(60)
-                    continue
                 
                 # --- 星辰牵引/安抚/收集由 run_avatar_star_attraction_loop 独立调度 ---
 
                 # --- 周天星斗大阵 ---
                 # 小号星宫分身不再主动启阵，只实时助阵副号三分身的邀请。
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar {avatar}: concubine chain skipped; meditation needs restart first.")
-                    await asyncio.sleep(60)
-                    continue
 
                 # --- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ---
                 await self.execute_avatar_concubine_chain(

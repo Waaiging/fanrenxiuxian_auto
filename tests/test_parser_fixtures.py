@@ -373,6 +373,57 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.sent, [])
         self.assertNotIn("last_tower_date", actor.get_avatar_state("缘生子"))
 
+    def test_avatar_field_training_ignores_meditation_attention(self):
+        class DummyFieldAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.state["avatars"]["缘生子"].update({
+                    "next_field_training_time": "",
+                    "last_field_training_time": "",
+                })
+
+            def avatar_meditation_needs_attention(self, avatar):
+                return True
+
+            def field_training_plan(self, avatar):
+                return field_training_plan_from_features(avatar, {"training_cmd": ".野外历练"})
+
+            def preserve_cooldown_floor(self, *args, **kwargs):
+                return ""
+
+            async def wait_for_field_training_settlement(self, resp, avatar):
+                return resp
+
+            def response_text(self, resp):
+                return str(resp or "")
+
+            def record_identity_field_training_response(self, avatar, text, context=""):
+                self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 2 * 3600))
+
+            async def maybe_run_bushi_wentian_after_field_training(self, avatar, text):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                return "**【野外历练 · 灵机暗藏】**\n获得修为 **+12000**。"
+
+        actor = DummyFieldAvatar()
+
+        wait = asyncio.run(actor.common_avatar_field_training_tick("缘生子"))
+
+        self.assertEqual(wait, 5)
+        self.assertEqual(actor.sent, [("缘生子", ".野外历练")])
+
+    def test_avatar_star_wait_ignores_meditation_attention(self):
+        actor = DummyAvatarCommon()
+        actor.state["avatars"]["缘生子"].update({
+            "next_star_collect_time": (datetime.now() - timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        actor.avatar_meditation_needs_attention = lambda avatar: True
+
+        self.assertEqual(actor.common_next_avatar_star_wait_seconds("缘生子"), 0)
+
     def test_common_avatar_tower_insufficient_cultivation_does_not_mark_done_after_failed_retry(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):
@@ -862,6 +913,139 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(fishing["active"])
         self.assertEqual(fishing["today_count"], 8)
         self.assertEqual(fishing["last_status"], "caught")
+
+    def test_fishing_yields_to_overdue_same_identity_command(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+            def fishing_command_is_enabled(self, identity):
+                return True
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def fishing_other_identity_impending_wait(self, identity):
+                return "", -1
+
+            def fishing_impending_wait(self, identity):
+                return 0
+
+            async def fishing_ensure_daily_bait(self, identity):
+                raise AssertionError("fishing should yield before buying bait")
+
+            async def fishing_try_nest(self, identity):
+                raise AssertionError("fishing should yield before nesting")
+
+            async def fishing_start_round(self, identity):
+                raise AssertionError("fishing should yield before starting a round")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "rod_owned": True,
+            "today_count": 7,
+            "daily_limit": 20,
+            "next_action_at": "",
+            "active": False,
+        })
+
+        wait = asyncio.run(actor.fishing_tick("主魂"))
+
+        self.assertEqual(wait, 10)
+        self.assertEqual(fishing["last_status"], "yielding")
+        self.assertIn("0秒", fishing["last_detail"])
+
+    def test_fishing_ignores_overdue_yuanying_state_for_disabled_avatar(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["素缘子"]
+        actor.avatar_features = {"素缘子": {"formation_assist": True}}
+        actor.state = {
+            "avatars": {
+                "素缘子": {
+                    "next_yuanying_out_time": "2026-06-24 11:58:06",
+                    "yuanying_out_active": True,
+                    "yuanying_out_end_time": "2026-06-24 11:58:06",
+                    "in_deep_meditation": True,
+                    "deep_meditation_end_time": add_seconds_str(now_str(), 4 * 3600),
+                }
+            },
+            "fishing": {},
+        }
+        actor.save_state = lambda: None
+        actor.identity_pause_seconds = lambda identity: 0
+        actor.custom_command_impending_wait = lambda identity: -1
+        actor.concubine_voyage_enabled = lambda identity: False
+        actor.concubine_voyage_auto_start_enabled = lambda identity: False
+
+        other_identity, wait = actor.fishing_other_identity_impending_wait("主魂")
+
+        self.assertEqual(other_identity, "")
+        self.assertEqual(wait, -1)
+
+    def test_fishing_ignores_heart_platform_daily_ready_before_fallback(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = []
+        actor.state = {
+            "next_heart_time": "2026-06-26 00:05:00",
+            "heart_platform_date": "2026-06-25",
+            "done": [".宗门点卯", ".闯塔"],
+            "fishing": {},
+        }
+        actor.save_state = lambda: None
+        actor.identity_pause_seconds = lambda identity: 0
+        actor.custom_command_impending_wait = lambda identity: -1
+        actor.concubine_voyage_enabled = lambda identity: False
+        actor.concubine_voyage_auto_start_enabled = lambda identity: False
+        actor.is_heart_platform_fallback_due = lambda today: False
+
+        self.assertEqual(actor.fishing_impending_wait_for_identity("主魂"), -1)
+
+    def test_xiaohao_impending_ignores_heart_platform_before_fallback(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["问心子"]
+        actor.state = {
+            "avatars": {
+                "问心子": {
+                    "next_heart_platform_time": "2026-06-26 00:05:00",
+                    "heart_platform_date": "2026-06-25",
+                    "last_dianmao_date": datetime.now().strftime("%Y-%m-%d"),
+                },
+            },
+            "fishing": {},
+        }
+        actor.save_state = lambda: None
+        actor.identity_pause_seconds = lambda identity: 0
+        actor.custom_command_impending_wait = lambda identity: -1
+        actor.concubine_voyage_auto_start_enabled = lambda identity: False
+        actor.state_time_command_paused = lambda key, identity: False
+        actor.is_heart_platform_fallback_due = lambda today: False
+
+        self.assertEqual(actor.fishing_impending_wait_for_identity("问心子"), 999999)
+
+    def test_xiaohao_impending_ignores_expired_force_exit_after_formation(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["素心子"]
+        actor.state = {"avatars": {"素心子": {}}}
+        actor.state_time_command_paused = lambda key, identity: False
+        actor.concubine_voyage_auto_start_enabled = lambda identity: False
+        actor.dashboard_command_paused = lambda command, identity: False
+        force_exit_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        active_until = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        wait = actor._state_impending_command_wait({
+            "next_force_exit_time": force_exit_time,
+            "formation_active_until": active_until,
+            "in_deep_meditation": True,
+            "deep_meditation_end_time": "",
+            "last_dianmao_date": datetime.now().strftime("%Y-%m-%d"),
+        }, identity="素心子")
+
+        self.assertEqual(wait, 999999)
 
     def test_fishing_parsers_cover_core_flow(self):
         basket = parse_fishing_basket(
@@ -2693,6 +2877,96 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "麻花藤")
 
+    def test_pasture_dispatch_does_not_defer_abyss_or_steal(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        last_abyss = add_seconds_str(now_str(), -3 * 3600)
+        next_abyss = add_seconds_str(last_abyss, 6 * 3600)
+        last_steal = add_seconds_str(now_str(), -3600)
+        next_steal = add_seconds_str(last_steal, 4 * 3600)
+        pasture_until = add_seconds_str(now_str(), cultivator_xiaohao.PASTURE_CD_SECONDS)
+        actor.state = {
+            "last_abyss_time": last_abyss,
+            "next_abyss_time": next_abyss,
+            "last_steal_time": last_steal,
+            "next_steal_time": next_steal,
+            "next_pasture_time": pasture_until,
+            "best_beast_name": "保龄球",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "保龄球", "species": "一阶灵兽", "status": "休息中", "power": 120, "exp": 0, "stamina": 100},
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        actor.record_pasture_dispatch("**保龄球、六翼 等2只灵兽** 欢快地冲入了万兽谷！\n它们将在 **4** 小时后自动归来。")
+
+        self.assertEqual(actor.state["last_abyss_time"], last_abyss)
+        self.assertEqual(actor.state["next_abyss_time"], next_abyss)
+        self.assertEqual(actor.state["last_steal_time"], last_steal)
+        self.assertEqual(actor.state["next_steal_time"], next_steal)
+        self.assertEqual(actor.state["next_beast_cruise_time"], pasture_until)
+        self.assertEqual(actor.state["next_beast_interaction_time"], pasture_until)
+
+    def test_beast_not_before_helpers_preserve_last_action_times(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "last_abyss_time": "2026-06-25 16:12:39",
+            "next_abyss_time": "2026-06-25 22:12:39",
+            "last_steal_time": "2026-06-25 16:25:07",
+            "next_steal_time": "2026-06-25 20:25:07",
+        }
+
+        actor.set_next_abyss_not_before("2026-06-26 00:32:02")
+        actor.set_next_steal_not_before("2026-06-26 00:32:02")
+
+        self.assertEqual(actor.state["last_abyss_time"], "2026-06-25 16:12:39")
+        self.assertEqual(actor.state["next_abyss_time"], "2026-06-26 00:32:02")
+        self.assertEqual(actor.state["last_steal_time"], "2026-06-25 16:25:07")
+        self.assertEqual(actor.state["next_steal_time"], "2026-06-26 00:32:02")
+
+    def test_avatar_yuanying_rift_checks_do_not_require_meditation_ready(self):
+        async def capture_xiaohao():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            calls = []
+
+            async def fake_yuanying(avatar, require_meditation_ready=False):
+                calls.append(("yuanying", avatar, require_meditation_ready))
+
+            async def fake_rift(avatar, cd_seconds, require_meditation_ready=False):
+                calls.append(("rift", avatar, require_meditation_ready))
+
+            actor.common_avatar_yuanying_out_check = fake_yuanying
+            actor.common_avatar_rift_search_check = fake_rift
+            await actor._avatar_yuanying_out_check("缘生子")
+            await actor._avatar_rift_search_check("缘生子")
+            return calls
+
+        async def capture_sub():
+            actor = SubCultivator.__new__(SubCultivator)
+            calls = []
+
+            async def fake_yuanying(avatar, require_meditation_ready=False):
+                calls.append(("yuanying", avatar, require_meditation_ready))
+
+            async def fake_rift(avatar, cd_seconds, require_meditation_ready=False):
+                calls.append(("rift", avatar, require_meditation_ready))
+
+            actor.common_avatar_yuanying_out_check = fake_yuanying
+            actor.common_avatar_rift_search_check = fake_rift
+            await actor._avatar_yuanying_out_check("缘生子")
+            await actor._avatar_rift_search_check("缘生子")
+            return calls
+
+        calls = asyncio.run(capture_xiaohao()) + asyncio.run(capture_sub())
+
+        self.assertEqual(calls, [
+            ("yuanying", "缘生子", False),
+            ("rift", "缘生子", False),
+            ("yuanying", "缘生子", False),
+            ("rift", "缘生子", False),
+        ])
+
     def test_xiaohao_main_soul_pause_does_not_make_main_impending(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.avatars = ["问心子"]
@@ -3920,6 +4194,20 @@ class ParserFixtureTests(unittest.TestCase):
         lock_until = datetime.strptime(actor.state["next_spirit_tree_harvest_time"], "%Y-%m-%d %H:%M:%S")
         self.assertGreaterEqual(lock_until, started + timedelta(hours=47, minutes=59))
         self.assertLessEqual(lock_until, datetime.now() + timedelta(hours=48, seconds=5))
+
+    def test_spirit_tree_expired_harvest_lock_does_not_block_future_mature_periods(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.state = {
+            "next_spirit_tree_harvest_time": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+
+        self.assertEqual(actor.spirit_tree_harvest_lock_until("主魂"), "")
+        self.assertFalse(actor.spirit_tree_harvest_locked("主魂"))
+        self.assertEqual(actor.state["next_spirit_tree_harvest_time"], "")
 
     def test_spirit_tree_harvest_reject_preserves_irrigation_cooldown(self):
         actor = Cultivator.__new__(Cultivator)
@@ -5440,6 +5728,18 @@ class ParserFixtureTests(unittest.TestCase):
         xiaohao_panels = build_command_panels("xiaohao", {"avatars": {"问心子": {}}})
         xiaohao_avatar = next(panel for panel in xiaohao_panels if panel.get("identity") == "问心子")
         self.assertIn(".野外历练", {row.get("command") for row in xiaohao_avatar.get("commands", [])})
+
+    def test_dashboard_force_exit_ignores_expired_formation_window(self):
+        force_exit_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        active_until = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        row = dashboard_server.force_exit_command({
+            "next_force_exit_time": force_exit_time,
+            "formation_active_until": active_until,
+            "in_deep_meditation": False,
+        })
+
+        self.assertEqual(row["tone"], "done")
+        self.assertEqual(row["status"], "无需出关")
 
     def test_main_avatar_field_training_sends_bare_command_except_wujiuzi(self):
         actor = Cultivator.__new__(Cultivator)

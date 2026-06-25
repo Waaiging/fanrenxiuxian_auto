@@ -832,7 +832,7 @@ class FishingMixin:
             return FISHING_CROSS_IDENTITY_YIELD_SECONDS
 
         impending = self.fishing_impending_wait(identity)
-        if 1 <= impending <= FISHING_IMPENDING_GUARD_SECONDS:
+        if 0 <= impending <= FISHING_IMPENDING_GUARD_SECONDS:
             self.fishing_set_status(
                 identity,
                 "yielding",

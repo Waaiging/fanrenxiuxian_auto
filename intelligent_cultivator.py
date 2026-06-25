@@ -2797,7 +2797,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     def spirit_tree_harvest_lock_until(self, identity=SPIRIT_TREE_AVATAR):
         a_state = self.spirit_tree_state_for_identity(identity)
         value = a_state.get("next_spirit_tree_harvest_time", "")
-        return value if value and is_future(value) else ""
+        if value and is_future(value):
+            return value
+        if value:
+            a_state["next_spirit_tree_harvest_time"] = ""
+        return ""
 
     def spirit_tree_harvest_locked(self, identity=SPIRIT_TREE_AVATAR):
         return bool(self.spirit_tree_harvest_lock_until(identity))
@@ -3582,6 +3586,20 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         for key, value in state.items():
             if key in ("next_formation_time", "next_formation_retry_time") and identity in self.avatars and not features.get("formation"):
                 continue
+            if key == "next_yuanying_out_time" and identity in self.avatars and not features.get("yuanying_out"):
+                continue
+            if key == "next_rift_search_time" and identity in self.avatars and not features.get("rift_search"):
+                continue
+            if key in ("next_heart_time", "heart_platform_time"):
+                today = datetime.now().strftime("%Y-%m-%d")
+                if state.get("heart_platform_date") == today:
+                    continue
+                if hasattr(self, "is_heart_platform_fallback_due") and not self.is_heart_platform_fallback_due(today):
+                    continue
+            if key == "next_force_exit_time":
+                active_until = state.get("formation_active_until", "")
+                if not (active_until and is_future(active_until)):
+                    continue
             if key == "next_concubine_voyage_time" and not self.concubine_voyage_enabled(identity):
                 continue
             if (
@@ -4046,7 +4064,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             avatar,
             timeout=120,
             handle_insufficient_cultivation=True,
-            require_meditation_ready=True,
+            require_meditation_ready=False,
             sleep_func=scheduler_sleep_seconds,
             delay_range=(0, 1800),
         )
@@ -4070,21 +4088,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                             entry = self.identity_pause_entry(avatar)
                             log.info(f"Avatar [{avatar}] is paused: {entry.get('reason', '')}; resume at {entry.get('until', '')}.")
                             continue
-                        # 被动结算可能由任意指令触发；一旦检测到闭关待续，先把闭关链路续上。
+                        # 被动结算可能由任意指令触发；闭关链路独立负责续上，不阻塞其他任务。
                         await self._avatar_meditation_check(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            log.info(f"Avatar [{avatar}] still needs meditation attention; skipping other avatar tasks this cycle.")
-                            continue
                         # 0. 每日点卯
                         if features.get("daily_checkin"): await self._avatar_daily_checkin(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            await self._avatar_meditation_check(avatar)
-                            continue
                         # 0.1 无咎子每日观命/定命
                         if features.get("destiny"): await self._avatar_destiny_check(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            await self._avatar_meditation_check(avatar)
-                            continue
                         # 0.2 无咎子元婴/裂缝
                         if features.get("yuanying_out"): await self._avatar_yuanying_out_check(avatar)
                         if self.identity_pause_seconds(avatar) > 0:
@@ -4097,19 +4106,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg and not self.formation_assist_in_progress:
                             await self._avatar_assist_formation(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            await self._avatar_meditation_check(avatar)
-                            continue
                         # 4. 闯塔
                         if features.get("tower"): await self._avatar_tower_check(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            await self._avatar_meditation_check(avatar)
-                            continue
                         # 5. 灵树灌溉
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
-                        if self.avatar_meditation_needs_attention(avatar):
-                            await self._avatar_meditation_check(avatar)
-                            continue
                         # 5. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
                         if features.get("dream_map") or features.get("heart_trial"):
                             await self.execute_avatar_concubine_chain(avatar)
@@ -4137,9 +4137,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                         continue
                     features = self.avatar_features.get(avatar, {})
                     if not features.get("training_cmd"):
-                        continue
-                    if self.avatar_meditation_needs_attention(avatar):
-                        next_wait = min(next_wait, 60)
                         continue
                     a_state = self.get_avatar_state(avatar)
                     next_time = a_state.get("next_field_training_time", "")
@@ -6210,15 +6207,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     async def maybe_run_avatar_star_cycle(self, avatar):
             if avatar not in STAR_ATTRACTION_AVATARS:
                 return
-            if self.avatar_meditation_needs_attention(avatar):
-                log.info(f"Avatar [{avatar}] star cycle skipped: meditation needs restart first.")
-                return
 
             async with AtomicTaskContext(self, f"AvatarStarAttraction-{avatar}"):
                 for _ in range(5):
-                    if self.avatar_meditation_needs_attention(avatar):
-                        log.info(f"Avatar [{avatar}] star cycle interrupted: meditation needs restart first.")
-                        return
                     state = self.get_avatar_state(avatar)
                     retry_time = state.get("star_attraction_retry_time", "")
                     if retry_time and is_future(retry_time):

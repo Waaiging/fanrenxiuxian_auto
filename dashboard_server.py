@@ -800,7 +800,12 @@ def meditation_train_command(state, group="闭关"):
 
 
 def force_exit_command(state, group="闭关"):
-    scheduled = time_command(state, "next_force_exit_time", ".强行出关", "强行出关", waiting="已排程", ready="可检查", missing="未排程", group=group)
+    active_until = parse_state_time(state.get("formation_active_until", ""))
+    display_state = state
+    if state.get("next_force_exit_time") and not (active_until and active_until > datetime.now()):
+        display_state = dict(state)
+        display_state["next_force_exit_time"] = ""
+    scheduled = time_command(display_state, "next_force_exit_time", ".强行出关", "强行出关", waiting="已排程", ready="可检查", missing="未排程", group=group)
     if scheduled["tone"] == "cooldown":
         return scheduled
     if state.get("in_deep_meditation"):
