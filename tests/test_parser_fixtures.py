@@ -295,6 +295,78 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(state["yuanying_out_active"])
         self.assertGreater(common_seconds_until(state["next_yuanying_out_time"]), 7 * 3600)
 
+    def test_common_main_yuanying_tick_sends_due_command(self):
+        class DummyMainYuanying(DummyCommon):
+            async def _wait_for_main_identity(self):
+                return None
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return "心念一动，元婴出窍，将在外云游 8小时。"
+
+        actor = DummyMainYuanying()
+        actor.sent = []
+
+        wait = asyncio.run(actor.common_main_yuanying_out_tick())
+
+        self.assertEqual(actor.sent, [".元婴出窍"])
+        self.assertEqual(wait, 5)
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertGreater(common_seconds_until(actor.state["next_yuanying_out_time"]), 7 * 3600)
+
+    def test_common_main_yuanying_retreat_tick_retries_after_settlement(self):
+        class DummyRetreatTick(DummyCommon):
+            yuanying_main_command = ".元婴闭关"
+
+            async def _wait_for_main_identity(self):
+                return None
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                if len(self.sent) == 1:
+                    return "元婴闭关结算，修为增加。"
+                return "开始闭关，持续提供修为。"
+
+        async def no_sleep(_seconds):
+            return None
+
+        actor = DummyRetreatTick()
+        actor.sent = []
+
+        with patch("common_command_features.asyncio.sleep", no_sleep):
+            wait = asyncio.run(actor.common_main_yuanying_out_tick())
+
+        self.assertEqual(actor.sent, [".元婴闭关", ".元婴闭关"])
+        self.assertEqual(wait, 5)
+        self.assertTrue(actor.state["yuanying_out_active"])
+        self.assertEqual(actor.state["next_yuanying_out_time"], "")
+
+    def test_common_main_rift_ignores_foreign_weakness_reply(self):
+        class DummyRift(DummyCommon):
+            async def _wait_for_main_identity(self):
+                return None
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return SimpleNamespace(
+                    text="肉体破碎，元婴虚弱，进入虚弱期。",
+                    reply_to=SimpleNamespace(reply_to_msg_id=9999),
+                )
+
+            async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
+                self.stopped = True
+
+        actor = DummyRift()
+        actor.sent = []
+        actor.stopped = False
+        actor.last_sent_id = 1234
+
+        wait = asyncio.run(actor.common_main_rift_search_tick(12 * 3600))
+
+        self.assertEqual(actor.sent, [".探寻裂缝"])
+        self.assertEqual(wait, 0)
+        self.assertFalse(actor.stopped)
+
     def test_common_treasure_touch_response_records_success_and_failure(self):
         actor = DummyCommon()
         actor.treasure_touch_command = ".抚摸法宝 青竹蜂云剑"

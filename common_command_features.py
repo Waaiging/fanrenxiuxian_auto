@@ -1630,6 +1630,124 @@ class CommonCommandMixin:
             wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
             await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
 
+    def main_level_has_yuanying(self, level):
+        return any(k in str(level or "") for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
+
+    async def ensure_main_yuanying_level_for_command(self, label="Yuanying command"):
+        """Fetch cached main level when needed and verify the command is available."""
+        log = self.common_command_logger()
+        main_level = self.state.get("level", "")
+        if not main_level:
+            log.info("Main level not cached, sending .状态 to fetch it...")
+            await self.send_and_wait_feedback(".状态", timeout=30)
+            main_level = self.state.get("level", "")
+        if self.main_level_has_yuanying(main_level):
+            return True
+        log.info(f"Main soul level [{main_level}] has no Yuanying. {label} suspended for 1 hour.")
+        return False
+
+    async def common_main_yuanying_out_tick(self, require_yuanying_level=False):
+        """Run one main-soul .元婴出窍/.元婴闭关 scheduling step and return next wait seconds."""
+        plan = self.yuanying_out_plan("主魂")
+        command = plan.command
+        log = self.common_command_logger()
+
+        await self._wait_for_main_identity()
+        end_time = self.state.get("yuanying_out_end_time") or self.state.get("next_yuanying_out_time", "")
+        active = self.state.get("yuanying_out_active")
+
+        if active and end_time and is_future(end_time):
+            wait_time = seconds_until(end_time)
+            log.info(f"Yuanying out active. Auto-return due at {end_time}.")
+            return wait_time
+
+        if active and not end_time and command == YUANYING_RETREAT_COMMAND:
+            log.info("Yuanying retreat active; waiting for passive settlement reply.")
+            return 600
+
+        if active:
+            repaired = self._repair_yuanying_out_from_last_start("active expiry guard")
+            if repaired:
+                self.save_state()
+                return seconds_until(repaired)
+            log.info("Yuanying out time expired. Auto-resetting state.")
+            self.state["yuanying_out_active"] = False
+            self.state["yuanying_out_end_time"] = ""
+            self.save_state()
+            return 5
+
+        if require_yuanying_level and not await self.ensure_main_yuanying_level_for_command("Yuanying out loop"):
+            return 3600
+
+        next_time = self.state.get("next_yuanying_out_time", "")
+        if next_time and is_future(next_time):
+            return seconds_until(next_time)
+
+        repaired = self._repair_yuanying_out_from_last_start("pre-send guard")
+        if repaired:
+            self.save_state()
+            return seconds_until(repaired)
+
+        log.info(f"Yuanying ability due: sending {command}.")
+        resp = await self.send_timed_command_plan(plan, "主魂")
+        resp_text = self.timed_command_response_text(resp)
+        self.record_yuanying_out_start_response(resp_text)
+        if command == YUANYING_RETREAT_COMMAND and is_yuanying_out_settlement_response(resp_text):
+            self.save_state()
+            log.info(f"{command}: settlement consumed trigger message; sending again to start next cycle.")
+            await asyncio.sleep(5)
+            resp = await self.send_timed_command_plan(plan, "主魂")
+            self.record_yuanying_out_start_response(self.timed_command_response_text(resp))
+        self.save_state()
+        return 5
+
+    def command_response_reply_id(self, resp_msg):
+        if hasattr(resp_msg, "reply_to") and getattr(resp_msg, "reply_to", None):
+            replied_id = getattr(resp_msg.reply_to, "reply_to_msg_id", None)
+            if replied_id:
+                return replied_id
+        return getattr(resp_msg, "reply_to_msg_id", None)
+
+    async def common_main_rift_search_tick(self, cd_seconds, require_yuanying_level=False):
+        """Run one main-soul .探寻裂缝 scheduling step and return next wait seconds."""
+        plan = self.rift_search_plan("主魂")
+        command = plan.command
+        log = self.common_command_logger()
+
+        await self._wait_for_main_identity()
+        if require_yuanying_level and not await self.ensure_main_yuanying_level_for_command("Rift search loop"):
+            return 3600
+
+        next_time = self.state.get(plan.next_key, "")
+        if next_time and is_future(next_time):
+            wait_time = seconds_until(next_time)
+            log.info(f"Rift search loop complete. Sleep {int(min(wait_time, 600))}s.")
+            return wait_time
+
+        log.info(f"Rift search due: sending {command}.")
+        resp_msg = await self.send_timed_command_plan(plan, "主魂")
+        if resp_msg is None:
+            if hasattr(self, "sleep_after_blocked_command") and await self.sleep_after_blocked_command(command, "Rift search"):
+                return 0
+            log.info("Rift search: no response received, retrying later.")
+            return 600
+
+        resp_text = self.timed_command_response_text(resp_msg)
+        if self.is_rift_weakness_response(resp_text):
+            replied_id = self.command_response_reply_id(resp_msg)
+            if replied_id and replied_id != getattr(self, "last_sent_id", None):
+                log.warning(
+                    f"Rift weakness detected but reply_to #{replied_id} != our sent msg, "
+                    "likely someone else's. Skipping."
+                )
+                return 0
+            await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
+            return -1
+
+        self.record_fixed_cd_command_response(resp_text, command, plan.last_key, plan.next_key, cd_seconds)
+        self.save_state()
+        return seconds_until(self.state.get(plan.next_key, "")) or 600
+
     def record_treasure_touch_response(self, resp, command=None):
         """Parse .抚摸法宝 response and update the shared main-soul cooldown state."""
         plan = self.treasure_touch_plan(command)

@@ -3179,74 +3179,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         主魂 .元婴闭关 不固定推算时长；等待机器人结算 reply 后重开。
         """
         await self.startup_done.wait()
-        plan = self.yuanying_out_plan("主魂")
         while self.is_running:
-            await self._wait_for_main_identity()
-            command = plan.command
-            end_time = (
-                self.state.get("yuanying_out_end_time")
-                or self.state.get("next_yuanying_out_time", "")
-            )
-            active = self.state.get("yuanying_out_active")
-
-            # 正在出窍且未到期 -> 等待
-            if active and end_time and is_future(end_time):
-                wait_time = seconds_until(end_time)
-                log.info(f"Yuanying out active. Auto-return due at {end_time}.")
-                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
-                continue
-
-            if active and not end_time and command == YUANYING_RETREAT_COMMAND:
-                log.info("Yuanying retreat active; waiting for passive settlement reply.")
-                await asyncio.sleep(scheduler_sleep_seconds(600))
-                continue
-
-            # 正在出窍但已到期 -> 自动归窍
-            if active:
-                repaired = self._repair_yuanying_out_from_last_start("active expiry guard")
-                if repaired:
-                    self.save_state()
-                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                    continue
-                log.info("Yuanying out time expired. Auto-resetting state.")
-                # 元婴自动归窍，直接重置状态
-                self.state["yuanying_out_active"] = False
-                self.state["yuanying_out_end_time"] = ""
-                self.save_state()
-                await asyncio.sleep(5)
-
-            # 冷却中 -> 等待冷却到期
-            next_time = self.state.get("next_yuanying_out_time", "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-
-            repaired = self._repair_yuanying_out_from_last_start("pre-send guard")
-            if repaired:
-                self.save_state()
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                continue
-
-            # 冷却到期 -> 重新开始主魂元婴闭关
-            log.info(f"Yuanying ability due: sending {command}.")
-            resp = await self.send_and_wait_feedback(
-                command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-            )
-            self.record_yuanying_out_start_response(resp)
-            if command == YUANYING_RETREAT_COMMAND and is_yuanying_out_settlement_response(resp):
-                self.save_state()
-                await asyncio.sleep(5)
-                log.info(f"{command}: settlement consumed trigger message; sending again to start next cycle.")
-                resp = await self.send_and_wait_feedback(
-                    command,
-                    timeout=plan.timeout,
-                    max_retries=plan.max_retries,
-                )
-                self.record_yuanying_out_start_response(resp)
-            self.save_state()
-            await asyncio.sleep(5)
+            wait_time = await self.common_main_yuanying_out_tick()
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ============================================================
     # 探寻裂缝循环

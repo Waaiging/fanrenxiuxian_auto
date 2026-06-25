@@ -1953,55 +1953,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         所以归窍成功后直接 fall through 到出窍判断。
         """
         await self.startup_done.wait()
-        plan = self.yuanying_out_plan("主魂")
         while self.is_running:
-            await self._wait_for_main_identity()
-            end_time = self.state.get("yuanying_out_end_time") or self.state.get("next_yuanying_out_time", "")
-            active = self.state.get("yuanying_out_active")
-
-            # 情况1：在外活跃，等待归窍
-            if active and end_time and is_future(end_time):
-                wait_time = seconds_until(end_time)
-                log.info(f"Yuanying out active. Auto-return due at {end_time}.")
-                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
-                continue
-
-            # 情况2：在外活跃但归窍时间已到，执行归窍
-            if active:
-                repaired = self._repair_yuanying_out_from_last_start("active expiry guard")
-                if repaired:
-                    self.save_state()
-                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                    continue
-                log.info("Yuanying out time expired. Auto-resetting state.")
-                # 元婴自动归窍，直接重置状态
-                self.state["yuanying_out_active"] = False
-                self.state["yuanying_out_end_time"] = ""
-                self.save_state()
-                await asyncio.sleep(5)
-
-            # 情况3：CD 未到
-            next_time = self.state.get("next_yuanying_out_time", "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-
-            repaired = self._repair_yuanying_out_from_last_start("pre-send guard")
-            if repaired:
-                self.save_state()
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                continue
-
-            # 情况4：CD 已到，重新出窍
-            log.info(f"Yuanying ability due: sending {plan.command}.")
-            resp = await self.send_and_wait_feedback(
-                plan.command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-            )
-            self.record_yuanying_out_start_response(resp)
-            self.save_state()
-            await asyncio.sleep(5)
+            wait_time = await self.common_main_yuanying_out_tick()
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ------------------------------------------------------------------
     # 探寻裂缝循环
@@ -2020,54 +1974,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         而不是其他人触发的。
         """
         await self.startup_done.wait()
-        plan = self.rift_search_plan("主魂")
-        command = plan.command
-        last_key = plan.last_key
-        next_key = plan.next_key
 
         while self.is_running:
-            await self._wait_for_main_identity()
-            next_time = self.state.get(next_key, "")
-            if next_time and is_future(next_time):
-                wait_time = seconds_until(next_time)
-                log.info(f"Rift search loop complete. Sleep {int(min(wait_time, 600))}s.")
-                await asyncio.sleep(scheduler_sleep_seconds(wait_time))
-                continue
-
-            log.info(f"Rift search due: sending {command}.")
-            resp_msg = await self.send_and_wait_feedback(
-                command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                return_response_msg=plan.return_response_msg,
-            )
-            if resp_msg is None:
-                if await self.sleep_after_blocked_command(command, "Rift search"):
-                    continue
-                log.info("Rift search: no response received, retrying later.")
-                await asyncio.sleep(scheduler_sleep_seconds(600))
-                continue
-            resp_text = resp_msg.text or ""
-
-            # 检测元婴虚弱期
-            if self.is_rift_weakness_response(resp_text):
-                # 验证：确保回复确实是对我们消息的回复
-                replied_id = None
-                if hasattr(resp_msg, 'reply_to') and resp_msg.reply_to:
-                    replied_id = getattr(resp_msg.reply_to, 'reply_to_msg_id', None)
-                elif hasattr(resp_msg, 'reply_to_msg_id'):
-                    replied_id = resp_msg.reply_to_msg_id
-                if replied_id and replied_id != getattr(self, 'last_sent_id', None):
-                    # 回复的目标不是我们的消息，可能是别人的虚弱期
-                    log.warning(f"Rift weakness detected but reply_to #{replied_id} != our sent msg, likely someone else's. Skipping.")
-                    continue
-                # 确认是我们自己的虚弱期，停止脚本
-                await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
+            wait_time = await self.common_main_rift_search_tick(RIFT_SEARCH_CD_SECONDS)
+            if wait_time < 0:
                 break
-
-            self.record_fixed_cd_command_response(resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS)
-            self.save_state()
-            wait_time = seconds_until(self.state.get(next_key, "")) or 600
             await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ------------------------------------------------------------------

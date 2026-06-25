@@ -2090,114 +2090,25 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     async def run_yuanying_out_loop(self):
         """元婴出窍循环：到点自动归窍，再重新出窍"""
         await self.startup_done.wait()
-        plan = self.yuanying_out_plan("主魂")
         while self.is_running:
             if await self.sleep_if_main_soul_paused("Yuanying out loop"):
                 continue
-            await self._wait_for_main_identity()
-            # 境界自适应校验
-            main_level = self.state.get("level", "")
-            if not main_level:
-                log.info("Main level not cached, sending .状态 to fetch it...")
-                await self.send_and_wait_feedback(".状态", timeout=30)
-                main_level = self.state.get("level", "")
-
-            end_time = self.state.get("yuanying_out_end_time") or self.state.get("next_yuanying_out_time", "")
-            active = self.state.get("yuanying_out_active")
-            # 已出窍 → 必须先自动归窍，不检查境界
-            if active and end_time and is_future(end_time):
-                log.info(f"Yuanying out active. Auto-return due at {end_time}.")
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(end_time)))
-                continue
-            if active:
-                repaired = self._repair_yuanying_out_from_last_start("active expiry guard")
-                if repaired:
-                    self.save_state()
-                    await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                    continue
-                log.info("Yuanying out time expired. Auto-resetting state.")
-                # 元婴自动归窍，直接重置状态
-                self.state["yuanying_out_active"] = False
-                self.state["yuanying_out_end_time"] = ""
-                self.save_state()
-                await asyncio.sleep(5)
-            # 境界检查：只在开启新出窍时检查，自动归窍不检查
-            has_yuanying = any(k in main_level for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
-            if not has_yuanying:
-                log.info(f"🚫 Main soul level [{main_level}] has no Yuanying. Yuanying out loop suspended for 1 hour.")
-                await asyncio.sleep(scheduler_sleep_seconds(3600))
-                continue
-
-            next_time = self.state.get("next_yuanying_out_time", "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-            repaired = self._repair_yuanying_out_from_last_start("pre-send guard")
-            if repaired:
-                self.save_state()
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(repaired)))
-                continue
-            log.info(f"Yuanying ability due: sending {plan.command}.")
-            resp = await self.send_and_wait_feedback(
-                plan.command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-            )
-            self.record_yuanying_out_start_response(resp)
-            self.save_state()
-            await asyncio.sleep(5)
+            wait_time = await self.common_main_yuanying_out_tick(require_yuanying_level=True)
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     async def run_rift_search_loop(self):
         """探寻裂缝循环：定时发送.探寻裂缝"""
         await self.startup_done.wait()
-        plan = self.rift_search_plan("主魂")
-        command = plan.command
-        last_key = plan.last_key
-        next_key = plan.next_key
         while self.is_running:
             if await self.sleep_if_main_soul_paused("Rift search loop"):
                 continue
-            await self._wait_for_main_identity()
-            # 境界自适应校验
-            main_level = self.state.get("level", "")
-            if not main_level:
-                log.info("Main level not cached, sending .状态 to fetch it...")
-                await self.send_and_wait_feedback(".状态", timeout=30)
-                main_level = self.state.get("level", "")
-
-            has_yuanying = any(k in main_level for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
-            if not has_yuanying:
-                log.info(f"🚫 Main soul level [{main_level}] has no Yuanying. Rift search loop suspended for 1 hour.")
-                await asyncio.sleep(scheduler_sleep_seconds(3600))
-                continue
-
-            next_time = self.state.get(next_key, "")
-            if next_time and is_future(next_time):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
-                continue
-            log.info(f"Rift search due: sending {command}.")
-            resp_msg = await self.send_and_wait_feedback(
-                command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                return_response_msg=plan.return_response_msg,
+            wait_time = await self.common_main_rift_search_tick(
+                RIFT_SEARCH_CD_SECONDS,
+                require_yuanying_level=True,
             )
-            if resp_msg is None:
-                if await self.sleep_after_blocked_command(command, "Rift search"):
-                    continue
-                log.info("Rift search: no response received, retrying later.")
-                await asyncio.sleep(scheduler_sleep_seconds(600))
-                continue
-            resp_text = resp_msg.text or ""
-            if self.is_rift_weakness_response(resp_text):
-                replied_id = getattr(getattr(resp_msg, 'reply_to', None), 'reply_to_msg_id', None) or getattr(resp_msg, 'reply_to_msg_id', None)
-                if replied_id and replied_id != getattr(self, 'last_sent_id', None):
-                    log.warning(f"Rift weakness detected but reply_to #{replied_id} != our sent msg, likely someone else's. Skipping.")
-                    continue
-                await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
+            if wait_time < 0:
                 break
-            self.record_fixed_cd_command_response(resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS)
-            await asyncio.sleep(5)
+            await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ---- 灵兽：时间解析与状态判断 ----
 
