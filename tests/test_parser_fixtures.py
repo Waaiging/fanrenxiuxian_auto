@@ -14,7 +14,14 @@ import intelligent_cultivator
 import log_utils
 import star_gazing_collector
 import sub_cultivator
-from command_modules import field_training_plan_from_features
+from command_modules import (
+    ask_dao_plan,
+    field_training_plan_from_features,
+    nurture_spirit_plan,
+    rift_search_plan,
+    treasure_touch_plan,
+    yuanying_out_plan,
+)
 from fishing_features import (
     FishingMixin,
     parse_buy_bait,
@@ -137,6 +144,52 @@ class ParserFixtureTests(unittest.TestCase):
 
         main = field_training_plan_from_features("主魂", main_command=".野外历练 谨慎")
         self.assertEqual(main.all_commands(), [".野外历练 谨慎"])
+
+    def test_yuanying_and_rift_plans_preserve_account_differences(self):
+        main_yuanying = yuanying_out_plan("主魂")
+        self.assertEqual(main_yuanying.command, ".元婴出窍")
+        self.assertEqual(main_yuanying.next_key, "next_yuanying_out_time")
+        self.assertFalse(main_yuanying.force_identity_check)
+
+        sub_main_yuanying = yuanying_out_plan("主魂", main_command=".元婴闭关")
+        self.assertEqual(sub_main_yuanying.command, ".元婴闭关")
+
+        avatar_yuanying = yuanying_out_plan("缘生子", main_command=".元婴闭关")
+        self.assertEqual(avatar_yuanying.command, ".元婴出窍")
+        self.assertTrue(avatar_yuanying.force_identity_check)
+
+        main_rift = rift_search_plan("主魂")
+        self.assertEqual(main_rift.command, ".探寻裂缝")
+        self.assertEqual(main_rift.last_key, "last_rift_search_time")
+        self.assertEqual(main_rift.next_key, "next_rift_search_time")
+        self.assertTrue(main_rift.return_response_msg)
+
+        avatar_rift = rift_search_plan("缘生子")
+        self.assertEqual(avatar_rift.command, ".探寻裂缝")
+        self.assertFalse(avatar_rift.return_response_msg)
+
+    def test_fixed_cooldown_plans_preserve_command_metadata(self):
+        main_treasure = treasure_touch_plan(".抚摸法宝 玄天斩灵剑")
+        self.assertEqual(main_treasure.command, ".抚摸法宝 玄天斩灵剑")
+        self.assertEqual(main_treasure.last_key, "last_treasure_touch_time")
+        self.assertEqual(main_treasure.next_key, "next_treasure_touch_time")
+        self.assertEqual(main_treasure.timeout, 90)
+        self.assertTrue(main_treasure.force_identity_check)
+
+        sub_treasure = treasure_touch_plan(".抚摸法宝 青竹蜂云剑")
+        self.assertEqual(sub_treasure.command, ".抚摸法宝 青竹蜂云剑")
+
+        nurture = nurture_spirit_plan(".温养器灵 斩灵")
+        self.assertEqual(nurture.command, ".温养器灵 斩灵")
+        self.assertEqual(nurture.next_key, "next_nurture_spirit_time")
+        self.assertFalse(nurture.force_identity_check)
+
+        ask_dao = ask_dao_plan()
+        self.assertEqual(ask_dao.command, ".问道")
+        self.assertEqual(ask_dao.last_key, "last_ask_dao_time")
+        self.assertEqual(ask_dao.next_key, "next_ask_dao_time")
+        self.assertEqual(ask_dao.max_retries, 1)
+        self.assertTrue(ask_dao.force_identity_check)
 
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):

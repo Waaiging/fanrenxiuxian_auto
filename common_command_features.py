@@ -32,7 +32,15 @@ from log_utils import (
     text_username_mentions,
     tracked_command_identity_for_reply,
 )
-from command_modules import field_training_plan_from_features
+from command_modules import (
+    ask_dao_plan,
+    field_training_plan_from_features,
+    nurture_spirit_plan,
+    rift_search_plan,
+    treasure_touch_plan,
+    yuanying_command_for_identity,
+    yuanying_out_plan,
+)
 
 
 # =====================================================================
@@ -1066,6 +1074,30 @@ class CommonCommandMixin:
             features=features,
             main_command=getattr(self, "field_training_command", FIELD_TRAINING_COMMAND),
         )
+
+    def yuanying_command_for_identity(self, identity="主魂"):
+        return yuanying_command_for_identity(
+            identity,
+            main_command=getattr(self, "yuanying_main_command", ".元婴出窍"),
+        )
+
+    def yuanying_out_plan(self, identity="主魂"):
+        return yuanying_out_plan(
+            identity,
+            main_command=getattr(self, "yuanying_main_command", ".元婴出窍"),
+        )
+
+    def rift_search_plan(self, identity="主魂"):
+        return rift_search_plan(identity)
+
+    def treasure_touch_plan(self, command=None):
+        return treasure_touch_plan(command or getattr(self, "treasure_touch_command", None))
+
+    def nurture_spirit_plan(self, command=None):
+        return nurture_spirit_plan(command or getattr(self, "nurture_spirit_command", None))
+
+    def ask_dao_plan(self, command=None):
+        return ask_dao_plan(command or getattr(self, "ask_dao_command", None))
 
     def is_field_training_response(self, text):
         """判断游戏回复是否为野外历练相关的消息"""

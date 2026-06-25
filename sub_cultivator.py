@@ -394,6 +394,8 @@ class AtomicTaskContext:
 class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     """星宫副号修仙脚本主类，管理所有自动循环与事件响应。"""
 
+    yuanying_main_command = YUANYING_RETREAT_COMMAND
+
     def __init__(self, session_name='sub_account_session'):
         """
         初始化副号脚本实例。
@@ -3381,7 +3383,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return True
 
     def yuanying_command_for_identity(self, identity="主魂"):
-        return YUANYING_RETREAT_COMMAND if str(identity or "主魂").strip() == "主魂" else ".元婴出窍"
+        return self.yuanying_out_plan(identity).command
 
     def record_yuanying_out_start_response(self, resp, identity="主魂"):
         """
@@ -3497,7 +3499,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return
         if self.identity_pause_seconds(avatar) > 0:
             return
-        if self.dashboard_command_paused(".元婴出窍", avatar):
+        plan = self.yuanying_out_plan(avatar)
+        if self.dashboard_command_paused(plan.command, avatar):
             return
         if (
             hasattr(self, "avatar_meditation_needs_attention")
@@ -3535,9 +3538,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.save_state()
             return
 
-        log.info(f"Avatar [{avatar}] yuanying out due: sending .元婴出窍.")
+        log.info(f"Avatar [{avatar}] yuanying out due: sending {plan.command}.")
         resp = await self.send_and_wait_feedback_identity(
-            avatar, ".元婴出窍", timeout=120, max_retries=0
+            avatar,
+            plan.command,
+            timeout=plan.timeout,
+            max_retries=plan.max_retries,
         )
         self.record_yuanying_out_start_response(self.response_text(resp), identity=avatar)
         self.save_state()
@@ -3548,7 +3554,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return
         if self.identity_pause_seconds(avatar) > 0:
             return
-        if self.dashboard_command_paused(".探寻裂缝", avatar):
+        plan = self.rift_search_plan(avatar)
+        if self.dashboard_command_paused(plan.command, avatar):
             return
         if (
             hasattr(self, "avatar_meditation_needs_attention")
@@ -3560,20 +3567,23 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         a_state = self.get_avatar_state(avatar)
         repaired_next = self.preserve_cooldown_floor(
             a_state,
-            "last_rift_search_time",
-            "next_rift_search_time",
+            plan.last_key,
+            plan.next_key,
             RIFT_SEARCH_CD_SECONDS,
             f"avatar rift search [{avatar}]",
         )
         if repaired_next and is_future(repaired_next):
             return
-        next_time = a_state.get("next_rift_search_time", "")
+        next_time = a_state.get(plan.next_key, "")
         if next_time and is_future(next_time):
             return
 
-        log.info(f"Avatar [{avatar}] rift search due: sending .探寻裂缝.")
+        log.info(f"Avatar [{avatar}] rift search due: sending {plan.command}.")
         resp = await self.send_and_wait_feedback_identity(
-            avatar, ".探寻裂缝", timeout=120, max_retries=0
+            avatar,
+            plan.command,
+            timeout=plan.timeout,
+            max_retries=plan.max_retries,
         )
         resp_text = self.response_text(resp)
         if self.is_rift_weakness_response(resp_text):
@@ -3582,9 +3592,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.record_identity_fixed_cd_command_response(
             avatar,
             resp_text,
-            ".探寻裂缝",
-            "last_rift_search_time",
-            "next_rift_search_time",
+            plan.command,
+            plan.last_key,
+            plan.next_key,
             RIFT_SEARCH_CD_SECONDS,
         )
         self.save_state()
@@ -3635,9 +3645,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             3. 成功关键字（联系更加紧密、器灵传来了喜悦等） -> 记录成功，2 小时后可再次抚摸。
             4. 不匹配 -> 告警，600 秒后重试。
         """
-        command = TREASURE_TOUCH_COMMAND
-        next_key = "next_treasure_touch_time"
-        last_key = "last_treasure_touch_time"
+        plan = self.treasure_touch_plan(TREASURE_TOUCH_COMMAND)
+        command = plan.command
+        next_key = plan.next_key
+        last_key = plan.last_key
         if not resp:
             self.state[next_key] = add_seconds_str(now_str(), 600)
             log.warning(
@@ -3741,9 +3752,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         主魂 .元婴闭关 不固定推算时长；等待机器人结算 reply 后重开。
         """
         await self.startup_done.wait()
+        plan = self.yuanying_out_plan("主魂")
         while self.is_running:
             await self._wait_for_main_identity()
-            command = self.yuanying_command_for_identity("主魂")
+            command = plan.command
             end_time = (
                 self.state.get("yuanying_out_end_time")
                 or self.state.get("next_yuanying_out_time", "")
@@ -3790,13 +3802,21 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
             # 冷却到期 -> 重新开始主魂元婴闭关
             log.info(f"Yuanying ability due: sending {command}.")
-            resp = await self.send_and_wait_feedback(command, timeout=120, max_retries=0)
+            resp = await self.send_and_wait_feedback(
+                command,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+            )
             self.record_yuanying_out_start_response(resp)
             if command == YUANYING_RETREAT_COMMAND and is_yuanying_out_settlement_response(resp):
                 self.save_state()
                 await asyncio.sleep(5)
                 log.info(f"{command}: settlement consumed trigger message; sending again to start next cycle.")
-                resp = await self.send_and_wait_feedback(command, timeout=120, max_retries=0)
+                resp = await self.send_and_wait_feedback(
+                    command,
+                    timeout=plan.timeout,
+                    max_retries=plan.max_retries,
+                )
                 self.record_yuanying_out_start_response(resp)
             self.save_state()
             await asyncio.sleep(5)
@@ -3813,9 +3833,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
           - 否则按固定冷却指令逻辑处理。
         """
         await self.startup_done.wait()
-        command = ".探寻裂缝"
-        last_key = "last_rift_search_time"
-        next_key = "next_rift_search_time"
+        plan = self.rift_search_plan("主魂")
+        command = plan.command
+        last_key = plan.last_key
+        next_key = plan.next_key
 
         while self.is_running:
             await self._wait_for_main_identity()
@@ -3826,9 +3847,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
-            log.info("Rift search due: sending .探寻裂缝.")
+            log.info(f"Rift search due: sending {command}.")
             resp_msg = await self.send_and_wait_feedback(
-                command, timeout=120, max_retries=0, return_response_msg=True
+                command,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                return_response_msg=plan.return_response_msg,
             )
             if resp_msg is None:
                 if await self.sleep_after_blocked_command(command, "Rift search"):
@@ -3847,7 +3871,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await asyncio.sleep(5)
                 # 重试一次
                 resp_msg = await self.send_and_wait_feedback(
-                    command, timeout=120, return_response_msg=True
+                    command,
+                    timeout=plan.timeout,
+                    return_response_msg=plan.return_response_msg,
                 )
                 if resp_msg is None:
                     if await self.sleep_after_blocked_command(command, "Rift search force-exit retry"):
@@ -3904,9 +3930,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             log.info("Treasure touch loop disabled for sub main soul after sect migration.")
             return
         await self.startup_done.wait()
+        plan = self.treasure_touch_plan(TREASURE_TOUCH_COMMAND)
         while self.is_running:
             await self._wait_for_main_identity()
-            next_time = self.state.get("next_treasure_touch_time", "")
+            next_time = self.state.get(plan.next_key, "")
             if next_time and is_future(next_time):
                 wait_time = seconds_until(next_time)
                 log.info(
@@ -3915,11 +3942,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await asyncio.sleep(scheduler_sleep_seconds(wait_time))
                 continue
 
-            log.info(f"Treasure touch due: sending {TREASURE_TOUCH_COMMAND}.")
+            log.info(f"Treasure touch due: sending {plan.command}.")
             resp = await self.send_and_wait_feedback(
-                TREASURE_TOUCH_COMMAND,
-                timeout=90,
-                force_identity_check=True,
+                plan.command,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                force_identity_check=plan.force_identity_check,
             )
 
             # 修为不足处理
@@ -3931,13 +3959,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await asyncio.sleep(5)
                 # 重试一次
                 resp = await self.send_and_wait_feedback(
-                    TREASURE_TOUCH_COMMAND,
-                    timeout=90,
-                    force_identity_check=True,
+                    plan.command,
+                    timeout=plan.timeout,
+                    max_retries=plan.max_retries,
+                    force_identity_check=plan.force_identity_check,
                 )
                 if "修为不足" in resp:
                     log.warning("Treasure touch: still 修为不足 after force exit, pausing 2h")
-                    self.state["next_treasure_touch_time"] = add_seconds_str(now_str(), 2 * 3600)
+                    self.state[plan.next_key] = add_seconds_str(now_str(), 2 * 3600)
                     self.save_state()
                     # 重新开启深度闭关
                     await asyncio.sleep(3)
@@ -3947,7 +3976,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
             self.record_treasure_touch_response(resp)
             self.save_state()
-            wait_time = seconds_until(self.state.get("next_treasure_touch_time", "")) or 600
+            wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
             await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
     # ============================================================
@@ -3969,8 +3998,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def record_ask_dao_response(self, resp, source=ASK_DAO_COMMAND):
         """记录 .问道 反馈；成功按 12 小时冷却，冷却回复按剩余时间排程。"""
         now = now_str()
-        next_key = "next_ask_dao_time"
-        last_key = "last_ask_dao_time"
+        plan = self.ask_dao_plan(ASK_DAO_COMMAND)
+        next_key = plan.next_key
+        last_key = plan.last_key
         if not resp:
             self.state[next_key] = add_seconds_str(now, ASK_DAO_RETRY_SECONDS)
             log.info(f"{source}: no response; retry at {self.state[next_key]}.")
@@ -4006,27 +4036,28 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         """元婴宗主魂 .问道 循环，每 12 小时一次。"""
         await self.startup_done.wait()
         await asyncio.sleep(random.randint(20, 80))
+        plan = self.ask_dao_plan(ASK_DAO_COMMAND)
         while self.is_running:
             await self._wait_for_main_identity()
-            if self.dashboard_command_paused(ASK_DAO_COMMAND, "主魂"):
+            if self.dashboard_command_paused(plan.command, "主魂"):
                 await asyncio.sleep(300)
                 continue
 
-            next_time = self.state.get("next_ask_dao_time", "")
+            next_time = self.state.get(plan.next_key, "")
             if next_time and is_future(next_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
                 continue
 
-            log.info(f"Ask Dao due: sending {ASK_DAO_COMMAND}.")
+            log.info(f"Ask Dao due: sending {plan.command}.")
             resp = await self.send_and_wait_feedback(
-                ASK_DAO_COMMAND,
-                timeout=90,
-                max_retries=1,
-                force_identity_check=True,
+                plan.command,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                force_identity_check=plan.force_identity_check,
             )
-            if resp is None and await self.sleep_after_blocked_command(ASK_DAO_COMMAND, "Ask Dao"):
+            if resp is None and await self.sleep_after_blocked_command(plan.command, "Ask Dao"):
                 continue
-            self.record_ask_dao_response(resp, ASK_DAO_COMMAND)
+            self.record_ask_dao_response(resp, plan.command)
             self.save_state()
             await asyncio.sleep(5)
 
