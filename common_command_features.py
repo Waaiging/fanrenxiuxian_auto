@@ -2661,6 +2661,55 @@ class CommonCommandMixin:
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
         return self.state.get("last_gazing_date") == date_str
 
+    def common_star_shift_done_today(self, today=None):
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        return self.state.get("last_star_shift_date") == today
+
+    def common_star_gazing_good_opportunity(self, text, good_keywords):
+        return bool(text and any(keyword in text for keyword in good_keywords))
+
+    def common_star_gazing_manifest_fate_type(self, text):
+        match = re.search(r"【((?:Good|Bad|Neutral)\s*-\s*[^】]+)】", text or "")
+        return match.group(1).strip() if match else ""
+
+    def common_star_gazing_pending_fate_type(self, text, good_keywords):
+        for keyword in good_keywords:
+            if text and keyword in text:
+                return keyword.strip("【】")
+        return ""
+
+    def common_is_star_gazing_final_report(self, text):
+        clean = str(text or "").replace("**", "")
+        return "【天机阁快报" in clean
+
+    def common_current_star_report_manifest_dt(self, now=None, interval_hours=3):
+        now = now or datetime.now()
+        base_hour = (now.hour // interval_hours) * interval_hours
+        return now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
+
+    def common_star_gazing_final_report_seen(self, target_dt):
+        if not target_dt:
+            return False
+        return self.state.get("last_star_gazing_report_manifest_time", "") == dt_to_str(target_dt)
+
+    def common_is_star_gazing_forbidden_response(self, text, forbidden_keywords):
+        return bool(text and any(keyword in text for keyword in forbidden_keywords))
+
+    def common_is_star_gazing_valid_result(self, text, valid_keywords):
+        return bool(text and any(keyword in text for keyword in valid_keywords))
+
+    def common_get_avatar_username(self, avatar):
+        for uname, name in getattr(self, "avatar_usernames", {}).items():
+            if name == avatar:
+                return uname
+        return ""
+
+    def common_star_gazing_observer_identity(self, text):
+        match = re.search(r"@([A-Za-z0-9_]+)\s+闭目凝神", text or "")
+        if not match:
+            return ""
+        return (getattr(self, "avatar_usernames", {}) or {}).get(match.group(1).lower(), "")
+
     def common_star_gazing_schedule_plan(self, now, manifest_dt, command_lead_seconds=60):
         """Return (.观星 send time, immediate_shift flag, consumed gazing date)."""
         min_lead_seconds = 60

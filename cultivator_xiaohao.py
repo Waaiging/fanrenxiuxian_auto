@@ -4341,32 +4341,25 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # ---- 观星与改换星移 (化身专用) ----
 
     def star_gazing_good_opportunity(self, text):
-        return bool(text and any(keyword in text for keyword in STAR_GAZING_GOOD_KEYWORDS))
+        return self.common_star_gazing_good_opportunity(text, STAR_GAZING_GOOD_KEYWORDS)
 
     def star_gazing_manifest_fate_type(self, text):
-        match = re.search(r"【((?:Good|Bad|Neutral)\s*-\s*[^】]+)】", text or "")
-        return match.group(1).strip() if match else ""
+        return self.common_star_gazing_manifest_fate_type(text)
 
     def star_gazing_pending_fate_type(self, text):
-        for keyword in STAR_GAZING_GOOD_KEYWORDS:
-            if text and keyword in text:
-                return keyword.strip("【】")
-        return ""
+        return self.common_star_gazing_pending_fate_type(text, STAR_GAZING_GOOD_KEYWORDS)
 
     def is_star_gazing_final_report(self, text):
-        """天机阁快报表示本轮整点演化已经结算，之后不应再改换星移。"""
-        clean = str(text or "").replace("**", "")
-        return "【天机阁快报" in clean
+        return self.common_is_star_gazing_final_report(text)
 
     def current_star_report_manifest_dt(self, now=None):
-        now = now or datetime.now()
-        base_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-        return now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
+        return self.common_current_star_report_manifest_dt(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def star_gazing_final_report_seen(self, target_dt):
-        if not target_dt:
-            return False
-        return self.state.get("last_star_gazing_report_manifest_time", "") == dt_to_str(target_dt)
+        return self.common_star_gazing_final_report_seen(target_dt)
 
     def record_star_gazing_final_report_if_needed(self, msg, text, source="new message"):
         if not self.is_star_gazing_final_report(text):
@@ -4394,17 +4387,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return True
 
     def is_star_gazing_forbidden_response(self, text):
-        return bool(text and any(keyword in text for keyword in STAR_GAZING_FORBIDDEN_KEYWORDS))
+        return self.common_is_star_gazing_forbidden_response(text, STAR_GAZING_FORBIDDEN_KEYWORDS)
 
     def is_star_gazing_valid_result(self, text):
-        return bool(text and any(keyword in text for keyword in STAR_GAZING_VALID_RESULT_KEYWORDS))
+        return self.common_is_star_gazing_valid_result(text, STAR_GAZING_VALID_RESULT_KEYWORDS)
 
     def get_avatar_username(self, avatar):
-        """根据化身名称反向查找其 Telegram 用户名"""
-        for uname, name in self.avatar_usernames.items():
-            if name == avatar:
-                return uname
-        return ""
+        return self.common_get_avatar_username(avatar)
 
     def next_star_manifest_dt(self, now=None):
         return self.common_next_star_manifest_dt(
@@ -4467,10 +4456,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return now >= pending_dt - timedelta(seconds=1)
 
     def star_gazing_observer_identity(self, text):
-        match = re.search(r"@([A-Za-z0-9_]+)\s+闭目凝神", text or "")
-        if not match:
-            return ""
-        return (getattr(self, "avatar_usernames", {}) or {}).get(match.group(1).lower(), "")
+        return self.common_star_gazing_observer_identity(text)
 
     def claimed_star_gazing_reply_msg_id(self, avatar, msg, text):
         msg_id = getattr(msg, "id", 0)

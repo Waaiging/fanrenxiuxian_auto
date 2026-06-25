@@ -5168,9 +5168,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             )
 
     def star_shift_done_today(self, today=None):
-            """检查今天是否已经执行过改换星移。"""
-            today = today or datetime.now().strftime("%Y-%m-%d")
-            return self.state.get("last_star_shift_date") == today
+            return self.common_star_shift_done_today(today or datetime.now().strftime("%Y-%m-%d"))
 
     def pending_daily_star_gazing_fallback_dt(self, now=None):
             return self.common_pending_daily_star_gazing_fallback_dt(now or datetime.now())
@@ -5263,39 +5261,30 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             )
 
     def star_shift_done_today(self, today=None):
-            """检查今天是否已经执行过改换星移。"""
-            today = today or datetime.now().strftime("%Y-%m-%d")
-            return self.state.get("last_star_shift_date") == today
+            return self.common_star_shift_done_today(today or datetime.now().strftime("%Y-%m-%d"))
 
     def pending_daily_star_gazing_fallback_dt(self, now=None):
             return self.common_pending_daily_star_gazing_fallback_dt(now or datetime.now())
     def star_gazing_good_opportunity(self, text):
-        return bool(text and any(keyword in text for keyword in STAR_GAZING_GOOD_KEYWORDS))
+        return self.common_star_gazing_good_opportunity(text, STAR_GAZING_GOOD_KEYWORDS)
 
     def star_gazing_manifest_fate_type(self, text):
-            match = re.search(r"【((?:Good|Bad|Neutral)\s*-\s*[^】]+)】", text or "")
-            return match.group(1).strip() if match else ""
+            return self.common_star_gazing_manifest_fate_type(text)
 
     def star_gazing_pending_fate_type(self, text):
-            for keyword in STAR_GAZING_GOOD_KEYWORDS:
-                if text and keyword in text:
-                    return keyword.strip("【】")
-            return ""
+            return self.common_star_gazing_pending_fate_type(text, STAR_GAZING_GOOD_KEYWORDS)
 
     def is_star_gazing_final_report(self, text):
-            """天机阁快报表示本轮整点演化已经结算，之后不应再改换星移。"""
-            clean = str(text or "").replace("**", "")
-            return "【天机阁快报" in clean
+            return self.common_is_star_gazing_final_report(text)
 
     def current_star_report_manifest_dt(self, now=None):
-            now = now or datetime.now()
-            base_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-            return now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
+            return self.common_current_star_report_manifest_dt(
+                now or datetime.now(),
+                interval_hours=STAR_GAZING_INTERVAL_HOURS,
+            )
 
     def star_gazing_final_report_seen(self, target_dt):
-            if not target_dt:
-                return False
-            return self.state.get("last_star_gazing_report_manifest_time", "") == dt_to_str(target_dt)
+            return self.common_star_gazing_final_report_seen(target_dt)
 
     def record_star_gazing_final_report_if_needed(self, msg, text, source="new message"):
             if not self.is_star_gazing_final_report(text):
