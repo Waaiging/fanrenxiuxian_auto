@@ -26,6 +26,19 @@ STAR_EVENT_MARKERS = (
     "静场令",
 )
 
+DEFAULT_GAME_BOT_USERNAMES = {
+    "fanrenxiuxian_bot",
+    "hantianzunhl",
+    "hantianz_bot",
+    "hantianzz_bot",
+    "hantianzzz_bot",
+    "hantianzzzz_bot",
+    "hantianzzzzz_bot",
+    "hantianzzzzzz_bot",
+    "hantianzzzzzzz_bot",
+    "hantianzzzzzzzz_bot",
+}
+
 
 def _local_tz():
     if ZoneInfo:
@@ -83,6 +96,11 @@ def _fmt_dt(dt):
 
 def _strip_md(value):
     return (value or "").replace("*", "").strip()
+
+
+def _is_game_bot_sender(sender):
+    username = (getattr(sender, "username", "") or "").lower().lstrip("@")
+    return bool(username and username in DEFAULT_GAME_BOT_USERNAMES)
 
 
 def _first_match(patterns, text, flags=0):
@@ -164,6 +182,8 @@ def _target_manifest_time(event_kind, local_time):
     if event_kind == "news":
         return boundary
     if event_kind == "manifest":
+        if 0 < offset <= 120:
+            return boundary
         return _next_boundary_time(local_time)
     if event_kind == "shift":
         return boundary if 0 <= offset <= 120 else _next_boundary_time(local_time)
@@ -201,6 +221,8 @@ def _load_existing_keys(path):
 
 def build_star_gazing_event_record(account, msg, text, sender=None, is_edited=False):
     text = text or ""
+    if sender is not None and not _is_game_bot_sender(sender):
+        return None
     if not any(marker in text for marker in STAR_EVENT_MARKERS):
         return None
 

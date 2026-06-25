@@ -223,6 +223,17 @@ class ConcubineMixin:
             if key not in self.state:
                 self.state[key] = value
                 changed = True
+        if self.state.get("last_concubine_status_mismatch") or self.state.get("last_concubine_status_mismatch_time"):
+            self.state["last_concubine_status_mismatch"] = ""
+            self.state["last_concubine_status_mismatch_time"] = ""
+            changed = True
+        for avatar_state in (self.state.get("avatars") or {}).values():
+            if not isinstance(avatar_state, dict):
+                continue
+            if avatar_state.get("last_concubine_status_mismatch") or avatar_state.get("last_concubine_status_mismatch_time"):
+                avatar_state["last_concubine_status_mismatch"] = ""
+                avatar_state["last_concubine_status_mismatch_time"] = ""
+                changed = True
         if changed:
             self.save_state()
 
@@ -485,6 +496,69 @@ class ConcubineMixin:
             names.add(state_name)
         return {name for name in names if name}
 
+    def managed_concubine_identities(self):
+        identities = ["主魂"]
+        for avatar in getattr(self, "avatars", []) or []:
+            if avatar and avatar not in identities:
+                identities.append(avatar)
+        return identities
+
+    def identity_for_concubine_voyage_text(self, text, fallback_identity=""):
+        """Infer the owner of a loose voyage response that was not reply-linked."""
+        clean = str(text or "")
+        if any(k in clean for k in ["元婴", "元神"]) and not any(
+            k in clean for k in ["侍妾", "道侣", "乱星海远航", "远航·"]
+        ):
+            return ""
+        if not clean or not self.is_concubine_voyage_response(clean):
+            return ""
+
+        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", clean)
+        if marker:
+            candidate = marker.group(1).strip()
+            if candidate in self.managed_concubine_identities():
+                return candidate
+
+        lower = clean.lower()
+        for username, avatar in getattr(self, "avatar_usernames", {}).items():
+            if f"@{str(username).lower().lstrip('@')}" in lower and avatar in self.managed_concubine_identities():
+                return avatar
+        for username in getattr(self, "identity_usernames", {}).get("主魂", []):
+            if f"@{str(username).lower().lstrip('@')}" in lower:
+                return "主魂"
+
+        name = self.extract_concubine_name(clean)
+        if name:
+            matches = [
+                identity
+                for identity in self.managed_concubine_identities()
+                if name in self.expected_concubine_names(identity)
+            ]
+            if len(matches) == 1:
+                return matches[0]
+
+        active_matches = []
+        for identity in self.managed_concubine_identities():
+            state = self._concubine_state_container(identity)
+            if not state.get("concubine_voyage_active"):
+                continue
+            next_time = state.get("next_concubine_voyage_time", "")
+            if not next_time or seconds_until(next_time) <= CONCUBINE_GRACE_SECONDS:
+                active_matches.append(identity)
+        if len(active_matches) == 1:
+            return active_matches[0]
+
+        fallback_identity = str(fallback_identity or "").strip()
+        if fallback_identity in self.managed_concubine_identities():
+            return fallback_identity
+        return ""
+
+    def record_passive_concubine_voyage_response(self, text, fallback_identity=""):
+        identity = self.identity_for_concubine_voyage_text(text, fallback_identity=fallback_identity)
+        if not identity:
+            return False
+        return self.record_concubine_voyage_response(text, identity=identity)
+
     def concubine_status_trusted_for_identity(self, text, identity="主魂"):
         """Return whether the status text is safely attributable to identity."""
         identity = identity or "主魂"
@@ -497,28 +571,8 @@ class ConcubineMixin:
         name = self.extract_concubine_name(text)
         if not name:
             return ""
-        expected = self.expected_concubine_names(identity)
         state = self._concubine_state_container(identity)
-        if expected and name not in expected:
-            if self.concubine_status_trusted_for_identity(text, identity):
-                now = now_str()
-                state["concubine_name"] = name
-                state["last_concubine_name_time"] = now
-                state["last_concubine_status_mismatch"] = ""
-                state["last_concubine_status_mismatch_time"] = ""
-                self.save_state()
-                log.warning(
-                    f"Concubine status [{identity}] updated trusted concubine "
-                    f"name from {sorted(expected)} to {name}."
-                )
-                return name
-            now = now_str()
-            state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"
-            state["last_concubine_status_mismatch_time"] = now
-            self.save_state()
-            log.warning(
-                f"Concubine status [{identity}] rejected: expected {sorted(expected)}, got {name}."
-            )
+        if not self.concubine_status_trusted_for_identity(text, identity):
             return ""
         state["concubine_name"] = name
         state["last_concubine_name_time"] = now_str()
@@ -528,39 +582,18 @@ class ConcubineMixin:
         return name
 
     def concubine_status_matches_identity(self, text, identity="主魂"):
-        """Reject same-avatar status panels that belong to another account's identity."""
+        """Reject only explicit identity-marker mismatches; do not validate concubine names."""
         clean = str(text or "")
         if not any(k in clean for k in ["你的道心侍妾", "你的红尘道侣", "【第二期机缘】", "远航状态"]):
             return True
-        name = self.extract_concubine_name(clean)
-        expected = self.expected_concubine_names(identity)
-        if not name:
-            return True
-        if expected and name not in expected:
-            if self.concubine_status_trusted_for_identity(clean, identity):
-                self.record_concubine_name_from_text(identity, clean)
-                return True
-            state = self._concubine_state_container(identity or "主魂")
-            now = now_str()
-            state["last_concubine_status_mismatch"] = f"expected={','.join(sorted(expected))}; got={name}"
-            state["last_concubine_status_mismatch_time"] = now
-            self.save_state()
-            log.warning(
-                f"Concubine status [{identity or '主魂'}] mismatch: expected {sorted(expected)}, got {name}."
-            )
+        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", clean)
+        if marker and marker.group(1).strip() != (identity or "主魂"):
             return False
         self.record_concubine_name_from_text(identity, clean)
         return True
 
     def recent_concubine_status_mismatch(self, identity="主魂", window_seconds=120):
-        state = self._concubine_state_container(identity or "主魂")
-        value = state.get("last_concubine_status_mismatch_time", "")
-        if not value:
-            return False
-        try:
-            return 0 <= (datetime.now() - str_to_dt(value)).total_seconds() <= window_seconds
-        except Exception:
-            return False
+        return False
 
     def concubine_voyage_enabled(self, identity="主魂"):
         """All managed identities enter the bound concubine voyage chain."""
@@ -815,6 +848,10 @@ class ConcubineMixin:
         """判断文本是否与侍妾远航/远航归来相关。"""
         clean = str(text or "").replace("**", "")
         if not clean:
+            return False
+        if any(k in clean for k in ["元婴", "元神"]) and not any(
+            k in clean for k in ["侍妾", "道侣", "乱星海远航", "远航·"]
+        ):
             return False
         return any(k in clean for k in [
             "侍妾远航", "远航", "归来", "启航", "返航", "航程", "航海",

@@ -44,7 +44,12 @@ CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
 FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 0  # 空回复时下一轮立即重试
+FIELD_TRAINING_SETTLEMENT_WAIT_SECONDS = 15    # 等待野外历练初始回复编辑为结算
+BUSHI_WENTIAN_COMMAND = ".卜筮问天"
+BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
+BUSHI_WENTIAN_DAILY_LIMIT = 10
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
+MEDITATION_SETTLEMENT_GRACE_SECONDS = 3 * 60      # 闭关到点后给机器人结算状态留 3 分钟余量
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
 SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
@@ -150,6 +155,9 @@ def common_command_default_state():
     return {
         "last_field_training_time": "",
         "next_field_training_time": "",
+        "bushi_wentian_date": "",
+        "bushi_wentian_count": 0,
+        "bushi_wentian_exchange_count": 0,
         "sect_name": "",
         "sect_war_left": "",
         "sect_war_right": "",
@@ -521,6 +529,119 @@ class CommonCommandMixin:
         value = state.get("next_meditation_retry_time", "")
         return value if value and is_future(value) else ""
 
+    def meditation_protected_until(self, state, grace_seconds=MEDITATION_SETTLEMENT_GRACE_SECONDS):
+        """Return the latest time before which .查看闭关 should not be sent.
+
+        The game often still reports a short remaining deep-meditation timer at
+        the local end timestamp, so every cached end time is protected by a
+        small settlement grace window.
+        """
+        if not isinstance(state, dict):
+            return ""
+        now = datetime.now()
+        candidates = []
+
+        guard_time = state.get("deep_meditation_guard_until", "")
+        if guard_time:
+            try:
+                guard_dt = datetime.strptime(str(guard_time), TIME_FORMAT)
+                if guard_dt > now:
+                    candidates.append(guard_dt)
+            except Exception:
+                pass
+
+        end_time = state.get("deep_meditation_end_time", "")
+        if end_time:
+            try:
+                end_dt = datetime.strptime(str(end_time), TIME_FORMAT)
+                protected_dt = end_dt + timedelta(seconds=int(grace_seconds or 0))
+                if protected_dt > now:
+                    candidates.append(protected_dt)
+            except Exception:
+                pass
+
+        if not candidates:
+            return ""
+        return dt_to_str(max(candidates))
+
+    def ensure_meditation_guard_from_end_time(self, state):
+        """Repair deep meditation guard state from a cached end time."""
+        if not isinstance(state, dict):
+            return False
+        protected_until = self.meditation_protected_until(state)
+        guard_time = state.get("deep_meditation_guard_until", "")
+        changed = False
+
+        if protected_until:
+            try:
+                should_update = (
+                    not guard_time
+                    or not is_future(guard_time)
+                    or datetime.strptime(str(guard_time), TIME_FORMAT) < datetime.strptime(protected_until, TIME_FORMAT)
+                )
+            except Exception:
+                should_update = True
+            if should_update:
+                state["deep_meditation_guard_until"] = protected_until
+                changed = True
+            if state.get("deep_meditation_end_time") and not state.get("in_deep_meditation"):
+                state["in_deep_meditation"] = True
+                changed = True
+            return changed
+
+        if guard_time and not is_future(guard_time):
+            state["deep_meditation_guard_until"] = ""
+            changed = True
+        return changed
+
+    def meditation_guard_wait_seconds_for_state(self, state):
+        protected_until = self.meditation_protected_until(state)
+        return seconds_until(protected_until) if protected_until else 0
+
+    def meditation_guard_active_for_state(self, state):
+        return self.meditation_guard_wait_seconds_for_state(state) > 0
+
+    def compact_duration_text(self, seconds):
+        seconds = max(0, int(seconds or 0))
+        hours, rem = divmod(seconds, 3600)
+        minutes, secs = divmod(rem, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours}小时")
+        if minutes:
+            parts.append(f"{minutes}分钟")
+        if secs or not parts:
+            parts.append(f"{secs}秒")
+        return "".join(parts)
+
+    def early_meditation_check_response_for_state(self, identity, state, logger=None):
+        if self.ensure_meditation_guard_from_end_time(state):
+            self.save_state()
+        wait_seconds = self.meditation_guard_wait_seconds_for_state(state)
+        if wait_seconds <= 0:
+            return ""
+        log = logger or self.common_command_logger()
+        log.info(
+            f"[{identity}] skipped early .查看闭关; meditation protected for "
+            f"{self.compact_duration_text(wait_seconds)}."
+        )
+        return f"你正在深度闭关，预计还需 **{self.compact_duration_text(wait_seconds)}** 即可功成圆满。"
+
+    def meditation_active_state_values(self, end_time, clear_restart=True):
+        values = {
+            "in_deep_meditation": True,
+            "deep_meditation_end_time": end_time,
+            "deep_meditation_guard_until": add_seconds_str(
+                end_time, MEDITATION_SETTLEMENT_GRACE_SECONDS
+            ) if end_time else "",
+            "next_meditation_retry_time": "",
+            "next_meditation_time": "",
+        }
+        if clear_restart:
+            values["meditation_restart_pending"] = False
+            values["meditation_restart_mode"] = ""
+        return values
+
     # ---- Dashboard 自定义指令调度 ----
 
     def load_dashboard_custom_commands(self):
@@ -630,6 +751,31 @@ class CommonCommandMixin:
             if wait >= 0:
                 min_wait = wait if min_wait is None else min(min_wait, wait)
         return min_wait if min_wait is not None else -1
+
+    def custom_command_state_guard_wait(self, identity, command):
+        """Return state cooldown wait for a dashboard custom command, or -1 if runnable."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        command = str(command or "").strip()
+        if not command:
+            return -1
+
+        if identity == "主魂":
+            state = getattr(self, "state", {})
+        elif identity in (getattr(self, "avatars", []) or []) and hasattr(self, "get_avatar_state"):
+            state = self.get_avatar_state(identity)
+        else:
+            state = {}
+        if not isinstance(state, dict):
+            return -1
+
+        waits = []
+        for key, mapped_command in STATE_TIME_COMMAND_MAP.items():
+            if not self.command_matches_prefix(command, mapped_command):
+                continue
+            value = state.get(key, "")
+            if isinstance(value, str) and value and is_future(value):
+                waits.append(seconds_until(value))
+        return min(waits) if waits else -1
 
     def merge_impending_wait(self, base_wait, extra_wait):
         if extra_wait is None or extra_wait < 0:
@@ -879,6 +1025,21 @@ class CommonCommandMixin:
                     if wait < 0:
                         continue
 
+                    state_wait = self.custom_command_state_guard_wait(identity, command)
+                    if state_wait > 0:
+                        run_state = self.custom_command_run_state(custom_id)
+                        run_state["identity"] = identity
+                        run_state["command"] = command
+                        run_state["last_status"] = "state_cooldown"
+                        run_state["next_run_at"] = add_seconds_str(now_str(), state_wait)
+                        self.save_state()
+                        log.info(
+                            f"Custom command deferred by state cooldown "
+                            f"[{identity}] {command}: {state_wait:.0f}s."
+                        )
+                        next_sleep = min(next_sleep, state_wait)
+                        continue
+
                     await self.execute_custom_command(identity, entry)
                     ran_any = True
                     await asyncio.sleep(3)
@@ -898,10 +1059,40 @@ class CommonCommandMixin:
         clean = (text or "").replace("**", "")
         return "野外历练" in clean or "山中灵机未复" in clean
 
+    def is_field_training_pending_response(self, text):
+        """野外历练初始回复，结果稍后会编辑到同一条消息。"""
+        clean = (text or "").replace("**", "")
+        return (
+            "【野外历练】" in clean
+            and "选择【" in clean
+            and "正向荒野深处行去" in clean
+        )
+
+    def is_field_training_settlement_response(self, text):
+        """野外历练已结算的回复，可以触发后置卜筮问天。"""
+        clean = (text or "").replace("**", "")
+        if not clean or "野外历练" not in clean:
+            return False
+        return any(k in clean for k in (
+            "野外历练 ·",
+            "灵机暗藏",
+            "妖兽遭遇",
+            "负伤而归",
+            "满载而归",
+            "获得修为",
+            "修为折损",
+            "此战只结算",
+            "此为玩家对 NPC",
+        ))
+
     def is_field_training_command_result(self, text):
         """判断已归属到野外历练指令的回复是否代表本轮有结果。"""
         clean = (text or "").replace("**", "")
-        return self.is_field_training_response(text) or ("卦象" in clean and "修为增加" in clean)
+        return (
+            self.is_field_training_settlement_response(text)
+            or self.is_field_training_cooldown_response(text)
+            or ("卦象" in clean and "修为增加" in clean)
+        )
 
     def is_field_training_cooldown_response(self, text):
         """判断回复是否为野外历练冷却中"""
@@ -931,6 +1122,10 @@ class CommonCommandMixin:
         if self.record_identity_yuanying_recovery_from_text(
             "主魂", text, source=context, command=FIELD_TRAINING_COMMAND
         ):
+            return False
+
+        if self.is_field_training_pending_response(text):
+            log.info("Field training pending response observed; waiting for edited settlement.")
             return False
 
         cd = self.parse_wait_time(text)
@@ -1028,6 +1223,10 @@ class CommonCommandMixin:
         ):
             return False
 
+        if self.is_field_training_pending_response(text):
+            log.info(f"Avatar [{identity}] field training pending response observed; waiting for edited settlement.")
+            return False
+
         cd = self.parse_wait_time(text)
         if self.is_field_training_cooldown_response(text) and cd > 0:
             cooldown_at = add_seconds_str(now, cd)
@@ -1078,6 +1277,194 @@ class CommonCommandMixin:
         if identity and identity != "主魂":
             return self.record_identity_field_training_response(identity, text, "野外历练被动同步")
         return self.record_field_training_response(text, "野外历练被动同步")
+
+    def field_training_response_text(self, resp):
+        if hasattr(self, "response_text"):
+            return self.response_text(resp)
+        if hasattr(resp, "text"):
+            return resp.text or ""
+        if isinstance(resp, str):
+            return resp
+        return str(resp) if resp else ""
+
+    async def wait_for_field_training_settlement(
+        self,
+        resp,
+        identity="主魂",
+        timeout_seconds=FIELD_TRAINING_SETTLEMENT_WAIT_SECONDS,
+        poll_seconds=1.5,
+    ):
+        """
+        野外历练先回复“正在行进”，随后编辑为结算。
+        只有等到编辑结算后，才适合发后置的 .卜筮问天。
+        """
+        text = self.field_training_response_text(resp)
+        if not self.is_field_training_pending_response(text):
+            return resp
+
+        msg_id = getattr(resp, "id", None)
+        client = getattr(self, "client", None)
+        chat_id = getattr(self, "target_chat_id", None)
+        log = self.common_command_logger()
+        if not msg_id or not client or chat_id is None:
+            log.warning(f"[{identity}] field training pending response has no fetchable message id; cannot wait for edited settlement.")
+            return resp
+
+        deadline = time.monotonic() + max(1, timeout_seconds)
+        last_text = text
+        while time.monotonic() < deadline:
+            await asyncio.sleep(max(0.01, poll_seconds))
+            try:
+                updated = await client.get_messages(chat_id, ids=msg_id)
+            except Exception as exc:
+                log.warning(f"[{identity}] field training edited-result fetch failed for {msg_id}: {exc}")
+                return resp
+            updated_text = self.field_training_response_text(updated)
+            if self.is_field_training_settlement_response(updated_text) or self.is_field_training_cooldown_response(updated_text):
+                if updated_text and updated_text != last_text:
+                    log.info(f"[{identity}] field training edited settlement observed for msg {msg_id}.")
+                return updated
+            last_text = updated_text or last_text
+
+        log.warning(f"[{identity}] field training settlement was not edited within {timeout_seconds}s; skipping post-training bushi.")
+        return resp
+
+    # ---- 卜筮问天 ----
+
+    def _bushi_wentian_state(self, identity="主魂"):
+        identity = str(identity or "").strip() or "主魂"
+        if identity != "主魂" and hasattr(self, "get_avatar_state"):
+            return self.get_avatar_state(identity)
+        return self.state
+
+    def ensure_bushi_wentian_state(self, identity="主魂"):
+        state = self._bushi_wentian_state(identity)
+        today = datetime.now().strftime("%Y-%m-%d")
+        changed = False
+        if state.get("bushi_wentian_date") != today:
+            state["bushi_wentian_date"] = today
+            state["bushi_wentian_count"] = 0
+            state["bushi_wentian_exchange_count"] = 0
+            changed = True
+        else:
+            for key, default in (
+                ("bushi_wentian_count", 0),
+                ("bushi_wentian_exchange_count", 0),
+            ):
+                if key not in state:
+                    state[key] = default
+                    changed = True
+        if changed:
+            self.save_state()
+        return state
+
+    def bushi_wentian_response_text(self, resp):
+        if hasattr(self, "response_text"):
+            return self.response_text(resp)
+        if hasattr(resp, "text"):
+            return resp.text or ""
+        if isinstance(resp, str):
+            return resp
+        return str(resp) if resp else ""
+
+    def is_bushi_wentian_exchange_offer(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        return (
+            "换取" in clean
+            and "回复本消息" in clean
+            and "消耗" in clean
+            and any(k in clean for k in ["天道示警", "机缘", "逆天之物"])
+        )
+
+    def is_bushi_wentian_daily_limit_response(self, text):
+        clean = str(text or "").replace("**", "")
+        return (
+            "卜筮问天" in clean
+            and "今日" in clean
+            and any(k in clean for k in ["次数", "上限", "明日", "已用尽"])
+        )
+
+    async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
+        """Run .卜筮问天 after a real field-training result, up to 10 times per day."""
+        if not self.is_field_training_settlement_response(field_training_text):
+            return False
+        identity = str(identity or "").strip() or "主魂"
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
+            return False
+        state = self.ensure_bushi_wentian_state(identity)
+        if int(state.get("bushi_wentian_count", 0) or 0) >= BUSHI_WENTIAN_DAILY_LIMIT:
+            return False
+
+        log = self.common_command_logger()
+        log.info(f"[{identity}] Bushi Wentian after field training: sending {BUSHI_WENTIAN_COMMAND}.")
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            resp_msg = await self.send_and_wait_feedback_identity(
+                identity,
+                BUSHI_WENTIAN_COMMAND,
+                timeout=90,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+                return_response_msg=True,
+            )
+        else:
+            resp_msg = await self.send_and_wait_feedback(
+                BUSHI_WENTIAN_COMMAND,
+                timeout=90,
+                max_retries=0,
+                suppress_no_response_alert=True,
+                return_response_msg=True,
+            )
+
+        text = self.bushi_wentian_response_text(resp_msg)
+        if not text:
+            return False
+
+        state = self.ensure_bushi_wentian_state(identity)
+        if self.is_bushi_wentian_daily_limit_response(text):
+            state["bushi_wentian_count"] = BUSHI_WENTIAN_DAILY_LIMIT
+            self.save_state()
+            return False
+
+        state["bushi_wentian_count"] = min(
+            BUSHI_WENTIAN_DAILY_LIMIT,
+            int(state.get("bushi_wentian_count", 0) or 0) + 1,
+        )
+        self.save_state()
+
+        if not self.is_bushi_wentian_exchange_offer(text):
+            return True
+
+        reply_to = getattr(resp_msg, "id", None)
+        if not reply_to:
+            log.warning(f"[{identity}] Bushi Wentian exchange offer has no message id; cannot reply .换取.")
+            return True
+
+        log.info(f"[{identity}] Bushi Wentian exchange offer detected; replying {BUSHI_WENTIAN_EXCHANGE_COMMAND}.")
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            await self.send_and_wait_feedback_identity(
+                identity,
+                BUSHI_WENTIAN_EXCHANGE_COMMAND,
+                reply_to=reply_to,
+                timeout=60,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        else:
+            await self.send_and_wait_feedback(
+                BUSHI_WENTIAN_EXCHANGE_COMMAND,
+                reply_to=reply_to,
+                timeout=60,
+                max_retries=0,
+                suppress_no_response_alert=True,
+            )
+        state = self.ensure_bushi_wentian_state(identity)
+        state["bushi_wentian_exchange_count"] = int(state.get("bushi_wentian_exchange_count", 0) or 0) + 1
+        self.save_state()
+        return True
 
     # ---- 宗门战 — 辅助方法 ----
 
@@ -1373,8 +1760,12 @@ class CommonCommandMixin:
                 timeout=90,
                 max_retries=0,
                 suppress_no_response_alert=True,
+                return_response_msg=True,
             )
-            self.record_field_training_response(resp)
+            resp = await self.wait_for_field_training_settlement(resp, "主魂")
+            resp_text = self.field_training_response_text(resp)
+            self.record_field_training_response(resp_text)
+            await self.maybe_run_bushi_wentian_after_field_training("主魂", resp_text)
             await asyncio.sleep(5)
 
     async def run_sect_war_loop(self):
