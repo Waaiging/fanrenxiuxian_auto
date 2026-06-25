@@ -6205,56 +6205,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         每天 23:00 - 23:30 之间随机错开时间，为指定分身发送一次 .闯塔。
         状态记录在 state.avatars[avatar]["last_tower_date"] 中。
         """
-        await self.startup_done.wait()
-        self._avatar_loop_count += 1
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                now = datetime.now()
-                today = now.strftime('%Y-%m-%d')
-                a_state = self.get_avatar_state(avatar)
-                last_date = a_state.get("last_tower_date", "")
-                if self.avatar_meditation_needs_attention(avatar):
-                    log.info(f"Avatar [{avatar}] tower skipped: meditation needs restart first.")
-                    await asyncio.sleep(60)
-                    continue
-
-                # 如果今天还没闯塔，且当前处于 23 点
-                if last_date != today and now.hour == 23:
-                    # 错开 10 - 600 秒（10分钟）内的一个随机时间，避免三个化身扎堆发送
-                    delay = random.randint(10, 600)
-                    log.info(f"Avatar [{avatar}] daily tower due today ({today}). Waiting {delay}s to staggered start...")
-                    await asyncio.sleep(delay)
-
-                    # 再次确认日期没有在休眠期间被其他协程更新
-                    a_state = self.get_avatar_state(avatar)
-                    if a_state.get("last_tower_date", "") != today:
-                        log.info(f"Avatar [{avatar}] daily tower start: sending .闯塔")
-                        resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=90)
-
-                        if resp is None:
-                            # 切换失败或发送失败，不标记完成，5分钟后重试
-                            log.warning(f"Avatar [{avatar}] daily tower: switch/send failed (resp=None). Retrying in 5 min.")
-                            await asyncio.sleep(300)
-                            continue
-                        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else str(resp) if resp else ""
-                        if not resp_text:
-                            log.info(f"Avatar [{avatar}] daily tower skipped: no usable response.")
-                            await asyncio.sleep(300)
-                            continue
-
-                        # 只要有回复（即使是提示次数不足），都标记为今天已做过，防止无限重试
-                        self.set_avatar_state(avatar, "last_tower_date", today)
-                        log.info(f"Avatar [{avatar}] daily tower recorded done for today.")
-
-                # 没到时间或者已完成，每 10 分钟检测一次
-                await asyncio.sleep(scheduler_sleep_seconds(600))
-
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] tower loop error: {e}")
-                await asyncio.sleep(300)
+        return await self.run_common_avatar_tower_loop(
+            avatar,
+            initial_delay=initial_delay,
+            timeout=90,
+            handle_insufficient_cultivation=False,
+            require_meditation_ready=True,
+            sleep_func=scheduler_sleep_seconds,
+        )
 
     # ============================================================
     # 化身日常与星宫相关循环

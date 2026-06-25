@@ -4110,35 +4110,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     # ============================================================
 
     async def run_avatar_tower_loop(self, avatar):
-        while self.is_running:
-            await self.pause_event.wait()
-            await self.startup_done.wait()
-            today = datetime.now().strftime("%Y-%m-%d")
-            a_state = self.get_avatar_state(avatar)
-            if self.avatar_meditation_needs_attention(avatar):
-                log.info(f"Avatar [{avatar}] tower skipped: meditation needs restart first.")
-                await asyncio.sleep(60)
-                continue
-            if a_state.get("last_tower_date") == today:
-                await asyncio.sleep(scheduler_sleep_seconds(((datetime.now()+timedelta(days=1)).replace(hour=0,minute=0,second=0)-datetime.now()).total_seconds(), minimum=60))
-                continue
-            now = datetime.now()
-            if now.hour < 23:
-                await asyncio.sleep(scheduler_sleep_seconds((now.replace(hour=23,minute=0,second=0)-now).total_seconds(), minimum=60))
-                continue
-            if now.hour == 23 and now.minute < 30:
-                await asyncio.sleep(random.randint(0,1800))
-            resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-            if not resp_text:
-                log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
-                await asyncio.sleep(300)
-                continue
-            if "修为不足" in resp_text:
-                async def rt(): return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-                await self.handle_修为不足(avatar, rt, cooldown_key="last_tower_date")
-            self.set_avatar_state(avatar, "last_tower_date", today)
-            await asyncio.sleep(scheduler_sleep_seconds(3600))
+        return await self.run_common_avatar_tower_loop(
+            avatar,
+            timeout=120,
+            handle_insufficient_cultivation=True,
+            require_meditation_ready=True,
+            sleep_func=scheduler_sleep_seconds,
+            delay_range=(0, 1800),
+        )
 
     # ============================================================
     # 身外化身：顺序执行主循环
@@ -4484,18 +4463,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             await self.record_avatar_deep_meditation_start(avatar, dr_text)
 
     async def _avatar_tower_check(self, avatar):
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.get_avatar_state(avatar).get("last_tower_date") == today: return
-        if datetime.now().hour < 23: return
-        resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-        if not resp_text:
-            log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
-            return
-        if "修为不足" in resp_text:
-            async def rt(): return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=120)
-            await self.handle_修为不足(avatar, rt, cooldown_key="last_tower_date")
-        self.set_avatar_state(avatar, "last_tower_date", today)
+        await self.common_avatar_tower_tick(
+            avatar,
+            timeout=120,
+            min_hour=23,
+            handle_insufficient_cultivation=True,
+            require_meditation_ready=False,
+        )
 
     async def _avatar_dream_map_check(self, avatar):
         a_state = self.get_avatar_state(avatar)

@@ -2222,6 +2222,162 @@ class CommonCommandMixin:
                 log.error(f"Avatar [{avatar}] field training loop error: {exc}", exc_info=True)
                 await asyncio.sleep(300)
 
+    # ---- 化身闯塔 ----
+
+    def avatar_tower_available(self, avatar, require_meditation_ready=False):
+        """Shared precheck for avatar .闯塔 sends."""
+        avatar = str(avatar or "").strip()
+        log = self.common_command_logger()
+        if not avatar or avatar not in getattr(self, "avatars", []):
+            return False
+        if self.identity_pause_seconds(avatar) > 0:
+            return False
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(".闯塔", avatar):
+            return False
+        if (
+            require_meditation_ready
+            and hasattr(self, "avatar_meditation_needs_attention")
+            and self.avatar_meditation_needs_attention(avatar)
+        ):
+            log.info(f"Avatar [{avatar}] tower skipped: meditation needs restart first.")
+            return False
+        return True
+
+    async def common_avatar_tower_send(
+        self,
+        avatar,
+        today=None,
+        timeout=90,
+        handle_insufficient_cultivation=False,
+        require_meditation_ready=False,
+    ):
+        """Send one avatar .闯塔 attempt and record today's completion on usable response."""
+        log = self.common_command_logger()
+        if not self.avatar_tower_available(
+            avatar,
+            require_meditation_ready=require_meditation_ready,
+        ):
+            return False
+
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        a_state = self.get_avatar_state(avatar)
+        if a_state.get("last_tower_date") == today:
+            return False
+
+        resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=timeout)
+        if resp is None:
+            log.warning(f"Avatar [{avatar}] tower: switch/send failed. Retrying later.")
+            return False
+        resp_text = self.timed_command_response_text(resp)
+        if not resp_text:
+            log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
+            return False
+
+        if (
+            handle_insufficient_cultivation
+            and "修为不足" in resp_text
+            and hasattr(self, "handle_修为不足")
+        ):
+            async def retry_tower():
+                return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=timeout)
+
+            success, resp_text = await self.handle_修为不足(
+                avatar,
+                retry_tower,
+                cooldown_key="last_tower_date",
+                cooldown_hours=2,
+            )
+            resp_text = self.timed_command_response_text(resp_text)
+            if not success:
+                log.warning(f"Avatar [{avatar}] tower: 修为不足 after force exit, will retry later.")
+                return False
+
+        self.set_avatar_state(avatar, "last_tower_date", today)
+        log.info(f"Avatar [{avatar}] tower completed for {today}.")
+        return True
+
+    async def common_avatar_tower_tick(
+        self,
+        avatar,
+        timeout=90,
+        min_hour=23,
+        exact_hour=None,
+        handle_insufficient_cultivation=False,
+        require_meditation_ready=False,
+    ):
+        """Run one time-gated avatar tower check."""
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if self.get_avatar_state(avatar).get("last_tower_date") == today:
+            return False
+        if exact_hour is not None and now.hour != exact_hour:
+            return False
+        if min_hour is not None and now.hour < min_hour:
+            return False
+        return await self.common_avatar_tower_send(
+            avatar,
+            today=today,
+            timeout=timeout,
+            handle_insufficient_cultivation=handle_insufficient_cultivation,
+            require_meditation_ready=require_meditation_ready,
+        )
+
+    async def run_common_avatar_tower_loop(
+        self,
+        avatar,
+        initial_delay=0,
+        timeout=90,
+        handle_insufficient_cultivation=False,
+        require_meditation_ready=False,
+        sleep_func=None,
+        delay_range=(10, 600),
+    ):
+        """Run the daily 23:00 avatar .闯塔 loop."""
+        await self.startup_done.wait()
+        if hasattr(self, "_avatar_loop_count"):
+            self._avatar_loop_count += 1
+        if initial_delay > 0:
+            self.common_command_logger().info(
+                f"Avatar [{avatar}] tower loop: waiting {initial_delay}s before start..."
+            )
+            await asyncio.sleep(initial_delay)
+
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            try:
+                await self.pause_event.wait()
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                a_state = self.get_avatar_state(avatar)
+                last_date = a_state.get("last_tower_date", "")
+
+                if (
+                    last_date != today
+                    and now.hour == 23
+                    and self.avatar_tower_available(
+                        avatar,
+                        require_meditation_ready=require_meditation_ready,
+                    )
+                ):
+                    delay = random.randint(*delay_range)
+                    log.info(f"Avatar [{avatar}] daily tower due today ({today}). Waiting {delay}s...")
+                    await asyncio.sleep(delay)
+                    if self.get_avatar_state(avatar).get("last_tower_date", "") != today:
+                        await self.common_avatar_tower_send(
+                            avatar,
+                            today=today,
+                            timeout=timeout,
+                            handle_insufficient_cultivation=handle_insufficient_cultivation,
+                            require_meditation_ready=require_meditation_ready,
+                        )
+
+                await asyncio.sleep(
+                    self.common_scheduler_sleep_seconds(600, sleep_func=sleep_func)
+                )
+            except Exception as exc:
+                log.error(f"Avatar [{avatar}] tower loop error: {exc}", exc_info=True)
+                await asyncio.sleep(300)
+
     async def wait_for_field_training_settlement(
         self,
         resp,

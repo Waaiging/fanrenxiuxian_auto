@@ -240,6 +240,80 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("缘生子", 12 * 3600, require_meditation_ready=True)))
         self.assertEqual(actor.sent, [])
 
+    def test_common_avatar_tower_send_records_done_on_usable_response(self):
+        class DummyTowerAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "你成功通关试炼古塔第 7 层。"
+
+        actor = DummyTowerAvatar()
+        today = "2026-06-25"
+
+        self.assertTrue(asyncio.run(actor.common_avatar_tower_send("缘生子", today=today)))
+        self.assertEqual(actor.sent[0][0], "缘生子")
+        self.assertEqual(actor.sent[0][1], ".闯塔")
+        self.assertEqual(actor.get_avatar_state("缘生子")["last_tower_date"], today)
+
+    def test_common_avatar_tower_send_can_require_meditation_ready(self):
+        class DummyTowerAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def avatar_meditation_needs_attention(self, avatar):
+                return True
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "你成功通关试炼古塔第 7 层。"
+
+        actor = DummyTowerAvatar()
+
+        self.assertFalse(asyncio.run(actor.common_avatar_tower_send(
+            "缘生子",
+            today="2026-06-25",
+            require_meditation_ready=True,
+        )))
+        self.assertEqual(actor.sent, [])
+        self.assertNotIn("last_tower_date", actor.get_avatar_state("缘生子"))
+
+    def test_common_avatar_tower_insufficient_cultivation_does_not_mark_done_after_failed_retry(self):
+        class DummyTowerAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return "修为不足，无法继续闯塔。"
+
+            async def handle_修为不足(self, avatar, retry_func, cooldown_key="", cooldown_hours=2):
+                await retry_func()
+                return False, "修为仍然不足。"
+
+        actor = DummyTowerAvatar()
+
+        self.assertFalse(asyncio.run(actor.common_avatar_tower_send(
+            "缘生子",
+            today="2026-06-25",
+            handle_insufficient_cultivation=True,
+        )))
+        self.assertEqual([item[1] for item in actor.sent], [".闯塔", ".闯塔"])
+        self.assertNotIn("last_tower_date", actor.get_avatar_state("缘生子"))
+
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()
         state = actor.get_avatar_state("缘生子")

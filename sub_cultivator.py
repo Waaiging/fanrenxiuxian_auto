@@ -6309,58 +6309,14 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         化身每日 23 点自动闯塔任务。
         每天 23:00 - 23:30 之间随机错开时间执行。
         """
-        await self.startup_done.wait()
-        if initial_delay > 0:
-            log.info(f"Avatar [{avatar}] tower loop: waiting {initial_delay}s before start...")
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            try:
-                now = datetime.now()
-                today = now.strftime('%Y-%m-%d')
-                a_state = self.get_avatar_state(avatar)
-                last_date = a_state.get("last_tower_date", "")
-
-                # 如果今天还没闯塔，且当前处于 23 点
-                if last_date != today and now.hour == 23:
-                    # 随机错开 10-600 秒，避免三个化身扎堆
-                    delay = random.randint(10, 600)
-                    log.info(f"Avatar [{avatar}] daily tower due today ({today}). Waiting {delay}s...")
-                    await asyncio.sleep(delay)
-
-                    # 重新检查（等待期间可能已执行）
-                    a_state = self.get_avatar_state(avatar)
-                    if a_state.get("last_tower_date", "") != today:
-                        resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=90)
-                        if resp is None:
-                            log.warning(f"Avatar [{avatar}] tower: switch/send failed. Retrying in 5 min.")
-                            await asyncio.sleep(300)
-                            continue
-                        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else str(resp) if resp else ""
-                        if not resp_text:
-                            log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
-                            await asyncio.sleep(300)
-                            continue
-
-                        # 修为不足处理
-                        if "修为不足" in resp_text:
-                            async def retry_tower():
-                                return await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=90)
-                            success, resp_text = await self.handle_修为不足(avatar, retry_tower, cooldown_key="last_tower_date", cooldown_hours=2)
-                            if not success:
-                                log.warning(f"Avatar [{avatar}] tower: 修为不足 after force exit, will retry next cycle")
-                                await asyncio.sleep(300)
-                                continue
-
-                        # 只要有回复（即使次数不足）都标记完成，防无限重试
-                        self.set_avatar_state(avatar, "last_tower_date", today)
-                        log.info(f"Avatar [{avatar}] tower completed for {today}.")
-
-                await asyncio.sleep(scheduler_sleep_seconds(600))  # 分段复查，防止状态变化后睡过头
-
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] tower loop error: {e}")
-                await asyncio.sleep(300)
+        return await self.run_common_avatar_tower_loop(
+            avatar,
+            initial_delay=initial_delay,
+            timeout=90,
+            handle_insufficient_cultivation=True,
+            require_meditation_ready=False,
+            sleep_func=scheduler_sleep_seconds,
+        )
 
     async def start(self):
         """
