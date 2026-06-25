@@ -1712,57 +1712,26 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # ============================================================
 
     def next_star_manifest_dt(self, now=None):
-        """
-        计算下一个星盘显现的整点时间。
-        星盘每 3 小时显现一次（0:00, 3:00, 6:00, ...）。
-        如果当前时间恰好是整点，返回下一个 3 的倍数整点。
-
-        例如：
-            当前 14:20 -> 当前窗口 12:00（已过）-> 下一个 15:00
-            当前 14:35 -> 下一个 15:00
-        """
-        now = now or datetime.now()
-        base_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-        candidate = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
-        if now >= candidate:
-            candidate += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
-        return candidate
+        return self.common_next_star_manifest_dt(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def active_star_gazing_target_dt(self, now=None):
-        """
-        检测当前是否处于"活跃的观星窗口"内。
-        观星窗口 = 目标显化时间 - STAR_GAZING_MONITOR_LEAD_SECONDS(3分钟)
-        如果当前时间在窗口内且尚未到改换星移发送时间，返回目标显化时间。
-
-        用于 handle_game_response 中快速判断是否该处理显化事件。
-        """
-        now = now or datetime.now()
-        for target in (
-            now.replace(minute=0, second=0, microsecond=0),
-            self.next_star_manifest_dt(now),
-        ):
-            if target.hour % STAR_GAZING_INTERVAL_HOURS != 0:
-                continue
-            window_start = target - timedelta(seconds=STAR_GAZING_MONITOR_LEAD_SECONDS)
-            shift_time = target - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS)
-            if window_start <= now <= shift_time:
-                return target
-        return None
+        return self.common_active_star_gazing_target_dt(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+            monitor_lead_seconds=STAR_GAZING_MONITOR_LEAD_SECONDS,
+            shift_lead_seconds=STAR_GAZING_SHIFT_LEAD_SECONDS,
+        )
 
     def next_star_gazing_window_start_dt(self, now=None):
-        """
-        计算下一个观星窗口的起始时间和对应的目标显化时间。
-        返回 (window_start, target_dt) 元组。
-        如果当前已过窗口截止时间，自动跳到下一轮。
-        """
-        now = now or datetime.now()
-        target = self.next_star_manifest_dt(now)
-        window_start = target - timedelta(seconds=STAR_GAZING_MONITOR_LEAD_SECONDS)
-        if now > target - timedelta(seconds=STAR_GAZING_SHIFT_LEAD_SECONDS):
-            # 当前窗口已过截止时间，跳到下一轮
-            target += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
-            window_start = target - timedelta(seconds=STAR_GAZING_MONITOR_LEAD_SECONDS)
-        return window_start, target
+        return self.common_next_star_gazing_window_start_dt(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+            monitor_lead_seconds=STAR_GAZING_MONITOR_LEAD_SECONDS,
+            shift_lead_seconds=STAR_GAZING_SHIFT_LEAD_SECONDS,
+        )
 
     def star_gazing_good_opportunity(self, text):
         """检查文本是否包含 Good 级别的观星结果关键字。只有 Good 才值得触发改换星移。"""
@@ -1877,8 +1846,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return False
 
     def star_observatory_needs_calm(self, text):
-        """检测观星台状态是否需要安抚（星辰流紊乱或黯淡）。"""
-        return bool(text and ("紊乱" in text or "黯淡" in text))
+        return self.common_star_observatory_needs_calm(text)
 
     def low_price_tianleizhu_price(self, text):
         """
@@ -1948,69 +1916,40 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return self.state.get("last_star_shift_date") == today
 
     def star_gazing_sent_on_date(self, date_str=None):
-        """检查指定日期是否已经发送过 .观星。"""
-        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
-        return self.state.get("last_gazing_date") == date_str
+        return self.common_star_gazing_sent_on_date(
+            date_str or datetime.now().strftime("%Y-%m-%d")
+        )
 
     def star_gazing_schedule_plan(self, now, manifest_dt):
-        """计算本轮显化的观星发送时间和应占用的观星日期。"""
-        min_lead_seconds = 60
-        lead_seconds = max(min_lead_seconds, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
-        latest_send_dt = manifest_dt - timedelta(seconds=min_lead_seconds)
-        send_dt = manifest_dt - timedelta(seconds=lead_seconds)
-        immediate_shift = False
-        if send_dt <= now:
-            send_dt = min(now + timedelta(seconds=3), latest_send_dt)
-
-        gazing_date = send_dt.strftime("%Y-%m-%d")
-        return send_dt, immediate_shift, gazing_date
+        return self.common_star_gazing_schedule_plan(
+            now,
+            manifest_dt,
+            command_lead_seconds=STAR_GAZING_COMMAND_LEAD_SECONDS,
+        )
 
     def star_gazing_send_dt(self, target_dt):
-        """
-        计算发送 .观星 的时间：在星盘显现前 STAR_GAZING_COMMAND_LEAD_SECONDS 秒发送。
-        这样观星结果出来后，刚好赶上显现时间点。
-        """
-        return target_dt - timedelta(seconds=STAR_GAZING_COMMAND_LEAD_SECONDS)
+        return self.common_star_gazing_send_dt(
+            target_dt,
+            command_lead_seconds=STAR_GAZING_COMMAND_LEAD_SECONDS,
+        )
 
     def star_gazing_target_for_opportunity(self, now=None):
-        """
-        计算当前观星机会对应的目标显化时间。
-        如果当前已错过“至少提前一分钟观星”的安全时间，则跳到下一轮。
-        """
-        now = now or datetime.now()
-        target_dt = self.next_star_manifest_dt(now)
-        latest_observe_dt = target_dt - timedelta(seconds=60)
-        if now > latest_observe_dt:
-            target_dt += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
-        return target_dt
+        return self.common_star_gazing_target_for_opportunity(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def star_gazing_manifest_for_notice(self, now=None):
-        """Return the manifest round a Good notice may still use, or None after final news."""
-        now = now or datetime.now()
-        current = now.replace(minute=0, second=0, microsecond=0)
-        if current.hour % STAR_GAZING_INTERVAL_HOURS == 0:
-            post_boundary_noise_end = current + timedelta(seconds=120)
-            if current <= now <= post_boundary_noise_end:
-                if self.star_gazing_final_report_seen(current):
-                    return None
-                return current
-            if self.star_gazing_final_report_seen(current):
-                return None
-
-        target_dt = self.next_star_manifest_dt(now)
-        return None if self.star_gazing_final_report_seen(target_dt) else target_dt
+        return self.common_star_gazing_manifest_for_notice(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def daily_star_gazing_fallback_dt(self, now=None):
-        """
-        计算每日备用观星时间（23:59）。
-        如果当天一整天都没有触发观星，在 23:59 发送一次兜底。
-        """
-        now = now or datetime.now()
-        return now.replace(
+        return self.common_daily_star_gazing_fallback_dt(
+            now or datetime.now(),
             hour=STAR_GAZING_DAILY_FALLBACK_HOUR,
             minute=STAR_GAZING_DAILY_FALLBACK_MINUTE,
-            second=0,
-            microsecond=0,
         )
 
     def has_pending_star_gazing_action(self):
@@ -2023,29 +1962,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         )
 
     def pending_daily_star_gazing_fallback_dt(self, now=None):
-        """
-        判断是否需要执行每日备用观星（23:59 兜底）。
-        只有在以下所有条件满足时才需要：
-          - 今天还没观星
-          - 今天还没触发过备用观星
-          - 今天还没执行改换星移
-          - 没有排期中的操作
-          - 当前时间未过 23:59 + 1分钟（即 00:00 之后不再触发）
-        """
-        now = now or datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        if self.star_gazing_sent_on_date(today):
-            return None
-        if self.state.get("last_star_gazing_fallback_date") == today:
-            return None
-        if self.star_shift_done_today(today):
-            return None
-        if self.has_pending_star_gazing_action():
-            return None
-        fallback_dt = self.daily_star_gazing_fallback_dt(now)
-        if now >= fallback_dt + timedelta(minutes=1):
-            return None
-        return fallback_dt
+        return self.common_pending_daily_star_gazing_fallback_dt(now or datetime.now())
 
     def clear_pending_star_gazing_schedule(self):
         """清除所有排期中的观星数据。"""

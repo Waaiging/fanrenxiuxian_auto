@@ -2502,6 +2502,123 @@ class CommonCommandMixin:
         notify_unrecognized_response(self, ".宗门传功", resp, self.common_command_logger(), "宗门传功")
         return "unknown"
 
+    def common_next_star_manifest_dt(self, now=None, interval_hours=3):
+        """Calculate the next star manifest boundary."""
+        now = now or datetime.now()
+        base_hour = (now.hour // interval_hours) * interval_hours
+        candidate = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
+        if now >= candidate:
+            candidate += timedelta(hours=interval_hours)
+        return candidate
+
+    def common_active_star_gazing_target_dt(
+        self,
+        now=None,
+        interval_hours=3,
+        monitor_lead_seconds=3 * 60,
+        shift_lead_seconds=0,
+    ):
+        """Return the manifest boundary while the current star-gazing window is active."""
+        now = now or datetime.now()
+        for target in (
+            now.replace(minute=0, second=0, microsecond=0),
+            self.next_star_manifest_dt(now),
+        ):
+            if target.hour % interval_hours != 0:
+                continue
+            window_start = target - timedelta(seconds=monitor_lead_seconds)
+            shift_time = target - timedelta(seconds=shift_lead_seconds)
+            if window_start <= now <= shift_time:
+                return target
+        return None
+
+    def common_next_star_gazing_window_start_dt(
+        self,
+        now=None,
+        interval_hours=3,
+        monitor_lead_seconds=3 * 60,
+        shift_lead_seconds=0,
+    ):
+        """Return (window_start, manifest_dt) for the next usable star-gazing window."""
+        now = now or datetime.now()
+        target = self.next_star_manifest_dt(now)
+        window_start = target - timedelta(seconds=monitor_lead_seconds)
+        if now > target - timedelta(seconds=shift_lead_seconds):
+            target += timedelta(hours=interval_hours)
+            window_start = target - timedelta(seconds=monitor_lead_seconds)
+        return window_start, target
+
+    def common_star_observatory_needs_calm(self, text):
+        return bool(text and ("紊乱" in text or "黯淡" in text))
+
+    def common_star_gazing_sent_on_date(self, date_str=None):
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        return self.state.get("last_gazing_date") == date_str
+
+    def common_star_gazing_schedule_plan(self, now, manifest_dt, command_lead_seconds=60):
+        """Return (.观星 send time, immediate_shift flag, consumed gazing date)."""
+        min_lead_seconds = 60
+        lead_seconds = max(min_lead_seconds, int(command_lead_seconds))
+        latest_send_dt = manifest_dt - timedelta(seconds=min_lead_seconds)
+        send_dt = manifest_dt - timedelta(seconds=lead_seconds)
+        immediate_shift = False
+        if send_dt <= now:
+            send_dt = min(now + timedelta(seconds=3), latest_send_dt)
+        return send_dt, immediate_shift, send_dt.strftime("%Y-%m-%d")
+
+    def common_star_gazing_send_dt(self, target_dt, command_lead_seconds=60):
+        return target_dt - timedelta(seconds=command_lead_seconds)
+
+    def common_star_gazing_target_for_opportunity(
+        self,
+        now=None,
+        interval_hours=3,
+        min_observe_lead_seconds=60,
+    ):
+        now = now or datetime.now()
+        target_dt = self.next_star_manifest_dt(now)
+        latest_observe_dt = target_dt - timedelta(seconds=min_observe_lead_seconds)
+        if now > latest_observe_dt:
+            target_dt += timedelta(hours=interval_hours)
+        return target_dt
+
+    def common_star_gazing_manifest_for_notice(self, now=None, interval_hours=3):
+        """Return the manifest round a Good notice may still use, or None after final news."""
+        now = now or datetime.now()
+        current = now.replace(minute=0, second=0, microsecond=0)
+        if current.hour % interval_hours == 0:
+            post_boundary_noise_end = current + timedelta(seconds=120)
+            if current <= now <= post_boundary_noise_end:
+                if self.star_gazing_final_report_seen(current):
+                    return None
+                return current
+            if self.star_gazing_final_report_seen(current):
+                return None
+
+        target_dt = self.next_star_manifest_dt(now)
+        return None if self.star_gazing_final_report_seen(target_dt) else target_dt
+
+    def common_daily_star_gazing_fallback_dt(self, now=None, hour=23, minute=59):
+        now = now or datetime.now()
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def common_pending_daily_star_gazing_fallback_dt(self, now=None):
+        """Return today's fallback .观星 time when the account still needs one."""
+        now = now or datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if self.star_gazing_sent_on_date(today):
+            return None
+        if self.state.get("last_star_gazing_fallback_date") == today:
+            return None
+        if self.star_shift_done_today(today):
+            return None
+        if self.has_pending_star_gazing_action():
+            return None
+        fallback_dt = self.daily_star_gazing_fallback_dt(now)
+        if now >= fallback_dt + timedelta(minutes=1):
+            return None
+        return fallback_dt
+
     async def wait_for_field_training_settlement(
         self,
         resp,

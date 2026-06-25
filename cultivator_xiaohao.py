@@ -4407,49 +4407,29 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return ""
 
     def next_star_manifest_dt(self, now=None):
-        """下一次星象显现候选时间（每 3 小时一次：0:00, 3:00, 6:00, ...）"""
-        now = now or datetime.now()
-        base_hour = (now.hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
-        candidate = now.replace(hour=base_hour, minute=0, second=0, microsecond=0)
-        if now >= candidate:
-            candidate += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
-        return candidate
+        return self.common_next_star_manifest_dt(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def star_gazing_schedule_plan(self, now, manifest_dt):
-        """计算本轮显化的观星发送时间和应占用的观星日期。"""
-        min_lead_seconds = 60
-        lead_seconds = max(min_lead_seconds, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
-        latest_send_dt = manifest_dt - timedelta(seconds=min_lead_seconds)
-        send_dt = manifest_dt - timedelta(seconds=lead_seconds)
-        immediate_shift = False
-        if send_dt <= now:
-            send_dt = min(now + timedelta(seconds=3), latest_send_dt)
-        return send_dt, immediate_shift, send_dt.strftime("%Y-%m-%d")
+        return self.common_star_gazing_schedule_plan(
+            now,
+            manifest_dt,
+            command_lead_seconds=STAR_GAZING_COMMAND_LEAD_SECONDS,
+        )
 
     def star_gazing_target_for_opportunity(self, now=None):
-        """Return the manifest round this Good notice can safely prepare for."""
-        now = now or datetime.now()
-        target_dt = self.next_star_manifest_dt(now)
-        latest_observe_dt = target_dt - timedelta(seconds=60)
-        if now > latest_observe_dt:
-            target_dt += timedelta(hours=STAR_GAZING_INTERVAL_HOURS)
-        return target_dt
+        return self.common_star_gazing_target_for_opportunity(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def star_gazing_manifest_for_notice(self, now=None):
-        """Return the manifest round a Good notice may still use, or None after final news."""
-        now = now or datetime.now()
-        current = now.replace(minute=0, second=0, microsecond=0)
-        if current.hour % STAR_GAZING_INTERVAL_HOURS == 0:
-            post_boundary_noise_end = current + timedelta(seconds=120)
-            if current <= now <= post_boundary_noise_end:
-                if self.star_gazing_final_report_seen(current):
-                    return None
-                return current
-            if self.star_gazing_final_report_seen(current):
-                return None
-
-        target_dt = self.next_star_manifest_dt(now)
-        return None if self.star_gazing_final_report_seen(target_dt) else target_dt
+        return self.common_star_gazing_manifest_for_notice(
+            now or datetime.now(),
+            interval_hours=STAR_GAZING_INTERVAL_HOURS,
+        )
 
     def clear_star_gazing_round_claim(self):
         """清除账号级观星轮次占用。"""
