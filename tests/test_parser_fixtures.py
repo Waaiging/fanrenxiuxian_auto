@@ -33,7 +33,9 @@ from fishing_features import (
     parse_rod_response,
 )
 from yinluo_features import (
+    YINLUO_MASTER_COMMAND,
     YINLUO_SOUL,
+    YinluoMixin,
     parse_yinluo_blood_wash,
     parse_yinluo_imprison,
     parse_yinluo_status,
@@ -1056,6 +1058,51 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(imprison["status"], "success")
         self.assertEqual(imprison["slot"], 1)
         self.assertEqual(imprison["soul"], YINLUO_SOUL)
+
+    def test_yinluo_tick_ignores_deep_meditation_for_avatar(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.state["avatars"]["缘生子"].update({
+                    "in_deep_meditation": True,
+                    "deep_meditation_end_time": add_seconds_str(now_str(), 8 * 3600),
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command, kwargs))
+                return DummyMessage(
+                    301,
+                    text=(
+                        "**【缘生子的阴罗幡】**\n\n"
+                        "**本命魔兵**: 阴罗本幡\n"
+                        "**幡体等阶**: 三阶中品\n"
+                        "**煞气池**: 1800 / 25000 (7%)\n"
+                        "**主魂流派**: 阴罗本幡\n"
+                        "**幡魂总炼化**: 2 缕\n\n"
+                        "**魂魄储备**:\n"
+                        " - 凶兽戾魄: 1 缕\n\n"
+                        "**炼化槽:**\n"
+                        "**1号槽**: [空闲]\n"
+                    ),
+                )
+
+        actor = DummyYinluo()
+        wait = asyncio.run(actor.yinluo_tick("缘生子"))
+        yinluo_state = actor.get_yinluo_state("缘生子")
+
+        self.assertEqual(wait, 5)
+        self.assertEqual(actor.sent[0][0], "缘生子")
+        self.assertEqual(actor.sent[0][1], YINLUO_MASTER_COMMAND)
+        self.assertTrue(actor.sent[0][2]["return_response_msg"])
+        self.assertEqual(yinluo_state["last_status"], "synced")
+        self.assertNotEqual(yinluo_state["last_status"], "meditation_blocked")
 
     def test_dashboard_main_yuanshengzi_yinluo_commands_enabled_by_default(self):
         state = {

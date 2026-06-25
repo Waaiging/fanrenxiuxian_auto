@@ -497,12 +497,6 @@ class YinluoMixin:
             return 3600
         if self.identity_pause_seconds(identity) > 0:
             return 60
-        identity_state = self.get_avatar_state(identity)
-        meditation_end = identity_state.get("deep_meditation_end_time", "")
-        if identity_state.get("in_deep_meditation") and meditation_end and is_future(meditation_end):
-            wait = max(60, min(seconds_until(meditation_end) + 30, 3600))
-            self.yinluo_set_status(identity, "meditation_blocked", "深度闭关中，等出关后养幡", wait)
-            return wait
 
         impending = self.yinluo_impending_wait(identity)
         if 0 <= impending <= YINLUO_IMPENDING_GUARD_SECONDS:
