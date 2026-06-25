@@ -492,6 +492,46 @@ class FishingMixin:
             ))
         return FISHING_ACTIVE_SWITCH_BUFFER_SECONDS
 
+    def fishing_active_due_for_switch(self, identity, target_identity="", command=""):
+        """Return True when a switch is waiting on a fishing round that is already due."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        target_identity = str(target_identity or "").strip()
+        if target_identity and target_identity == identity:
+            return False
+        if str(command or "").strip() == ".提竿":
+            return False
+        try:
+            state = self.get_fishing_state(identity)
+        except Exception:
+            return False
+        if not state.get("active"):
+            return False
+        due_at = state.get("active_due_at", "")
+        return bool(due_at and not is_future(due_at))
+
+    async def fishing_switch_wait_or_raise_due(self, identity, target_identity="", command=""):
+        """
+        Return switch wait seconds, raising an overdue rod first when the current
+        identity is already allowed to finish the active fishing round.
+
+        Call this only while the caller holds avatar_send_lock and current_identity
+        is still the fishing identity; the raw send path intentionally avoids
+        reacquiring the same lock.
+        """
+        wait = self.fishing_active_switch_wait(identity, target_identity=target_identity, command=command)
+        if wait <= 0:
+            return wait
+        if not self.fishing_active_due_for_switch(identity, target_identity=target_identity, command=command):
+            return wait
+        log = self.fishing_logger()
+        if log:
+            log.info(
+                f"Fishing [{identity}] is overdue before switching to {target_identity or 'unknown'}; "
+                "raising rod first."
+            )
+        await self.fishing_raise_rod_current_identity(identity)
+        return self.fishing_active_switch_wait(identity, target_identity=target_identity, command=command)
+
     async def fishing_sync_basket(self, identity):
         resp = await self.send_fishing_command(identity, ".鱼篓", timeout=60)
         text = self.fishing_response_text(resp)
@@ -679,8 +719,27 @@ class FishingMixin:
         self.save_state()
         return ok
 
+    async def fishing_raise_rod_current_identity(self, identity):
+        previous_last_sent_id = getattr(self, "last_sent_id", None)
+        resp = await self._send_and_wait_feedback_raw(
+            ".提竿",
+            timeout=60,
+            max_retries=0,
+            suppress_no_response_alert=True,
+        )
+        if not self.fishing_response_text(resp):
+            sent_id = getattr(self, "last_sent_id", None)
+            if sent_id and sent_id != previous_last_sent_id:
+                polled = await self.fishing_poll_reply_to_sent_command(identity, ".提竿", sent_id)
+                if polled:
+                    resp = polled
+        return await self.fishing_record_rod_response(identity, resp)
+
     async def fishing_raise_rod(self, identity):
         resp = await self.send_fishing_command(identity, ".提竿", timeout=60)
+        return await self.fishing_record_rod_response(identity, resp)
+
+    async def fishing_record_rod_response(self, identity, resp):
         text = self.fishing_response_text(resp)
         parsed = parse_rod_response(text)
         state = self.get_fishing_state(identity)

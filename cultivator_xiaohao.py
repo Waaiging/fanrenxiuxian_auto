@@ -1549,7 +1549,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     should_yield = True
                     wait_sec_to_sleep = 0.5
                 elif self.current_identity and self.current_identity != identity:
-                    fishing_wait = self.fishing_active_switch_wait(
+                    fishing_wait = await self.fishing_switch_wait_or_raise_due(
                         self.current_identity, target_identity=identity, command=message
                     )
                     if fishing_wait > 0:
@@ -1811,7 +1811,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     if not command_send_precheck(self, message, log, identity="主魂"):
                         log.info(f"Skip auto-switch to 主魂: main command is not sendable now ({message}).")
                         return None
-                    fishing_wait = self.fishing_active_switch_wait(
+                    fishing_wait = await self.fishing_switch_wait_or_raise_due(
                         self.current_identity, target_identity="主魂", command=message
                     )
                     if fishing_wait > 0:

@@ -721,7 +721,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     if not command_send_precheck(self, message, log, identity="主魂"):
                         log.info(f"Skip auto-switch to 主魂: main command is not sendable now ({message}).")
                         return None
-                    fishing_wait = self.fishing_active_switch_wait(
+                    fishing_wait = await self.fishing_switch_wait_or_raise_due(
                         self.current_identity, target_identity="主魂", command=message
                     )
                     if fishing_wait > 0:
@@ -3875,7 +3875,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             switched_this_iteration = False
             async with self.avatar_send_lock:
                 if self.current_identity != identity:
-                    fishing_wait = self.fishing_active_switch_wait(
+                    fishing_wait = await self.fishing_switch_wait_or_raise_due(
                         self.current_identity, target_identity=identity, command=message
                     )
                     if fishing_wait > 0:

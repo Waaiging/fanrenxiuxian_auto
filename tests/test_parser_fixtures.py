@@ -332,6 +332,43 @@ class ParserFixtureTests(unittest.TestCase):
             0,
         )
 
+    def test_fishing_overdue_switch_guard_raises_rod_before_switch(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+                self.last_sent_id = 100
+
+            def save_state(self):
+                pass
+
+            async def _send_and_wait_feedback_raw(self, command, **kwargs):
+                self.commands.append(command)
+                self.last_sent_id += 1
+                return "**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！"
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "active": True,
+            "active_due_at": add_seconds_str(now_str(), -5),
+            "today_count": 7,
+            "daily_limit": 20,
+        })
+
+        wait = asyncio.run(actor.fishing_switch_wait_or_raise_due(
+            "主魂",
+            target_identity="问心子",
+            command=".登天阶",
+        ))
+
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(wait, 0)
+        self.assertEqual(actor.commands, [".提竿"])
+        self.assertFalse(fishing["active"])
+        self.assertEqual(fishing["today_count"], 8)
+        self.assertEqual(fishing["last_status"], "caught")
+
     def test_fishing_parsers_cover_core_flow(self):
         basket = parse_fishing_basket(
             "**【鱼篓】**\n"
