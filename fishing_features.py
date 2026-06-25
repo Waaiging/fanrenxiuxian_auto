@@ -1,9 +1,18 @@
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until, str_to_dt
-from log_utils import dashboard_command_disabled, load_command_controls
+from log_utils import (
+    dashboard_command_disabled,
+    feedback_response_matches_command,
+    is_game_bot_sender,
+    load_command_controls,
+    log_incoming_message,
+    meaningful_reply_to_msg_id,
+    record_bot_response,
+)
 
 
 FISHING_MASTER_COMMAND = ".钓鱼 灵虫饵"
@@ -11,6 +20,8 @@ FISHING_BAIT = "灵虫饵"
 FISHING_DAILY_LIMIT = 20
 FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
+FISHING_CROSS_IDENTITY_YIELD_SECONDS = 45
+FISHING_CROSS_IDENTITY_YIELD_COOLDOWN_SECONDS = 120
 FISHING_RETRY_SECONDS = 10 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 
@@ -57,6 +68,7 @@ def fishing_default_state():
         "last_catch": "",
         "last_round_at": "",
         "consecutive_empty": 0,
+        "last_cross_identity_yield_at": "",
     }
 
 
@@ -297,20 +309,75 @@ class FishingMixin:
         return False
 
     async def send_fishing_command(self, identity, command, timeout=60):
+        previous_last_sent_id = getattr(self, "last_sent_id", None)
         if identity == "主魂":
-            return await self.send_and_wait_feedback(
+            response = await self.send_and_wait_feedback(
                 command,
                 timeout=timeout,
                 max_retries=0,
                 suppress_no_response_alert=True,
             )
-        return await self.send_and_wait_feedback_identity(
-            identity,
-            command,
-            timeout=timeout,
-            max_retries=0,
-            suppress_no_response_alert=True,
-        )
+        else:
+            response = await self.send_and_wait_feedback_identity(
+                identity,
+                command,
+                timeout=timeout,
+                max_retries=0,
+                suppress_no_response_alert=True,
+            )
+        if self.fishing_response_text(response):
+            return response
+        sent_id = getattr(self, "last_sent_id", None)
+        if sent_id and sent_id != previous_last_sent_id:
+            polled = await self.fishing_poll_reply_to_sent_command(identity, command, sent_id)
+            if polled:
+                return polled
+        return response
+
+    async def fishing_poll_reply_to_sent_command(self, identity, command, sent_id, timeout=8):
+        client = getattr(self, "client", None)
+        if client is None or not sent_id:
+            return ""
+        log = self.fishing_logger()
+        deadline = time.monotonic() + max(1, float(timeout or 1))
+        while time.monotonic() < deadline:
+            try:
+                messages = await client.get_messages(getattr(self, "target_chat_id"), limit=40)
+            except Exception as exc:
+                if log:
+                    log.info(f"Fishing poll [{identity}] failed for {command}: {exc}")
+                return ""
+            for msg in reversed(messages or []):
+                try:
+                    if (getattr(msg, "id", 0) or 0) <= int(sent_id):
+                        continue
+                    if meaningful_reply_to_msg_id(self, msg) != sent_id:
+                        continue
+                    text = self.fishing_response_text(msg)
+                    if not text or not feedback_response_matches_command(command, text):
+                        continue
+                    sender = await msg.get_sender()
+                    if sender is not None and not is_game_bot_sender(self, sender):
+                        continue
+                    record_bot_response(self)
+                    await log_incoming_message(
+                        self,
+                        command,
+                        text,
+                        msg=msg,
+                        logger=log,
+                        identity=identity,
+                    )
+                    if log:
+                        log.info(
+                            f"Fishing poll [{identity}] matched {command} reply: "
+                            f"command_msg={sent_id}, response_msg={getattr(msg, 'id', None)}."
+                        )
+                    return text
+                except Exception:
+                    continue
+            await asyncio.sleep(1)
+        return ""
 
     def fishing_response_text(self, response):
         if response is None:
@@ -340,8 +407,25 @@ class FishingMixin:
         return default_seconds
 
     def fishing_impending_wait(self, identity):
+        return self.fishing_impending_wait_for_identity(identity)
+
+    def fishing_impending_wait_for_identity(self, identity):
         try:
-            wait = self.get_identity_impending_command_wait(identity)
+            if hasattr(self, "_state_impending_command_wait"):
+                target = self.state if identity == "主魂" else self.get_avatar_state(identity)
+                state_without_meditation = dict(target or {})
+                state_without_meditation["in_deep_meditation"] = True
+                state_without_meditation["deep_meditation_end_time"] = ""
+                state_without_meditation["next_meditation_retry_time"] = ""
+                wait = self._state_impending_command_wait(state_without_meditation, identity=identity)
+                if hasattr(self, "custom_command_impending_wait"):
+                    custom_wait = self.custom_command_impending_wait(identity)
+                    if hasattr(self, "merge_impending_wait"):
+                        wait = self.merge_impending_wait(wait, custom_wait)
+                    else:
+                        wait = min(wait, custom_wait)
+            else:
+                wait = self.get_identity_impending_command_wait(identity)
         except Exception:
             return -1
         if wait is None:
@@ -350,6 +434,39 @@ class FishingMixin:
             return float(wait)
         except Exception:
             return -1
+
+    def fishing_other_identity_impending_wait(self, identity):
+        identities = ["主魂"]
+        identities.extend(list(getattr(self, "avatars", []) or []))
+        best_identity = ""
+        best_wait = None
+        for other in identities:
+            if other == identity:
+                continue
+            try:
+                if self.identity_pause_seconds(other) > 0:
+                    continue
+            except Exception:
+                pass
+            wait = self.fishing_impending_wait_for_identity(other)
+            if wait is None or wait < 0:
+                continue
+            if best_wait is None or wait < best_wait:
+                best_wait = wait
+                best_identity = other
+        if best_wait is None:
+            return "", -1
+        return best_identity, float(best_wait)
+
+    def fishing_recently_yielded_to_other_identity(self, identity):
+        state = self.get_fishing_state(identity)
+        last_at = state.get("last_cross_identity_yield_at", "")
+        if not last_at:
+            return False
+        try:
+            return seconds_until(add_seconds_str(last_at, FISHING_CROSS_IDENTITY_YIELD_COOLDOWN_SECONDS)) > 0
+        except Exception:
+            return False
 
     async def fishing_sync_basket(self, identity):
         resp = await self.send_fishing_command(identity, ".鱼篓", timeout=60)
@@ -567,17 +684,11 @@ class FishingMixin:
             return 60
 
         state = self.get_fishing_state(identity)
-        identity_state = self.state if identity == "主魂" else self.get_avatar_state(identity)
-        meditation_end = identity_state.get("deep_meditation_end_time", "")
-        if identity_state.get("in_deep_meditation") and meditation_end and is_future(meditation_end):
-            wait_seconds = max(60, min(seconds_until(meditation_end) + 30, 3600))
-            self.fishing_set_status(
-                identity,
-                "meditation_blocked",
-                f"深度闭关中，等出关后钓鱼",
-                wait_seconds,
-            )
-            return wait_seconds
+        if state.get("last_status") == "meditation_blocked":
+            state["last_status"] = "enabled"
+            state["last_detail"] = "深度闭关不阻塞钓鱼"
+            state["next_action_at"] = ""
+            self.save_state()
 
         today = _today()
         if state.get("last_sync_date") != today or state.get("rod_owned") is None:
@@ -606,8 +717,23 @@ class FishingMixin:
         if next_action and is_future(next_action):
             return max(1, min(seconds_until(next_action), 300))
 
+        other_identity, other_wait = self.fishing_other_identity_impending_wait(identity)
+        if (
+            other_identity
+            and 0 <= other_wait <= FISHING_IMPENDING_GUARD_SECONDS
+            and not self.fishing_recently_yielded_to_other_identity(identity)
+        ):
+            state["last_cross_identity_yield_at"] = now_str()
+            self.fishing_set_status(
+                identity,
+                "yielding_identity",
+                f"本轮提竿后让路给 {other_identity} 的到期指令",
+                FISHING_CROSS_IDENTITY_YIELD_SECONDS,
+            )
+            return FISHING_CROSS_IDENTITY_YIELD_SECONDS
+
         impending = self.fishing_impending_wait(identity)
-        if 0 <= impending <= FISHING_IMPENDING_GUARD_SECONDS:
+        if 1 <= impending <= FISHING_IMPENDING_GUARD_SECONDS:
             self.fishing_set_status(
                 identity,
                 "yielding",

@@ -42,6 +42,9 @@ USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 # 命令守卫参数
 COMMAND_GUARD_WINDOW_SECONDS = 30 * 60      # 监控窗口 30 分钟
 COMMAND_GUARD_BLOCK_SECONDS = 60 * 60       # 触发守卫后拦截 1 小时
+# 发送次数守卫只用于显式标记的失败重试场景；正常业务循环由
+# dashboard、身份暂停、机器人健康暂停等更具体的保护负责。
+COMMAND_GUARD_DEFAULT_TRACK_SENDS = False
 COMMAND_GUARD_POLICY_OVERRIDES = {
     ".协同守山": {                           # 守山按机器人回执保护，正常成功/短冷却不按发送次数拦截
         "limit": 9999,
@@ -70,6 +73,14 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
         "block_seconds": 10 * 60,
         "alert": False,
     },
+    ".渔具铺": {"track_sends": False, "alert": False},
+    ".鱼篓": {"track_sends": False, "alert": False},
+    ".买鱼饵": {"track_sends": False, "alert": False},
+    ".打窝": {"track_sends": False, "alert": False},
+    ".钓鱼": {"track_sends": False, "alert": False},
+    ".垂钓": {"track_sends": False, "alert": False},
+    ".钓鱼状态": {"track_sends": False, "alert": False},
+    ".提竿": {"track_sends": False, "alert": False},
 }
 
 PARAM_COMMAND_ROOTS = {
@@ -237,7 +248,7 @@ def command_guard_policy(command, limit, window, block_seconds):
         int(policy.get("block_seconds", block_seconds)),
         bool(policy.get("alert", True)),
         bool(policy.get("identity_scoped", True)),
-        bool(policy.get("track_sends", True)),
+        bool(policy.get("track_sends", COMMAND_GUARD_DEFAULT_TRACK_SENDS)),
     )
 
 
