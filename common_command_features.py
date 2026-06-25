@@ -32,6 +32,7 @@ from log_utils import (
     text_username_mentions,
     tracked_command_identity_for_reply,
 )
+from command_modules import field_training_plan_from_features
 
 
 # =====================================================================
@@ -1054,6 +1055,18 @@ class CommonCommandMixin:
 
     # ---- 野外历练 ----
 
+    def field_training_plan(self, identity="主魂"):
+        """Build the configured field-training command plan for an identity."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        features = {}
+        if identity != "主魂":
+            features = (getattr(self, "avatar_features", {}) or {}).get(identity, {})
+        return field_training_plan_from_features(
+            identity=identity,
+            features=features,
+            main_command=getattr(self, "field_training_command", FIELD_TRAINING_COMMAND),
+        )
+
     def is_field_training_response(self, text):
         """判断游戏回复是否为野外历练相关的消息"""
         clean = (text or "").replace("**", "")
@@ -1753,14 +1766,15 @@ class CommonCommandMixin:
                 continue
 
             log = self.common_command_logger()
-            cmd = getattr(self, 'field_training_command', FIELD_TRAINING_COMMAND)
+            plan = self.field_training_plan("主魂")
+            cmd = plan.command
             log.info(f"Field training due: sending {cmd}.")
             resp = await self.send_and_wait_feedback(
                 cmd,
-                timeout=90,
-                max_retries=0,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                suppress_no_response_alert=plan.suppress_no_response_alert,
+                return_response_msg=plan.return_response_msg,
             )
             resp = await self.wait_for_field_training_settlement(resp, "主魂")
             resp_text = self.field_training_response_text(resp)

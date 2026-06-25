@@ -14,6 +14,7 @@ import intelligent_cultivator
 import log_utils
 import star_gazing_collector
 import sub_cultivator
+from command_modules import field_training_plan_from_features
 from fishing_features import (
     FishingMixin,
     parse_buy_bait,
@@ -115,6 +116,28 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_field_training_plan_preserves_identity_specific_prefixes(self):
+        plan = field_training_plan_from_features(
+            "无咎子",
+            {
+                "meditation_prefix": ".推命",
+                "training_prefix_commands": [".推命 探索", ".改命 探索"],
+                "training_cmd": ".野外历练",
+                "training_level": "深入",
+            },
+        )
+        self.assertEqual(plan.command, ".野外历练 深入")
+        self.assertEqual(
+            plan.all_commands(),
+            [".推命 探索", ".改命 探索", ".野外历练 深入"],
+        )
+
+        default_avatar = field_training_plan_from_features("缘生子", {})
+        self.assertEqual(default_avatar.all_commands(), [".野外历练"])
+
+        main = field_training_plan_from_features("主魂", main_command=".野外历练 谨慎")
+        self.assertEqual(main.all_commands(), [".野外历练 谨慎"])
+
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):
             def __init__(self):

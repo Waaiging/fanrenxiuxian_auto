@@ -5194,25 +5194,20 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             return
         nt = a_state.get("next_field_training_time", "")
         if nt and is_future(nt): return
-        features = self.avatar_features.get(avatar, {})
-        prefix = features.get("meditation_prefix", "")
-        training_cmd = features.get("training_cmd", ".野外历练")
-        training_level = features.get("training_level", "")
-        training_command = " ".join(part for part in (training_cmd, training_level) if part)
-        training_prefix_commands = features.get("training_prefix_commands")
-        if training_prefix_commands is None:
-            training_prefix_commands = [f"{prefix} 探索"] if prefix else []
-        for prefix_command in training_prefix_commands:
-            await self.send_and_wait_feedback_identity(avatar, prefix_command)
-            await asyncio.sleep(3)
+        plan = self.field_training_plan(avatar)
+        training_command = plan.command
+        for step in plan.pre_steps:
+            await self.send_and_wait_feedback_identity(avatar, step.command)
+            if step.delay_after:
+                await asyncio.sleep(step.delay_after)
         resp = await self.send_and_wait_feedback_identity(
             avatar,
             training_command,
-            timeout=90,
-            max_retries=0,
-            force_identity_check=True,
-            suppress_no_response_alert=True,
-            return_response_msg=True,
+            timeout=plan.timeout,
+            max_retries=plan.max_retries,
+            force_identity_check=plan.force_identity_check,
+            suppress_no_response_alert=plan.suppress_no_response_alert,
+            return_response_msg=plan.return_response_msg,
         )
         resp = await self.wait_for_field_training_settlement(resp, avatar)
         resp_text = self.response_text(resp)
@@ -5220,11 +5215,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             async def rt(): return await self.send_and_wait_feedback_identity(
                 avatar,
                 training_command,
-                timeout=90,
-                max_retries=0,
-                force_identity_check=True,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                force_identity_check=plan.force_identity_check,
+                suppress_no_response_alert=plan.suppress_no_response_alert,
+                return_response_msg=plan.return_response_msg,
             )
             success, resp_text = await self.handle_修为不足(avatar, rt, cooldown_key="next_field_training_time")
             if not success: return

@@ -6747,17 +6747,21 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
                     continue
 
-                # 发送历练指令
-                cmd = ".野外历练"
+                plan = self.field_training_plan(avatar)
+                for step in plan.pre_steps:
+                    await self.send_and_wait_feedback_identity(avatar, step.command)
+                    if step.delay_after:
+                        await asyncio.sleep(step.delay_after)
+                cmd = plan.command
                 log.info(f"Avatar [{avatar}] field training due: sending {cmd}")
                 resp = await self.send_and_wait_feedback_identity(
                     avatar,
                     cmd,
-                    timeout=90,
-                    max_retries=0,
-                    force_identity_check=True,
-                    suppress_no_response_alert=True,
-                    return_response_msg=True,
+                    timeout=plan.timeout,
+                    max_retries=plan.max_retries,
+                    force_identity_check=plan.force_identity_check,
+                    suppress_no_response_alert=plan.suppress_no_response_alert,
+                    return_response_msg=plan.return_response_msg,
                 )
                 resp = await self.wait_for_field_training_settlement(resp, avatar)
 

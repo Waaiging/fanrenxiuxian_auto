@@ -6999,16 +6999,21 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time), minimum=60))
                     continue
 
-                field_training_cmd = ".野外历练"
+                plan = self.field_training_plan(avatar)
+                for step in plan.pre_steps:
+                    await self.send_and_wait_feedback_identity(avatar, step.command)
+                    if step.delay_after:
+                        await asyncio.sleep(step.delay_after)
+                field_training_cmd = plan.command
                 log.info(f"Avatar [{avatar}] field training due: sending {field_training_cmd}")
                 ft_resp = await self.send_and_wait_feedback_identity(
                     avatar,
                     field_training_cmd,
-                    timeout=90,
-                    max_retries=0,
-                    force_identity_check=True,
-                    suppress_no_response_alert=True,
-                    return_response_msg=True,
+                    timeout=plan.timeout,
+                    max_retries=plan.max_retries,
+                    force_identity_check=plan.force_identity_check,
+                    suppress_no_response_alert=plan.suppress_no_response_alert,
+                    return_response_msg=plan.return_response_msg,
                 )
                 ft_resp = await self.wait_for_field_training_settlement(ft_resp, avatar)
                 ft_text = self.response_text(ft_resp)
@@ -7018,11 +7023,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         return await self.send_and_wait_feedback_identity(
                             avatar,
                             field_training_cmd,
-                            timeout=90,
-                            max_retries=0,
-                            force_identity_check=True,
-                            suppress_no_response_alert=True,
-                            return_response_msg=True,
+                            timeout=plan.timeout,
+                            max_retries=plan.max_retries,
+                            force_identity_check=plan.force_identity_check,
+                            suppress_no_response_alert=plan.suppress_no_response_alert,
+                            return_response_msg=plan.return_response_msg,
                         )
 
                     success, ft_text = await self.handle_修为不足(
