@@ -197,6 +197,38 @@ def common_command_default_state():
 class CommonCommandMixin:
     """通用固定冷却指令混入类。"""
 
+    # ---- 轻量解析/判断工具 ----
+
+    def message_age_seconds(self, msg):
+        """Return message age in seconds, based on the original send time."""
+        msg_dt = getattr(msg, "date", None)
+        if not msg_dt:
+            return 0
+        try:
+            now_dt = datetime.now(msg_dt.tzinfo) if msg_dt.tzinfo else datetime.utcnow()
+            return max(0, (now_dt - msg_dt).total_seconds())
+        except Exception:
+            return 0
+
+    def formation_invite_actor_username(self, text):
+        """Extract the actor username from a formation invite."""
+        if not text:
+            return ""
+        match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
+        if not match:
+            match = re.search(r"@([A-Za-z0-9_]+)", text)
+        return match.group(1).lower() if match else ""
+
+    def avatar_username_for_identity(self, avatar):
+        for username, name in (getattr(self, "avatar_usernames", {}) or {}).items():
+            if name == avatar:
+                return username.lower()
+        return ""
+
+    def formation_result_includes_avatar(self, text, avatar):
+        username = self.avatar_username_for_identity(avatar)
+        return bool(username and f"@{username}" in (text or "").lower())
+
     # ---- 状态管理 ----
 
     def ensure_common_command_state(self):

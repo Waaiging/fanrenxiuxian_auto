@@ -4110,22 +4110,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # ---- 星宫阵法助阵：小号只助阵副号三分身的启阵邀请 ----
 
     def formation_invite_actor_username(self, text):
-        if not text:
-            return ""
-        match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
-        if not match:
-            match = re.search(r"@([A-Za-z0-9_]+)", text)
-        return (match.group(1).lower() if match else "")
+        return CommonCommandMixin.formation_invite_actor_username(self, text)
 
     def avatar_username_for_identity(self, avatar):
-        for username, name in self.avatar_usernames.items():
-            if name == avatar:
-                return username.lower()
-        return ""
+        return CommonCommandMixin.avatar_username_for_identity(self, avatar)
 
     def formation_result_includes_avatar(self, text, avatar):
-        username = self.avatar_username_for_identity(avatar)
-        return bool(username and f"@{username}" in (text or "").lower())
+        return CommonCommandMixin.formation_result_includes_avatar(self, text, avatar)
 
     def is_target_formation_invite(self, text):
         if not text:
@@ -4141,14 +4132,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return self.formation_invite_actor_username(text) in FORMATION_TARGET_INITIATORS
 
     def message_age_seconds(self, msg):
-        msg_dt = getattr(msg, "date", None)
-        if not msg_dt:
-            return 0
-        try:
-            now_dt = datetime.now(msg_dt.tzinfo) if msg_dt.tzinfo else datetime.utcnow()
-            return max(0, (now_dt - msg_dt).total_seconds())
-        except Exception:
-            return 0
+        return CommonCommandMixin.message_age_seconds(self, msg)
 
     def record_avatar_formation_success(self, avatar, formation_time=None):
         formation_time = formation_time or now_str()

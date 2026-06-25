@@ -2427,14 +2427,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     def message_age_seconds(self, msg):
         """计算消息的年龄（秒）"""
-        msg_dt = getattr(msg, "date", None)
-        if not msg_dt:
-            return 0
-        try:
-            now_dt = datetime.now(msg_dt.tzinfo) if msg_dt.tzinfo else datetime.utcnow()
-            return max(0, (now_dt - msg_dt).total_seconds())
-        except Exception:
-            return 0
+        return CommonCommandMixin.message_age_seconds(self, msg)
 
     async def get_updated_message(self, msg, delay_sec=120):
         """等待后重新获取消息编辑后内容"""
@@ -6369,22 +6362,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     def formation_invite_actor_username(self, text):
             """提取阵法邀请里的发起者 @username。"""
-            if not text:
-                return ""
-            match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
-            if not match:
-                match = re.search(r"@([A-Za-z0-9_]+)", text)
-            return (match.group(1).lower() if match else "")
+            return CommonCommandMixin.formation_invite_actor_username(self, text)
 
     def avatar_username_for_identity(self, avatar):
-            for username, name in self.avatar_usernames.items():
-                if name == avatar:
-                    return username.lower()
-            return ""
+            return CommonCommandMixin.avatar_username_for_identity(self, avatar)
 
     def formation_result_includes_avatar(self, text, avatar):
-            username = self.avatar_username_for_identity(avatar)
-            return bool(username and f"@{username}" in (text or "").lower())
+            return CommonCommandMixin.formation_result_includes_avatar(self, text, avatar)
 
     def is_target_formation_invite(self, text):
             """只监听副号三个分身发起的星宫启阵邀请。"""

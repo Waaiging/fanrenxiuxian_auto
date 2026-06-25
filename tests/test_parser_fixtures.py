@@ -193,6 +193,23 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(ask_dao.max_retries, 1)
         self.assertTrue(ask_dao.force_identity_check)
 
+    def test_common_message_age_seconds_handles_timezone_and_missing_date(self):
+        actor = DummyCommon()
+        aware_msg = SimpleNamespace(date=datetime.now(timezone.utc) - timedelta(seconds=15))
+        naive_msg = SimpleNamespace(date=datetime.utcnow() - timedelta(seconds=9))
+        self.assertGreaterEqual(actor.message_age_seconds(aware_msg), 14)
+        self.assertGreaterEqual(actor.message_age_seconds(naive_msg), 8)
+        self.assertEqual(actor.message_age_seconds(SimpleNamespace()), 0)
+
+    def test_common_formation_invite_and_avatar_match_helpers(self):
+        actor = DummyCommon()
+        actor.avatar_usernames = {"Ding303": "寻真子", "Sub_Avatar": "缘生子"}
+        text = "【周天星斗大阵-启】@Ding303 正在布设大阵，尚需 2 位道友助阵。"
+        self.assertEqual(actor.formation_invite_actor_username(text), "ding303")
+        self.assertEqual(actor.avatar_username_for_identity("缘生子"), "sub_avatar")
+        self.assertTrue(actor.formation_result_includes_avatar("大阵已成，@Sub_Avatar 已助阵。", "缘生子"))
+        self.assertFalse(actor.formation_result_includes_avatar("大阵已成，@Other 已助阵。", "缘生子"))
+
     def test_common_avatar_yuanying_check_uses_shared_plan_sender(self):
         class DummyTimedAvatar(DummyAvatarCommon):
             def __init__(self):

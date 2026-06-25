@@ -4187,12 +4187,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return bool(text and ("周天星斗大阵-启" in text or "尚需" in text or "助阵" in text))
 
     def formation_invite_actor_username(self, text):
-        if not text:
-            return ""
-        match = re.search(r"@([A-Za-z0-9_]+)\s*正在布设大阵", text)
-        if not match:
-            match = re.search(r"@([A-Za-z0-9_]+)", text)
-        return (match.group(1).lower() if match else "")
+        return CommonCommandMixin.formation_invite_actor_username(self, text)
 
     def formation_invite_actor_identity(self, text):
         username = self.formation_invite_actor_username(text)
@@ -4463,18 +4458,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def message_age_seconds(self, msg):
         """计算消息的年龄（从发送到现在的秒数）。"""
-        msg_dt = getattr(msg, "date", None)
-        if not msg_dt:
-            return 0
-        try:
-            now_dt = (
-                datetime.now(msg_dt.tzinfo)
-                if msg_dt.tzinfo
-                else datetime.utcnow()
-            )
-            return max(0, (now_dt - msg_dt).total_seconds())
-        except Exception:
-            return 0
+        return CommonCommandMixin.message_age_seconds(self, msg)
 
     async def assist_external_formation(self, formation_msg):
         """
