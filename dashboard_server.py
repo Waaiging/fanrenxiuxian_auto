@@ -28,7 +28,7 @@ from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
-from log_utils import command_control_key, feedback_response_matches_command
+from log_utils import command_control_key
 from command_modules import (
     ASK_DAO_COMMAND,
     NURTURE_SPIRIT_COMMAND,
@@ -83,9 +83,9 @@ LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
 LOG_PAGE_LOCK = threading.Lock()         # 日志分页接口锁
 CULTIVATION_CACHE = {}                   # 修为统计缓存
 CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
-COMMAND_RECORD_CACHE = {}                # 指令执行记录缓存
-COMMAND_RECORD_LOCK = threading.Lock()   # 指令执行记录锁
-COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令执行记录接口短缓存
+COMMAND_RECORD_CACHE = {}                # 指令发送记录缓存
+COMMAND_RECORD_LOCK = threading.Lock()   # 指令发送记录锁
+COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令发送记录接口短缓存
 COMMAND_RECORD_ENDPOINT_LOCK = threading.Lock()
 MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
 MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
@@ -1626,11 +1626,11 @@ def read_recent_log_entries(name, before_byte=None, limit=80):
 
 
 # =====================================================================
-# 指令执行记录
+# 指令发送记录
 # =====================================================================
 
 def command_record_signature(name):
-    """返回消息库签名，用于避免重复解析指令生效记录。"""
+    """返回消息库签名，用于避免重复解析指令发送记录。"""
     path = message_events_db_path()
     try:
         stat = os.stat(path)
@@ -1646,66 +1646,8 @@ def command_record_username(account, identity):
     names = account_profile_usernames(account).get(identity or "主魂") or []
     return " / ".join(names)
 
-COMMAND_RECORD_QUERY_COMMANDS = {
-    ".查看闭关",
-    ".灵树状态",
-    ".我的侍妾",
-    ".我的灵兽",
-    ".我的灵根",
-    ".状态",
-    ".宗门战况",
-    ".宗门列表",
-    ".天阶状态",
-    ".观星台",
-    ".储物袋",
-    ".背包",
-    ".物品栏",
-    ".库存",
-}
-
-COMMAND_RECORD_NO_EFFECT_MARKERS = (
-    "冷却", "后再", "请在", "尚未", "尚需", "未复", "未恢复",
-    "灵气尚未平复", "无法", "不能", "不可", "修为不足", "灵石不足",
-    "不存在", "没有名为", "尚无侍妾", "还没有侍妾", "未随行",
-    "你已在深度闭关", "已在深度闭关", "正在深度闭关",
-    "请勿重复", "重复操作", "已经参与", "已在阵中", "没有找到",
-    "无功不受禄",
-    "器灵也是需要休息", "别摸啦",
-)
-
-COMMAND_RECORD_EFFECT_MARKERS = (
-    "成功", "获得", "收获", "增加", "增长", "变化", "完成", "归来",
-    "出窍", "已进入", "开始", "开启", "切换成功", "神念已附着",
-    "神念重归", "注入了", "成熟度", "修为增长", "造化自生",
-    "通关", "战报", "点卯", "不敌败退", "身受重创", "倒退",
-    "失败", "清点所得", "远航归来", "启航", "入渊", "偷菜",
-    "默契", "经验", "亲密", "心情", "羁绊", "忠诚",
-    "召回", "出战", "放养", "巡游",
-)
-
-def command_record_base_command(command):
-    text = str(command or "").strip()
-    if not text:
-        return ""
-    parts = text.split()
-    return parts[0] if parts else text
-
-def command_record_response_effective(command, response_text):
-    """True when a matched reply means the command actually took effect."""
-    clean = str(response_text or "").replace("**", "").replace("`", "").strip()
-    if not clean:
-        return False
-    base = command_record_base_command(command)
-    if base in COMMAND_RECORD_QUERY_COMMANDS:
-        return feedback_response_matches_command(command, clean) or feedback_response_matches_command(base, clean)
-    if any(marker in clean for marker in COMMAND_RECORD_NO_EFFECT_MARKERS):
-        return False
-    if any(marker in clean for marker in COMMAND_RECORD_EFFECT_MARKERS):
-        return feedback_response_matches_command(command, clean) or feedback_response_matches_command(base, clean)
-    return False
-
 def build_account_command_records(name, recent_limit=8):
-    """按身份+指令聚合已生效回复，生成执行记录表数据。"""
+    """按身份+指令聚合已成功发送的指令消息，生成发送记录表数据。"""
     if name not in WINDOW_MAP:
         return {"records": [], "error": "未知账号", "updated_at": datetime.now().strftime(TIME_FORMAT)}
     signature = command_record_signature(name)
@@ -1729,25 +1671,18 @@ def build_account_command_records(name, recent_limit=8):
         rows = conn.execute(
             """
             SELECT
+                cl.chat_id,
+                cl.command_msg_id,
                 cl.identity,
                 cl.command,
                 cl.source,
-                cl.sent_at,
-                cl.response_at,
-                cl.response_msg_id,
-                cl.response_hash,
-                COALESCE(me.text, '') AS response_text
+                cl.sent_at
             FROM command_ledger cl
-            LEFT JOIN message_events me
-              ON me.account=cl.account
-             AND me.chat_id IS cl.chat_id
-             AND me.msg_id=cl.response_msg_id
-             AND (cl.response_hash IS NULL OR me.text_hash=cl.response_hash)
             WHERE cl.account=?
-              AND cl.status='matched'
-              AND COALESCE(cl.response_at, '')!=''
+              AND cl.command_msg_id IS NOT NULL
+              AND COALESCE(cl.sent_at, '')!=''
               AND COALESCE(cl.command, '') LIKE '.%'
-            ORDER BY cl.response_at ASC, cl.command_msg_id ASC
+            ORDER BY cl.sent_at ASC, cl.command_msg_id ASC
             """,
             (name,),
         ).fetchall()
@@ -1762,14 +1697,11 @@ def build_account_command_records(name, recent_limit=8):
         command = str(item["command"] or "").strip()
         if not command or not command.startswith("."):
             continue
-        response_text = item["response_text"] or ""
-        if not command_record_response_effective(command, response_text):
-            continue
-        entry_time = parse_state_time(item["response_at"]) or parse_state_time(item["sent_at"])
+        entry_time = parse_state_time(item["sent_at"])
         if not entry_time:
             continue
-        response_key = item["response_msg_id"] or item["response_hash"] or f"{item['response_at']}:{command}"
-        if not response_key:
+        send_key = f"{item['chat_id']}:{item['command_msg_id']}"
+        if not send_key:
             continue
         identity = str(item["identity"] or "主魂").strip() or "主魂"
         key = (identity, command)
@@ -1786,14 +1718,14 @@ def build_account_command_records(name, recent_limit=8):
             "last_time": "",
             "last_interval_seconds": None,
             "recent_times": [],
-            "_seen_response_keys": set(),
+            "_seen_send_keys": set(),
             "manual_count": 0,
             "auto_count": 0,
             "is_switch": command.startswith(".切换"),
         })
-        if response_key in row["_seen_response_keys"]:
+        if send_key in row["_seen_send_keys"]:
             continue
-        row["_seen_response_keys"].add(response_key)
+        row["_seen_send_keys"].add(send_key)
         time_text = entry_time.strftime(TIME_FORMAT)
         if not row["first_time"]:
             row["first_time"] = time_text
@@ -1817,7 +1749,7 @@ def build_account_command_records(name, recent_limit=8):
 
     rows = sorted(records.values(), key=lambda item: item.get("last_time") or "", reverse=True)
     for row in rows:
-        row.pop("_seen_response_keys", None)
+        row.pop("_seen_send_keys", None)
     data = {
         "records": rows,
         "error": error,
@@ -3229,7 +3161,7 @@ def resource_stats(since_hours: int = 12, max_rows: int = RESOURCE_STATS_MAX_ROW
 
 @app.get("/api/command-records")
 def command_records(username: str = Depends(authenticate)):
-    """获取各账号按身份/指令聚合的执行记录。"""
+    """获取各账号按身份/指令聚合的发送记录。"""
     now_ts = time.time()
     with COMMAND_RECORD_ENDPOINT_LOCK:
         cached = COMMAND_RECORD_ENDPOINT_CACHE.get("data")

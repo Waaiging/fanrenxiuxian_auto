@@ -2576,7 +2576,7 @@ class ParserFixtureTests(unittest.TestCase):
             dashboard_server.LOG_TAIL_INITIAL_BYTES = old_initial_bytes
             dashboard_server.LOG_TAIL_MAX_BYTES = old_max_bytes
 
-    def test_dashboard_command_records_use_effective_replies_only(self):
+    def test_dashboard_command_records_use_sent_ledger_rows(self):
         old_config_dir = dashboard_server.CONFIG_DIR
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -2628,6 +2628,8 @@ class ParserFixtureTests(unittest.TestCase):
                          "地脉灵气尚未恢复，请在 **1小时59分钟55秒** 后再来灌溉。"),
                         (1003, ".灵树灌溉", "manual", "2026-06-14 11:49:32", 2003, "2026-06-14 11:49:34",
                          "**【🌿 灵树灌溉】**\n你注入了: **水行** 灵气\n🌳 **成熟度**: 11.05% -> **11.16%**"),
+                        (1004, ".灵树灌溉", "auto", "2026-06-14 12:49:32", None, None, ""),
+                        (1005, "不是指令", "auto", "2026-06-14 12:50:32", None, None, ""),
                     ]
                     for cmd_msg, command, source, sent_at, resp_msg, response_at, text in rows:
                         conn.execute(
@@ -2635,19 +2637,29 @@ class ParserFixtureTests(unittest.TestCase):
                             INSERT INTO command_ledger (
                                 account, chat_id, command_msg_id, command, identity, source,
                                 status, sent_at, response_msg_id, response_at, updated_at
-                            ) VALUES ('main', 1, ?, ?, '主魂', ?, 'matched', ?, ?, ?, ?)
+                            ) VALUES ('main', 1, ?, ?, '主魂', ?, ?, ?, ?, ?, ?)
                             """,
-                            (cmd_msg, command, source, sent_at, resp_msg, response_at, response_at),
+                            (
+                                cmd_msg,
+                                command,
+                                source,
+                                "matched" if resp_msg else "sent",
+                                sent_at,
+                                resp_msg,
+                                response_at,
+                                response_at or sent_at,
+                            ),
                         )
-                        conn.execute(
-                            """
-                            INSERT INTO message_events (
-                                account, event_kind, direction, chat_id, msg_id, is_game_bot,
-                                identity, command, text, text_hash, created_at
-                            ) VALUES ('main', 'new', 'bot_in', 1, ?, 1, '主魂', ?, ?, '', ?)
-                            """,
-                            (resp_msg, command, text, response_at),
-                        )
+                        if resp_msg:
+                            conn.execute(
+                                """
+                                INSERT INTO message_events (
+                                    account, event_kind, direction, chat_id, msg_id, is_game_bot,
+                                    identity, command, text, text_hash, created_at
+                                ) VALUES ('main', 'new', 'bot_in', 1, ?, 1, '主魂', ?, ?, '', ?)
+                                """,
+                                (resp_msg, command, text, response_at),
+                            )
                     conn.commit()
                 finally:
                     conn.close()
@@ -2655,11 +2667,16 @@ class ParserFixtureTests(unittest.TestCase):
                 records = dashboard_server.build_account_command_records("main")["records"]
                 row = next(item for item in records if item["command"] == ".灵树灌溉")
 
-                self.assertEqual(row["count"], 2)
-                self.assertEqual(row["auto_count"], 1)
+                self.assertEqual(row["count"], 4)
+                self.assertEqual(row["auto_count"], 3)
                 self.assertEqual(row["manual_count"], 1)
-                self.assertEqual(row["last_time"], "2026-06-14 11:49:34")
-                self.assertEqual(row["recent_times"], ["2026-06-14 09:49:33", "2026-06-14 11:49:34"])
+                self.assertEqual(row["last_time"], "2026-06-14 12:49:32")
+                self.assertEqual(row["recent_times"], [
+                    "2026-06-14 09:49:32",
+                    "2026-06-14 09:50:28",
+                    "2026-06-14 11:49:32",
+                    "2026-06-14 12:49:32",
+                ])
         finally:
             dashboard_server.CONFIG_DIR = old_config_dir
             dashboard_server.COMMAND_RECORD_CACHE.clear()

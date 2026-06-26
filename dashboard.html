@@ -434,7 +434,7 @@
         <div id="account-cards" style="display: contents;"></div>
         <section class="command-record-section">
             <div class="record-header">
-                <div class="record-title">指令执行记录表</div>
+                <div class="record-title">指令发送记录表</div>
                 <div class="record-summary" id="record-summary">加载中...</div>
             </div>
             <div class="record-tools">
@@ -1162,15 +1162,15 @@
             if (!commandRecordRows.length) {
                 return `
                     <div class="identity-records">
-                        <div class="identity-record-title"><span>最近执行记录</span><span>加载中</span></div>
-                        <div class="record-empty">执行记录正在加载。</div>
+                        <div class="identity-record-title"><span>最近发送记录</span><span>加载中</span></div>
+                        <div class="record-empty">发送记录正在加载。</div>
                     </div>
                 `;
             }
             if (!rows.length) {
                 return `
                     <div class="identity-records">
-                        <div class="identity-record-title"><span>最近执行记录</span><span>0 条</span></div>
+                        <div class="identity-record-title"><span>最近发送记录</span><span>0 条</span></div>
                         <div class="record-empty">该身份暂未记录到自动或手动指令。</div>
                     </div>
                 `;
@@ -1178,7 +1178,7 @@
             return `
                 <div class="identity-records">
                     <div class="identity-record-title">
-                        <span>最近执行记录</span>
+                        <span>最近发送记录</span>
                         <span>${rows.length} / ${recordsForIdentity(account, identity).length} 条</span>
                     </div>
                     ${rows.map(row => `
@@ -1481,7 +1481,7 @@
             const latest = commandRecordUpdatedAt ? `更新 ${commandRecordUpdatedAt}` : '未更新';
             summary.textContent = `${latest} · 显示 ${rows.length} / ${total} 项`;
             if (!rows.length) {
-                box.innerHTML = '<div class="record-empty">没有符合筛选条件的执行记录。</div>';
+                box.innerHTML = '<div class="record-empty">没有符合筛选条件的发送记录。</div>';
                 return;
             }
             box.innerHTML = `
@@ -1500,7 +1500,7 @@
                             <th>脚本</th>
                             <th>身份</th>
                             <th>指令</th>
-                            <th>最近执行</th>
+                            <th>最近发送</th>
                             <th>上次间隔</th>
                             <th>今日/总计</th>
                             <th>最近 8 次</th>
@@ -1561,7 +1561,7 @@
             } catch (e) {
                 console.error('Command records update failed:', e);
                 const summary = document.getElementById('record-summary');
-                if (summary) summary.textContent = '执行记录加载失败';
+                if (summary) summary.textContent = '发送记录加载失败';
             } finally {
                 pollBusy.commandRecords = false;
             }
