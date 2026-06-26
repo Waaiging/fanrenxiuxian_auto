@@ -107,6 +107,10 @@ CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshot
 LOG_TAIL_INITIAL_BYTES = 192 * 1024
 LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+SERVER_START_TS = time.time()
+SERVER_STARTED_AT = datetime.fromtimestamp(SERVER_START_TS).strftime(TIME_FORMAT)
+GIT_META_CACHE = {}
+GIT_META_CACHE_SECONDS = 60
 ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
@@ -2896,6 +2900,100 @@ def account_process_pids(account):
         pids.append(pid)
     return pids
 
+def process_uptime_seconds(pid):
+    """Return process uptime in seconds when ps is available."""
+    if os.name == 'nt':
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "etimes=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return None
+        return int(str(result.stdout or "").strip())
+    except Exception:
+        return None
+
+def file_mtime_info(path):
+    """Return dashboard-friendly file mtime details."""
+    if not os.path.exists(path):
+        return {"exists": False, "updated_at": "", "age_seconds": None, "size": 0}
+    try:
+        stat = os.stat(path)
+        return {
+            "exists": True,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime(TIME_FORMAT),
+            "age_seconds": max(0, int(time.time() - stat.st_mtime)),
+            "size": stat.st_size,
+        }
+    except Exception:
+        return {"exists": False, "updated_at": "", "age_seconds": None, "size": 0}
+
+def account_runtime_info(account, pids=None):
+    """Build process and state-file metadata for one account."""
+    script = SCRIPT_MAP.get(account, "")
+    live_pids = list(pids) if pids is not None else (account_process_pids(account) if os.name != 'nt' else [])
+    uptimes = [value for value in (process_uptime_seconds(pid) for pid in live_pids) if value is not None]
+    state_path = os.path.join(CONFIG_DIR, f"state_{account}.json")
+    return {
+        "script": script,
+        "pids": live_pids,
+        "uptime_seconds": max(uptimes) if uptimes else None,
+        "state": file_mtime_info(state_path),
+    }
+
+def git_command_output(args):
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=CONFIG_DIR,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return ""
+        return str(result.stdout or "").strip()
+    except Exception:
+        return ""
+
+def git_metadata():
+    """Return cached git metadata for the running deploy checkout."""
+    now_ts = time.time()
+    cached = GIT_META_CACHE.get("data")
+    if cached and now_ts - float(GIT_META_CACHE.get("at") or 0) < GIT_META_CACHE_SECONDS:
+        return cached
+    branch = git_command_output(["branch", "--show-current"])
+    commit = git_command_output(["rev-parse", "HEAD"])
+    dirty_text = git_command_output(["status", "--short"])
+    data = {
+        "branch": branch or "unknown",
+        "commit": commit,
+        "commit_short": commit[:7] if commit else "unknown",
+        "dirty": bool(dirty_text),
+        "dirty_count": len([line for line in dirty_text.splitlines() if line.strip()]),
+        "available": bool(commit),
+        "checked_at": datetime.now().strftime(TIME_FORMAT),
+    }
+    GIT_META_CACHE["at"] = now_ts
+    GIT_META_CACHE["data"] = data
+    return data
+
+def dashboard_runtime_info(account_infos=None):
+    """Build VPS/deploy metadata for the dashboard header."""
+    return {
+        "dashboard": {
+            "pid": os.getpid(),
+            "started_at": SERVER_STARTED_AT,
+            "uptime_seconds": max(0, int(time.time() - SERVER_START_TS)),
+        },
+        "git": git_metadata(),
+        "accounts": account_infos or {},
+    }
+
 def signal_account_processes(account, sig):
     """Signal only the python process for the selected account script."""
     for pid in account_process_pids(account):
@@ -3011,12 +3109,17 @@ def status(username: str = Depends(authenticate)):
             if cached and now_ts - float(STATUS_CACHE.get("at") or 0) < STATUS_CACHE_SECONDS:
                 return cached
             result = {}
+            runtime_accounts = {}
             for key, info in ACCOUNT_DISPLAY_NAMES.items():
                 state = get_state(key)
+                pids = account_process_pids(key) if os.name != 'nt' else None
+                process_info = account_runtime_info(key, pids=pids)
+                runtime_accounts[key] = process_info
                 result[key] = {
                     "name": info,
                     "state": state,
-                    "is_alive": get_process_status(key),
+                    "is_alive": bool(pids) if os.name != 'nt' else get_process_status(key),
+                    "process": process_info,
                     "cultivation": get_cultivation_summary(key),
                     "command_panels": build_command_panels(key, state),
                     "profile_usernames": account_profile_usernames(key),
@@ -3024,6 +3127,7 @@ def status(username: str = Depends(authenticate)):
             payload = {
                 "accounts": result,
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "runtime": dashboard_runtime_info(runtime_accounts),
             }
             STATUS_CACHE["at"] = now_ts
             STATUS_CACHE["data"] = payload
@@ -3169,7 +3273,7 @@ async def upsert_custom_command(payload: dict = Body(...), username: str = Depen
     interval_minutes = clean_custom_int(payload.get("interval_minutes"), default=0, min_value=0, max_value=60 * 24 * 30)
     timeout_seconds = clean_custom_int(payload.get("timeout_seconds"), default=45, min_value=10, max_value=180)
     max_retries = clean_custom_int(payload.get("max_retries"), default=0, min_value=0, max_value=2)
-    schedule_enabled = bool(payload.get("schedule_enabled", interval_minutes > 0)) and interval_minutes > 0
+    schedule_enabled = bool(payload.get("schedule_enabled", False)) and interval_minutes > 0
     if account not in WINDOW_MAP:
         return {"success": False, "msg": "未知账号"}
     if not command:

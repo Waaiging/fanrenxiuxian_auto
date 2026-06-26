@@ -91,6 +91,34 @@
         .command-launcher-meta { margin-top: 0.3rem; display: flex; justify-content: space-between; gap: 0.45rem; color: var(--text-secondary); font-size: 0.68rem; min-width: 0; }
         .command-launcher-next { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-launcher-ready { color: #34d399; white-space: nowrap; }
+        .runtime-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; padding: 0.95rem 1rem; backdrop-filter: blur(12px); }
+        .runtime-header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; margin-bottom: 0.75rem; }
+        .runtime-title { display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
+        .runtime-title strong { color: var(--text-primary); font-size: 0.95rem; }
+        .runtime-title span, .runtime-git { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.35; }
+        .runtime-git { text-align: right; }
+        .runtime-git.dirty { color: #fbbf24; }
+        .runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.55rem; }
+        .runtime-item { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.62rem 0.7rem; min-width: 0; }
+        .runtime-item-name { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.35rem; }
+        .runtime-item-pid { color: var(--accent-color); font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
+        .runtime-item-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .account-health { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.65rem; margin: 0.2rem 0 1rem; }
+        .account-health-title { display: flex; justify-content: space-between; gap: 0.6rem; color: var(--text-secondary); font-size: 0.72rem; font-weight: 800; margin-bottom: 0.52rem; }
+        .account-health-next { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .health-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.42rem; }
+        .health-metric { border: 1px solid rgba(255,255,255,0.07); border-radius: 7px; padding: 0.42rem 0.35rem; background: rgba(255,255,255,0.035); text-align: center; min-width: 0; }
+        .health-metric-value { display: block; font-family: 'JetBrains Mono', monospace; font-weight: 900; font-size: 0.9rem; color: var(--text-primary); }
+        .health-metric-label { display: block; color: var(--text-secondary); font-size: 0.64rem; margin-top: 0.08rem; white-space: nowrap; }
+        .health-metric.danger .health-metric-value { color: #f87171; }
+        .health-metric.warning .health-metric-value { color: #fbbf24; }
+        .health-metric.paused .health-metric-value { color: #fca5a5; }
+        .identity-command-strip { width: 100%; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0.25rem; margin-top: 0.1rem; }
+        .identity-command-metric { border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: rgba(0,0,0,0.18); color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.61rem; padding: 0.12rem 0.28rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .identity-command-strip.danger .identity-command-metric.next { color: #f87171; border-color: rgba(248,113,113,0.32); }
+        .identity-command-strip.warning .identity-command-metric.next { color: #fbbf24; border-color: rgba(251,191,36,0.28); }
+        .identity-command-open { border: 1px solid rgba(0,210,255,0.36); border-radius: 6px; background: rgba(0,210,255,0.1); color: var(--accent-color); font-size: 0.62rem; font-weight: 800; padding: 0.12rem 0.36rem; cursor: pointer; }
+        .identity-command-open:hover { background: rgba(0,210,255,0.18); }
         .command-group { font-size: 0.78rem; color: var(--accent-color); letter-spacing: 0; padding: 0.9rem 0 0.35rem; font-weight: 800; border-top: 1px solid rgba(255,255,255,0.06); }
         .command-group:first-child { border-top: 0; padding-top: 0; }
         .command-row { display: grid; grid-template-columns: minmax(9rem, 1.6fr) minmax(8rem, 1fr) minmax(5.5rem, auto) minmax(5.8rem, auto); gap: 0.75rem; align-items: center; padding: 0.78rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.92rem; }
@@ -216,6 +244,8 @@
         .log-empty { color: #64748b; padding: 1rem 0; }
         @media (max-width: 800px) {
             main { grid-template-columns: 1fr; padding: 1rem; }
+            .runtime-header { flex-direction: column; }
+            .runtime-git { text-align: left; }
             .log-tools { grid-template-columns: 1fr; align-items: stretch; }
             .log-filter-summary { text-align: left; min-width: 0; }
             .command-row { grid-template-columns: 1fr auto; gap: 0.5rem 0.65rem; font-size: 0.88rem; }
@@ -377,6 +407,9 @@
     </header>
 
     <main>
+        <section class="runtime-section" id="runtime-summary">
+            <div class="record-empty">运行信息加载中...</div>
+        </section>
         <div id="account-cards" style="display: contents;"></div>
         <section class="command-record-section">
             <div class="record-header">
@@ -796,6 +829,155 @@
             return rows.length ? rows[0] : null;
         }
 
+        function commandRowsFromPanels(panels) {
+            const rows = [];
+            for (const panel of (Array.isArray(panels) ? panels : [])) {
+                const identity = panel.identity || '主魂';
+                for (const item of dashboardCommands(panel.commands)) {
+                    rows.push({identity, item});
+                }
+            }
+            return rows;
+        }
+
+        function summarizeCommandRows(rows) {
+            const summary = {
+                total: 0,
+                paused: 0,
+                due: 0,
+                soon: 0,
+                next: null
+            };
+            const futures = [];
+            for (const row of (Array.isArray(rows) ? rows : [])) {
+                const item = row.item || row;
+                if (!item) continue;
+                summary.total += 1;
+                if (item.control_disabled) {
+                    summary.paused += 1;
+                    continue;
+                }
+                const seconds = commandNextSeconds(item);
+                if (seconds === null || item.tone === 'done') continue;
+                if (seconds <= 0) {
+                    summary.due += 1;
+                } else {
+                    if (seconds <= 30 * 60) summary.soon += 1;
+                    futures.push({identity: row.identity || '主魂', item, seconds});
+                }
+            }
+            futures.sort((a, b) => a.seconds - b.seconds);
+            summary.next = futures[0] || null;
+            return summary;
+        }
+
+        function identityCommandSummary(account, identity) {
+            const panelKey = commandIdentityKey(account, identity || '主魂');
+            const commands = window.commandPanelDataMap?.[panelKey]?.panel?.commands || [];
+            return summarizeCommandRows(commands.map(item => ({identity: identity || '主魂', item})));
+        }
+
+        function commandNextSummaryText(summary) {
+            if (!summary || !summary.total) return '暂无指令';
+            if (summary.due > 0) return `${summary.due} 项到期`;
+            if (summary.next) {
+                const label = summary.next.item.label || summary.next.item.command || '指令';
+                return `${summary.next.identity} · ${label} ${formatDurationShort(summary.next.seconds)}`;
+            }
+            return '暂无倒计时';
+        }
+
+        function renderIdentityCommandStrip(account, identity) {
+            const summary = identityCommandSummary(account, identity);
+            const tone = summary.due > 0 ? 'danger' : (summary.soon > 0 ? 'warning' : '');
+            const nextText = commandNextSummaryText(summary);
+            return `
+                <div class="identity-command-strip ${tone}" title="${escapeHtml(nextText)}">
+                    <span class="identity-command-metric">指令 ${summary.total}</span>
+                    <span class="identity-command-metric">暂停 ${summary.paused}</span>
+                    <span class="identity-command-metric next">${escapeHtml(nextText)}</span>
+                    <button class="identity-command-open" type="button" onclick="event.stopPropagation(); openIdentityCommands('${escapeJs(account)}', '${escapeJs(identity || '主魂')}')">指令</button>
+                </div>
+            `;
+        }
+
+        function renderMetric(value, label, tone = '') {
+            return `
+                <div class="health-metric ${tone}">
+                    <span class="health-metric-value">${escapeHtml(value)}</span>
+                    <span class="health-metric-label">${escapeHtml(label)}</span>
+                </div>
+            `;
+        }
+
+        function renderAccountCommandHealth(panels) {
+            const summary = summarizeCommandRows(commandRowsFromPanels(panels));
+            const nextText = commandNextSummaryText(summary);
+            return `
+                <div class="account-health">
+                    <div class="account-health-title">
+                        <span>调度健康</span>
+                        <span class="account-health-next" title="${escapeHtml(nextText)}">${escapeHtml(nextText)}</span>
+                    </div>
+                    <div class="health-metrics">
+                        ${renderMetric(summary.total, '指令')}
+                        ${renderMetric(summary.due, '待执行', summary.due > 0 ? 'danger' : '')}
+                        ${renderMetric(summary.soon, '30分内', summary.soon > 0 ? 'warning' : '')}
+                        ${renderMetric(summary.paused, '暂停', summary.paused > 0 ? 'paused' : '')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderRuntimeSummary(data) {
+            const target = document.getElementById('runtime-summary');
+            if (!target) return;
+            const runtime = data?.runtime || {};
+            const dashboard = runtime.dashboard || {};
+            const git = runtime.git || {};
+            const accountMeta = runtime.accounts || {};
+            const gitText = git.available
+                ? `${git.branch || 'unknown'} @ ${git.commit_short || 'unknown'}`
+                : 'git 信息不可用';
+            const dirtyText = git.dirty ? ` · 未提交 ${Number(git.dirty_count || 0)} 项` : ' · clean';
+            const accountRows = Object.entries(data?.accounts || {}).map(([id, acc]) => {
+                const process = accountMeta[id] || acc.process || {};
+                const state = process.state || {};
+                const pids = Array.isArray(process.pids) ? process.pids : [];
+                const pidText = pids.length ? `PID ${pids.join(',')}` : '未运行';
+                const uptime = process.uptime_seconds !== null && process.uptime_seconds !== undefined
+                    ? formatDurationShort(process.uptime_seconds)
+                    : '--';
+                const stateAge = state.age_seconds !== null && state.age_seconds !== undefined
+                    ? formatDurationShort(state.age_seconds)
+                    : '--';
+                return `
+                    <div class="runtime-item">
+                        <div class="runtime-item-name">
+                            <span>${escapeHtml(acc.name || id)}</span>
+                            <span class="runtime-item-pid">${escapeHtml(pidText)}</span>
+                        </div>
+                        <div class="runtime-item-meta" title="${escapeHtml(process.script || '')}">脚本 ${escapeHtml(process.script || '--')}</div>
+                        <div class="runtime-item-meta">运行 ${escapeHtml(uptime)} · state 更新 ${escapeHtml(stateAge)} 前</div>
+                    </div>
+                `;
+            }).join('');
+            target.innerHTML = `
+                <div class="runtime-header">
+                    <div class="runtime-title">
+                        <strong>VPS 运行信息</strong>
+                        <span>Dashboard PID ${escapeHtml(dashboard.pid || '--')} · 已运行 ${escapeHtml(formatDurationShort(dashboard.uptime_seconds || 0))} · 启动 ${escapeHtml(dashboard.started_at || '--')}</span>
+                    </div>
+                    <div class="runtime-git ${git.dirty ? 'dirty' : ''}" title="${escapeHtml(git.checked_at || '')}">
+                        ${escapeHtml(gitText + dirtyText)}
+                    </div>
+                </div>
+                <div class="runtime-grid">
+                    ${accountRows || '<div class="record-empty">暂无账号运行信息。</div>'}
+                </div>
+            `;
+        }
+
         function commandScheduleText(item) {
             if (item?.schedule_type === 'daily') {
                 return item.remaining || item.at || '今日';
@@ -1047,7 +1229,7 @@
                     <div class="command-custom-actions">
                         <button class="command-custom-submit" type="submit">添加指令</button>
                         <label class="command-visibility-item">
-                            <input name="schedule_enabled" type="checkbox" checked>
+                            <input name="schedule_enabled" type="checkbox">
                             <span class="command-visibility-label">自动调度</span>
                         </label>
                     </div>
@@ -1399,7 +1581,7 @@
                 if (form.elements['interval_minutes']) form.elements['interval_minutes'].value = '60';
                 if (form.elements['timeout_seconds']) form.elements['timeout_seconds'].value = '45';
                 if (form.elements['max_retries']) form.elements['max_retries'].value = '0';
-                if (form.elements['schedule_enabled']) form.elements['schedule_enabled'].checked = true;
+                if (form.elements['schedule_enabled']) form.elements['schedule_enabled'].checked = false;
                 await updateStatus();
                 if (commandModalKey === panelKey) renderCommandModal(panelKey);
             } catch (e) {
@@ -1478,6 +1660,7 @@
                 const r = await fetch(apiUrl('/api/status'), {cache: 'no-store'});
                 const data = await r.json();
                 document.getElementById('server-time').innerText = data.server_time;
+                renderRuntimeSummary(data);
                 
                 let html = '';
                 window.commandPanelDataMap = {};
@@ -1513,7 +1696,9 @@
                         } catch(e) { return t; }
                     }
 
-                    const commandPanelHtml = renderCommandPanels(id, acc.command_panels || []);
+                    const panels = acc.command_panels || [];
+                    const commandPanelHtml = renderCommandPanels(id, panels);
+                    const accountHealthHtml = renderAccountCommandHealth(panels);
 
                     let avatarHtml = '';
                     if (s.avatars && Object.keys(s.avatars).length > 0) {
@@ -1600,6 +1785,7 @@
                                     <div class="avatar-status ${statusClass}" style="margin-top: 0.1rem;">
                                         <span class="avatar-status-dot"></span>${statusText}
                                     </div>
+                                    ${renderIdentityCommandStrip(id, name)}
                                 </div>
                             `;
                         }).join('');
@@ -1628,6 +1814,7 @@
                                     </div>
                                 </div>
                                 ${mainUsernameText ? `<div class="identity-username account-username" title="${escapeHtml(mainUsernameText)}">主魂 ${escapeHtml(mainUsernameText)}</div>` : ''}
+                                ${renderIdentityCommandStrip(id, '主魂')}
                                 <div class="stat-grid">
                                     <div class="stat-item">
                                         <div class="stat-label">闭关状态</div>
@@ -1640,6 +1827,7 @@
                                 </div>
                                 ${renderCultivation(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
                             </div>
+                            ${accountHealthHtml}
                             ${avatarHtml}
                             ${commandPanelHtml}
                             <div class="controls">
