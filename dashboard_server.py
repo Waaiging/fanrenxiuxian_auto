@@ -2783,11 +2783,37 @@ def get_cultivation_summary(name):
 # 日志过滤与查询
 # =====================================================================
 
-def filter_log_entries(entries, tag="", q=""):
+def log_entry_header(entry):
+    lines = entry.get("lines") or []
+    if lines:
+        return str(lines[0] or "")
+    text = str(entry.get("text") or "")
+    return text.splitlines()[0] if text else ""
+
+def entry_matches_log_kind(entry, kind=""):
+    kind = str(kind or "").strip().lower()
+    if not kind:
+        return True
+    header = log_entry_header(entry)
+    if kind == "out":
+        return " OUT " in f" {header} "
+    if kind == "in":
+        return " IN " in f" {header} "
+    if kind == "warn":
+        return "[WARNING]" in header
+    if kind == "error":
+        return "[ERROR]" in header or "[CRITICAL]" in header
+    if kind == "issue":
+        return any(marker in header for marker in ("[WARNING]", "[ERROR]", "[CRITICAL]"))
+    return True
+
+def filter_log_entries(entries, tag="", q="", kind=""):
     """按标签和关键词过滤日志条目"""
     tag = (tag or "").strip(); q = (q or "").strip().lower()
     filtered = []
     for entry in entries:
+        if kind and not entry_matches_log_kind(entry, kind):
+            continue
         if tag:
             if tag == OTHER_LOG_TAG:
                 if tag not in entry["tags"]: continue
@@ -2822,10 +2848,13 @@ def get_log_tags(name, include_counts=True):
     ordered.sort(key=lambda item: (-item["count"], item["tag"]))
     return {"tags": ordered, "error": error}
 
-def get_log_page(name, before=None, limit=80, tag="", q=""):
+def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
     """获取分页的日志内容"""
     limit = max(20, min(int(limit or 80), 200))
-    if not (tag or q):
+    kind = (kind or "").strip().lower()
+    if kind not in {"", "out", "in", "warn", "error", "issue"}:
+        kind = ""
+    if not (tag or q or kind):
         entries, error, meta = read_recent_log_entries(name, before_byte=before, limit=limit)
         if error:
             return {"content": error, "entries": [], "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None, "partial": True}
@@ -2841,6 +2870,7 @@ def get_log_page(name, before=None, limit=80, tag="", q=""):
             "next_before": meta.get("next_before"),
             "tag": tag,
             "q": q,
+            "kind": kind,
             "partial": True,
             "cursor_mode": meta.get("cursor_mode", "byte"),
             "log_size": meta.get("log_size", 0),
@@ -2849,7 +2879,7 @@ def get_log_page(name, before=None, limit=80, tag="", q=""):
     entries, error = read_log_entries(name)
     if error:
         return {"content": error, "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None}
-    filtered = filter_log_entries(entries, tag=tag, q=q)
+    filtered = filter_log_entries(entries, tag=tag, q=q, kind=kind)
     total = len(entries); matched = len(filtered)
     end = matched if before is None else max(0, min(int(before), matched))
     start = max(0, end - limit)
@@ -2857,7 +2887,7 @@ def get_log_page(name, before=None, limit=80, tag="", q=""):
     return {"content": "\n\n".join(entry["text"] for entry in page_entries),
             "entries": [entry["text"] for entry in page_entries],
             "start": start, "end": end, "total": total, "matched": matched,
-            "has_more": start > 0, "next_before": start if start > 0 else None, "tag": tag, "q": q}
+            "has_more": start > 0, "next_before": start if start > 0 else None, "tag": tag, "q": q, "kind": kind}
 
 
 # =====================================================================
@@ -3211,7 +3241,7 @@ def command_records(username: str = Depends(authenticate)):
         return payload
 
 @app.get("/api/logs/{name}")
-def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "",
+def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "", kind: str = "",
          username: str = Depends(authenticate)):
     """获取账号的分页日志"""
     cache_key = json.dumps({
@@ -3220,13 +3250,14 @@ def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = ""
         "limit": max(1, min(int(limit or 80), 300)),
         "tag": tag or "",
         "q": q or "",
+        "kind": kind or "",
     }, sort_keys=True, ensure_ascii=False)
     now_ts = time.time()
     with LOG_PAGE_LOCK:
         cached = LOG_PAGE_CACHE.get(cache_key)
         if cached and now_ts - float(cached.get("at") or 0) < LOG_PAGE_CACHE_SECONDS:
             return cached.get("data")
-        payload = get_log_page(name, before=before, limit=limit, tag=tag, q=q)
+        payload = get_log_page(name, before=before, limit=limit, tag=tag, q=q, kind=kind)
         LOG_PAGE_CACHE[cache_key] = {"at": now_ts, "data": payload}
         if len(LOG_PAGE_CACHE) > 24:
             oldest_key = min(LOG_PAGE_CACHE, key=lambda key: LOG_PAGE_CACHE[key].get("at", 0))
