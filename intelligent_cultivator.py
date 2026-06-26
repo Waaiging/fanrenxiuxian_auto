@@ -29,7 +29,7 @@ import json
 STAR_GAZING_INTERVAL_HOURS = 3
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (16, 18)
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (8, 10)
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1
@@ -1073,6 +1073,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 self.update_identity_passively(msg)
                 manual_reply = is_reply_to_manual_command(self, msg)
                 manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender_cache, log)
+                self.record_star_shift_attempt_if_needed(msg, text, source="new message")
                 if not manual_reply or not manual_processed:
                     self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
                 if not manual_reply:
@@ -4937,6 +4938,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     record_game_bot_activity(self, sender, log)
                     record_star_gazing_event("main", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
+                    self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁）
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
                         identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")
@@ -5231,6 +5233,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     def star_gazing_final_report_seen(self, target_dt):
             return self.common_star_gazing_final_report_seen(target_dt)
 
+    def record_star_shift_attempt_if_needed(self, msg, text, source="new message"):
+            return self.common_record_star_shift_attempt_message(
+                msg,
+                text,
+                STAR_GAZING_SHIFT_TARGET,
+                source=source,
+                logger=log,
+            )
+
     def record_star_gazing_final_report_if_needed(self, msg, text, source="new message"):
             if not self.is_star_gazing_final_report(text):
                 return False
@@ -5340,6 +5351,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                             f"{idx}/{STAR_GAZING_SHIFT_REPEAT_COUNT} scheduled at {dt_to_str(send_dt)}."
                         )
                         continue
+                    if not self.common_mark_star_shift_attempt(
+                        "主魂",
+                        today,
+                        source="scheduled dispatch",
+                        logger=log,
+                    ):
+                        break
+                    self.save_state()
                     log.info(
                         f"Star gazing: sending {command} repeat {idx}/{STAR_GAZING_SHIFT_REPEAT_COUNT} "
                         f"as reply to .观星 result {reply_msg_id}."
@@ -5412,6 +5431,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             log.info(f"🔒 [ATOMIC LOCK] Acquired by AvatarStarShift-{avatar}")
             try:
                 command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
+                if not self.common_mark_star_shift_attempt(
+                    avatar,
+                    today,
+                    source="avatar scheduled dispatch",
+                    logger=log,
+                ):
+                    return
+                self.save_state()
                 log.info(f"Star gazing [{avatar}]: sending {command} as reply to .观星 result {reply_msg_id}.")
                 sent_msg = await self.send_and_wait_feedback_identity(
                     avatar,
@@ -5590,6 +5617,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                             return
                     
                         who = avatar or "主魂"
+                        if not self.common_mark_star_shift_attempt(
+                            who,
+                            today,
+                            source="active-window dispatch",
+                            logger=log,
+                        ):
+                            return
+                        self.save_state()
                         log.info(
                             f"Star gazing [{who}]: sending {command} in ACTIVE window as reply to msg {resp_msg.id}."
                         )

@@ -1702,9 +1702,9 @@ class ParserFixtureTests(unittest.TestCase):
         target = datetime(2026, 6, 15, 12, 0, 0)
 
         cases = [
-            (intelligent_cultivator, 16, 18),
-            (sub_cultivator, 22, 24),
-            (cultivator_xiaohao, 19, 21),
+            (intelligent_cultivator, 8, 10),
+            (sub_cultivator, 9, 11),
+            (cultivator_xiaohao, 10, 12),
         ]
         for module, min_delay, max_delay in cases:
             with self.subTest(module=module.__name__):
@@ -1713,6 +1713,69 @@ class ParserFixtureTests(unittest.TestCase):
                     self.assertGreater(shift_dt, target)
                     self.assertGreaterEqual(shift_dt, target + timedelta(seconds=min_delay))
                     self.assertLessEqual(shift_dt, target + timedelta(seconds=max_delay))
+
+    def test_star_shift_attempt_feedback_marks_avatar_and_clears_pending(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["缘生子"]
+        actor.avatar_usernames = {"adai925": "缘生子"}
+        actor.state = {
+            "avatars": {"缘生子": {"pending_star_gazing_target_time": now_str()}},
+            "pending_star_gazing_manifest_time": now_str(),
+            "pending_star_gazing_fate_type": "Good - 五彩缤纷",
+            "star_gazing_claimed_avatar": "缘生子",
+            "star_gazing_claimed_manifest_time": now_str(),
+        }
+        actor.feedback_commands = {8001: ".改换星移 @TitanCreeper"}
+        actor.feedback_identities = {8001: "缘生子"}
+        actor.command_avatar_map = {8001: "缘生子"}
+        actor.save_state = lambda: None
+        actor.get_avatar_state = lambda name: actor.state["avatars"].setdefault(name, {})
+        actor.set_avatar_state = lambda name, key, value: actor.state["avatars"].setdefault(name, {}).__setitem__(key, value)
+
+        msg = DummyMessage(
+            8002,
+            text="[Avatar: 缘生子]\n你开始消耗 **33558** 点修为，尝试扭转因果...\n（成功率: **50%**）",
+            reply_to_msg_id=8001,
+        )
+
+        self.assertTrue(actor.record_star_shift_attempt_if_needed(msg, msg.text, source="fixture"))
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(actor.state["avatars"]["缘生子"]["last_star_shift_date"], today)
+        self.assertEqual(actor.state["avatars"]["缘生子"]["pending_star_gazing_target_time"], "")
+        self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
+
+    def test_star_shift_success_broadcast_marks_claimed_avatar(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_usernames = {"lvdoumiao": "缘生子"}
+        actor.state = {
+            "avatars": {"缘生子": {}},
+            "pending_star_shift_target_time": now_str(),
+            "pending_star_shift_msg_id": 9001,
+            "pending_star_gazing_manifest_time": now_str(),
+            "star_gazing_claimed_avatar": "缘生子",
+            "star_gazing_claimed_manifest_time": now_str(),
+        }
+        actor.feedback_commands = {}
+        actor.feedback_identities = {}
+        actor.command_avatar_map = {}
+        actor.save_state = lambda: None
+        actor.get_avatar_state = lambda name: actor.state["avatars"].setdefault(name, {})
+        actor.set_avatar_state = lambda name, key, value: actor.state["avatars"].setdefault(name, {}).__setitem__(key, value)
+
+        text = """
+[Avatar: 缘生子]
+**【天机异动】**
+星盘光芒大作！【星宫】弟子 @Lvdoumiao 强行施展【改换星移】之术，竟成功扭转了天机！
+
+原本将降临于 @zedwang125 身上的**【Good - 五彩缤纷】**，现已改道，将由 **@Gamling33** 承受！
+"""
+
+        self.assertTrue(actor.record_star_shift_attempt_if_needed(DummyMessage(9002, text=text), text, source="fixture"))
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(actor.state["avatars"]["缘生子"]["last_star_shift_date"], today)
+        self.assertEqual(actor.state["pending_star_shift_target_time"], "")
+        self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
 
     def test_bad_manifest_after_boundary_clears_previous_round_pending_all_accounts(self):
         class FixedDatetime(datetime):

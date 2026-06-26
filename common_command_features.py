@@ -32,6 +32,7 @@ from log_utils import (
     text_targets_current_account,
     text_username_mentions,
     tracked_command_identity_for_reply,
+    tracked_command_text_for_reply,
 )
 from command_modules import (
     ask_dao_plan,
@@ -2825,6 +2826,108 @@ class CommonCommandMixin:
         if not target_dt:
             return False
         return self.state.get("last_star_gazing_report_manifest_time", "") == dt_to_str(target_dt)
+
+    def common_is_star_shift_attempt_feedback(self, text):
+        clean = str(text or "").replace("**", "")
+        return "你开始消耗" in clean and "扭转因果" in clean
+
+    def common_star_shift_target_in_success(self, text, target_username):
+        clean = str(text or "").replace("**", "")
+        target = str(target_username or "").strip().lstrip("@")
+        if not target or "【天机异动】" not in clean or "改换星移" not in clean:
+            return False
+        pattern = rf"将由\s*@?{re.escape(target)}\b\s*承受"
+        return bool(re.search(pattern, clean, flags=re.IGNORECASE))
+
+    def common_star_shift_actor_identity(self, text):
+        clean = str(text or "").replace("**", "")
+        match = re.search(r"弟子\s*@([A-Za-z0-9_]+)\s*强行施展", clean)
+        if not match:
+            return ""
+        return (getattr(self, "avatar_usernames", {}) or {}).get(match.group(1).lower(), "")
+
+    def common_star_shift_identity_from_text(self, text):
+        return (
+            self.common_star_shift_actor_identity(text)
+            or avatar_marker_identity_from_text(text)
+            or self.state.get("star_gazing_claimed_avatar", "")
+            or "主魂"
+        )
+
+    def common_star_shift_attempted_for_identity(self, identity="主魂", date_str=None):
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity != "主魂" and hasattr(self, "get_avatar_state"):
+            return self.get_avatar_state(identity).get("last_star_shift_date") == date_str
+        return self.state.get("last_star_shift_date") == date_str
+
+    def common_mark_star_shift_attempt(self, identity="主魂", date_str=None, source="", logger=None):
+        """Mark one .改换星移 attempt for a round before any later duplicate task can send."""
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        identity = str(identity or "主魂").strip() or "主魂"
+        changed = False
+        stamp = now_str()
+
+        if identity != "主魂" and hasattr(self, "get_avatar_state") and hasattr(self, "set_avatar_state"):
+            state = self.get_avatar_state(identity)
+            if state.get("last_star_shift_date") != date_str:
+                self.set_avatar_state(identity, "last_star_shift_date", date_str)
+                self.set_avatar_state(identity, "last_star_shift_time", stamp)
+                changed = True
+        else:
+            if self.state.get("last_star_shift_date") != date_str:
+                self.state["last_star_shift_date"] = date_str
+                self.state["last_star_shift_time"] = stamp
+                changed = True
+
+        if changed:
+            log = logger or self.common_command_logger()
+            who = identity or "主魂"
+            suffix = f" ({source})" if source else ""
+            log.info(f"Star gazing [{who}]: marked .改换星移 attempted for {date_str}{suffix}.")
+        return changed
+
+    def common_clear_star_shift_pending_after_attempt(self, identity=""):
+        identity = str(identity or "").strip()
+        if identity and identity != "主魂" and hasattr(self, "clear_avatar_star_gazing_pending"):
+            self.clear_avatar_star_gazing_pending(identity)
+        if hasattr(self, "clear_pending_star_shift"):
+            self.clear_pending_star_shift()
+        else:
+            self.state["pending_star_gazing_manifest_time"] = ""
+            self.state["pending_star_gazing_fate_type"] = ""
+        self.common_clear_star_gazing_round_claim()
+
+    def common_record_star_shift_attempt_message(self, msg, text, target_username, source="", logger=None):
+        """Record accepted/successful .改换星移 messages so duplicate scheduled tasks stand down."""
+        log = logger or self.common_command_logger()
+        identity = ""
+        reason = ""
+
+        if self.common_star_shift_target_in_success(text, target_username):
+            identity = self.common_star_shift_identity_from_text(text)
+            reason = "success broadcast"
+        elif self.common_is_star_shift_attempt_feedback(text):
+            command = str(tracked_command_text_for_reply(self, msg) or "").strip()
+            if command and not command.startswith(".改换星移"):
+                return False
+            if not command and not avatar_marker_identity_from_text(text):
+                return False
+            identity = tracked_command_identity_for_reply(self, msg) or avatar_marker_identity_from_text(text) or "主魂"
+            reason = "attempt accepted"
+        else:
+            return False
+
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        changed = self.common_mark_star_shift_attempt(
+            identity,
+            date_str,
+            source=f"{reason}; {source}" if source else reason,
+            logger=log,
+        )
+        self.common_clear_star_shift_pending_after_attempt(identity)
+        self.save_state()
+        return True
 
     def common_is_star_gazing_forbidden_response(self, text, forbidden_keywords):
         return bool(text and any(keyword in text for keyword in forbidden_keywords))

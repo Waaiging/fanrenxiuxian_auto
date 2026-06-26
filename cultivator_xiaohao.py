@@ -98,7 +98,7 @@ from log_utils import (
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (19, 21)     # 小号在显现后 19~21 秒发出，抢显化后的机缘窗口
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (10, 12)     # 小号在显现后 10~12 秒发出，目标让成功广播落在快报前
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
@@ -4013,6 +4013,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             if is_game_bot_sender(self, sender):
                 record_game_bot_activity(self, sender, log)
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
+                self.record_star_shift_attempt_if_needed(msg, text, source="new message")
             # 身外化身：被动身份自愈更新
             if is_game_bot_sender(self, sender): 
                 self.update_identity_passively(msg)
@@ -4375,6 +4376,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             )
         return True
 
+    def record_star_shift_attempt_if_needed(self, msg, text, source="new message"):
+        return self.common_record_star_shift_attempt_message(
+            msg,
+            text,
+            STAR_SHIFT_TARGET,
+            source=source,
+            logger=log,
+        )
+
     def is_star_gazing_forbidden_response(self, text):
         return self.common_is_star_gazing_forbidden_response(text, STAR_GAZING_FORBIDDEN_KEYWORDS)
 
@@ -4610,6 +4620,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 return
 
             command = f".改换星移 @{STAR_SHIFT_TARGET}"
+            if not self.common_mark_star_shift_attempt(
+                avatar,
+                today,
+                source="avatar scheduled dispatch",
+                logger=log,
+            ):
+                return
+            self.save_state()
             log.info(f"Avatar {avatar} Star gazing: sending {command} as reply to .观星 result {reply_msg_id}.")
             sent_msg = await self.send_and_wait_feedback_identity(
                 avatar,
@@ -4741,6 +4759,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         log.error(f"Avatar {avatar}: username mapping not found in immediate mode; skipping shift.")
                         return
                     command = f".改换星移 @{STAR_SHIFT_TARGET}"
+                    if not self.common_mark_star_shift_attempt(
+                        avatar,
+                        today,
+                        source="active-window dispatch",
+                        logger=log,
+                    ):
+                        return
+                    self.save_state()
                     log.info(f"Avatar {avatar} Star gazing: sending {command} in ACTIVE window as reply to msg {resp_msg.id}.")
                     sent_msg = await self.send_and_wait_feedback_identity(
                         avatar,
@@ -6087,6 +6113,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     record_game_bot_activity(self, sender, log)
                     record_star_gazing_event("xiaohao", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
+                    self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁，加入账号强匹配）
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
                         identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")
