@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import random
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,18 @@ CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 EVENT_FILE = os.path.join(CONFIG_DIR, "star_gazing_events.jsonl")
 LOCK_FILE = os.path.join(CONFIG_DIR, "star_gazing_events.lock")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+STAR_SHIFT_DEFAULT_SEND_RANGE = (21, 24)
+STAR_SHIFT_MIN_SEND_DELAY_SECONDS = 6
+STAR_SHIFT_MAX_SEND_DELAY_SECONDS = 28
+STAR_SHIFT_RESULT_DELAY_SECONDS = 8
+STAR_SHIFT_RESULT_SAFETY_GAP_RANGE = (2, 4)
+STAR_SHIFT_MIN_RECENT_TYPE_SAMPLES = 5
+STAR_SHIFT_MIN_RECENT_HOUR_SAMPLES = 5
+STAR_SHIFT_MIN_RECENT_GLOBAL_SAMPLES = 10
+STAR_SHIFT_HISTORY_LOOKBACK_DAYS = 7
+STAR_SHIFT_RECENT_GLOBAL_DAYS = 3
+STAR_SHIFT_NEWS_OFFSET_MAX_SECONDS = 120
 
 STAR_EVENT_MARKERS = (
     "【星盘显化】",
@@ -92,6 +105,192 @@ def _next_boundary_time(dt):
 
 def _fmt_dt(dt):
     return dt.strftime(TIME_FORMAT) if dt else ""
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), TIME_FORMAT)
+    except Exception:
+        return None
+
+
+def _median(values):
+    values = sorted(float(v) for v in values)
+    if not values:
+        return None
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2.0
+
+
+def _fate_title(value):
+    value = _strip_md(value or "")
+    match = re.search(r"(?:Good|Bad|Neutral)\s*-\s*(.+)", value)
+    if match:
+        return match.group(1).strip()
+    return value.strip("【】 ")
+
+
+def _load_star_gazing_records(path=EVENT_FILE):
+    if not os.path.exists(path):
+        return []
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return records
+
+
+def _unique_news_offsets(records, now=None):
+    now = now or datetime.now(_local_tz()).replace(tzinfo=None)
+    seen = set()
+    items = []
+    for record in records:
+        if record.get("event_kind") != "news":
+            continue
+        offset = record.get("final_news_offset_seconds")
+        if not isinstance(offset, (int, float)):
+            continue
+        if offset < 0 or offset > STAR_SHIFT_NEWS_OFFSET_MAX_SECONDS:
+            continue
+        message_time = _parse_dt(record.get("message_time"))
+        target_time = _parse_dt(record.get("target_manifest_time"))
+        if not message_time or not target_time:
+            continue
+        key = (
+            record.get("target_manifest_time", ""),
+            record.get("message_id"),
+            record.get("text_hash", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "offset": float(offset),
+                "title": _fate_title(record.get("news_title")),
+                "hour": target_time.hour,
+                "message_time": message_time,
+            }
+        )
+    return items
+
+
+def predict_star_shift_delay_range(
+    target_dt,
+    fate_type="",
+    now=None,
+    history_file=EVENT_FILE,
+):
+    """Predict a post-manifest .改换星移 send window from collected history."""
+    now = now or datetime.now(_local_tz()).replace(tzinfo=None)
+    target_dt = target_dt.replace(tzinfo=None)
+    title = _fate_title(fate_type)
+    news_items = _unique_news_offsets(_load_star_gazing_records(history_file), now=now)
+
+    def choose(candidates, min_count, reason):
+        if len(candidates) < min_count:
+            return None, ""
+        value = _median(item["offset"] for item in candidates)
+        return value, f"{reason} n={len(candidates)}"
+
+    predicted_news_offset = None
+    reason = ""
+    recent_cutoff = now - timedelta(days=STAR_SHIFT_HISTORY_LOOKBACK_DAYS)
+    recent_global_cutoff = now - timedelta(days=STAR_SHIFT_RECENT_GLOBAL_DAYS)
+
+    if title:
+        predicted_news_offset, reason = choose(
+            [
+                item for item in news_items
+                if item["title"] == title and item["message_time"] >= recent_cutoff
+            ],
+            STAR_SHIFT_MIN_RECENT_TYPE_SAMPLES,
+            f"recent type {title}",
+        )
+
+    if predicted_news_offset is None:
+        predicted_news_offset, reason = choose(
+            [
+                item for item in news_items
+                if item["hour"] == target_dt.hour and item["message_time"] >= recent_cutoff
+            ],
+            STAR_SHIFT_MIN_RECENT_HOUR_SAMPLES,
+            f"recent hour {target_dt.hour:02d}",
+        )
+
+    if predicted_news_offset is None:
+        predicted_news_offset, reason = choose(
+            [item for item in news_items if item["message_time"] >= recent_global_cutoff],
+            STAR_SHIFT_MIN_RECENT_GLOBAL_SAMPLES,
+            f"recent {STAR_SHIFT_RECENT_GLOBAL_DAYS}d global",
+        )
+
+    if predicted_news_offset is None:
+        predicted_news_offset, reason = choose(
+            [item for item in news_items if item["message_time"] >= recent_cutoff],
+            STAR_SHIFT_MIN_RECENT_GLOBAL_SAMPLES,
+            f"recent {STAR_SHIFT_HISTORY_LOOKBACK_DAYS}d global",
+        )
+
+    if predicted_news_offset is None:
+        predicted_news_offset, reason = choose(news_items, 1, "all history")
+
+    if predicted_news_offset is None:
+        return (*STAR_SHIFT_DEFAULT_SEND_RANGE, "default no history")
+
+    base_delay = int(
+        round(
+            predicted_news_offset
+            - STAR_SHIFT_RESULT_DELAY_SECONDS
+            - _median(STAR_SHIFT_RESULT_SAFETY_GAP_RANGE)
+        )
+    )
+    min_delay = max(STAR_SHIFT_MIN_SEND_DELAY_SECONDS, base_delay - 1)
+    max_delay = min(STAR_SHIFT_MAX_SEND_DELAY_SECONDS, base_delay + 1)
+    if min_delay > max_delay:
+        min_delay = max_delay
+    return min_delay, max_delay, f"{reason}, news~+{predicted_news_offset:.1f}s"
+
+
+def predicted_star_shift_dt(
+    target_dt,
+    now=None,
+    fate_type="",
+    history_file=EVENT_FILE,
+    logger=None,
+):
+    """Return a dynamic .改换星移 send time after the manifest boundary."""
+    now = now or datetime.now(_local_tz()).replace(tzinfo=None)
+    min_delay, max_delay, reason = predict_star_shift_delay_range(
+        target_dt,
+        fate_type=fate_type,
+        now=now,
+        history_file=history_file,
+    )
+    elapsed = (now - target_dt).total_seconds()
+    if elapsed > min_delay:
+        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
+    delay = random.randint(int(min_delay), int(max_delay))
+    if logger:
+        logger.info(
+            f"Star gazing: dynamic shift window +{min_delay}-{max_delay}s "
+            f"for {target_dt.strftime(TIME_FORMAT)} ({fate_type or 'unknown fate'}; {reason}); "
+            f"selected +{delay}s."
+        )
+    return target_dt + timedelta(seconds=delay)
 
 
 def _strip_md(value):

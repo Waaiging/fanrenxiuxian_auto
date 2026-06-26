@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 import os
 import sqlite3
@@ -1701,18 +1702,70 @@ class ParserFixtureTests(unittest.TestCase):
     def test_star_gazing_shift_time_is_after_manifest_all_accounts(self):
         target = datetime(2026, 6, 15, 12, 0, 0)
 
-        cases = [
-            (intelligent_cultivator, 8, 10),
-            (sub_cultivator, 9, 11),
-            (cultivator_xiaohao, 10, 12),
-        ]
-        for module, min_delay, max_delay in cases:
+        for module in (intelligent_cultivator, sub_cultivator, cultivator_xiaohao):
             with self.subTest(module=module.__name__):
                 for _ in range(20):
                     shift_dt = module.star_gazing_shift_dt(target)
                     self.assertGreater(shift_dt, target)
-                    self.assertGreaterEqual(shift_dt, target + timedelta(seconds=min_delay))
-                    self.assertLessEqual(shift_dt, target + timedelta(seconds=max_delay))
+                    self.assertGreaterEqual(shift_dt, target + timedelta(seconds=6))
+                    self.assertLessEqual(shift_dt, target + timedelta(seconds=28))
+
+    def test_star_shift_predictor_defaults_without_history(self):
+        target = datetime(2026, 6, 26, 15, 0, 0)
+        now = datetime(2026, 6, 26, 14, 59, 0)
+        missing_path = os.path.join(tempfile.gettempdir(), "missing-star-gazing-events.jsonl")
+
+        min_delay, max_delay, reason = star_gazing_collector.predict_star_shift_delay_range(
+            target,
+            fate_type="Good - 星辰异象",
+            now=now,
+            history_file=missing_path,
+        )
+
+        self.assertEqual((min_delay, max_delay), (21, 24))
+        self.assertIn("default", reason)
+
+    def test_star_shift_predictor_uses_recent_type_history(self):
+        target = datetime(2026, 6, 26, 15, 0, 0)
+        now = datetime(2026, 6, 26, 14, 59, 0)
+        records = []
+        for idx, offset in enumerate([33, 34, 35, 36, 37], 1):
+            records.append({
+                "event_kind": "news",
+                "final_news_offset_seconds": offset,
+                "message_time": f"2026-06-2{idx} 12:00:{offset:02d}",
+                "target_manifest_time": f"2026-06-2{idx} 12:00:00",
+                "message_id": idx,
+                "text_hash": f"type-{idx}",
+                "news_title": "星辰异象",
+            })
+        for idx, offset in enumerate([12, 13, 14, 15, 16], 100):
+            records.append({
+                "event_kind": "news",
+                "final_news_offset_seconds": offset,
+                "message_time": f"2026-06-2{idx - 99} 09:00:{offset:02d}",
+                "target_manifest_time": f"2026-06-2{idx - 99} 09:00:00",
+                "message_id": idx,
+                "text_hash": f"other-{idx}",
+                "news_title": "古修洞府现世",
+            })
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+            history_path = fh.name
+            for record in records:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        try:
+            min_delay, max_delay, reason = star_gazing_collector.predict_star_shift_delay_range(
+                target,
+                fate_type="Good - 星辰异象",
+                now=now,
+                history_file=history_path,
+            )
+        finally:
+            os.remove(history_path)
+
+        self.assertEqual((min_delay, max_delay), (23, 25))
+        self.assertIn("recent type 星辰异象", reason)
 
     def test_star_shift_attempt_feedback_marks_avatar_and_clears_pending(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

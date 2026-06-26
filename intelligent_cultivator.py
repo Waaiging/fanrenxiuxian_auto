@@ -29,7 +29,7 @@ import json
 STAR_GAZING_INTERVAL_HOURS = 3
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (8, 10)
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1
@@ -69,15 +69,9 @@ if hasattr(time, 'tzset'):
 from datetime import datetime, timedelta  # 日期时间处理
 
 
-def star_gazing_shift_dt(target_dt, now=None):
-    """Return a shift send time within this account's post-manifest window."""
-    now = now or datetime.now()
-    min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
-    elapsed = (now - target_dt).total_seconds()
-    if elapsed > min_delay:
-        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
-    delay = random.randint(min_delay, max_delay)
-    return target_dt + timedelta(seconds=delay)
+def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
+    """Return a history-based shift send time after the manifest boundary."""
+    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
 
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 
@@ -87,7 +81,7 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 from fishing_features import FishingMixin
-from star_gazing_collector import record_star_gazing_event
+from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from yinluo_features import YinluoMixin, YINLUO_IDENTITY
 from log_utils import (
     CommandLogFilter,          # 日志过滤器，过滤掉指令内容（保护隐私）
@@ -5293,7 +5287,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             log.info("🔒 [ATOMIC LOCK] Acquired by StarShift")
             try:
                 today = gazing_date or target_dt.strftime("%Y-%m-%d")
-                shift_dt = star_gazing_shift_dt(target_dt)
+                fate_type = self.state.get("pending_star_gazing_fate_type", "")
+                shift_dt = star_gazing_shift_dt(target_dt, fate_type=fate_type, logger=log)
                 send_times = [
                     shift_dt + timedelta(seconds=i * STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS)
                     for i in range(STAR_GAZING_SHIFT_REPEAT_COUNT)
@@ -5395,7 +5390,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 gazing_date: 观星日期。
             """
             today = gazing_date or target_dt.strftime("%Y-%m-%d")
-            shift_dt = star_gazing_shift_dt(target_dt)
+            fate_type = self.state.get("pending_star_gazing_fate_type", "")
+            shift_dt = star_gazing_shift_dt(target_dt, fate_type=fate_type, logger=log)
             if self.get_avatar_state(avatar).get("last_star_shift_date") == today:
                 return
             if self.star_gazing_final_report_seen(target_dt):
@@ -5583,7 +5579,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                             current_manifest_dt = datetime.now().replace(
                                 hour=current_manifest_hour, minute=0, second=0, microsecond=0
                             )
-                        shift_dt = star_gazing_shift_dt(current_manifest_dt)
+                        fate_type = self.star_gazing_manifest_fate_type(resp_text) or self.state.get("pending_star_gazing_fate_type", "")
+                        shift_dt = star_gazing_shift_dt(current_manifest_dt, fate_type=fate_type, logger=log)
                     
                         now2 = datetime.now()
                         if now2 < shift_dt:

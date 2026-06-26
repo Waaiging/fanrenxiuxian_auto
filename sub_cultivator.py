@@ -78,7 +78,7 @@ from concubine_features import ConcubineMixin, concubine_default_state
 
 from fishing_features import FishingMixin
 
-from star_gazing_collector import record_star_gazing_event
+from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 
 from log_utils import (
     CommandLogFilter,           # 日志过滤器：将包含指令关键词的日志行额外标记
@@ -162,7 +162,7 @@ STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机
 STAR_GAZING_INTERVAL_HOURS = 3                      # 星盘显现间隔 3 小时（每 3 小时整点一次）
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60           # 在显现前 3 分钟开始监听消息
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60               # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (9, 11)     # 副号在显现后 9~11 秒发出，目标让成功广播落在快报前
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)     # 动态预测窗口边界，具体发送点由历史快报样本决定
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                 # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1                  # 改换星移只发 1 次（晚发策略不需要重试）
@@ -176,15 +176,9 @@ STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59  # 活跃抢占期缩短为 59 秒。超�
 STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
 
 
-def star_gazing_shift_dt(target_dt, now=None):
-    """Return a shift send time within this account's post-manifest window."""
-    now = now or datetime.now()
-    min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
-    elapsed = (now - target_dt).total_seconds()
-    if elapsed > min_delay:
-        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
-    delay = random.randint(min_delay, max_delay)
-    return target_dt + timedelta(seconds=delay)
+def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
+    """Return a history-based shift send time after the manifest boundary."""
+    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
 
 MAIN_STAR_PALACE_STATE_KEYS = {
     "next_star_check_time",
@@ -2113,7 +2107,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         log.info("🔒 [ATOMIC LOCK] Acquired by StarShift")
         try:
             today = gazing_date or target_dt.strftime("%Y-%m-%d")
-            shift_dt = star_gazing_shift_dt(target_dt)
+            fate_type = self.state.get("pending_star_gazing_fate_type", "")
+            shift_dt = star_gazing_shift_dt(target_dt, fate_type=fate_type, logger=log)
             send_times = [
                 shift_dt + timedelta(seconds=i * STAR_GAZING_SHIFT_REPEAT_INTERVAL_SECONDS)
                 for i in range(STAR_GAZING_SHIFT_REPEAT_COUNT)
@@ -2210,7 +2205,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
             gazing_date: 观星日期。
         """
         today = gazing_date or target_dt.strftime("%Y-%m-%d")
-        shift_dt = star_gazing_shift_dt(target_dt)
+        fate_type = self.state.get("pending_star_gazing_fate_type", "")
+        shift_dt = star_gazing_shift_dt(target_dt, fate_type=fate_type, logger=log)
         if self.get_avatar_state(avatar).get("last_star_shift_date") == today:
             return
         if self.star_gazing_final_report_seen(target_dt):
@@ -2400,7 +2396,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         current_manifest_dt = datetime.now().replace(
                             hour=current_manifest_hour, minute=0, second=0, microsecond=0
                         )
-                    shift_dt = star_gazing_shift_dt(current_manifest_dt)
+                    fate_type = self.star_gazing_manifest_fate_type(resp_text) or self.state.get("pending_star_gazing_fate_type", "")
+                    shift_dt = star_gazing_shift_dt(current_manifest_dt, fate_type=fate_type, logger=log)
                     
                     now2 = datetime.now()
                     if now2 < shift_dt:

@@ -61,7 +61,7 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 from fishing_features import FishingMixin
-from star_gazing_collector import record_star_gazing_event
+from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     is_deep_meditation_ongoing_response, is_deep_meditation_settlement_response, is_game_bot_sender,
@@ -98,7 +98,7 @@ from log_utils import (
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (10, 12)     # 小号在显现后 10~12 秒发出，目标让成功广播落在快报前
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)      # 动态预测窗口边界，具体发送点由历史快报样本决定
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
@@ -130,15 +130,9 @@ STAR_GAZING_VALID_RESULT_KEYWORDS = (
 )
 
 
-def star_gazing_shift_dt(target_dt, now=None):
-    """Return a shift send time within this account's post-manifest window."""
-    now = now or datetime.now()
-    min_delay, max_delay = STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS
-    elapsed = (now - target_dt).total_seconds()
-    if elapsed > min_delay:
-        min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
-    delay = random.randint(min_delay, max_delay)
-    return target_dt + timedelta(seconds=delay)
+def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
+    """Return a history-based shift send time after the manifest boundary."""
+    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
 
 # =====================================================================
 # 路径与常量配置
@@ -4584,7 +4578,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     @safe_bg_task
     async def avatar_schedule_star_shift(self, avatar, reply_msg_id, target_dt, gazing_date=None):
         today = gazing_date or target_dt.strftime("%Y-%m-%d")
-        shift_dt = star_gazing_shift_dt(target_dt)
+        fate_type = self.state.get("pending_star_gazing_fate_type", "")
+        shift_dt = star_gazing_shift_dt(target_dt, fate_type=fate_type, logger=log)
         if self.get_avatar_state(avatar).get("last_star_shift_date") == today: return
         if self.star_gazing_final_report_seen(target_dt):
             log.info(
@@ -4725,7 +4720,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         current_manifest_dt = datetime.now().replace(
                             hour=current_manifest_hour, minute=0, second=0, microsecond=0
                         )
-                    shift_dt = star_gazing_shift_dt(current_manifest_dt)
+                    fate_type = self.star_gazing_manifest_fate_type(resp_text) or self.state.get("pending_star_gazing_fate_type", "")
+                    shift_dt = star_gazing_shift_dt(current_manifest_dt, fate_type=fate_type, logger=log)
 
                     now2 = datetime.now()
                     if now2 < shift_dt:
