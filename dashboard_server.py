@@ -594,6 +594,43 @@ def time_command(state, key, command, label=None, waiting="冷却中", ready="�
     return command_row(command, label, ready, "ready", "0秒", str(raw), detail, group, schedule_type="cooldown", next_seconds=0)
 
 
+def yuanying_retreat_command(state):
+    """Display sub main-soul .元婴闭关, whose active reply may not include an end time."""
+    raw = state.get("yuanying_out_end_time") or state.get("next_yuanying_out_time", "")
+    target = parse_state_time(raw)
+    if state.get("yuanying_out_active"):
+        if target and target > datetime.now():
+            next_seconds = max(0, int((target - datetime.now()).total_seconds()))
+            return command_row(
+                SUB_MAIN_YUANYING_COMMAND,
+                "元婴闭关",
+                "闭关中",
+                "active",
+                format_remaining(next_seconds),
+                str(raw),
+                "等待自动结算",
+                "通用",
+                schedule_type="cooldown",
+                next_seconds=next_seconds,
+            )
+        detail = "机器人未返回剩余时间，等待下次发言自动结算"
+        last_return = state.get("last_yuanying_return_time", "")
+        if last_return:
+            detail = f"{detail} · 上次结算 {last_return}"
+        return command_row(
+            SUB_MAIN_YUANYING_COMMAND,
+            "元婴闭关",
+            "闭关中",
+            "active",
+            "等结算",
+            str(raw or ""),
+            detail,
+            "通用",
+            schedule_type="cooldown",
+        )
+    return time_command(state, "next_yuanying_out_time", SUB_MAIN_YUANYING_COMMAND, "元婴闭关", group="通用")
+
+
 def active_until_command(state, key, command, label=None, active="生效中", ready="未生效", detail="", group=""):
     """Display a buff/event active-until timestamp."""
     raw = state.get(key, "")
@@ -1018,7 +1055,7 @@ def main_soul_panel(account, state):
         rows.extend([
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
-            time_command(state, "next_yuanying_out_time", SUB_MAIN_YUANYING_COMMAND, "元婴闭关", group="通用"),
+            yuanying_retreat_command(state),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
             time_command(state, "next_ask_dao_time", ASK_DAO_COMMAND, "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),

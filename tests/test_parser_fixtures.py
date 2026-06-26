@@ -1480,6 +1480,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rows[".囚禁魂魄 <槽位> 凶兽戾魄"]["control_key"], ".囚禁魂魄 *")
         self.assertNotIn(".囚禁魂魄 <槽位> 妖兽精魄", rows)
 
+    def test_dashboard_sub_main_yuanying_retreat_active_unknown_is_not_due(self):
+        state = {
+            "yuanying_out_active": True,
+            "yuanying_out_end_time": "",
+            "next_yuanying_out_time": "",
+            "last_yuanying_return_time": "2026-06-26 20:58:24",
+            "avatars": {},
+        }
+
+        panels = build_command_panels("sub", state)
+        panel = next(p for p in panels if p.get("identity") == "主魂")
+        rows = {r.get("command"): r for r in panel.get("commands", [])}
+        row = rows[".元婴闭关"]
+
+        self.assertEqual(row["status"], "闭关中")
+        self.assertEqual(row["tone"], "active")
+        self.assertEqual(row["remaining"], "等结算")
+        self.assertNotIn("next_seconds", row)
+
     def test_clear_history_command_is_admin_plain_c_only(self):
         actor = SimpleNamespace(
             target_chat_id=-100123456,
