@@ -96,6 +96,7 @@ CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
+DEPLOY_VERSION_FILE = "deploy_version.json"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
 STATUS_CACHE_SECONDS = 10
 LOG_PAGE_CACHE_SECONDS = 5
@@ -2960,6 +2961,32 @@ def git_command_output(args):
     except Exception:
         return ""
 
+def deploy_version_metadata():
+    """Read deployment metadata when the VPS deploy directory is not a git checkout."""
+    path = os.path.join(CONFIG_DIR, DEPLOY_VERSION_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    commit = str(raw.get("commit") or "").strip()
+    branch = str(raw.get("branch") or "").strip()
+    return {
+        "branch": branch or "unknown",
+        "commit": commit,
+        "commit_short": str(raw.get("commit_short") or commit[:7] or "unknown"),
+        "dirty": False,
+        "dirty_count": 0,
+        "available": bool(commit),
+        "checked_at": datetime.now().strftime(TIME_FORMAT),
+        "deployed_at": str(raw.get("deployed_at") or ""),
+        "source": "deploy_version",
+    }
+
 def git_metadata():
     """Return cached git metadata for the running deploy checkout."""
     now_ts = time.time()
@@ -2969,15 +2996,28 @@ def git_metadata():
     branch = git_command_output(["branch", "--show-current"])
     commit = git_command_output(["rev-parse", "HEAD"])
     dirty_text = git_command_output(["status", "--short"])
-    data = {
-        "branch": branch or "unknown",
-        "commit": commit,
-        "commit_short": commit[:7] if commit else "unknown",
-        "dirty": bool(dirty_text),
-        "dirty_count": len([line for line in dirty_text.splitlines() if line.strip()]),
-        "available": bool(commit),
-        "checked_at": datetime.now().strftime(TIME_FORMAT),
-    }
+    if commit:
+        data = {
+            "branch": branch or "unknown",
+            "commit": commit,
+            "commit_short": commit[:7],
+            "dirty": bool(dirty_text),
+            "dirty_count": len([line for line in dirty_text.splitlines() if line.strip()]),
+            "available": True,
+            "checked_at": datetime.now().strftime(TIME_FORMAT),
+            "source": "git",
+        }
+    else:
+        data = deploy_version_metadata() or {
+            "branch": "unknown",
+            "commit": "",
+            "commit_short": "unknown",
+            "dirty": False,
+            "dirty_count": 0,
+            "available": False,
+            "checked_at": datetime.now().strftime(TIME_FORMAT),
+            "source": "unavailable",
+        }
     GIT_META_CACHE["at"] = now_ts
     GIT_META_CACHE["data"] = data
     return data
