@@ -1190,7 +1190,7 @@ class ParserFixtureTests(unittest.TestCase):
         listing = parse_trade_listing_response("上架成功，挂单ID：23733。")
         self.assertEqual(listing["status"], "success")
         self.assertEqual(listing["listing_id"], "23733")
-        self.assertEqual(parse_trade_purchase_response("购买成功，获得了【青竹鱼竿】x1。")["status"], "success")
+        self.assertEqual(parse_trade_purchase_response("购买成功，获得了【青竹钓竿】x1。")["status"], "success")
 
     def test_fishing_control_text_is_bare_and_limited(self):
         self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
@@ -1407,10 +1407,10 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append((identity, command))
-                if identity == "缘生子" and command == ".上架 凝血草 换 青竹鱼竿*1":
+                if identity == "缘生子" and command == ".上架 凝血草 换 青竹钓竿*1":
                     return "上架成功，挂单ID：23733。"
                 if identity == "主魂" and command == ".购买 23733":
-                    return "购买成功，获得了【青竹鱼竿】x1。"
+                    return "购买成功，获得了【青竹钓竿】x1。"
                 raise AssertionError(f"unexpected command: {identity} {command}")
 
         actor = DummyFishing()
@@ -1419,7 +1419,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertTrue(asyncio.run(actor.fishing_auto_transfer_rod("主魂", "缘生子")))
         self.assertEqual(actor.commands, [
-            ("缘生子", ".上架 凝血草 换 青竹鱼竿*1"),
+            ("缘生子", ".上架 凝血草 换 青竹钓竿*1"),
             ("主魂", ".购买 23733"),
         ])
         self.assertFalse(actor.get_fishing_state("主魂")["rod_owned"])
@@ -1446,10 +1446,10 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append((identity, command))
-                if self.account_key == "sub" and identity == "厚土" and command == ".上架 凝血草 换 青竹鱼竿*1":
+                if self.account_key == "sub" and identity == "厚土" and command == ".上架 凝血草 换 青竹钓竿*1":
                     return "上架成功，挂单ID：23733。"
                 if self.account_key == "main" and identity == "主魂" and command == ".购买 23733":
-                    return "购买成功，获得了【青竹鱼竿】x1。"
+                    return "购买成功，获得了【青竹钓竿】x1。"
                 raise AssertionError(f"unexpected command: {self.account_key} {identity} {command}")
 
         main = DummyFishing("main", ["无咎子"])
@@ -1479,7 +1479,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertEqual(global_state["rod_holder"]["identity"], "厚土")
                 self.assertTrue(sub.get_fishing_state("厚土")["rod_owned"])
 
-        self.assertEqual(sub.commands, [("厚土", ".上架 凝血草 换 青竹鱼竿*1")])
+        self.assertEqual(sub.commands, [("厚土", ".上架 凝血草 换 青竹钓竿*1")])
         self.assertEqual(main.commands, [("主魂", ".购买 23733")])
 
     def test_fishing_auto_chat_control_writes_single_global_switch(self):
