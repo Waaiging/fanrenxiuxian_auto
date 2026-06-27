@@ -369,6 +369,16 @@ def parse_nest_response(text):
             result["remaining"] = int(success_match.group(2))
         return result
 
+    active_match = re.search(r"已打下\s*【([^】]+)】.*?还可影响\s*(\d+)\s*竿.*?不可重复叠加", clean)
+    if active_match:
+        result.update({
+            "matched": True,
+            "status": "already_active",
+            "nest": active_match.group(1).strip(),
+            "remaining": int(active_match.group(2)),
+        })
+        return result
+
     missing_match = re.search(r"资源不足：\s*([^x。\n]+)x(\d+)", clean)
     if missing_match:
         result.update({
@@ -892,6 +902,16 @@ class FishingMixin:
             counts[nest_name] = int(counts.get(nest_name, 0)) + 1
             state["last_status"] = "nested"
             state["last_detail"] = f"{nest_name} 剩余 {state['current_nest_remaining']} 竿"
+            self.save_state()
+            return True
+        if parsed.get("status") == "already_active":
+            nest_name = parsed.get("nest") or nest
+            state["current_nest"] = nest_name
+            state["current_nest_remaining"] = int(parsed.get("remaining") or 0)
+            counts = state.setdefault("nest_counts", {})
+            counts[nest_name] = max(int(counts.get(nest_name, 0)), 1)
+            state["last_status"] = "nested"
+            state["last_detail"] = f"{nest_name} 剩余 {state['current_nest_remaining']} 竿（已有窝料）"
             self.save_state()
             return True
         if parsed.get("status") == "missing_resource":

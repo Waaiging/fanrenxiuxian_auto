@@ -1086,9 +1086,45 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(nest["missing_name"], "灵米饵")
         self.assertEqual(nest["missing_count"], 3)
 
+        active_nest = parse_nest_response("你已打下【灵草窝】，还可影响 **1** 竿，不可重复叠加。")
+        self.assertEqual(active_nest["status"], "already_active")
+        self.assertEqual(active_nest["nest"], "灵草窝")
+        self.assertEqual(active_nest["remaining"], 1)
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            ".打窝 灵草窝",
+            "你已打下【灵草窝】，还可影响 **1** 竿，不可重复叠加。",
+        ))
+
         rod = parse_rod_response("**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！")
         self.assertEqual(rod["status"], "success")
         self.assertEqual(rod["catch"], "银须灵鲢")
+
+    def test_fishing_existing_nest_reply_syncs_without_incrementing_count(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".打窝 灵草窝":
+                    return "你已打下【灵草窝】，还可影响 **1** 竿，不可重复叠加。"
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
+        fishing["nest_counts"] = {"灵草窝": 1}
+
+        self.assertTrue(asyncio.run(actor.fishing_try_nest("主魂")))
+        self.assertEqual(actor.commands, [".打窝 灵草窝"])
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["current_nest"], "灵草窝")
+        self.assertEqual(fishing["current_nest_remaining"], 1)
+        self.assertEqual(fishing["nest_counts"]["灵草窝"], 1)
 
     def test_fishing_missing_nest_bait_retry_does_not_skip_nest(self):
         class DummyFishing(FishingMixin):
