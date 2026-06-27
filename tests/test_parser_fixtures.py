@@ -1883,12 +1883,14 @@ class ParserFixtureTests(unittest.TestCase):
                 "rod_holder": "主魂",
             }
         }
-        commands = [
-            command
-            for panel in build_command_panels("main", state)
-            for command in panel.get("commands", [])
-            if str(command.get("command") or "").startswith(".全自动钓鱼")
-        ]
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(dashboard_server, "CONFIG_DIR", tmpdir):
+            commands = [
+                command
+                for panel in build_command_panels("main", state)
+                for command in panel.get("commands", [])
+                if str(command.get("command") or "").startswith(".全自动钓鱼")
+            ]
         self.assertEqual(len(commands), 1)
         selected = commands[0]
         self.assertEqual(selected["command"], ".全自动钓鱼")
