@@ -1284,6 +1284,76 @@ class ParserFixtureTests(unittest.TestCase):
             default_disabled=True,
         ))
 
+    def test_fishing_stale_daily_count_resets_for_dashboard(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        state = {
+            "fishing": {
+                "last_sync_date": yesterday,
+                "today_count": 20,
+                "daily_limit": 20,
+                "daily_done_auto_paused_date": today,
+                "daily_done_notified_date": today,
+                "last_status": "daily_done",
+                "last_detail": "今日已垂钓 20/20",
+                "current_nest": "米糠小窝",
+                "current_nest_remaining": 1,
+                "next_action_at": f"{today} 00:05:00",
+            }
+        }
+
+        row = next(
+            command
+            for panel in build_command_panels("main", state)
+            for command in panel.get("commands", [])
+            if command.get("command") == ".钓鱼 灵米饵"
+        )
+
+        self.assertIn("今日 0/20", row["detail"])
+        self.assertNotIn("米糠小窝", row["detail"])
+        self.assertNotEqual(row["status"], "今日已满")
+
+    def test_fishing_stale_daily_count_does_not_auto_pause_or_notify(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {
+                        "last_sync_date": yesterday,
+                        "today_count": 20,
+                        "daily_limit": 20,
+                        "daily_done_auto_paused_date": today,
+                        "daily_done_notified_date": today,
+                        "last_status": "daily_done",
+                        "last_detail": "今日已垂钓 20/20",
+                    }
+                }
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        async def fail_alert(*args, **kwargs):
+            raise AssertionError("stale daily count must not notify")
+
+        actor = DummyFishing()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path), \
+                    patch.object(fishing_features, "send_text_alert", fail_alert):
+                asyncio.run(actor.fishing_finish_daily_done("主魂"))
+
+            self.assertFalse(os.path.exists(controls_path))
+
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 0)
+        self.assertEqual(fishing["daily_done_auto_paused_date"], "")
+        self.assertEqual(fishing["daily_done_notified_date"], "")
+
     def test_fishing_legacy_lingchong_control_migrates_to_lingmi(self):
         class DummyFishing(FishingMixin):
             account_key = "xiaohao"

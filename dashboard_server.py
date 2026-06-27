@@ -38,7 +38,7 @@ from command_modules import (
     treasure_touch_plan,
     yuanying_out_plan,
 )
-from fishing_features import FISHING_DAILY_LIMIT, FISHING_MASTER_COMMAND
+from fishing_features import FISHING_DAILY_LIMIT, FISHING_MASTER_COMMAND, fishing_dashboard_state
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
@@ -673,6 +673,7 @@ def fishing_command(state):
     fishing = state.get("fishing", {}) if isinstance(state, dict) else {}
     if not isinstance(fishing, dict):
         fishing = {}
+    fishing = fishing_dashboard_state(fishing)
     today_count = int(fishing.get("today_count") or 0)
     daily_limit = int(fishing.get("daily_limit") or FISHING_DAILY_LIMIT)
     detail_parts = [f"今日 {today_count}/{daily_limit}", f"饵料 {FISHING_MASTER_COMMAND.split()[-1]}"]

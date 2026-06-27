@@ -41,6 +41,16 @@ FISHING_NEST_BAIT_REQUIREMENTS = {
 }
 
 FISHING_BAIT_NAMES = {"凡饵", "灵虫饵", "灵米饵", "妖血饵"}
+FISHING_DAILY_STALE_STATUSES = {
+    "daily_done",
+    "synced",
+    "bait_bought",
+    "nested",
+    "caught",
+    "empty",
+    "yielding",
+    "yielding_identity",
+}
 
 
 def fishing_default_state():
@@ -89,6 +99,68 @@ def _today():
 def _next_day_action_time():
     tomorrow = datetime.now() + timedelta(days=1)
     return tomorrow.replace(hour=0, minute=5, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fishing_daily_count_is_current(state, today=None):
+    if not isinstance(state, dict):
+        return False
+    today = today or _today()
+    dated_fields = ("last_sync_date", "daily_done_basket_sync_date")
+    if any(str(state.get(key) or "") == today for key in dated_fields):
+        return True
+    timestamp_fields = ("last_round_at", "active_started_at", "active_due_at")
+    return any(str(state.get(key) or "").startswith(today) for key in timestamp_fields)
+
+
+def reset_stale_fishing_daily_state(state, today=None):
+    if not isinstance(state, dict):
+        return False
+    today = today or _today()
+    if fishing_daily_count_is_current(state, today):
+        return False
+
+    has_stale_daily_data = any([
+        int(state.get("today_count") or 0) > 0,
+        state.get("daily_done_basket_sync_date"),
+        state.get("daily_done_auto_paused_date"),
+        state.get("daily_done_notified_date"),
+        state.get("current_nest"),
+        int(state.get("current_nest_remaining") or 0) > 0,
+        state.get("last_status") in FISHING_DAILY_STALE_STATUSES,
+    ])
+    if not has_stale_daily_data:
+        return False
+
+    state["today_count"] = 0
+    state["daily_done_basket_sync_date"] = ""
+    state["daily_done_auto_paused_date"] = ""
+    state["daily_done_notified_date"] = ""
+    state["current_nest"] = ""
+    state["current_nest_remaining"] = 0
+    if state.get("last_status") in FISHING_DAILY_STALE_STATUSES:
+        state["last_status"] = "waiting"
+    if "今日" in str(state.get("last_detail") or "") or "剩余" in str(state.get("last_detail") or ""):
+        state["last_detail"] = "等待今日鱼篓校准"
+    next_action = str(state.get("next_action_at") or "")
+    if next_action and not is_future(next_action):
+        state["next_action_at"] = ""
+    return True
+
+
+def fishing_daily_done_for_today(state, today=None):
+    if not isinstance(state, dict):
+        return False
+    today = today or _today()
+    if not fishing_daily_count_is_current(state, today):
+        return False
+    daily_limit = int(state.get("daily_limit") or FISHING_DAILY_LIMIT)
+    return daily_limit > 0 and int(state.get("today_count") or 0) >= daily_limit
+
+
+def fishing_dashboard_state(state, today=None):
+    view = dict(state or {}) if isinstance(state, dict) else {}
+    reset_stale_fishing_daily_state(view, today=today)
+    return view
 
 
 def _load_command_controls_uncached():
@@ -342,6 +414,7 @@ class FishingMixin:
             for key, value in defaults.items():
                 state.setdefault(key, value)
         today = _today()
+        reset_stale_fishing_daily_state(state, today=today)
         if state.get("nest_plan_date") != today:
             state["nest_plan_date"] = today
             state["nest_counts"] = {}
@@ -392,6 +465,15 @@ class FishingMixin:
         account = self.fishing_account_key()
         if not account:
             return False
+        state = self.get_fishing_state(identity)
+        if not fishing_daily_done_for_today(state):
+            log = self.fishing_logger()
+            if log:
+                log.info(
+                    f"Fishing [{identity}] skip dashboard auto-pause because daily count "
+                    "is not current or not complete."
+                )
+            return False
         identity = str(identity or "主魂").strip() or "主魂"
         control_keys = (FISHING_MASTER_COMMAND, *FISHING_LEGACY_MASTER_COMMANDS)
         changed = False
@@ -417,7 +499,6 @@ class FishingMixin:
         finally:
             _release_command_control_lock(lock)
 
-        state = self.get_fishing_state(identity)
         state["daily_done_auto_paused_date"] = _today()
         self.save_state()
         log = self.fishing_logger()
@@ -431,6 +512,14 @@ class FishingMixin:
     async def fishing_notify_daily_done(self, identity, pause_changed=False):
         state = self.get_fishing_state(identity)
         today = _today()
+        if not fishing_daily_done_for_today(state, today=today):
+            log = self.fishing_logger()
+            if log:
+                log.info(
+                    f"Fishing [{identity}] skip daily-done notice because daily count "
+                    "is not current or not complete."
+                )
+            return False
         if state.get("daily_done_notified_date") == today:
             return False
         account = self.fishing_account_key()
