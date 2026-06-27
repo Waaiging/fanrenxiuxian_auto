@@ -1,22 +1,26 @@
 import asyncio
+import json
+import os
 import re
 import time
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until, str_to_dt
 from log_utils import (
-    dashboard_command_disabled,
+    COMMAND_CONTROL_FILE,
     feedback_response_matches_command,
     is_game_bot_sender,
     load_command_controls,
     log_incoming_message,
     meaningful_reply_to_msg_id,
     record_bot_response,
+    send_text_alert,
 )
 
 
-FISHING_MASTER_COMMAND = ".钓鱼 灵虫饵"
-FISHING_BAIT = "灵虫饵"
+FISHING_BAIT = "灵米饵"
+FISHING_MASTER_COMMAND = f".钓鱼 {FISHING_BAIT}"
+FISHING_LEGACY_MASTER_COMMANDS = (".钓鱼 灵虫饵",)
 FISHING_DAILY_LIMIT = 20
 FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
@@ -27,13 +31,11 @@ FISHING_RETRY_SECONDS = 10 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 
 FISHING_NEST_PLAN = (
-    ("妖腥窝", 1),
     ("灵草窝", 2),
-    ("米糠小窝", 1),
+    ("米糠小窝", 2),
 )
 
 FISHING_NEST_BAIT_REQUIREMENTS = {
-    "妖腥窝": ("妖血饵", 2),
     "灵草窝": ("灵米饵", 3),
     "米糠小窝": ("凡饵", 2),
 }
@@ -63,6 +65,8 @@ def fishing_default_state():
         "bait_purchase_date": "",
         "bait_purchase_done": False,
         "daily_done_basket_sync_date": "",
+        "daily_done_auto_paused_date": "",
+        "daily_done_notified_date": "",
         "active": False,
         "active_bait": "",
         "active_started_at": "",
@@ -85,6 +89,63 @@ def _today():
 def _next_day_action_time():
     tomorrow = datetime.now() + timedelta(days=1)
     return tomorrow.replace(hour=0, minute=5, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _load_command_controls_uncached():
+    try:
+        with open(COMMAND_CONTROL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def _save_command_controls_uncached(data):
+    directory = os.path.dirname(COMMAND_CONTROL_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{COMMAND_CONTROL_FILE}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, COMMAND_CONTROL_FILE)
+
+
+def _acquire_command_control_lock(timeout=5):
+    lock_path = f"{COMMAND_CONTROL_FILE}.lock"
+    deadline = time.monotonic() + max(0.5, float(timeout or 0.5))
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii", errors="ignore"))
+            return fd, lock_path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 30:
+                    os.remove(lock_path)
+                    continue
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                return None, lock_path
+            time.sleep(0.05)
+
+
+def _release_command_control_lock(lock):
+    fd, lock_path = lock
+    try:
+        if fd is not None:
+            os.close(fd)
+    except Exception:
+        pass
+    try:
+        if fd is not None:
+            os.remove(lock_path)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 def parse_fishing_basket(text):
@@ -293,21 +354,135 @@ class FishingMixin:
     def fishing_logger(self):
         return getattr(self, "log", None)
 
+    def fishing_account_key(self):
+        return str(getattr(self, "account_key", "") or "").strip()
+
+    def fishing_migrate_legacy_control(self, identity, legacy_key, entry):
+        account = self.fishing_account_key()
+        if not account or not legacy_key:
+            return False
+        lock = _acquire_command_control_lock()
+        try:
+            data = _load_command_controls_uncached()
+            account_controls = data.setdefault(account, {})
+            identity_controls = account_controls.setdefault(identity or "主魂", {})
+            if FISHING_MASTER_COMMAND in identity_controls:
+                return False
+            disabled = bool(entry.get("disabled")) if isinstance(entry, dict) else bool(entry)
+            identity_controls[FISHING_MASTER_COMMAND] = {
+                "disabled": disabled,
+                "command": FISHING_MASTER_COMMAND,
+                "label": "钓鱼",
+                "updated_at": now_str(),
+                "updated_by": "auto-fishing-migrate",
+                "note": f"migrated from {legacy_key}",
+            }
+            _save_command_controls_uncached(data)
+            log = self.fishing_logger()
+            if log:
+                log.info(
+                    f"Fishing [{identity}] migrated dashboard control "
+                    f"{legacy_key} -> {FISHING_MASTER_COMMAND}."
+                )
+            return True
+        finally:
+            _release_command_control_lock(lock)
+
+    def fishing_pause_dashboard_command(self, identity, reason="daily limit reached"):
+        account = self.fishing_account_key()
+        if not account:
+            return False
+        identity = str(identity or "主魂").strip() or "主魂"
+        control_keys = (FISHING_MASTER_COMMAND, *FISHING_LEGACY_MASTER_COMMANDS)
+        changed = False
+        lock = _acquire_command_control_lock()
+        try:
+            data = _load_command_controls_uncached()
+            account_controls = data.setdefault(account, {})
+            identity_controls = account_controls.setdefault(identity, {})
+            for key in control_keys:
+                current = identity_controls.get(key)
+                current_disabled = bool(current.get("disabled")) if isinstance(current, dict) else bool(current)
+                if not current_disabled:
+                    changed = True
+                identity_controls[key] = {
+                    "disabled": True,
+                    "command": key,
+                    "label": "钓鱼",
+                    "updated_at": now_str(),
+                    "updated_by": "auto-fishing",
+                    "reason": reason,
+                }
+            _save_command_controls_uncached(data)
+        finally:
+            _release_command_control_lock(lock)
+
+        state = self.get_fishing_state(identity)
+        state["daily_done_auto_paused_date"] = _today()
+        self.save_state()
+        log = self.fishing_logger()
+        if log:
+            log.info(
+                f"Fishing [{identity}] auto-paused dashboard command "
+                f"{FISHING_MASTER_COMMAND} ({reason})."
+            )
+        return changed
+
+    async def fishing_notify_daily_done(self, identity, pause_changed=False):
+        state = self.get_fishing_state(identity)
+        today = _today()
+        if state.get("daily_done_notified_date") == today:
+            return False
+        account = self.fishing_account_key()
+        account_label = {
+            "main": "主号",
+            "sub": "副号",
+            "xiaohao": "小号",
+        }.get(account, account or "账号")
+        today_count = int(state.get("today_count") or 0)
+        daily_limit = int(state.get("daily_limit") or FISHING_DAILY_LIMIT)
+        text = (
+            f"{account_label} [{identity}] 今日钓鱼已完成 {today_count}/{daily_limit} 竿。\n"
+            f"已自动暂停 dashboard 指令：{FISHING_MASTER_COMMAND}。\n"
+            "明天需要继续钓鱼时，请在 dashboard 手动启用。"
+        )
+        if state.get("last_catch"):
+            text += f"\n最后一竿：{state.get('last_catch')}"
+        if not pause_changed:
+            text += "\n备注：dashboard 开关此前已处于暂停状态。"
+        log = self.fishing_logger()
+        sent = await send_text_alert(self, "钓鱼完成", text, log)
+        state["daily_done_notified_date"] = today
+        self.save_state()
+        if log:
+            if sent:
+                log.info(f"Fishing [{identity}] daily-done notice sent.")
+            else:
+                log.warning(f"Fishing [{identity}] daily-done notice could not be sent.")
+        return sent
+
+    async def fishing_finish_daily_done(self, identity, reason="daily limit reached"):
+        pause_changed = self.fishing_pause_dashboard_command(identity, reason=reason)
+        await self.fishing_notify_daily_done(identity, pause_changed=pause_changed)
+
     def fishing_command_is_enabled(self, identity):
         controls = load_command_controls().get(getattr(self, "account_key", ""), {})
         if not isinstance(controls, dict):
             return False
-        keys = (FISHING_MASTER_COMMAND,)
+        keys = (FISHING_MASTER_COMMAND, *FISHING_LEGACY_MASTER_COMMANDS)
         for ident in (identity, "*"):
             ident_controls = controls.get(ident, {})
             if not isinstance(ident_controls, dict):
                 continue
             for key in keys:
+                if key not in ident_controls:
+                    continue
                 entry = ident_controls.get(key)
+                if key != FISHING_MASTER_COMMAND:
+                    self.fishing_migrate_legacy_control(identity, key, entry)
                 if isinstance(entry, dict):
                     return not bool(entry.get("disabled"))
-                if entry:
-                    return False
+                return not bool(entry)
         return False
 
     async def send_fishing_command(self, identity, command, timeout=60):
@@ -708,6 +883,7 @@ class FishingMixin:
         state = self.get_fishing_state(identity)
         today = _today()
         if state.get("daily_done_basket_sync_date") == today:
+            await self.fishing_finish_daily_done(identity, reason="daily limit already synced")
             return True
         ok = await self.fishing_sync_basket(identity)
         state = self.get_fishing_state(identity)
@@ -717,6 +893,7 @@ class FishingMixin:
         state["last_detail"] = f"今日已垂钓 {state.get('today_count')}/{state.get('daily_limit')}"
         state["next_action_at"] = _next_day_action_time()
         self.save_state()
+        await self.fishing_finish_daily_done(identity, reason="daily limit reached")
         return ok
 
     async def fishing_raise_rod_current_identity(self, identity):

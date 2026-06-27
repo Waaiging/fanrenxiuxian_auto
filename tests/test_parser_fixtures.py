@@ -13,6 +13,7 @@ import concubine_features
 import common_command_features
 import cultivator_xiaohao
 import dashboard_server
+import fishing_features
 import intelligent_cultivator
 import log_utils
 import star_gazing_collector
@@ -1068,15 +1069,15 @@ class ParserFixtureTests(unittest.TestCase):
 
         start = parse_fishing_start(
             "**【灵溪垂钓】**\n"
-            "你挂上 **【灵虫饵】**，抛竿入水，敛息坐定。\n"
+            "你挂上 **【灵米饵】**，抛竿入水，敛息坐定。\n"
             "预计 **32秒** 内会有鱼讯。\n"
             "鱼讯倒计时：**31秒**"
         )
         self.assertEqual(start["status"], "started")
-        self.assertEqual(start["bait"], "灵虫饵")
+        self.assertEqual(start["bait"], "灵米饵")
         self.assertEqual(start["wait_seconds"], 32)
 
-        buy = parse_buy_bait("**【渔具铺】**\n你购得 **【灵虫饵】x20**。")
+        buy = parse_buy_bait("**【渔具铺】**\n你购得 **【灵米饵】x20**。")
         self.assertEqual(buy["status"], "success")
         self.assertEqual(buy["count"], 20)
 
@@ -1108,7 +1109,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor = DummyFishing()
         fishing = actor.get_fishing_state("主魂")
-        fishing["nest_counts"] = {"妖腥窝": 1}
+        fishing["nest_counts"] = {}
 
         self.assertFalse(asyncio.run(actor.fishing_try_nest("主魂")))
         self.assertEqual(actor.commands, [".打窝 灵草窝", ".买鱼饵 灵米饵 3"])
@@ -1117,6 +1118,20 @@ class ParserFixtureTests(unittest.TestCase):
             datetime.now().strftime("%Y-%m-%d"),
         )
         self.assertEqual(actor.fishing_next_nest("主魂"), "灵草窝")
+
+    def test_fishing_nest_plan_excludes_yaoxing_and_uses_two_rice_chaff(self):
+        actor = type("DummyFishing", (FishingMixin,), {
+            "__init__": lambda self: setattr(self, "state", {"fishing": {}}),
+            "save_state": lambda self: None,
+        })()
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(actor.fishing_next_nest("主魂"), "灵草窝")
+        fishing["nest_counts"] = {"灵草窝": 2}
+        self.assertEqual(actor.fishing_next_nest("主魂"), "米糠小窝")
+        fishing["nest_counts"] = {"灵草窝": 2, "米糠小窝": 1}
+        self.assertEqual(actor.fishing_next_nest("主魂"), "米糠小窝")
+        fishing["nest_counts"] = {"灵草窝": 2, "米糠小窝": 2}
+        self.assertEqual(actor.fishing_next_nest("主魂"), "")
 
     def test_fishing_daily_done_syncs_basket_after_twentieth_rod(self):
         class DummyFishing(FishingMixin):
@@ -1137,7 +1152,7 @@ class ParserFixtureTests(unittest.TestCase):
                         "青竹钓竿：**已持有**\n"
                         "今日竿数：**20/20**\n"
                         "当前窝料：无\n\n"
-                        "**鱼饵**\n- 灵虫饵 x0\n\n"
+                        "**鱼饵**\n- 灵米饵 x0\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
                     )
                 raise AssertionError(f"unexpected command: {command}")
@@ -1159,6 +1174,68 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["last_status"], "daily_done")
         self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
 
+    def test_fishing_daily_done_auto_pauses_dashboard_and_notifies(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+                self.config = {"notify_target": "Waaiging"}
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".提竿":
+                    return "**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！"
+                if command == ".鱼篓":
+                    return (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**20/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼饵**\n- 灵米饵 x0\n\n"
+                        "**鱼获**\n- 银须灵鲢 x1\n"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        async def fake_alert(actor, title, text, logger=None):
+            notices.append((title, text))
+            return True
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "today_count": 19,
+            "daily_limit": 20,
+            "active": True,
+            "active_due_at": now_str(),
+        })
+
+        notices = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path), \
+                    patch.object(fishing_features, "send_text_alert", fake_alert):
+                self.assertTrue(asyncio.run(actor.fishing_raise_rod("主魂")))
+                self.assertTrue(asyncio.run(actor.fishing_sync_daily_done_basket("主魂")))
+                with open(controls_path, "r", encoding="utf-8") as f:
+                    controls = json.load(f)
+
+        identity_controls = controls["xiaohao"]["主魂"]
+        self.assertTrue(identity_controls[".钓鱼 灵米饵"]["disabled"])
+        self.assertTrue(identity_controls[".钓鱼 灵虫饵"]["disabled"])
+        self.assertEqual(actor.commands, [".提竿", ".鱼篓"])
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0][0], "钓鱼完成")
+        self.assertIn("已自动暂停 dashboard 指令：.钓鱼 灵米饵", notices[0][1])
+        fishing = actor.get_fishing_state("主魂")
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(fishing["daily_done_auto_paused_date"], today)
+        self.assertEqual(fishing["daily_done_notified_date"], today)
+
     def test_fishing_daily_limit_start_response_syncs_basket(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
@@ -1170,7 +1247,7 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
-                if command == ".钓鱼 灵虫饵":
+                if command == ".钓鱼 灵米饵":
                     return "你今日已垂钓 **20/20** 竿，神识已乏，明日再来。"
                 if command == ".鱼篓":
                     return (
@@ -1178,7 +1255,7 @@ class ParserFixtureTests(unittest.TestCase):
                         "青竹钓竿：**已持有**\n"
                         "今日竿数：**20/20**\n"
                         "当前窝料：**灵草窝**（剩余 5 竿）\n\n"
-                        "**鱼饵**\n- 灵虫饵 x0\n\n"
+                        "**鱼饵**\n- 灵米饵 x0\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
                     )
                 raise AssertionError(f"unexpected command: {command}")
@@ -1186,7 +1263,7 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         self.assertTrue(asyncio.run(actor.fishing_start_round("主魂")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(actor.commands, [".钓鱼 灵虫饵", ".鱼篓"])
+        self.assertEqual(actor.commands, [".钓鱼 灵米饵", ".鱼篓"])
         self.assertEqual(fishing["today_count"], 20)
         self.assertEqual(fishing["last_status"], "daily_done")
         self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
@@ -1196,16 +1273,54 @@ class ParserFixtureTests(unittest.TestCase):
             {},
             "xiaohao",
             "主魂",
-            ".钓鱼 灵虫饵",
+            ".钓鱼 灵米饵",
             default_disabled=True,
         ))
         self.assertFalse(dashboard_server.command_control_disabled(
-            {"xiaohao": {"主魂": {".钓鱼 灵虫饵": {"disabled": False}}}},
+            {"xiaohao": {"主魂": {".钓鱼 灵米饵": {"disabled": False}}}},
             "xiaohao",
             "主魂",
-            ".钓鱼 灵虫饵",
+            ".钓鱼 灵米饵",
             default_disabled=True,
         ))
+
+    def test_fishing_legacy_lingchong_control_migrates_to_lingmi(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+        actor = DummyFishing()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "xiaohao": {
+                        "主魂": {
+                            ".钓鱼 灵虫饵": {
+                                "disabled": False,
+                                "command": ".钓鱼 灵虫饵",
+                            }
+                        }
+                    }
+                }, f, ensure_ascii=False)
+            log_utils._COMMAND_CONTROLS_CACHE["mtime"] = None
+            log_utils._COMMAND_CONTROLS_CACHE["data"] = {}
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path), \
+                    patch.object(log_utils, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(actor.fishing_command_is_enabled("主魂"))
+                with open(controls_path, "r", encoding="utf-8") as f:
+                    controls = json.load(f)
+            log_utils._COMMAND_CONTROLS_CACHE["mtime"] = None
+            log_utils._COMMAND_CONTROLS_CACHE["data"] = {}
+
+        migrated = controls["xiaohao"]["主魂"][".钓鱼 灵米饵"]
+        self.assertFalse(migrated["disabled"])
+        self.assertEqual(migrated["command"], ".钓鱼 灵米饵")
 
     def test_yinluo_parsers_cover_core_flow(self):
         status = parse_yinluo_status(
