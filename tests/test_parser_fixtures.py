@@ -1482,6 +1482,83 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sub.commands, [("厚土", ".上架 凝血草 换 青竹钓竿*1")])
         self.assertEqual(main.commands, [("主魂", ".购买 23733")])
 
+    def test_fishing_auto_target_lists_directly_when_global_holder_is_remote(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "sub"
+            avatars = ["厚土"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {
+                        "last_sync_date": today,
+                        "today_count": 20,
+                        "daily_limit": 20,
+                    },
+                    "fishing_auto": {"preferred_bait": "灵米饵"},
+                    "avatars": {"厚土": {"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 20}}},
+                }
+                self.commands = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def fishing_auto_find_rod_holder(self, identities=None, scan=False):
+                raise AssertionError("known remote holder should not trigger local rod scan")
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append((identity, command))
+                if identity == "厚土" and command == ".上架 凝血草 换 青竹钓竿*1":
+                    return "上架成功，挂单ID：23733。"
+                raise AssertionError(f"unexpected command: {identity} {command}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "sub": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "state_main.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "avatars": {
+                        "无咎子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "素缘子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                    },
+                }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "state_xiaohao.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "avatars": {
+                        "问心子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "素心子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                    },
+                }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": today,
+                    "preferred_bait": "灵米饵",
+                    "active": {"account": "sub", "identity": "厚土", "key": "sub|厚土"},
+                    "rod_holder": {"account": "main", "identity": "素缘子"},
+                    "completed": {},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertEqual(asyncio.run(actor.fishing_auto_tick()), 5)
+                transfer = fishing_features._load_fishing_auto_global_state()["transfer"]
+
+        self.assertEqual(actor.commands, [("厚土", ".上架 凝血草 换 青竹钓竿*1")])
+        self.assertEqual(transfer["status"], "listed")
+        self.assertEqual(transfer["listing_id"], "23733")
+
     def test_fishing_auto_chat_control_writes_single_global_switch(self):
         class DummyFishing(FishingMixin):
             account_key = "main"

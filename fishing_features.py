@@ -2266,19 +2266,7 @@ class FishingMixin:
         if await self.fishing_auto_handle_global_purchase():
             return 5
 
-        local_holder = await self.fishing_auto_find_rod_holder(identities, scan=False)
-        if not local_holder:
-            local_holder = await self.fishing_auto_find_rod_holder(identities, scan=True)
-        rod_holder_payload = None
-        if local_holder:
-            rod_holder_payload = {"account": self.fishing_account_key(), "identity": local_holder}
         global_state, global_snapshot, target = self.fishing_auto_global_active_target(bait=bait)
-        if rod_holder_payload:
-            global_state, global_snapshot = self.fishing_auto_update_global_progress(
-                bait=bait,
-                rod_holder=rod_holder_payload,
-            )
-            target = global_state.get("active") if isinstance(global_state.get("active"), dict) else target
 
         self.fishing_auto_pending_identities()
         if not global_snapshot.get("pending"):
@@ -2304,6 +2292,15 @@ class FishingMixin:
             )
             return 60
 
+        global_holder = global_state.get("rod_holder") if isinstance(global_state.get("rod_holder"), dict) else {}
+        if (
+            global_holder.get("account")
+            and global_holder.get("identity")
+            and global_holder.get("account") != account
+        ):
+            await self.fishing_auto_publish_global_listing(global_holder, target)
+            return 5
+
         try:
             if self.identity_pause_seconds(target_identity) > 0:
                 self.fishing_auto_set_status("waiting", f"等待 {target_identity} 暂停结束", 300)
@@ -2320,7 +2317,15 @@ class FishingMixin:
         if target_state.get("rod_owned") is not True:
             self.fishing_auto_adopt_purchased_global_rod(target)
         if target_state.get("rod_owned") is not True:
-            holder = local_holder or await self.fishing_auto_find_rod_holder(identities, scan=True)
+            local_holder = await self.fishing_auto_find_rod_holder(identities, scan=False)
+            if not local_holder:
+                local_holder = await self.fishing_auto_find_rod_holder(identities, scan=True)
+            if local_holder:
+                global_state, global_snapshot = self.fishing_auto_update_global_progress(
+                    bait=bait,
+                    rod_holder={"account": account, "identity": local_holder},
+                )
+            holder = local_holder
             if holder and holder != target_identity:
                 if not await self.fishing_auto_transfer_rod(holder, target_identity):
                     return FISHING_AUTO_RETRY_SECONDS
@@ -2335,7 +2340,6 @@ class FishingMixin:
                     rod_holder={"account": account, "identity": target_identity},
                 )
             else:
-                global_holder = global_state.get("rod_holder") if isinstance(global_state.get("rod_holder"), dict) else {}
                 if (
                     global_holder.get("account")
                     and global_holder.get("identity")
