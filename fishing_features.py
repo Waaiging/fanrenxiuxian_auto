@@ -71,6 +71,8 @@ def fishing_default_state():
         "daily_limit": FISHING_DAILY_LIMIT,
         "baits": {},
         "catches": {},
+        "basket_catches_baseline_date": "",
+        "basket_catches_baseline": {},
         "daily_catches": {},
         "daily_loot": {},
         "current_nest": "",
@@ -145,6 +147,8 @@ def reset_stale_fishing_daily_state(state, today=None):
     state["daily_done_notified_date"] = ""
     state["daily_catches"] = {}
     state["daily_loot"] = {}
+    state["basket_catches_baseline_date"] = ""
+    state["basket_catches_baseline"] = {}
     state["current_nest"] = ""
     state["current_nest_remaining"] = 0
     if state.get("last_status") in FISHING_DAILY_STALE_STATUSES:
@@ -218,6 +222,24 @@ def fishing_catch_summary(catches):
         if name and count > 0:
             parts.append(f"{name} x{count}")
     return "、".join(parts)
+
+
+def fishing_positive_catch_delta(current, baseline):
+    current = current or {}
+    baseline = baseline or {}
+    delta = {}
+    for name, count in current.items():
+        diff = int(count or 0) - int(baseline.get(name, 0) or 0)
+        if diff > 0:
+            delta[name] = diff
+    return delta
+
+
+def fishing_merge_catches(existing, basket_daily):
+    merged = dict(existing or {})
+    for name, count in (basket_daily or {}).items():
+        merged[name] = max(int(merged.get(name, 0) or 0), int(count or 0))
+    return {name: count for name, count in merged.items() if int(count or 0) > 0}
 
 
 def parse_fishing_loot_lines(text):
@@ -569,6 +591,40 @@ class FishingMixin:
 
     def fishing_preferred_bait(self, identity):
         return fishing_bait_for_state(self.get_fishing_state(identity))
+
+    def fishing_sync_daily_catches_from_basket(self, state, parsed):
+        today = _today()
+        catches = parsed.get("catches") or {}
+        today_count = parsed.get("today_count")
+        if today_count is None:
+            return False
+
+        if state.get("basket_catches_baseline_date") != today:
+            if int(today_count or 0) <= 0 and not state.get("daily_catches"):
+                baseline = dict(catches)
+            else:
+                baseline = {}
+            state["basket_catches_baseline_date"] = today
+            state["basket_catches_baseline"] = baseline
+
+        if int(today_count or 0) <= 0:
+            state["basket_catches_baseline_date"] = today
+            state["basket_catches_baseline"] = dict(catches)
+            if state.get("daily_catches"):
+                state["daily_catches"] = {}
+                return True
+            return False
+
+        baseline = state.get("basket_catches_baseline")
+        if not isinstance(baseline, dict):
+            baseline = {}
+            state["basket_catches_baseline"] = baseline
+        basket_daily = fishing_positive_catch_delta(catches, baseline)
+        merged = fishing_merge_catches(state.get("daily_catches", {}), basket_daily)
+        if merged != (state.get("daily_catches") or {}):
+            state["daily_catches"] = merged
+            return True
+        return False
 
     def fishing_master_command(self, identity):
         return fishing_command_for_bait(self.fishing_preferred_bait(identity))
@@ -1061,6 +1117,7 @@ class FishingMixin:
         if parsed.get("daily_limit") is not None:
             state["daily_limit"] = parsed["daily_limit"]
         state["baits"] = parsed.get("baits", {})
+        self.fishing_sync_daily_catches_from_basket(state, parsed)
         state["catches"] = parsed.get("catches", {})
         state["last_sync_date"] = _today()
         state["last_status"] = "synced"

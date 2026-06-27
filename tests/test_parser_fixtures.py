@@ -1479,6 +1479,86 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["daily_done_basket_sync_date"], "")
         self.assertEqual(fishing["next_action_at"], "")
 
+    def test_fishing_basket_sync_calibrates_daily_catches(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+                self.responses = [
+                    (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**0/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼获**\n暂无\n"
+                    ),
+                    (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**20/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼获**\n"
+                        "- 青鳞小鲫 x11\n"
+                        "- 银须灵鲢 x7\n"
+                        "- 赤尾火鲤 x1\n"
+                    ),
+                ]
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                return self.responses.pop(0)
+
+        actor = DummyFishing()
+        self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["basket_catches_baseline"], {})
+        fishing["daily_catches"] = {"青鳞小鲫": 8, "银须灵鲢": 4, "赤尾火鲤": 1}
+
+        self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 11, "银须灵鲢": 7, "赤尾火鲤": 1})
+
+    def test_fishing_basket_sync_uses_zero_count_as_baseline(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.responses = [
+                    (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**0/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼获**\n- 青鳞小鲫 x2\n"
+                    ),
+                    (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**1/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼获**\n- 青鳞小鲫 x3\n"
+                    ),
+                ]
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                return self.responses.pop(0)
+
+        actor = DummyFishing()
+        self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["basket_catches_baseline"], {"青鳞小鲫": 2})
+        self.assertEqual(fishing["daily_catches"], {})
+
+        self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 1})
+
     def test_fishing_unrecognized_raise_does_not_increment_count(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
