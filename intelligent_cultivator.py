@@ -1366,6 +1366,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             self.state["last_stairs_time"] = now
             self.state["last_stairs_success_time"] = now
             self.state["next_stairs_time"] = add_seconds_str(now, CLOUD_STAIRS_CD_SECONDS)
+            self.record_daily_reward_event("主魂", ".登天阶", stairs_resp, source=source)
             log.info(f"Cloud stairs success, next run at {self.state['next_stairs_time']}")
             return True
 
@@ -4871,6 +4872,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         asyncio.create_task(self.run_field_training_loop())
         asyncio.create_task(self.run_sect_war_loop())
         asyncio.create_task(self.run_custom_command_loop())
+        asyncio.create_task(self.run_daily_reward_summary_loop(initial_delay=40))
         if not self.lingxiao_enabled:
             asyncio.create_task(self.run_main_spirit_tree_loop())
 

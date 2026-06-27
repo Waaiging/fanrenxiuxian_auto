@@ -4108,6 +4108,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     log.info("Collection successful! Checking attraction cooldown...")
                     await asyncio.sleep(3)
                     self.state["last_collection_time"] = now_str()
+                    self.record_daily_reward_event("主魂", ".收集精华", collect_resp, source="收集精华")
                     attr_wait = self.star_attraction_wait_seconds()
                     if attr_wait > 0:
                         log.info(
@@ -6141,6 +6142,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_field_training_loop())   # 野外历练（继承）
         asyncio.create_task(self.run_sect_war_loop())         # 宗门战（继承）
         asyncio.create_task(self.run_custom_command_loop())    # dashboard 自定义指令
+        asyncio.create_task(self.run_daily_reward_summary_loop(initial_delay=40))
         asyncio.create_task(self.run_ask_dao_loop())           # 元婴宗问道
         asyncio.create_task(self.run_yuanying_out_loop())     # 元婴出窍
         asyncio.create_task(self.run_rift_search_loop())      # 探寻裂缝

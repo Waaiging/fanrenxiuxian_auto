@@ -188,6 +188,54 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(main_treasure.timeout, 90)
         self.assertTrue(main_treasure.force_identity_check)
 
+    def test_daily_reward_parser_and_summary_group_by_identity(self):
+        actor = DummyAvatarCommon()
+        text = "【元婴闭关结算】元婴闭关结束，获得修为 +2000，获得了【煞气小刀】x1。"
+
+        self.assertTrue(actor.record_daily_reward_event("主魂", ".元婴闭关", text, source="test"))
+        self.assertFalse(actor.record_daily_reward_event("主魂", ".元婴闭关", text, source="duplicate"))
+        self.assertTrue(actor.record_daily_reward_event(
+            "缘生子",
+            ".探寻裂缝",
+            "探寻裂缝成功，发现秘藏，获得【灵石】x3，宗门贡献 +5。",
+            source="test",
+        ))
+        today = datetime.now().strftime("%Y-%m-%d")
+        summary = actor.build_daily_reward_summary_text(today)
+
+        self.assertIn("账号：DummyAvatarCommon", summary)
+        self.assertIn("主魂：", summary)
+        self.assertIn(".元婴闭关：1 次；修为 +2000、煞气小刀 +1", summary)
+        self.assertIn("缘生子：", summary)
+        self.assertIn(".探寻裂缝：1 次；宗门贡献 +5、灵石 +3", summary)
+
+    def test_daily_reward_hooks_for_yuanying_rift_and_field_training(self):
+        actor = DummyAvatarCommon()
+        actor.record_yuanying_out_settlement_response(
+            "【元婴归窍总结】元婴神游归来，带回了以下收获：修为 +1200。",
+            identity="缘生子",
+            source="fixture",
+        )
+        actor.record_identity_fixed_cd_command_response(
+            "缘生子",
+            "探寻裂缝成功，获得【空间碎片】x2。",
+            ".探寻裂缝",
+            "last_rift_search_time",
+            "next_rift_search_time",
+            12 * 3600,
+        )
+        actor.record_identity_field_training_response(
+            "缘生子",
+            "【野外历练 · 灵机暗藏】本次获得：修为 +300、灵石 x4。",
+            context="fixture",
+        )
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        summary = actor.build_daily_reward_summary_text(today)
+        self.assertIn(".元婴出窍：1 次；修为 +1200", summary)
+        self.assertIn(".探寻裂缝：1 次；空间碎片 +2", summary)
+        self.assertIn(".野外历练：1 次；修为 +300、灵石 +4", summary)
+
         sub_treasure = treasure_touch_plan(".抚摸法宝 青竹蜂云剑")
         self.assertEqual(sub_treasure.command, ".抚摸法宝 青竹蜂云剑")
 

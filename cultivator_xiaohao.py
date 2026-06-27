@@ -941,6 +941,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.set_avatar_state(avatar, "last_stairs_time", now)
             self.set_avatar_state(avatar, "last_stairs_success_time", now)
             self.set_avatar_state(avatar, "next_stairs_time", add_seconds_str(now, 3 * 3600))
+            self.record_daily_reward_event(avatar, ".登天阶", stairs_resp, source=source)
             log.info(f"Cloud stairs [{avatar}] success, next run at {self.get_avatar_state(avatar).get('next_stairs_time', '')}")
             return True
 
@@ -3632,6 +3633,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await asyncio.sleep(3)
                 continue
 
+            reward_recorded = False
+            if any(k in a_resp for k in ["获得", "收获", "战利品", "带回", "奖励"]):
+                reward_recorded = self.record_daily_reward_event(
+                    "主魂", f".探渊 {best_name}", a_resp, source=f"灵兽探渊[{best_name}]"
+                )
+
             injury_cd = self.record_beast_injury_from_response(best_name, a_resp, source="abyss")
             if injury_cd >= 0:
                 abyss_delay = max(21600, injury_cd)
@@ -3648,6 +3655,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 return True
 
             if self.is_abyss_success_response(a_resp):
+                if not reward_recorded:
+                    self.record_daily_reward_event(
+                        "主魂", f".探渊 {best_name}", a_resp, source=f"灵兽探渊[{best_name}]"
+                    )
                 self.state["last_abyss_time"] = now_str()
                 self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600)
                 self.set_best_beast_status(best_name, "休息中")
@@ -6255,6 +6266,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_field_training_loop())
         asyncio.create_task(self.run_sect_war_loop())
         asyncio.create_task(self.run_custom_command_loop())
+        asyncio.create_task(self.run_daily_reward_summary_loop(initial_delay=40))
         asyncio.create_task(self.run_treasure_touch_loop())
         asyncio.create_task(self.run_yuanying_out_loop())
         asyncio.create_task(self.run_rift_search_loop())

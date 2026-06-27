@@ -10,6 +10,7 @@
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from log_utils import (
     is_yuanying_rebirth_block_response,
     is_yuanying_rebirth_success_response,
     notify_unrecognized_response,
+    send_text_alert,
     text_targets_current_account,
     text_username_mentions,
     tracked_command_identity_for_reply,
@@ -191,6 +193,8 @@ def common_command_default_state():
         "star_gazing_assigned_manifest_time": "",
         "star_gazing_assigned_avatar": "",
         "star_gazing_assigned_time": "",
+        "daily_reward_events": [],
+        "daily_reward_last_sent_date": "",
     }
 
 
@@ -400,6 +404,237 @@ class CommonCommandMixin:
     def common_command_logger(self):
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
+
+    # ---- 每日收益汇总 ----
+
+    def daily_reward_enabled_commands(self):
+        return {
+            ".元婴出窍",
+            ".元婴闭关",
+            ".探寻裂缝",
+            ".野外历练",
+            ".登天阶",
+            ".收集精华",
+            ".探渊",
+            ".灵兽探渊",
+        }
+
+    def daily_reward_account_label(self):
+        key = getattr(self, "account_key", "") or ""
+        return {
+            "main": "主号",
+            "sub": "副号",
+            "xiaohao": "小号",
+        }.get(key, key or self.__class__.__name__)
+
+    def clean_reward_text(self, text):
+        return re.sub(r"[ \t]+", " ", str(text or "").replace("**", "").replace("`", "")).strip()
+
+    def parse_reward_items_from_text(self, text):
+        """Best-effort parser for command rewards used by the daily summary."""
+        clean = self.clean_reward_text(text)
+        if not clean:
+            return {}
+        rewards = {}
+
+        def add(name, amount):
+            name = str(name or "").strip(" ：:，,。.;；-+")
+            if not name:
+                return
+            if name in {"x", "X", "本次", "额外", "收益", "奖励", "获得", "收获", "共计"}:
+                return
+            if any(ch in name for ch in "【】[]"):
+                return
+            try:
+                value = int(str(amount).replace(",", ""))
+            except Exception:
+                return
+            if value == 0:
+                return
+            rewards[name] = int(rewards.get(name, 0)) + value
+
+        for name, amount in re.findall(r"【([^】]{1,30})】\s*[xX*＊]\s*([+-]?\d[\d,]*)", clean):
+            add(name, amount)
+
+        for name, amount in re.findall(
+            r"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·（）()]{0,20})\s*[xX*＊]\s*([+-]?\d[\d,]*)",
+            clean,
+        ):
+            add(name, amount)
+
+        for name, amount in re.findall(
+            r"(修为|灵石|宗门贡献|贡献|神识|气血|煞气|道韵|感悟|星辰精华|精华)\s*(?:增加|提升|获得|得到|为|:|：)?\s*\+?\s*([+-]?\d[\d,]*)",
+            clean,
+        ):
+            add(name, amount)
+
+        for amount, _unit, name in re.findall(
+            r"([+-]?\d[\d,]*)\s*(点|枚|份|缕|颗|个)?\s*(修为|灵石|宗门贡献|贡献|神识|气血|煞气|道韵|感悟|星辰精华|精华)",
+            clean,
+        ):
+            add(name, amount)
+
+        for amount in re.findall(r"修为最终(?:增加|变化)了?\s*\+?\s*([+-]?\d[\d,]*)\s*点", clean):
+            add("修为", amount)
+
+        return rewards
+
+    def summarize_reward_items(self, rewards):
+        if not rewards:
+            return ""
+        parts = []
+        for name in sorted(rewards):
+            value = int(rewards.get(name, 0) or 0)
+            if value > 0:
+                parts.append(f"{name} +{value}")
+            else:
+                parts.append(f"{name} {value}")
+        return "、".join(parts)
+
+    def record_daily_reward_event(self, identity, command, text, source=""):
+        self.ensure_common_command_state()
+        command = str(command or "").strip()
+        root = command.split()[0] if command else ""
+        if command not in self.daily_reward_enabled_commands() and root not in self.daily_reward_enabled_commands():
+            return False
+        clean = self.clean_reward_text(text)
+        if not clean:
+            return False
+
+        now = datetime.now()
+        event_date = now.strftime("%Y-%m-%d")
+        event_time = now.strftime(TIME_FORMAT)
+        identity = str(identity or "主魂").strip() or "主魂"
+        sig = hashlib.sha1(f"{identity}|{root or command}|{clean[:1200]}".encode("utf-8")).hexdigest()
+        events = self.state.get("daily_reward_events")
+        if not isinstance(events, list):
+            events = []
+            self.state["daily_reward_events"] = events
+
+        for old in reversed(events[-30:]):
+            if old.get("sig") != sig:
+                continue
+            try:
+                age = (now - str_to_dt(old.get("time", ""))).total_seconds()
+            except Exception:
+                age = 999999
+            if 0 <= age <= 120:
+                return False
+
+        rewards = self.parse_reward_items_from_text(clean)
+        excerpt = re.sub(r"\s+", " ", clean)
+        if len(excerpt) > 180:
+            excerpt = excerpt[:180] + "..."
+        events.append({
+            "date": event_date,
+            "time": event_time,
+            "identity": identity,
+            "command": root or command,
+            "source": source or command,
+            "rewards": rewards,
+            "excerpt": excerpt,
+            "sig": sig,
+        })
+
+        cutoff = (now - timedelta(days=4)).strftime("%Y-%m-%d")
+        self.state["daily_reward_events"] = [
+            event for event in events
+            if str(event.get("date", "")) >= cutoff
+        ]
+        self.save_state()
+        return True
+
+    def build_daily_reward_summary_text(self, summary_date):
+        events = [
+            event for event in self.state.get("daily_reward_events", [])
+            if event.get("date") == summary_date
+        ]
+        if not events:
+            return ""
+
+        grouped = {}
+        for event in events:
+            identity = event.get("identity") or "主魂"
+            command = event.get("command") or "未知指令"
+            bucket = grouped.setdefault(identity, {}).setdefault(command, {
+                "count": 0,
+                "rewards": {},
+                "unparsed": 0,
+                "samples": [],
+            })
+            bucket["count"] += 1
+            rewards = event.get("rewards") if isinstance(event.get("rewards"), dict) else {}
+            if rewards:
+                for name, value in rewards.items():
+                    bucket["rewards"][name] = int(bucket["rewards"].get(name, 0) or 0) + int(value or 0)
+            else:
+                bucket["unparsed"] += 1
+                if event.get("excerpt") and len(bucket["samples"]) < 2:
+                    bucket["samples"].append(event.get("excerpt"))
+
+        lines = [
+            f"统计日期：{summary_date}",
+            f"账号：{self.daily_reward_account_label()}",
+        ]
+        identity_order = ["主魂"] + [name for name in getattr(self, "avatars", []) if name != "主魂"]
+        identity_order += [name for name in grouped if name not in identity_order]
+        for identity in identity_order:
+            commands = grouped.get(identity)
+            if not commands:
+                continue
+            lines.append("")
+            lines.append(f"{identity}：")
+            for command in sorted(commands):
+                bucket = commands[command]
+                reward_text = self.summarize_reward_items(bucket["rewards"])
+                detail = reward_text or "收益未解析"
+                if bucket["unparsed"] and reward_text:
+                    detail += f"；未解析 {bucket['unparsed']} 次"
+                lines.append(f"- {command}：{bucket['count']} 次；{detail}")
+                if not reward_text:
+                    for sample in bucket["samples"]:
+                        lines.append(f"  摘录：{sample}")
+        return "\n".join(lines)
+
+    async def send_daily_reward_summary_for_date(self, summary_date):
+        self.ensure_common_command_state()
+        if self.state.get("daily_reward_last_sent_date") == summary_date:
+            return False
+        text = self.build_daily_reward_summary_text(summary_date)
+        self.state["daily_reward_last_sent_date"] = summary_date
+        self.save_state()
+        if not text:
+            return False
+        log = self.common_command_logger()
+        sent = await send_text_alert(self, "周期收益日报", text, log)
+        if sent:
+            log.info(f"Daily reward summary sent for {summary_date}.")
+        else:
+            log.warning(f"Daily reward summary failed for {summary_date}; marked sent to avoid spam.")
+        return sent
+
+    def seconds_until_daily_reward_summary(self, now=None):
+        now = now or datetime.now()
+        target = now.replace(hour=0, minute=10, second=0, microsecond=0)
+        if now >= target:
+            target = target + timedelta(days=1)
+        return max(1, int((target - now).total_seconds()))
+
+    async def run_daily_reward_summary_loop(self, initial_delay=0):
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+        while getattr(self, "is_running", True):
+            try:
+                now = datetime.now()
+                today_target = now.replace(hour=0, minute=10, second=0, microsecond=0)
+                if now >= today_target:
+                    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                    await self.send_daily_reward_summary_for_date(yesterday)
+                await asyncio.sleep(min(self.seconds_until_daily_reward_summary(), 3600))
+            except Exception as exc:
+                self.common_command_logger().error(f"Daily reward summary loop error: {exc}", exc_info=True)
+                await asyncio.sleep(300)
 
     # ---- 身份级暂停（元婴虚弱等）----
 
@@ -1531,6 +1766,7 @@ class CommonCommandMixin:
             log.warning(f"{prefix}{command}: unrecognized response; retry scheduled at {state[next_key]}.")
             return False
 
+        self.record_daily_reward_event(identity, command, resp, source=command)
         state[last_key] = now
         state[next_key] = add_seconds_str(now, cd_seconds)
         self.save_state()
@@ -1611,6 +1847,7 @@ class CommonCommandMixin:
         log = self.common_command_logger()
         prefix = f"[{identity}] " if identity != "主魂" else ""
         command = self.yuanying_command_for_identity(identity)
+        self.record_daily_reward_event(identity, command, resp, source=source)
 
         recent_start_due = self._recent_yuanying_start_future(identity=identity)
         if recent_start_due:
@@ -2157,6 +2394,7 @@ class CommonCommandMixin:
             return True
 
         if self.is_field_training_command_result(text):
+            self.record_daily_reward_event("主魂", FIELD_TRAINING_COMMAND, text, source=context)
             self.state["last_field_training_time"] = now
             self.state["next_field_training_time"] = add_seconds_str(now, FIELD_TRAINING_CD_SECONDS)
             self.save_state()
@@ -2255,6 +2493,7 @@ class CommonCommandMixin:
             return True
 
         if self.is_field_training_command_result(text):
+            self.record_daily_reward_event(identity, FIELD_TRAINING_COMMAND, text, source=context)
             next_time = add_seconds_str(now, FIELD_TRAINING_CD_SECONDS)
             update_avatar({
                 "last_field_training_time": now,
@@ -3324,6 +3563,7 @@ class CommonCommandMixin:
         now = now_str()
         clean = (text or "").replace("**", "")
         if clean and any(k in clean for k in ["收集完成", "成功从", "获得了"]):
+            self.record_daily_reward_event(avatar, ".收集精华", text, source=source)
             self.update_avatar_states(avatar, {
                 "last_star_collect_time": now,
                 "next_star_collect_time": "",
