@@ -28,6 +28,7 @@ from command_modules import (
 )
 from fishing_features import (
     FishingMixin,
+    parse_fishing_control_text,
     parse_buy_bait,
     parse_fishing_basket,
     parse_fishing_start,
@@ -1099,6 +1100,77 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rod["status"], "success")
         self.assertEqual(rod["catch"], "银须灵鲢")
 
+    def test_fishing_control_text_is_bare_and_limited(self):
+        self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
+        self.assertEqual(parse_fishing_control_text(" 钓鱼   灵虫饵 "), "灵虫饵")
+        self.assertEqual(parse_fishing_control_text(".钓鱼 灵米饵"), "")
+        self.assertEqual(parse_fishing_control_text("钓鱼 妖血饵"), "")
+
+    def test_fishing_chat_control_enables_selected_bait(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.pause_admins = {8325841058}
+                self.current_identity = "主魂"
+                self.saved = 0
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = DummyFishing()
+        msg = SimpleNamespace(sender_id=8325841058, out=False, id=1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(asyncio.run(
+                    actor.maybe_handle_fishing_control_message(msg, "钓鱼 灵虫饵")
+                ))
+                with open(controls_path, "r", encoding="utf-8") as f:
+                    controls = json.load(f)
+                self.assertTrue(actor.fishing_command_is_enabled("主魂"))
+
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["preferred_bait"], "灵虫饵")
+        self.assertEqual(fishing["last_status"], "enabled")
+        identity_controls = controls["xiaohao"]["主魂"]
+        self.assertFalse(identity_controls[".钓鱼 灵虫饵"]["disabled"])
+        self.assertTrue(identity_controls[".钓鱼 灵米饵"]["disabled"])
+        self.assertGreaterEqual(actor.saved, 1)
+
+    def test_fishing_preferred_bait_drives_buy_and_start(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {"preferred_bait": "灵虫饵"}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".买鱼饵 灵虫饵 20":
+                    return "**【渔具铺】**\n你购得 **【灵虫饵】x20**。"
+                if command == ".钓鱼 灵虫饵":
+                    return (
+                        "**【灵溪垂钓】**\n"
+                        "你挂上 **【灵虫饵】**，抛竿入水，敛息坐定。\n"
+                        "预计 **30秒** 内会有鱼讯。"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
+        fishing["daily_limit"] = 20
+        self.assertTrue(asyncio.run(actor.fishing_ensure_daily_bait("主魂")))
+        self.assertTrue(asyncio.run(actor.fishing_start_round("主魂")))
+        self.assertEqual(actor.commands, [".买鱼饵 灵虫饵 20", ".钓鱼 灵虫饵"])
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["active_bait"], "灵虫饵")
+        self.assertEqual(fishing["baits"]["灵虫饵"], 19)
+
     def test_fishing_existing_nest_reply_syncs_without_incrementing_count(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
@@ -1387,6 +1459,26 @@ class ParserFixtureTests(unittest.TestCase):
             default_disabled=True,
         ))
 
+    def test_dashboard_fishing_row_uses_preferred_bait(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        state = {
+            "fishing": {
+                "preferred_bait": "灵虫饵",
+                "last_sync_date": today,
+                "today_count": 3,
+                "daily_limit": 20,
+                "last_status": "enabled",
+            }
+        }
+        row = next(
+            command
+            for panel in build_command_panels("main", state)
+            for command in panel.get("commands", [])
+            if command.get("label") == "钓鱼"
+        )
+        self.assertEqual(row["command"], ".钓鱼 灵虫饵")
+        self.assertIn("饵料 灵虫饵", row["detail"])
+
     def test_fishing_stale_daily_count_resets_for_dashboard(self):
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1457,7 +1549,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["daily_done_auto_paused_date"], "")
         self.assertEqual(fishing["daily_done_notified_date"], "")
 
-    def test_fishing_legacy_lingchong_control_migrates_to_lingmi(self):
+    def test_fishing_lingchong_control_sets_preferred_bait(self):
         class DummyFishing(FishingMixin):
             account_key = "xiaohao"
 
@@ -1491,9 +1583,9 @@ class ParserFixtureTests(unittest.TestCase):
             log_utils._COMMAND_CONTROLS_CACHE["mtime"] = None
             log_utils._COMMAND_CONTROLS_CACHE["data"] = {}
 
-        migrated = controls["xiaohao"]["主魂"][".钓鱼 灵米饵"]
-        self.assertFalse(migrated["disabled"])
-        self.assertEqual(migrated["command"], ".钓鱼 灵米饵")
+        identity_controls = controls["xiaohao"]["主魂"]
+        self.assertNotIn(".钓鱼 灵米饵", identity_controls)
+        self.assertEqual(actor.get_fishing_state("主魂")["preferred_bait"], "灵虫饵")
 
     def test_yinluo_parsers_cover_core_flow(self):
         status = parse_yinluo_status(

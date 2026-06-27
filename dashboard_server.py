@@ -38,7 +38,12 @@ from command_modules import (
     treasure_touch_plan,
     yuanying_out_plan,
 )
-from fishing_features import FISHING_DAILY_LIMIT, FISHING_MASTER_COMMAND, fishing_dashboard_state
+from fishing_features import (
+    FISHING_DAILY_LIMIT,
+    fishing_dashboard_bait,
+    fishing_dashboard_command,
+    fishing_dashboard_state,
+)
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
@@ -674,9 +679,11 @@ def fishing_command(state):
     if not isinstance(fishing, dict):
         fishing = {}
     fishing = fishing_dashboard_state(fishing)
+    command = fishing_dashboard_command(fishing)
+    bait = fishing_dashboard_bait(fishing)
     today_count = int(fishing.get("today_count") or 0)
     daily_limit = int(fishing.get("daily_limit") or FISHING_DAILY_LIMIT)
-    detail_parts = [f"今日 {today_count}/{daily_limit}", f"饵料 {FISHING_MASTER_COMMAND.split()[-1]}"]
+    detail_parts = [f"今日 {today_count}/{daily_limit}", f"饵料 {bait}"]
     current_nest = str(fishing.get("current_nest") or "").strip()
     nest_remaining = int(fishing.get("current_nest_remaining") or 0)
     if current_nest and nest_remaining > 0:
@@ -689,7 +696,7 @@ def fishing_command(state):
     if fishing.get("active") and active_due and active_due > datetime.now():
         next_seconds = max(0, int((active_due - datetime.now()).total_seconds()))
         return command_row(
-            FISHING_MASTER_COMMAND,
+            command,
             "钓鱼",
             "等鱼讯",
             "cooldown",
@@ -707,7 +714,7 @@ def fishing_command(state):
         next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
         status = "今日已满" if fishing.get("last_status") == "daily_done" else "等待中"
         return command_row(
-            FISHING_MASTER_COMMAND,
+            command,
             "钓鱼",
             status,
             "cooldown",
@@ -735,7 +742,7 @@ def fishing_command(state):
     }
     last_status = str(fishing.get("last_status") or "paused")
     return command_row(
-        FISHING_MASTER_COMMAND,
+        command,
         "钓鱼",
         status_map.get(last_status, "就绪"),
         "ready" if last_status not in {"no_rod", "paused"} else "unknown",

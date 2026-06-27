@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until, str_to_dt
 from log_utils import (
     COMMAND_CONTROL_FILE,
+    _is_own_outgoing_sender,
     feedback_response_matches_command,
     is_game_bot_sender,
-    load_command_controls,
     log_incoming_message,
     meaningful_reply_to_msg_id,
     record_bot_response,
@@ -21,6 +21,8 @@ from log_utils import (
 FISHING_BAIT = "灵米饵"
 FISHING_MASTER_COMMAND = f".钓鱼 {FISHING_BAIT}"
 FISHING_LEGACY_MASTER_COMMANDS = (".钓鱼 灵虫饵",)
+FISHING_CONTROL_BAITS = ("灵米饵", "灵虫饵")
+FISHING_CONTROL_COMMANDS = tuple(f".钓鱼 {bait}" for bait in FISHING_CONTROL_BAITS)
 FISHING_DAILY_LIMIT = 20
 FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
@@ -60,6 +62,7 @@ def fishing_default_state():
         "last_detail": "",
         "last_response": "",
         "next_action_at": "",
+        "preferred_bait": FISHING_BAIT,
         "rod_owned": None,
         "skill": "",
         "skill_exp": 0,
@@ -161,6 +164,61 @@ def fishing_dashboard_state(state, today=None):
     view = dict(state or {}) if isinstance(state, dict) else {}
     reset_stale_fishing_daily_state(view, today=today)
     return view
+
+
+def fishing_command_for_bait(bait):
+    bait = str(bait or "").strip()
+    if bait not in FISHING_BAIT_NAMES:
+        bait = FISHING_BAIT
+    return f".钓鱼 {bait}"
+
+
+def fishing_bait_from_command(command):
+    match = re.fullmatch(r"\.钓鱼\s+(\S+)", str(command or "").strip())
+    if not match:
+        return ""
+    bait = match.group(1).strip()
+    return bait if bait in FISHING_BAIT_NAMES else ""
+
+
+def fishing_bait_for_state(state):
+    if not isinstance(state, dict):
+        return FISHING_BAIT
+    bait = str(state.get("preferred_bait") or "").strip()
+    if bait not in FISHING_BAIT_NAMES:
+        bait = FISHING_BAIT
+    return bait
+
+
+def fishing_dashboard_bait(state):
+    return fishing_bait_for_state(fishing_dashboard_state(state))
+
+
+def fishing_dashboard_command(state):
+    return fishing_command_for_bait(fishing_dashboard_bait(state))
+
+
+def parse_fishing_control_text(text):
+    match = re.fullmatch(r"钓鱼\s+(\S+)", str(text or "").strip())
+    if not match:
+        return ""
+    bait = match.group(1).strip()
+    return bait if bait in FISHING_CONTROL_BAITS else ""
+
+
+def _sender_id_variants(sender_id):
+    if sender_id is None:
+        return set()
+    value = str(sender_id)
+    variants = {value}
+    if value.startswith("-100"):
+        variants.add(value[4:])
+    elif value.startswith("-"):
+        variants.add(value[1:])
+    else:
+        variants.add(f"-100{value}")
+        variants.add(f"-{value}")
+    return variants
 
 
 def _load_command_controls_uncached():
@@ -440,36 +498,60 @@ class FishingMixin:
     def fishing_account_key(self):
         return str(getattr(self, "account_key", "") or "").strip()
 
-    def fishing_migrate_legacy_control(self, identity, legacy_key, entry):
-        account = self.fishing_account_key()
-        if not account or not legacy_key:
-            return False
-        lock = _acquire_command_control_lock()
-        try:
-            data = _load_command_controls_uncached()
-            account_controls = data.setdefault(account, {})
-            identity_controls = account_controls.setdefault(identity or "主魂", {})
-            if FISHING_MASTER_COMMAND in identity_controls:
-                return False
-            disabled = bool(entry.get("disabled")) if isinstance(entry, dict) else bool(entry)
-            identity_controls[FISHING_MASTER_COMMAND] = {
-                "disabled": disabled,
-                "command": FISHING_MASTER_COMMAND,
-                "label": "钓鱼",
-                "updated_at": now_str(),
-                "updated_by": "auto-fishing-migrate",
-                "note": f"migrated from {legacy_key}",
-            }
-            _save_command_controls_uncached(data)
-            log = self.fishing_logger()
-            if log:
-                log.info(
-                    f"Fishing [{identity}] migrated dashboard control "
-                    f"{legacy_key} -> {FISHING_MASTER_COMMAND}."
-                )
+    def fishing_preferred_bait(self, identity):
+        return fishing_bait_for_state(self.get_fishing_state(identity))
+
+    def fishing_master_command(self, identity):
+        return fishing_command_for_bait(self.fishing_preferred_bait(identity))
+
+    def fishing_control_keys(self, identity):
+        keys = [
+            self.fishing_master_command(identity),
+            FISHING_MASTER_COMMAND,
+            *FISHING_LEGACY_MASTER_COMMANDS,
+            *FISHING_CONTROL_COMMANDS,
+        ]
+        return tuple(dict.fromkeys(key for key in keys if key))
+
+    def fishing_identity_from_control_message(self, msg):
+        sender_variants = _sender_id_variants(getattr(msg, "sender_id", None))
+        avatar_chat_ids = getattr(self, "_avatar_chat_ids", {}) or {}
+        for raw_id, identity in avatar_chat_ids.items():
+            if sender_variants & _sender_id_variants(raw_id):
+                return identity or "主魂"
+        return (
+            getattr(self, "_manual_identity_label", None)
+            or getattr(self, "current_identity", None)
+            or "主魂"
+        )
+
+    def fishing_wakeup_event(self, identity):
+        events = getattr(self, "_fishing_wakeup_events", None)
+        if events is None:
+            events = {}
+            self._fishing_wakeup_events = events
+        identity = str(identity or "主魂").strip() or "主魂"
+        event = events.get(identity)
+        if event is None:
+            event = asyncio.Event()
+            events[identity] = event
+        return event
+
+    def fishing_wake(self, identity):
+        self.fishing_wakeup_event(identity).set()
+
+    async def fishing_sleep(self, identity, seconds):
+        seconds = max(1, min(int(seconds or 1), 300))
+        event = self.fishing_wakeup_event(identity)
+        if event.is_set():
+            event.clear()
             return True
-        finally:
-            _release_command_control_lock(lock)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=seconds)
+            event.clear()
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def fishing_pause_dashboard_command(self, identity, reason="daily limit reached"):
         account = self.fishing_account_key()
@@ -485,7 +567,7 @@ class FishingMixin:
                 )
             return False
         identity = str(identity or "主魂").strip() or "主魂"
-        control_keys = (FISHING_MASTER_COMMAND, *FISHING_LEGACY_MASTER_COMMANDS)
+        control_keys = self.fishing_control_keys(identity)
         changed = False
         lock = _acquire_command_control_lock()
         try:
@@ -515,9 +597,82 @@ class FishingMixin:
         if log:
             log.info(
                 f"Fishing [{identity}] auto-paused dashboard command "
-                f"{FISHING_MASTER_COMMAND} ({reason})."
+                f"{self.fishing_master_command(identity)} ({reason})."
             )
         return changed
+
+    def fishing_enable_dashboard_command(self, identity, bait, reason="chat control"):
+        account = self.fishing_account_key()
+        if not account:
+            return False
+        identity = str(identity or "主魂").strip() or "主魂"
+        bait = bait if bait in FISHING_CONTROL_BAITS else FISHING_BAIT
+        selected_key = fishing_command_for_bait(bait)
+        changed = False
+        lock = _acquire_command_control_lock()
+        try:
+            data = _load_command_controls_uncached()
+            account_controls = data.setdefault(account, {})
+            identity_controls = account_controls.setdefault(identity, {})
+            for key in self.fishing_control_keys(identity):
+                disabled = key != selected_key
+                current = identity_controls.get(key)
+                current_disabled = bool(current.get("disabled")) if isinstance(current, dict) else bool(current)
+                if key not in identity_controls or current_disabled != disabled:
+                    changed = True
+                identity_controls[key] = {
+                    "disabled": disabled,
+                    "command": key,
+                    "label": "钓鱼",
+                    "updated_at": now_str(),
+                    "updated_by": "chat-control",
+                    "reason": reason,
+                }
+            _save_command_controls_uncached(data)
+        finally:
+            _release_command_control_lock(lock)
+        return changed
+
+    def fishing_apply_control(self, identity, bait, reason="chat control"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        bait = bait if bait in FISHING_CONTROL_BAITS else ""
+        if not bait:
+            return False
+        state = self.get_fishing_state(identity)
+        old_bait = fishing_bait_for_state(state)
+        state["preferred_bait"] = bait
+        if old_bait != bait:
+            state["bait_purchase_done"] = False
+        if fishing_daily_done_for_today(state):
+            state["last_status"] = "daily_done"
+            state["last_detail"] = (
+                f"今日已垂钓 {state.get('today_count')}/{state.get('daily_limit')}，"
+                f"饵料已切换为 {bait}"
+            )
+        else:
+            state["last_status"] = "enabled"
+            state["last_detail"] = f"手动启用钓鱼，饵料 {bait}"
+            if not state.get("active"):
+                state["next_action_at"] = ""
+        self.fishing_enable_dashboard_command(identity, bait, reason=reason)
+        self.save_state()
+        self.fishing_wake(identity)
+        log = self.fishing_logger()
+        if log:
+            log.info(f"Fishing [{identity}] enabled by chat control with bait {bait}.")
+        return True
+
+    async def maybe_handle_fishing_control_message(self, msg, text, sender=None):
+        if sender is not None and is_game_bot_sender(self, sender):
+            return False
+        bait = parse_fishing_control_text(text)
+        if not bait:
+            return False
+        if not _is_own_outgoing_sender(self, msg):
+            return False
+        identity = self.fishing_identity_from_control_message(msg)
+        self.fishing_apply_control(identity, bait, reason="chat control")
+        return True
 
     async def fishing_notify_daily_done(self, identity, pause_changed=False):
         state = self.get_fishing_state(identity)
@@ -540,9 +695,10 @@ class FishingMixin:
         }.get(account, account or "账号")
         today_count = int(state.get("today_count") or 0)
         daily_limit = int(state.get("daily_limit") or FISHING_DAILY_LIMIT)
+        command = self.fishing_master_command(identity)
         text = (
             f"{account_label} [{identity}] 今日钓鱼已完成 {today_count}/{daily_limit} 竿。\n"
-            f"已自动暂停 dashboard 指令：{FISHING_MASTER_COMMAND}。\n"
+            f"已自动暂停 dashboard 指令：{command}。\n"
             "明天需要继续钓鱼时，请在 dashboard 手动启用。"
         )
         if state.get("last_catch"):
@@ -565,10 +721,10 @@ class FishingMixin:
         await self.fishing_notify_daily_done(identity, pause_changed=pause_changed)
 
     def fishing_command_is_enabled(self, identity):
-        controls = load_command_controls().get(getattr(self, "account_key", ""), {})
+        controls = _load_command_controls_uncached().get(getattr(self, "account_key", ""), {})
         if not isinstance(controls, dict):
             return False
-        keys = (FISHING_MASTER_COMMAND, *FISHING_LEGACY_MASTER_COMMANDS)
+        keys = self.fishing_control_keys(identity)
         for ident in (identity, "*"):
             ident_controls = controls.get(ident, {})
             if not isinstance(ident_controls, dict):
@@ -577,11 +733,18 @@ class FishingMixin:
                 if key not in ident_controls:
                     continue
                 entry = ident_controls.get(key)
-                if key != FISHING_MASTER_COMMAND:
-                    self.fishing_migrate_legacy_control(identity, key, entry)
                 if isinstance(entry, dict):
-                    return not bool(entry.get("disabled"))
-                return not bool(entry)
+                    disabled = bool(entry.get("disabled"))
+                else:
+                    disabled = bool(entry)
+                if not disabled:
+                    bait = fishing_bait_from_command(key)
+                    if bait in FISHING_CONTROL_BAITS and bait != self.fishing_preferred_bait(identity):
+                        state = self.get_fishing_state(identity)
+                        state["preferred_bait"] = bait
+                        state["bait_purchase_done"] = False
+                        self.save_state()
+                return not disabled
         return False
 
     async def send_fishing_command(self, identity, command, timeout=60):
@@ -850,20 +1013,21 @@ class FishingMixin:
 
     async def fishing_ensure_daily_bait(self, identity):
         state = self.get_fishing_state(identity)
+        bait = fishing_bait_for_state(state)
         today_count = int(state.get("today_count") or 0)
         daily_limit = int(state.get("daily_limit") or FISHING_DAILY_LIMIT)
         needed = max(0, daily_limit - today_count)
         if needed <= 0:
             return True
-        if state.get("bait_purchase_done") and int(state.get("baits", {}).get(FISHING_BAIT, 0)) > 0:
+        if state.get("bait_purchase_done") and int(state.get("baits", {}).get(bait, 0)) > 0:
             return True
-        current = int(state.get("baits", {}).get(FISHING_BAIT, 0))
+        current = int(state.get("baits", {}).get(bait, 0))
         buy_count = max(0, needed - current)
         if buy_count <= 0:
             state["bait_purchase_done"] = True
             self.save_state()
             return True
-        if not await self.fishing_buy_bait(identity, FISHING_BAIT, buy_count):
+        if not await self.fishing_buy_bait(identity, bait, buy_count):
             return False
         state = self.get_fishing_state(identity)
         state["bait_purchase_date"] = _today()
@@ -939,7 +1103,9 @@ class FishingMixin:
         return False
 
     async def fishing_start_round(self, identity):
-        resp = await self.send_fishing_command(identity, FISHING_MASTER_COMMAND, timeout=60)
+        command = self.fishing_master_command(identity)
+        bait = self.fishing_preferred_bait(identity)
+        resp = await self.send_fishing_command(identity, command, timeout=60)
         text = self.fishing_response_text(resp)
         parsed = parse_fishing_start(text)
         state = self.get_fishing_state(identity)
@@ -948,17 +1114,17 @@ class FishingMixin:
         if status == "started":
             wait_seconds = max(5, int(parsed.get("wait_seconds") or 60)) + FISHING_ROUND_BUFFER_SECONDS
             state["active"] = True
-            state["active_bait"] = parsed.get("bait") or FISHING_BAIT
+            state["active_bait"] = parsed.get("bait") or bait
             state["active_started_at"] = now_str()
             state["active_due_at"] = add_seconds_str(now_str(), wait_seconds)
             baits = state.setdefault("baits", {})
-            baits[FISHING_BAIT] = max(0, int(baits.get(FISHING_BAIT, 0)) - 1)
+            baits[bait] = max(0, int(baits.get(bait, 0)) - 1)
             state["last_status"] = "fishing"
             state["last_detail"] = f"{state['active_bait']} 等鱼讯 {wait_seconds}秒"
             self.save_state()
             return True
         if status == "missing_bait":
-            missing = parsed.get("missing_bait") or FISHING_BAIT
+            missing = parsed.get("missing_bait") or bait
             remaining = max(1, int(state.get("daily_limit") or FISHING_DAILY_LIMIT) - int(state.get("today_count") or 0))
             if await self.fishing_buy_bait(identity, missing, remaining):
                 return await self.fishing_start_round(identity)
@@ -1173,11 +1339,13 @@ class FishingMixin:
                     not self.fishing_command_is_enabled(identity)
                     and hasattr(self, "wait_for_dashboard_command_control_change")
                 ):
-                    await self.wait_for_dashboard_command_control_change(
+                    changed = await self.wait_for_dashboard_command_control_change(
                         max(10, min(int(wait_seconds), FISHING_DISABLED_SLEEP_SECONDS))
                     )
+                    if not changed:
+                        await self.fishing_sleep(identity, 1)
                 else:
-                    await asyncio.sleep(max(1, min(int(wait_seconds), 300)))
+                    await self.fishing_sleep(identity, wait_seconds)
             except Exception as exc:
                 if log:
                     log.error(f"Fishing loop [{identity}] error: {exc}", exc_info=True)

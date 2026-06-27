@@ -4035,6 +4035,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             if not is_game_bot_sender(self, sender) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender, log):
                     return
+                if await self.maybe_handle_fishing_control_message(msg, text, sender):
+                    return
                 _sender_id = getattr(msg, "sender_id", None)
                 if _sender_id and _sender_id in self.pause_admins:
                     stripped = text.strip()
