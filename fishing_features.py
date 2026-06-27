@@ -72,6 +72,7 @@ def fishing_default_state():
         "baits": {},
         "catches": {},
         "daily_catches": {},
+        "daily_loot": {},
         "current_nest": "",
         "current_nest_remaining": 0,
         "nest_plan_date": "",
@@ -130,6 +131,7 @@ def reset_stale_fishing_daily_state(state, today=None):
         state.get("daily_done_auto_paused_date"),
         state.get("daily_done_notified_date"),
         state.get("daily_catches"),
+        state.get("daily_loot"),
         state.get("current_nest"),
         int(state.get("current_nest_remaining") or 0) > 0,
         state.get("last_status") in FISHING_DAILY_STALE_STATUSES,
@@ -142,6 +144,7 @@ def reset_stale_fishing_daily_state(state, today=None):
     state["daily_done_auto_paused_date"] = ""
     state["daily_done_notified_date"] = ""
     state["daily_catches"] = {}
+    state["daily_loot"] = {}
     state["current_nest"] = ""
     state["current_nest_remaining"] = 0
     if state.get("last_status") in FISHING_DAILY_STALE_STATUSES:
@@ -215,6 +218,16 @@ def fishing_catch_summary(catches):
         if name and count > 0:
             parts.append(f"{name} x{count}")
     return "、".join(parts)
+
+
+def parse_fishing_loot_lines(text):
+    clean = _strip_markdown(text)
+    loot = {}
+    for name, count in re.findall(r"伴生机缘[:：]\s*【([^】]+)】\s*x\s*(\d+)", clean):
+        name = name.strip()
+        if name:
+            loot[name] = loot.get(name, 0) + int(count)
+    return loot
 
 
 def parse_fishing_control_text(text):
@@ -511,13 +524,14 @@ def parse_nest_response(text):
 
 def parse_rod_response(text):
     clean = _strip_markdown(text)
-    result = {"matched": False, "status": "", "catch": ""}
+    result = {"matched": False, "status": "", "catch": "", "loot": {}}
     if "【提竿成功】" in clean:
         result["matched"] = True
         result["status"] = "success"
         fish_match = re.search(r"一尾\s*【([^】]+)】", clean)
         if fish_match:
             result["catch"] = fish_match.group(1).strip()
+        result["loot"] = parse_fishing_loot_lines(clean)
         return result
     if "【空竿】" in clean or "提竿太急" in clean or "时机差了一线" in clean or "收竿起身" in clean:
         result["matched"] = True
@@ -759,6 +773,9 @@ class FishingMixin:
         catches_summary = fishing_catch_summary(state.get("daily_catches", {}))
         if catches_summary:
             text += f"\n今日鱼获：{catches_summary}"
+        loot_summary = fishing_catch_summary(state.get("daily_loot", {}))
+        if loot_summary:
+            text += f"\n今日伴生机缘：{loot_summary}"
         if state.get("last_catch"):
             text += f"\n最后一竿：{state.get('last_catch')}"
         if not pause_changed:
@@ -1347,6 +1364,10 @@ class FishingMixin:
             if state["last_catch"]:
                 daily_catches = state.setdefault("daily_catches", {})
                 daily_catches[state["last_catch"]] = int(daily_catches.get(state["last_catch"], 0)) + 1
+            if parsed.get("loot"):
+                daily_loot = state.setdefault("daily_loot", {})
+                for name, count in parsed.get("loot", {}).items():
+                    daily_loot[name] = int(daily_loot.get(name, 0)) + int(count or 0)
             state["last_detail"] = f"提竿成功{('：' + state['last_catch']) if state['last_catch'] else ''}"
             state["consecutive_empty"] = 0
         elif parsed.get("status") == "empty":

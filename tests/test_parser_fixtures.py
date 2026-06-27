@@ -33,6 +33,7 @@ from fishing_features import (
     parse_buy_bait,
     parse_exchange_response,
     parse_fishing_basket,
+    parse_fishing_loot_lines,
     parse_fishing_start,
     parse_missing_resources,
     parse_nest_response,
@@ -1122,6 +1123,19 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rod["status"], "success")
         self.assertEqual(rod["catch"], "银须灵鲢")
 
+        lucky_rod = parse_rod_response(
+            "【提竿成功】\n"
+            "@Yidao2250 在 青溪浅滩 猛然提竿，灵线绷成一道银弧。\n"
+            "水下灵光一翻，竟是一尾【银须灵鲢】！\n\n"
+            "品阶：灵鱼\n"
+            "- 伴生机缘：【煞气小刀】x1\n\n"
+            "鱼获已入鱼篓，可用 .开鱼 银须灵鲢 查看鱼腹机缘。"
+        )
+        self.assertEqual(lucky_rod["status"], "success")
+        self.assertEqual(lucky_rod["catch"], "银须灵鲢")
+        self.assertEqual(lucky_rod["loot"], {"煞气小刀": 1})
+        self.assertEqual(parse_fishing_loot_lines("- 伴生机缘：【煞气小刀】x1"), {"煞气小刀": 1})
+
     def test_fishing_control_text_is_bare_and_limited(self):
         self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
         self.assertEqual(parse_fishing_control_text(" 钓鱼   灵虫饵 "), "灵虫饵")
@@ -1344,7 +1358,11 @@ class ParserFixtureTests(unittest.TestCase):
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
                 if command == ".提竿":
-                    return "**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！"
+                    return (
+                        "**【提竿成功】**\n"
+                        "水下灵光一翻，竟是一尾 **【银须灵鲢】**！\n"
+                        "- 伴生机缘：【煞气小刀】x1"
+                    )
                 if command == ".鱼篓":
                     return (
                         "**【鱼篓】**\n"
@@ -1460,7 +1478,11 @@ class ParserFixtureTests(unittest.TestCase):
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
                 if command == ".提竿":
-                    return "**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！"
+                    return (
+                        "**【提竿成功】**\n"
+                        "水下灵光一翻，竟是一尾 **【银须灵鲢】**！\n"
+                        "- 伴生机缘：【煞气小刀】x1"
+                    )
                 if command == ".鱼篓":
                     return (
                         "**【鱼篓】**\n"
@@ -1504,9 +1526,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(notices[0][0], "钓鱼完成")
         self.assertIn("已自动暂停 dashboard 指令：.钓鱼 灵米饵", notices[0][1])
         self.assertIn("今日鱼获：青鳞小鲫 x2、银须灵鲢 x1", notices[0][1])
+        self.assertIn("今日伴生机缘：煞气小刀 x1", notices[0][1])
         self.assertIn("最后一竿：银须灵鲢", notices[0][1])
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 2, "银须灵鲢": 1})
+        self.assertEqual(fishing["daily_loot"], {"煞气小刀": 1})
         today = datetime.now().strftime("%Y-%m-%d")
         self.assertEqual(fishing["daily_done_auto_paused_date"], today)
         self.assertEqual(fishing["daily_done_notified_date"], today)
