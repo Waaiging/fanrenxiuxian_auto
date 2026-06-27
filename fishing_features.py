@@ -2109,6 +2109,12 @@ class FishingMixin:
                 msg_id = str(msg_id)
             recorded = state.setdefault("recorded_rod_message_ids", [])
             if msg_id in recorded:
+                if (
+                    finish_daily
+                    and parsed.get("matched")
+                    and fishing_daily_done_for_today(state)
+                ):
+                    await self.fishing_sync_daily_done_basket(identity)
                 return parsed.get("matched", False)
             if parsed.get("matched"):
                 recorded.append(msg_id)

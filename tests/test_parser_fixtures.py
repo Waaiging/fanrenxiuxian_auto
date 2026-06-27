@@ -1807,6 +1807,71 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["daily_catches"], {"银须灵鲢": 1})
         self.assertEqual(fishing["recorded_rod_message_ids"], [101])
 
+    def test_fishing_duplicate_final_rod_still_runs_daily_done_notice(self):
+        class DummyFishing(FishingMixin):
+            account_key = "sub"
+
+            def __init__(self):
+                self.state = {"avatars": {"厚土": {"fishing": {}}}}
+                self.commands = []
+                self.config = {"notify_target": "Waaiging"}
+
+            def save_state(self):
+                pass
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"].setdefault(identity, {})
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append((identity, command))
+                if command == ".鱼篓":
+                    return (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**20/20**\n\n"
+                        "**鱼饵**\n- 灵米饵 x6\n\n"
+                        "**鱼获**\n- 银须灵鲢 x10\n- 青鳞小鲫 x10\n"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        async def fake_alert(actor, title, text, logger=None):
+            notices.append((title, text))
+            return True
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("厚土")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "today_count": 19,
+            "daily_limit": 20,
+            "active": True,
+            "active_due_at": now_str(),
+        })
+        msg = SimpleNamespace(
+            id=202,
+            text="**【提竿成功】**\n水下灵光一翻，竟是一尾 **【青鳞小鲫】**！",
+        )
+
+        notices = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path), \
+                    patch.object(fishing_features, "send_text_alert", fake_alert):
+                self.assertTrue(asyncio.run(actor.fishing_record_rod_response("厚土", msg, finish_daily=False)))
+                self.assertTrue(asyncio.run(actor.fishing_record_rod_response("厚土", msg, finish_daily=True)))
+                with open(controls_path, "r", encoding="utf-8") as f:
+                    controls = json.load(f)
+
+        fishing = actor.get_fishing_state("厚土")
+        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 1})
+        self.assertEqual(fishing["recorded_rod_message_ids"], [202])
+        self.assertEqual(actor.commands, [("厚土", ".鱼篓")])
+        self.assertEqual(len(notices), 1)
+        self.assertIn("副号 [厚土] 今日钓鱼已完成 20/20 竿", notices[0][1])
+        self.assertIn("今日鱼获：青鳞小鲫 x1", notices[0][1])
+        self.assertTrue(controls["sub"]["厚土"][".钓鱼 灵米饵"]["disabled"])
+
     def test_fishing_daily_done_auto_pauses_dashboard_and_notifies(self):
         self.assertEqual(
             fishing_catch_summary({"青鳞小鲫": 2, "银须灵鲢": 1, "空": 0}),
