@@ -1602,6 +1602,28 @@ class ParserFixtureTests(unittest.TestCase):
         fishing["nest_counts"] = {"灵草窝": 2, "米糠小窝": 2}
         self.assertEqual(actor.fishing_next_nest("主魂"), "")
 
+    def test_fishing_unrecognized_start_retries_after_two_minutes(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                return ""
+
+        actor = DummyFishing()
+        self.assertFalse(asyncio.run(actor.fishing_start_round("主魂")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(actor.commands, [".钓鱼 灵米饵"])
+        self.assertEqual(fishing_features.FISHING_RETRY_SECONDS, 2 * 60)
+        self.assertEqual(fishing["last_status"], "start_unrecognized")
+        self.assertLessEqual(common_seconds_until(fishing["next_action_at"]), 120)
+        self.assertGreater(common_seconds_until(fishing["next_action_at"]), 100)
+
     def test_fishing_daily_done_syncs_basket_after_twentieth_rod(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
