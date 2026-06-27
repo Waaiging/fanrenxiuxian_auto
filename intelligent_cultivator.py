@@ -5067,6 +5067,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             self.set_avatar_state(avatar, "last_gazing_time", now_str())
             self.state["last_gazing_date"] = gazing_date
             self.state["last_gazing_time"] = now_str()
+            self.common_mark_star_gazing_round_assigned(
+                manifest_dt,
+                avatar,
+                source="passive .观星 result",
+                logger=log,
+            )
             self.clear_pending_star_gazing_schedule()
             self.state["next_star_gazing_time"] = ""
             self.save_state()
@@ -5561,9 +5567,21 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     # ⚠️ 同步更新主 state，防止 star_gazing_sent_on_date() 漏检导致重复派化身
                     self.state["last_gazing_date"] = today
                     self.state["last_gazing_time"] = now_str()
+                    self.common_mark_star_gazing_round_assigned(
+                        manifest_dt,
+                        avatar,
+                        source=".观星 response",
+                        logger=log,
+                    )
                 else:
                     self.state["last_gazing_date"] = today
                     self.state["last_gazing_time"] = now_str()
+                    self.common_mark_star_gazing_round_assigned(
+                        manifest_dt,
+                        "主魂",
+                        source=".观星 response",
+                        logger=log,
+                    )
                     self.clear_pending_star_gazing_schedule()
                     self.save_state()
 
@@ -5794,6 +5812,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                         )
                         return True
 
+                    assigned_avatar = self.common_star_gazing_assigned_avatar_for_manifest(manifest_dt)
+                    if assigned_avatar:
+                        log.info(
+                            f"Star gazing: manifest {manifest_key} already spent by {assigned_avatar}; "
+                            f"skip duplicate trigger from {sender_info}: {text_preview}"
+                        )
+                        return True
+
                     selected_avatar, idx = self.choose_star_gazing_avatar_for_today(gazing_date)
                     if not selected_avatar:
                         log.info(f"观星轮换: {gazing_date} 所有化身都已观星，跳过本轮显化。")
@@ -5812,6 +5838,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     self.state["pending_star_gazing_fate_type"] = self.star_gazing_pending_fate_type(text)
                     self.state["star_gazing_claimed_manifest_time"] = manifest_key
                     self.state["star_gazing_claimed_avatar"] = selected_avatar
+                    self.common_mark_star_gazing_round_assigned(
+                        manifest_dt,
+                        selected_avatar,
+                        source="manifest opportunity",
+                        logger=log,
+                    )
                     self.state["next_star_gazing_time"] = dt_to_str(send_dt)
                     self.save_state()
 

@@ -188,6 +188,9 @@ def common_command_default_state():
         "last_sect_war_response": "",
         "custom_command_runs": {},
         "identity_pauses": {},
+        "star_gazing_assigned_manifest_time": "",
+        "star_gazing_assigned_avatar": "",
+        "star_gazing_assigned_time": "",
     }
 
 
@@ -284,6 +287,46 @@ class CommonCommandMixin:
         self.state["star_gazing_claimed_avatar"] = ""
         self.state["pending_star_gazing_manifest_time"] = ""
         self.state["pending_star_gazing_fate_type"] = ""
+
+    def common_star_gazing_manifest_key(self, manifest):
+        if isinstance(manifest, datetime):
+            return dt_to_str(manifest)
+        return str(manifest or "").strip()
+
+    def common_star_gazing_assigned_avatar_for_manifest(self, manifest):
+        """Return the script-level identity already assigned to this manifest round."""
+        manifest_key = self.common_star_gazing_manifest_key(manifest)
+        if not manifest_key:
+            return ""
+        claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+        claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+        if claimed_manifest == manifest_key and claimed_avatar:
+            return claimed_avatar
+        assigned_manifest = self.state.get("star_gazing_assigned_manifest_time", "")
+        if assigned_manifest != manifest_key:
+            return ""
+        return self.state.get("star_gazing_assigned_avatar", "") or claimed_avatar or "unknown"
+
+    def common_mark_star_gazing_round_assigned(self, manifest, avatar, source="", logger=None):
+        """Remember that this script has already spent this manifest round on one identity."""
+        manifest_key = self.common_star_gazing_manifest_key(manifest)
+        if not manifest_key:
+            return False
+        identity = str(avatar or "主魂").strip() or "主魂"
+        changed = (
+            self.state.get("star_gazing_assigned_manifest_time", "") != manifest_key
+            or self.state.get("star_gazing_assigned_avatar", "") != identity
+        )
+        self.state["star_gazing_assigned_manifest_time"] = manifest_key
+        self.state["star_gazing_assigned_avatar"] = identity
+        self.state["star_gazing_assigned_time"] = now_str()
+        if changed:
+            log = logger or self.common_command_logger()
+            suffix = f" ({source})" if source else ""
+            log.info(
+                f"Star gazing [{identity}]: manifest {manifest_key} assigned at script level{suffix}."
+            )
+        return changed
 
     def common_star_gazing_claim_matches(self, avatar, manifest_dt, default_identity="主魂"):
         """Return whether the current account-level claim still belongs to identity."""
@@ -2867,6 +2910,17 @@ class CommonCommandMixin:
         identity = str(identity or "主魂").strip() or "主魂"
         changed = False
         stamp = now_str()
+        manifest_key = (
+            self.state.get("star_gazing_claimed_manifest_time", "")
+            or self.state.get("pending_star_gazing_manifest_time", "")
+        )
+        if manifest_key:
+            self.common_mark_star_gazing_round_assigned(
+                manifest_key,
+                identity,
+                source=source or ".改换星移 attempt",
+                logger=logger,
+            )
 
         if identity != "主魂" and hasattr(self, "get_avatar_state") and hasattr(self, "set_avatar_state"):
             state = self.get_avatar_state(identity)

@@ -4483,6 +4483,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
         self.set_avatar_state(avatar, "last_gazing_date", gazing_date)
         self.set_avatar_state(avatar, "last_gazing_time", now_str())
+        self.common_mark_star_gazing_round_assigned(
+            manifest_dt,
+            avatar,
+            source="passive .观星 result",
+            logger=log,
+        )
         self.clear_avatar_star_gazing_pending(avatar)
         self.state["pending_star_gazing_manifest_time"] = ""
         self.state["pending_star_gazing_fate_type"] = ""
@@ -4711,6 +4717,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
             self.set_avatar_state(avatar, "last_gazing_date", today)
             self.set_avatar_state(avatar, "last_gazing_time", now_str())
+            self.common_mark_star_gazing_round_assigned(
+                manifest_dt,
+                avatar,
+                source=".观星 response",
+                logger=log,
+            )
 
             if self.star_gazing_good_opportunity(resp_text):
                 if immediate_shift:
@@ -4873,6 +4885,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     )
                     return
 
+                assigned_avatar = self.common_star_gazing_assigned_avatar_for_manifest(manifest_dt)
+                if assigned_avatar:
+                    log.info(
+                        f"Avatar Star gazing: manifest {manifest_key} already spent by {assigned_avatar}; "
+                        "skip duplicate trigger."
+                    )
+                    return
+
                 selected_avatar = avatar
                 idx = 0
                 if not selected_avatar:
@@ -4899,6 +4919,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 self.state["star_gazing_claimed_avatar"] = selected_avatar
                 self.state["pending_star_gazing_manifest_time"] = manifest_key
                 self.state["pending_star_gazing_fate_type"] = self.star_gazing_pending_fate_type(text)
+                self.common_mark_star_gazing_round_assigned(
+                    manifest_dt,
+                    selected_avatar,
+                    source="manifest opportunity",
+                    logger=log,
+                )
                 self.set_avatar_state(selected_avatar, "pending_star_gazing_date", gazing_date)
                 self.set_avatar_state(selected_avatar, "pending_star_gazing_target_time", dt_to_str(send_dt))
                 self.set_avatar_state(selected_avatar, "next_star_gazing_time", dt_to_str(send_dt))

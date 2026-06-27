@@ -2076,6 +2076,8 @@ class ParserFixtureTests(unittest.TestCase):
                 "pending_star_gazing_fate_type": "Good - 五彩缤纷",
                 "star_gazing_claimed_manifest_time": "2026-06-22 18:00:00",
                 "star_gazing_claimed_avatar": avatar,
+                "star_gazing_assigned_manifest_time": "2026-06-22 18:00:00",
+                "star_gazing_assigned_avatar": avatar,
                 "next_star_gazing_time": "2026-06-22 17:59:00",
                 "star_gazing_avatar_index": 0,
                 "avatars": {avatar: {}},
@@ -2105,6 +2107,111 @@ class ParserFixtureTests(unittest.TestCase):
                     scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"),
                     "2026-06-24 12:00:00",
                 )
+
+    def test_same_manifest_assigned_round_does_not_rotate_second_avatar(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 6, 24, 12, 0, 38)
+                return value.replace(tzinfo=tz) if tz else value
+
+        manifest_key = "2026-06-24 12:00:00"
+        text = """
+**【星盘显化】**
+@foo 闭目凝神，推演天机...星盘之上，天机已然显现！
+
+**下一次天道演化将是**: **【Good - 星辰异象】**
+**当前天命所归**: **@bar**
+"""
+        sender = SimpleNamespace(username="hantianzzzzzz_bot")
+
+        async def run_main_like(cls, module, first_avatar, second_avatar=None):
+            actor = cls.__new__(cls)
+            actor.mc = {}
+            actor.avatars = [first_avatar] + ([second_avatar] if second_avatar else [])
+            actor.avatar_nicknames = {name: "" for name in actor.avatars}
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.star_gazing_task = None
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_schedule(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.schedule_star_gazing_simple = fake_schedule
+            actor.state = {
+                "star_gazing_avatar_index": 1 if second_avatar else 0,
+                "star_gazing_assigned_manifest_time": manifest_key,
+                "star_gazing_assigned_avatar": first_avatar,
+                "last_star_gazing_report_manifest_time": "",
+                "avatars": {
+                    first_avatar: {"last_gazing_date": "2026-06-24"},
+                    **({second_avatar: {}} if second_avatar else {}),
+                },
+            }
+            with patch.object(module, "datetime", FixedDatetime):
+                handled = await actor.maybe_handle_star_gazing_opportunity(
+                    DummyMessage(7317, text=text),
+                    text,
+                    sender,
+                )
+                await asyncio.sleep(0)
+            return handled, actor.state, scheduled
+
+        cases = (
+            (Cultivator, intelligent_cultivator, "素缘子", None),
+            (SubCultivator, sub_cultivator, "厚土", "缘生子"),
+        )
+        for cls, module, first_avatar, second_avatar in cases:
+            with self.subTest(cls=cls.__name__):
+                handled, state, scheduled = asyncio.run(
+                    run_main_like(cls, module, first_avatar, second_avatar)
+                )
+                self.assertTrue(handled)
+                self.assertEqual(scheduled, [])
+                self.assertEqual(state.get("star_gazing_claimed_manifest_time", ""), "")
+                self.assertEqual(state.get("star_gazing_claimed_avatar", ""), "")
+                self.assertEqual(state["star_gazing_assigned_manifest_time"], manifest_key)
+                self.assertEqual(state["star_gazing_assigned_avatar"], first_avatar)
+
+        async def run_xiaohao():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            actor.mc = {}
+            actor.avatars = ["素心子", "缘生子"]
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_schedule(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.avatar_schedule_star_gazing_simple = fake_schedule
+            actor.state = {
+                "star_gazing_avatar_index": 1,
+                "star_gazing_assigned_manifest_time": manifest_key,
+                "star_gazing_assigned_avatar": "素心子",
+                "last_star_gazing_report_manifest_time": "",
+                "avatars": {
+                    "素心子": {"last_gazing_date": "2026-06-24"},
+                    "缘生子": {},
+                },
+            }
+            with patch.object(cultivator_xiaohao, "datetime", FixedDatetime):
+                await actor.avatar_handle_star_gazing_opportunity(
+                    None,
+                    DummyMessage(7318, text=text),
+                    text,
+                    sender,
+                )
+                await asyncio.sleep(0)
+            return actor.state, scheduled
+
+        xiaohao_state, xiaohao_scheduled = asyncio.run(run_xiaohao())
+        self.assertEqual(xiaohao_scheduled, [])
+        self.assertEqual(xiaohao_state.get("star_gazing_claimed_manifest_time", ""), "")
+        self.assertEqual(xiaohao_state.get("star_gazing_claimed_avatar", ""), "")
+        self.assertEqual(xiaohao_state["star_gazing_assigned_manifest_time"], manifest_key)
+        self.assertEqual(xiaohao_state["star_gazing_assigned_avatar"], "素心子")
 
     def test_good_notice_before_final_report_uses_current_manifest_all_accounts(self):
         class FixedDatetime(datetime):
