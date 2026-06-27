@@ -39,8 +39,11 @@ from command_modules import (
     yuanying_out_plan,
 )
 from fishing_features import (
+    FISHING_AUTO_CONTROL_COMMAND,
     FISHING_AUTO_CONTROL_COMMANDS,
+    FISHING_CONTROL_BAITS,
     FISHING_DAILY_LIMIT,
+    fishing_auto_bait_from_entry,
     fishing_auto_bait_for_state,
     fishing_auto_dashboard_state,
     fishing_dashboard_bait,
@@ -486,6 +489,18 @@ def command_control_disabled(controls, account, identity, control_key, default_d
     return bool(default_disabled)
 
 
+def fishing_auto_control_entry(account):
+    controls = load_command_controls()
+    account_controls = controls.get(account, {}) if isinstance(controls, dict) else {}
+    if not isinstance(account_controls, dict):
+        return {}
+    identity_controls = account_controls.get("主魂", {})
+    if not isinstance(identity_controls, dict):
+        return {}
+    entry = identity_controls.get(FISHING_AUTO_CONTROL_COMMAND)
+    return entry if isinstance(entry, dict) else {}
+
+
 def apply_command_controls(account, panel):
     controls = load_command_controls()
     identity = panel.get("identity") or "主魂"
@@ -759,10 +774,14 @@ def fishing_command(state):
     )
 
 
-def fishing_auto_commands(state):
+def fishing_auto_commands(account, state):
     auto_state = state.get("fishing_auto", {}) if isinstance(state, dict) else {}
     auto_state = fishing_auto_dashboard_state(auto_state)
-    preferred_bait = fishing_auto_bait_for_state(auto_state)
+    control_entry = fishing_auto_control_entry(account)
+    preferred_bait = fishing_auto_bait_from_entry(
+        control_entry,
+        fallback=fishing_auto_bait_for_state(auto_state),
+    )
     active_identity = str(auto_state.get("active_identity") or "").strip()
     rod_holder = str(auto_state.get("rod_holder") or "").strip()
     completed = auto_state.get("completed", {}) if isinstance(auto_state.get("completed"), dict) else {}
@@ -790,40 +809,38 @@ def fishing_auto_commands(state):
     }
     last_status = str(auto_state.get("last_status") or "paused")
     next_action = parse_state_time(auto_state.get("next_action_at", ""))
-    rows = []
-    for command in FISHING_AUTO_CONTROL_COMMANDS:
-        bait = command.split()[-1] if command.split() else preferred_bait
-        is_selected = bait == preferred_bait
-        if next_action and next_action > datetime.now() and is_selected:
-            next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
-            rows.append(command_row(
-                command,
-                f"全自动钓鱼({bait})",
-                "等待中",
-                "cooldown",
-                format_remaining(next_seconds),
-                str(auto_state.get("next_action_at") or ""),
-                " · ".join(detail_parts),
-                "钓鱼",
-                schedule_type="cooldown",
-                next_seconds=next_seconds,
-                default_paused=True,
-            ))
-            continue
-        rows.append(command_row(
-            command,
-            f"全自动钓鱼({bait})",
-            status_map.get(last_status, "就绪") if is_selected else "可选鱼饵",
-            "ready" if is_selected and last_status not in {"paused", "done"} else "unknown",
+    if next_action and next_action > datetime.now():
+        next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
+        row = command_row(
+            FISHING_AUTO_CONTROL_COMMAND,
+            "全自动钓鱼",
+            "等待中",
+            "cooldown",
+            format_remaining(next_seconds),
+            str(auto_state.get("next_action_at") or ""),
+            " · ".join(detail_parts),
+            "钓鱼",
+            schedule_type="cooldown",
+            next_seconds=next_seconds,
+            default_paused=True,
+        )
+    else:
+        row = command_row(
+            FISHING_AUTO_CONTROL_COMMAND,
+            "全自动钓鱼",
+            status_map.get(last_status, "就绪"),
+            "ready" if last_status not in {"paused", "done"} else "unknown",
             "0秒",
             str(auto_state.get("next_action_at") or ""),
-            " · ".join(detail_parts + ([] if is_selected else [f"启用后改用 {bait}"])),
+            " · ".join(detail_parts),
             "钓鱼",
             schedule_type="cooldown",
             next_seconds=0,
             default_paused=True,
-        ))
-    return rows
+        )
+    row["bait_options"] = list(FISHING_CONTROL_BAITS)
+    row["bait_value"] = preferred_bait
+    return [row]
 
 
 def yinluo_commands(state):
@@ -1123,7 +1140,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(state))
+        rows.extend(fishing_auto_commands(account, state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -1142,7 +1159,7 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(state))
+        rows.extend(fishing_auto_commands(account, state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
@@ -1157,7 +1174,7 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(state))
+        rows.extend(fishing_auto_commands(account, state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
@@ -3345,6 +3362,43 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
 
     with COMMAND_CONTROL_LOCK:
         data = load_command_controls()
+        if command in FISHING_AUTO_CONTROL_COMMANDS:
+            bait = str(payload.get("bait") or "").strip()
+            if bait not in FISHING_CONTROL_BAITS:
+                for auto_account in WINDOW_MAP:
+                    old_entry = (
+                        data.get(auto_account, {})
+                        .get("主魂", {})
+                        .get(FISHING_AUTO_CONTROL_COMMAND, {})
+                    )
+                    if isinstance(old_entry, dict) and old_entry.get("bait") in FISHING_CONTROL_BAITS:
+                        bait = old_entry.get("bait")
+                        break
+            if bait not in FISHING_CONTROL_BAITS:
+                bait = FISHING_CONTROL_BAITS[0]
+            for auto_account in WINDOW_MAP:
+                account_controls = data.setdefault(auto_account, {})
+                identity_controls = account_controls.setdefault("主魂", {})
+                identity_controls[FISHING_AUTO_CONTROL_COMMAND] = {
+                    "disabled": disabled,
+                    "command": FISHING_AUTO_CONTROL_COMMAND,
+                    "label": "全自动钓鱼",
+                    "bait": bait,
+                    "updated_at": datetime.now().strftime(TIME_FORMAT),
+                    "updated_by": username,
+                }
+            save_command_controls(data)
+            with STATUS_LOCK:
+                STATUS_CACHE.clear()
+            return {
+                "success": True,
+                "account": account,
+                "identity": identity,
+                "control_key": FISHING_AUTO_CONTROL_COMMAND,
+                "disabled": disabled,
+                "bait": bait,
+                "global": True,
+            }
         account_controls = data.setdefault(account, {})
         identity_controls = account_controls.setdefault(identity, {})
         if disabled:
@@ -3356,16 +3410,7 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
                 "updated_by": username,
             }
         else:
-            if command in FISHING_AUTO_CONTROL_COMMANDS:
-                for auto_command in FISHING_AUTO_CONTROL_COMMANDS:
-                    identity_controls[auto_command] = {
-                        "disabled": auto_command != command,
-                        "command": auto_command,
-                        "label": "全自动钓鱼",
-                        "updated_at": datetime.now().strftime(TIME_FORMAT),
-                        "updated_by": username,
-                    }
-            elif default_paused:
+            if default_paused:
                 identity_controls[control_key] = {
                     "disabled": False,
                     "command": command,
@@ -3389,6 +3434,42 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "control_key": control_key,
         "disabled": disabled,
     }
+
+@app.post("/api/fishing-auto-bait")
+async def set_fishing_auto_bait(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Update the global auto-fishing bait without changing the enabled/paused switch."""
+    bait = str(payload.get("bait") or "").strip()
+    if bait not in FISHING_CONTROL_BAITS:
+        return {"success": False, "msg": "未知鱼饵"}
+    with COMMAND_CONTROL_LOCK:
+        data = load_command_controls()
+        enabled = False
+        for auto_account in WINDOW_MAP:
+            entry = (
+                data.get(auto_account, {})
+                .get("主魂", {})
+                .get(FISHING_AUTO_CONTROL_COMMAND, {})
+            )
+            if isinstance(entry, dict) and not bool(entry.get("disabled")):
+                enabled = True
+                break
+        for auto_account in WINDOW_MAP:
+            account_controls = data.setdefault(auto_account, {})
+            identity_controls = account_controls.setdefault("主魂", {})
+            old_entry = identity_controls.get(FISHING_AUTO_CONTROL_COMMAND, {})
+            disabled = bool(old_entry.get("disabled")) if isinstance(old_entry, dict) else not enabled
+            identity_controls[FISHING_AUTO_CONTROL_COMMAND] = {
+                "disabled": disabled,
+                "command": FISHING_AUTO_CONTROL_COMMAND,
+                "label": "全自动钓鱼",
+                "bait": bait,
+                "updated_at": datetime.now().strftime(TIME_FORMAT),
+                "updated_by": username,
+            }
+        save_command_controls(data)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {"success": True, "bait": bait, "enabled": enabled}
 
 @app.post("/api/custom-command")
 async def upsert_custom_command(payload: dict = Body(...), username: str = Depends(authenticate)):

@@ -1426,6 +1426,89 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.get_fishing_state("缘生子")["rod_owned"])
         self.assertEqual(actor.get_fishing_auto_state()["rod_holder"], "缘生子")
 
+    def test_fishing_auto_cross_account_transfer_listing_purchase_and_adopt(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self, account_key, avatars):
+                self.account_key = account_key
+                self.avatars = avatars
+                self.state = {
+                    "fishing": {},
+                    "fishing_auto": {},
+                    "avatars": {avatar: {} for avatar in avatars},
+                }
+                self.commands = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append((identity, command))
+                if self.account_key == "sub" and identity == "厚土" and command == ".上架 凝血草 换 青竹鱼竿*1":
+                    return "上架成功，挂单ID：23733。"
+                if self.account_key == "main" and identity == "主魂" and command == ".购买 23733":
+                    return "购买成功，获得了【青竹鱼竿】x1。"
+                raise AssertionError(f"unexpected command: {self.account_key} {identity} {command}")
+
+        main = DummyFishing("main", ["无咎子"])
+        sub = DummyFishing("sub", ["厚土"])
+        main.get_fishing_state("主魂")["rod_owned"] = True
+        sub.get_fishing_state("厚土")["rod_owned"] = False
+        holder = {"account": "main", "identity": "主魂"}
+        target = {"account": "sub", "identity": "厚土"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(asyncio.run(sub.fishing_auto_publish_global_listing(holder, target)))
+                transfer = fishing_features._load_fishing_auto_global_state()["transfer"]
+                self.assertEqual(transfer["status"], "listed")
+                self.assertEqual(transfer["listing_id"], "23733")
+
+                self.assertTrue(asyncio.run(main.fishing_auto_handle_global_purchase()))
+                global_state = fishing_features._load_fishing_auto_global_state()
+                self.assertEqual(global_state["transfer"]["status"], "purchased")
+                self.assertFalse(main.get_fishing_state("主魂")["rod_owned"])
+
+                self.assertTrue(sub.fishing_auto_adopt_purchased_global_rod(target))
+                global_state = fishing_features._load_fishing_auto_global_state()
+                self.assertEqual(global_state["transfer"], {})
+                self.assertEqual(global_state["rod_holder"]["account"], "sub")
+                self.assertEqual(global_state["rod_holder"]["identity"], "厚土")
+                self.assertTrue(sub.get_fishing_state("厚土")["rod_owned"])
+
+        self.assertEqual(sub.commands, [("厚土", ".上架 凝血草 换 青竹鱼竿*1")])
+        self.assertEqual(main.commands, [("主魂", ".购买 23733")])
+
+    def test_fishing_auto_chat_control_writes_single_global_switch(self):
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["无咎子"]
+
+            def __init__(self):
+                self.state = {"fishing_auto": {}, "fishing": {}, "avatars": {"无咎子": {}}}
+                self.saved = 0
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = DummyFishing()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(actor.fishing_auto_apply_control("灵虫饵", reason="fixture"))
+                with open(controls_path, "r", encoding="utf-8") as f:
+                    controls = json.load(f)
+                for account in ("main", "sub", "xiaohao"):
+                    entry = controls[account]["主魂"][".全自动钓鱼"]
+                    self.assertFalse(entry["disabled"])
+                    self.assertEqual(entry["bait"], "灵虫饵")
+                    self.assertNotIn(".全自动钓鱼 灵虫饵", controls[account]["主魂"])
+        self.assertEqual(actor.get_fishing_auto_state()["preferred_bait"], "灵虫饵")
+        self.assertGreater(actor.saved, 0)
+
     def test_fishing_nest_plan_excludes_yaoxing_and_uses_two_rice_chaff(self):
         actor = type("DummyFishing", (FishingMixin,), {
             "__init__": lambda self: setattr(self, "state", {"fishing": {}}),
@@ -1790,7 +1873,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(row["command"], ".钓鱼 灵虫饵")
         self.assertIn("饵料 灵虫饵", row["detail"])
 
-    def test_dashboard_fishing_auto_rows_allow_bait_selection(self):
+    def test_dashboard_fishing_auto_row_allows_bait_selection(self):
         state = {
             "fishing_auto": {
                 "preferred_bait": "灵虫饵",
@@ -1806,11 +1889,11 @@ class ParserFixtureTests(unittest.TestCase):
             for command in panel.get("commands", [])
             if str(command.get("command") or "").startswith(".全自动钓鱼")
         ]
-        self.assertEqual(
-            {command["command"] for command in commands},
-            {".全自动钓鱼 灵米饵", ".全自动钓鱼 灵虫饵"},
-        )
-        selected = next(command for command in commands if command["command"] == ".全自动钓鱼 灵虫饵")
+        self.assertEqual(len(commands), 1)
+        selected = commands[0]
+        self.assertEqual(selected["command"], ".全自动钓鱼")
+        self.assertEqual(selected["bait_value"], "灵虫饵")
+        self.assertEqual(selected["bait_options"], ["灵米饵", "灵虫饵"])
         self.assertIn("鱼饵 灵虫饵", selected["detail"])
 
     def test_fishing_stale_daily_count_resets_for_dashboard(self):

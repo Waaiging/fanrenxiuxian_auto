@@ -25,7 +25,15 @@ FISHING_MASTER_COMMAND = f".钓鱼 {FISHING_BAIT}"
 FISHING_LEGACY_MASTER_COMMANDS = (".钓鱼 灵虫饵",)
 FISHING_CONTROL_BAITS = ("灵米饵", "灵虫饵")
 FISHING_CONTROL_COMMANDS = tuple(f".钓鱼 {bait}" for bait in FISHING_CONTROL_BAITS)
-FISHING_AUTO_CONTROL_COMMANDS = tuple(f".全自动钓鱼 {bait}" for bait in FISHING_CONTROL_BAITS)
+FISHING_AUTO_CONTROL_COMMAND = ".全自动钓鱼"
+FISHING_AUTO_CONTROL_COMMANDS = (FISHING_AUTO_CONTROL_COMMAND,)
+FISHING_AUTO_LEGACY_CONTROL_COMMANDS = tuple(f".全自动钓鱼 {bait}" for bait in FISHING_CONTROL_BAITS)
+FISHING_AUTO_CONTROL_ACCOUNTS = ("main", "sub", "xiaohao")
+FISHING_AUTO_ACCOUNT_IDENTITIES = {
+    "main": ("主魂", "无咎子", "缘生子", "素缘子"),
+    "sub": ("主魂", "厚土", "缘生子", "寻真子"),
+    "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
+}
 FISHING_DAILY_LIMIT = 20
 FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
@@ -235,10 +243,7 @@ def fishing_dashboard_command(state):
 
 
 def fishing_auto_command_for_bait(bait):
-    bait = str(bait or "").strip()
-    if bait not in FISHING_CONTROL_BAITS:
-        bait = FISHING_BAIT
-    return f".全自动钓鱼 {bait}"
+    return FISHING_AUTO_CONTROL_COMMAND
 
 
 def fishing_auto_bait_from_command(command):
@@ -247,6 +252,18 @@ def fishing_auto_bait_from_command(command):
         return ""
     bait = match.group(1).strip()
     return bait if bait in FISHING_CONTROL_BAITS else ""
+
+
+def fishing_auto_bait_from_entry(entry, fallback=FISHING_BAIT):
+    if isinstance(entry, dict):
+        bait = str(entry.get("bait") or "").strip()
+        if bait in FISHING_CONTROL_BAITS:
+            return bait
+        bait = fishing_auto_bait_from_command(entry.get("command", ""))
+        if bait in FISHING_CONTROL_BAITS:
+            return bait
+    bait = str(fallback or "").strip()
+    return bait if bait in FISHING_CONTROL_BAITS else FISHING_BAIT
 
 
 def fishing_auto_bait_for_state(state):
@@ -382,6 +399,106 @@ def _release_command_control_lock(lock):
         pass
     except Exception:
         pass
+
+
+def _fishing_auto_global_file():
+    return os.path.join(os.path.dirname(COMMAND_CONTROL_FILE), "fishing_auto_global.json")
+
+
+def _fishing_auto_state_file(account):
+    return os.path.join(os.path.dirname(COMMAND_CONTROL_FILE), f"state_{account}.json")
+
+
+def _fishing_auto_identity_key(account, identity):
+    return f"{account}|{str(identity or '主魂').strip() or '主魂'}"
+
+
+def _fishing_auto_default_global_state():
+    return {
+        "date": _today(),
+        "preferred_bait": FISHING_BAIT,
+        "active": {},
+        "rod_holder": {},
+        "completed": {},
+        "transfer": {},
+        "updated_at": now_str(),
+    }
+
+
+def _load_fishing_auto_global_state():
+    path = _fishing_auto_global_file()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except FileNotFoundError:
+        data = {}
+    except Exception:
+        data = {}
+    defaults = _fishing_auto_default_global_state()
+    if data.get("date") != _today():
+        keep_bait = data.get("preferred_bait") if data.get("preferred_bait") in FISHING_CONTROL_BAITS else FISHING_BAIT
+        data = defaults
+        data["preferred_bait"] = keep_bait
+        return data
+    for key, value in defaults.items():
+        data.setdefault(key, value)
+    return data
+
+
+def _save_fishing_auto_global_state(data):
+    path = _fishing_auto_global_file()
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    data = data if isinstance(data, dict) else {}
+    data["date"] = _today()
+    data["updated_at"] = now_str()
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _acquire_fishing_auto_global_lock(timeout=5):
+    lock_path = f"{_fishing_auto_global_file()}.lock"
+    deadline = time.monotonic() + max(0.5, float(timeout or 0.5))
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii", errors="ignore"))
+            return fd, lock_path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 30:
+                    os.remove(lock_path)
+                    continue
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                return None, lock_path
+            time.sleep(0.05)
+
+
+def _load_fishing_auto_account_root_state(account):
+    try:
+        with open(_fishing_auto_state_file(account), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _fishing_auto_identity_fishing_state(root_state, identity):
+    identity = str(identity or "主魂").strip() or "主魂"
+    if identity == "主魂":
+        state = root_state.get("fishing", {}) if isinstance(root_state, dict) else {}
+    else:
+        avatars = root_state.get("avatars", {}) if isinstance(root_state, dict) else {}
+        avatar_state = avatars.get(identity, {}) if isinstance(avatars, dict) else {}
+        state = avatar_state.get("fishing", {}) if isinstance(avatar_state, dict) else {}
+    return state if isinstance(state, dict) else {}
 
 
 def parse_fishing_basket(text):
@@ -846,63 +963,58 @@ class FishingMixin:
     def fishing_auto_master_command(self):
         return fishing_auto_command_for_bait(fishing_auto_bait_for_state(self.get_fishing_auto_state()))
 
-    def fishing_auto_enable_dashboard_command(self, bait, reason="chat control"):
-        account = self.fishing_account_key()
-        if not account:
-            return False
-        bait = bait if bait in FISHING_CONTROL_BAITS else FISHING_BAIT
-        selected_key = fishing_auto_command_for_bait(bait)
+    def fishing_auto_write_dashboard_commands(self, disabled, bait=None, reason="dashboard control"):
+        bait = bait if bait in FISHING_CONTROL_BAITS else fishing_auto_bait_for_state(self.get_fishing_auto_state())
         changed = False
         lock = _acquire_command_control_lock()
         try:
             data = _load_command_controls_uncached()
-            account_controls = data.setdefault(account, {})
-            identity_controls = account_controls.setdefault("主魂", {})
-            for key in self.fishing_auto_control_keys():
-                disabled = key != selected_key
-                current = identity_controls.get(key)
+            for account in FISHING_AUTO_CONTROL_ACCOUNTS:
+                account_controls = data.setdefault(account, {})
+                identity_controls = account_controls.setdefault("主魂", {})
+                current = identity_controls.get(FISHING_AUTO_CONTROL_COMMAND)
                 current_disabled = bool(current.get("disabled")) if isinstance(current, dict) else bool(current)
-                if key not in identity_controls or current_disabled != disabled:
+                current_bait = fishing_auto_bait_from_entry(current, fallback=bait)
+                if (
+                    FISHING_AUTO_CONTROL_COMMAND not in identity_controls
+                    or current_disabled != bool(disabled)
+                    or current_bait != bait
+                ):
                     changed = True
-                identity_controls[key] = {
-                    "disabled": disabled,
-                    "command": key,
+                identity_controls[FISHING_AUTO_CONTROL_COMMAND] = {
+                    "disabled": bool(disabled),
+                    "command": FISHING_AUTO_CONTROL_COMMAND,
                     "label": "全自动钓鱼",
+                    "bait": bait,
                     "updated_at": now_str(),
                     "updated_by": "auto-fishing",
                     "reason": reason,
                 }
+                for legacy_key in FISHING_AUTO_LEGACY_CONTROL_COMMANDS:
+                    if legacy_key in identity_controls:
+                        identity_controls.pop(legacy_key, None)
+                        changed = True
             _save_command_controls_uncached(data)
         finally:
             _release_command_control_lock(lock)
         return changed
 
+    def fishing_auto_enable_dashboard_command(self, bait, reason="chat control"):
+        account = self.fishing_account_key()
+        if not account:
+            return False
+        bait = bait if bait in FISHING_CONTROL_BAITS else FISHING_BAIT
+        return self.fishing_auto_write_dashboard_commands(False, bait=bait, reason=reason)
+
     def fishing_auto_pause_dashboard_command(self, reason="daily limit reached"):
         account = self.fishing_account_key()
         if not account:
             return False
-        changed = False
-        lock = _acquire_command_control_lock()
-        try:
-            data = _load_command_controls_uncached()
-            account_controls = data.setdefault(account, {})
-            identity_controls = account_controls.setdefault("主魂", {})
-            for key in self.fishing_auto_control_keys():
-                current = identity_controls.get(key)
-                current_disabled = bool(current.get("disabled")) if isinstance(current, dict) else bool(current)
-                if not current_disabled:
-                    changed = True
-                identity_controls[key] = {
-                    "disabled": True,
-                    "command": key,
-                    "label": "全自动钓鱼",
-                    "updated_at": now_str(),
-                    "updated_by": "auto-fishing",
-                    "reason": reason,
-                }
-            _save_command_controls_uncached(data)
-        finally:
-            _release_command_control_lock(lock)
+        changed = self.fishing_auto_write_dashboard_commands(
+            True,
+            bait=fishing_auto_bait_for_state(self.get_fishing_auto_state()),
+            reason=reason,
+        )
         state = self.get_fishing_auto_state()
         state["daily_done_auto_paused_date"] = _today()
         self.save_state()
@@ -1063,20 +1175,33 @@ class FishingMixin:
         wildcard_controls = controls.get("*", {})
         if not isinstance(wildcard_controls, dict):
             wildcard_controls = {}
-        for key in self.fishing_auto_control_keys():
+        entry = ident_controls.get(FISHING_AUTO_CONTROL_COMMAND, wildcard_controls.get(FISHING_AUTO_CONTROL_COMMAND))
+        if entry is not None:
+            disabled = bool(entry.get("disabled")) if isinstance(entry, dict) else bool(entry)
+            if not disabled:
+                state = self.get_fishing_auto_state()
+                bait = fishing_auto_bait_from_entry(entry, fallback=fishing_auto_bait_for_state(state))
+                if state.get("preferred_bait") != bait:
+                    state["preferred_bait"] = bait
+                    state["last_detail"] = f"dashboard 选择鱼饵 {bait}"
+                    self.save_state()
+                return True
+            return False
+        for key in FISHING_AUTO_LEGACY_CONTROL_COMMANDS:
             entry = ident_controls.get(key, wildcard_controls.get(key))
             if entry is None:
                 continue
             disabled = bool(entry.get("disabled")) if isinstance(entry, dict) else bool(entry)
-            if not disabled:
-                bait = fishing_auto_bait_from_command(key)
-                if bait in FISHING_CONTROL_BAITS:
-                    state = self.get_fishing_auto_state()
-                    if state.get("preferred_bait") != bait:
-                        state["preferred_bait"] = bait
-                        state["last_detail"] = f"dashboard 选择鱼饵 {bait}"
-                        self.save_state()
-                return True
+            if disabled:
+                return False
+            bait = fishing_auto_bait_from_command(key)
+            if bait in FISHING_CONTROL_BAITS:
+                state = self.get_fishing_auto_state()
+                if state.get("preferred_bait") != bait:
+                    state["preferred_bait"] = bait
+                    state["last_detail"] = f"dashboard 选择鱼饵 {bait}"
+                    self.save_state()
+            return True
         return False
 
     async def send_fishing_command(self, identity, command, timeout=60):
@@ -1592,6 +1717,86 @@ class FishingMixin:
             state["next_action_at"] = add_seconds_str(now_str(), next_seconds)
         self.save_state()
 
+    def fishing_auto_global_account_states(self):
+        states = {}
+        current_account = self.fishing_account_key()
+        for account in FISHING_AUTO_CONTROL_ACCOUNTS:
+            if account == current_account:
+                states[account] = getattr(self, "state", {}) if isinstance(getattr(self, "state", None), dict) else {}
+            else:
+                states[account] = _load_fishing_auto_account_root_state(account)
+        return states
+
+    def fishing_auto_global_snapshot(self):
+        states = self.fishing_auto_global_account_states()
+        completed = {}
+        pending = []
+        today = _today()
+        for account in FISHING_AUTO_CONTROL_ACCOUNTS:
+            root = states.get(account, {})
+            identities = FISHING_AUTO_ACCOUNT_IDENTITIES.get(account, ("主魂",))
+            if account == self.fishing_account_key():
+                identities = tuple(self.fishing_auto_identities())
+            for identity in identities:
+                fishing = _fishing_auto_identity_fishing_state(root, identity)
+                key = _fishing_auto_identity_key(account, identity)
+                if fishing_daily_done_for_today(fishing, today=today):
+                    completed[key] = today
+                else:
+                    pending.append({"account": account, "identity": identity, "key": key})
+        return {"completed": completed, "pending": pending}
+
+    def fishing_auto_update_global_progress(self, bait=None, rod_holder=None):
+        snapshot = self.fishing_auto_global_snapshot()
+        lock = _acquire_fishing_auto_global_lock()
+        try:
+            data = _load_fishing_auto_global_state()
+            data["completed"] = snapshot["completed"]
+            if bait in FISHING_CONTROL_BAITS:
+                data["preferred_bait"] = bait
+            if isinstance(rod_holder, dict) and rod_holder.get("account") and rod_holder.get("identity"):
+                data["rod_holder"] = {
+                    "account": rod_holder.get("account"),
+                    "identity": rod_holder.get("identity"),
+                    "updated_at": now_str(),
+                }
+            active = data.get("active") if isinstance(data.get("active"), dict) else {}
+            active_key = _fishing_auto_identity_key(active.get("account"), active.get("identity"))
+            pending_keys = {item["key"] for item in snapshot["pending"]}
+            if active_key not in pending_keys:
+                next_item = snapshot["pending"][0] if snapshot["pending"] else {}
+                data["active"] = {
+                    "account": next_item.get("account", ""),
+                    "identity": next_item.get("identity", ""),
+                    "key": next_item.get("key", ""),
+                    "updated_at": now_str(),
+                } if next_item else {}
+            _save_fishing_auto_global_state(data)
+            return data, snapshot
+        finally:
+            _release_command_control_lock(lock)
+
+    def fishing_auto_global_active_target(self, bait=None):
+        data, snapshot = self.fishing_auto_update_global_progress(bait=bait)
+        active = data.get("active") if isinstance(data.get("active"), dict) else {}
+        if not active and snapshot["pending"]:
+            active = snapshot["pending"][0]
+        return data, snapshot, active
+
+    def fishing_auto_current_global_transfer(self):
+        data = _load_fishing_auto_global_state()
+        transfer = data.get("transfer") if isinstance(data.get("transfer"), dict) else {}
+        return data, transfer
+
+    def fishing_auto_clear_global_transfer(self):
+        lock = _acquire_fishing_auto_global_lock()
+        try:
+            data = _load_fishing_auto_global_state()
+            data["transfer"] = {}
+            _save_fishing_auto_global_state(data)
+        finally:
+            _release_command_control_lock(lock)
+
     def fishing_auto_pending_identities(self):
         pending = []
         completed = {}
@@ -1638,6 +1843,169 @@ class FishingMixin:
                 if log:
                     log.info(f"Fishing auto rod scan [{identity}] failed: {exc}")
         return ""
+
+    async def fishing_auto_publish_global_listing(self, holder, target, _resolved_resources=False):
+        if not isinstance(holder, dict) or not isinstance(target, dict):
+            return False
+        if target.get("account") != self.fishing_account_key():
+            return False
+        target_identity = str(target.get("identity") or "").strip()
+        if not target_identity:
+            return False
+        data, transfer = self.fishing_auto_current_global_transfer()
+        if (
+            transfer.get("status") in {"listed", "purchased"}
+            and transfer.get("from_account") == holder.get("account")
+            and transfer.get("from_identity") == holder.get("identity")
+            and transfer.get("to_account") == target.get("account")
+            and transfer.get("to_identity") == target_identity
+            and transfer.get("listing_id")
+        ):
+            return True
+
+        self.fishing_auto_set_status(
+            "transferring",
+            f"{holder.get('account')}[{holder.get('identity')}] -> {target_identity} 转移鱼竿：等待挂单",
+            FISHING_AUTO_RETRY_SECONDS,
+        )
+        listing_command = f".上架 {FISHING_ROD_LISTING_MATERIAL} 换 {FISHING_ROD_ITEM}*1"
+        listing_resp = await self.send_fishing_command(target_identity, listing_command, timeout=90)
+        listing_text = self.fishing_response_text(listing_resp)
+        listing = parse_trade_listing_response(listing_text)
+        if (
+            listing.get("status") == "insufficient_resource"
+            and not _resolved_resources
+            and await self.fishing_resolve_missing_resources(target_identity, listing.get("missing_resources") or [])
+        ):
+            return await self.fishing_auto_publish_global_listing(holder, target, _resolved_resources=True)
+        listing_id = str(listing.get("listing_id") or "").strip()
+        if listing.get("status") != "success" or not listing_id:
+            self.fishing_auto_set_status(
+                "transfer_failed",
+                f"{target_identity} 上架换鱼竿失败或未识别挂单ID",
+                FISHING_AUTO_RETRY_SECONDS,
+                listing_text,
+            )
+            return False
+
+        lock = _acquire_fishing_auto_global_lock()
+        try:
+            data = _load_fishing_auto_global_state()
+            data["transfer"] = {
+                "status": "listed",
+                "from_account": holder.get("account", ""),
+                "from_identity": holder.get("identity", ""),
+                "to_account": target.get("account", ""),
+                "to_identity": target_identity,
+                "listing_id": listing_id,
+                "started_at": transfer.get("started_at") or now_str(),
+                "updated_at": now_str(),
+            }
+            _save_fishing_auto_global_state(data)
+        finally:
+            _release_command_control_lock(lock)
+        self.fishing_auto_set_status(
+            "transferring",
+            f"已上架换鱼竿挂单 {listing_id}，等待 {holder.get('account')}[{holder.get('identity')}] 购买",
+            FISHING_AUTO_RETRY_SECONDS,
+            listing_text,
+        )
+        return True
+
+    async def fishing_auto_handle_global_purchase(self):
+        account = self.fishing_account_key()
+        data, transfer = self.fishing_auto_current_global_transfer()
+        if transfer.get("status") != "listed" or transfer.get("from_account") != account:
+            return False
+        holder = str(transfer.get("from_identity") or "").strip()
+        listing_id = str(transfer.get("listing_id") or "").strip()
+        if not holder or not listing_id:
+            return False
+        self.fishing_auto_set_status(
+            "transferring",
+            f"{holder} 购买跨账号鱼竿挂单 {listing_id}",
+            FISHING_AUTO_RETRY_SECONDS,
+        )
+        purchase_resp = await self.send_fishing_command(holder, f".购买 {listing_id}", timeout=90)
+        purchase_text = self.fishing_response_text(purchase_resp)
+        purchase = parse_trade_purchase_response(purchase_text)
+        if purchase.get("status") != "success":
+            lock = _acquire_fishing_auto_global_lock()
+            try:
+                data = _load_fishing_auto_global_state()
+                data["transfer"] = {
+                    **transfer,
+                    "status": "purchase_failed",
+                    "failed_at": now_str(),
+                    "updated_at": now_str(),
+                }
+                _save_fishing_auto_global_state(data)
+            finally:
+                _release_command_control_lock(lock)
+            self.fishing_auto_set_status(
+                "transfer_failed",
+                f"{holder} 购买挂单 {listing_id} 失败",
+                FISHING_AUTO_RETRY_SECONDS,
+                purchase_text,
+            )
+            return True
+
+        self.get_fishing_state(holder)["rod_owned"] = False
+        lock = _acquire_fishing_auto_global_lock()
+        try:
+            data = _load_fishing_auto_global_state()
+            data["rod_holder"] = {
+                "account": transfer.get("to_account", ""),
+                "identity": transfer.get("to_identity", ""),
+                "updated_at": now_str(),
+            }
+            data["transfer"] = {
+                **transfer,
+                "status": "purchased",
+                "purchased_at": now_str(),
+                "updated_at": now_str(),
+            }
+            _save_fishing_auto_global_state(data)
+        finally:
+            _release_command_control_lock(lock)
+        self.save_state()
+        self.fishing_auto_set_status(
+            "transferred",
+            f"鱼竿已购买给 {transfer.get('to_account')}[{transfer.get('to_identity')}]",
+            5,
+            purchase_text,
+        )
+        return True
+
+    def fishing_auto_adopt_purchased_global_rod(self, target):
+        if not isinstance(target, dict) or target.get("account") != self.fishing_account_key():
+            return False
+        data, transfer = self.fishing_auto_current_global_transfer()
+        if (
+            transfer.get("status") != "purchased"
+            or transfer.get("to_account") != target.get("account")
+            or transfer.get("to_identity") != target.get("identity")
+        ):
+            return False
+        identity = str(target.get("identity") or "").strip()
+        if not identity:
+            return False
+        state = self.get_fishing_state(identity)
+        state["rod_owned"] = True
+        state["last_sync_date"] = _today()
+        auto_state = self.get_fishing_auto_state()
+        auto_state["rod_holder"] = identity
+        auto_state["active_identity"] = identity
+        auto_state["last_status"] = "transferred"
+        auto_state["last_detail"] = f"跨账号鱼竿已转入 {identity}"
+        auto_state["next_action_at"] = ""
+        self.save_state()
+        self.fishing_auto_clear_global_transfer()
+        self.fishing_auto_update_global_progress(
+            bait=fishing_auto_bait_for_state(auto_state),
+            rod_holder={"account": self.fishing_account_key(), "identity": identity},
+        )
+        return True
 
     async def fishing_auto_transfer_rod(self, holder, target, _resolved_resources=False):
         holder = str(holder or "").strip()
@@ -1893,9 +2261,27 @@ class FishingMixin:
 
         auto_state = self.get_fishing_auto_state()
         bait = fishing_auto_bait_for_state(auto_state)
-        pending = self.fishing_auto_pending_identities()
         identities = self.fishing_auto_identities()
-        if not pending:
+
+        if await self.fishing_auto_handle_global_purchase():
+            return 5
+
+        local_holder = await self.fishing_auto_find_rod_holder(identities, scan=False)
+        if not local_holder:
+            local_holder = await self.fishing_auto_find_rod_holder(identities, scan=True)
+        rod_holder_payload = None
+        if local_holder:
+            rod_holder_payload = {"account": self.fishing_account_key(), "identity": local_holder}
+        global_state, global_snapshot, target = self.fishing_auto_global_active_target(bait=bait)
+        if rod_holder_payload:
+            global_state, global_snapshot = self.fishing_auto_update_global_progress(
+                bait=bait,
+                rod_holder=rod_holder_payload,
+            )
+            target = global_state.get("active") if isinstance(global_state.get("active"), dict) else target
+
+        self.fishing_auto_pending_identities()
+        if not global_snapshot.get("pending"):
             auto_state["last_status"] = "done"
             auto_state["last_detail"] = "今日全自动钓鱼全部完成"
             auto_state["active_identity"] = ""
@@ -1903,66 +2289,78 @@ class FishingMixin:
             self.save_state()
             self.fishing_auto_pause_dashboard_command(reason="all identities daily limit reached")
             return self.fishing_wait_from_state("主魂", 3600)
-        available_pending = []
-        for identity in pending:
-            try:
-                if self.identity_pause_seconds(identity) > 0:
-                    continue
-            except Exception:
-                pass
-            available_pending.append(identity)
-        if not available_pending:
-            self.fishing_auto_set_status("waiting", "等待身份暂停结束", 300)
-            return 300
-        pending = available_pending
 
-        holder = await self.fishing_auto_find_rod_holder(identities, scan=False)
-        if not holder:
-            holder = await self.fishing_auto_find_rod_holder(identities, scan=True)
+        account = self.fishing_account_key()
+        target_account = str(target.get("account") or "").strip()
+        target_identity = str(target.get("identity") or "").strip()
+        if not target_account or not target_identity:
+            self.fishing_auto_set_status("waiting", "等待全局钓鱼队列", 60)
+            return 60
+        if target_account != account:
+            self.fishing_auto_set_status(
+                "waiting",
+                f"全局队列当前轮到 {target_account}[{target_identity}]",
+                60,
+            )
+            return 60
 
-        target = ""
-        if holder and holder in pending and not fishing_daily_done_for_today(self.get_fishing_state(holder)):
-            target = holder
-        else:
-            active_identity = str(auto_state.get("active_identity") or "").strip()
-            target = active_identity if active_identity in pending else pending[0]
+        try:
+            if self.identity_pause_seconds(target_identity) > 0:
+                self.fishing_auto_set_status("waiting", f"等待 {target_identity} 暂停结束", 300)
+                return 300
+        except Exception:
+            pass
 
-        if not target:
-            self.fishing_auto_set_status("waiting", "暂无可钓鱼身份", 300)
-            return 300
-
-        target_state = self.get_fishing_state(target)
+        target_state = self.get_fishing_state(target_identity)
         if fishing_bait_for_state(target_state) != bait:
             target_state["preferred_bait"] = bait
             target_state["bait_purchase_done"] = False
             self.save_state()
 
         if target_state.get("rod_owned") is not True:
-            if not holder:
-                holder = await self.fishing_auto_find_rod_holder(identities, scan=True)
-            if holder and holder != target:
-                if not await self.fishing_auto_transfer_rod(holder, target):
+            self.fishing_auto_adopt_purchased_global_rod(target)
+        if target_state.get("rod_owned") is not True:
+            holder = local_holder or await self.fishing_auto_find_rod_holder(identities, scan=True)
+            if holder and holder != target_identity:
+                if not await self.fishing_auto_transfer_rod(holder, target_identity):
                     return FISHING_AUTO_RETRY_SECONDS
-            elif holder == target:
+                self.fishing_auto_update_global_progress(
+                    bait=bait,
+                    rod_holder={"account": account, "identity": target_identity},
+                )
+            elif holder == target_identity:
                 target_state["rod_owned"] = True
+                self.fishing_auto_update_global_progress(
+                    bait=bait,
+                    rod_holder={"account": account, "identity": target_identity},
+                )
             else:
+                global_holder = global_state.get("rod_holder") if isinstance(global_state.get("rod_holder"), dict) else {}
+                if (
+                    global_holder.get("account")
+                    and global_holder.get("identity")
+                    and global_holder.get("account") != account
+                ):
+                    await self.fishing_auto_publish_global_listing(global_holder, target)
+                    return 60
                 self.fishing_auto_set_status("no_rod_holder", "未找到当前鱼竿持有者", FISHING_AUTO_RETRY_SECONDS)
                 return FISHING_AUTO_RETRY_SECONDS
 
         auto_state = self.get_fishing_auto_state()
-        auto_state["active_identity"] = target
-        auto_state["rod_holder"] = target
+        auto_state["active_identity"] = target_identity
+        auto_state["rod_holder"] = target_identity
         auto_state["last_status"] = "running"
-        auto_state["last_detail"] = f"当前 {target} 使用 {bait} 钓鱼"
+        auto_state["last_detail"] = f"当前 {target_identity} 使用 {bait} 钓鱼"
         auto_state["next_action_at"] = ""
         self.save_state()
-        wait = await self.fishing_tick(target, ignore_dashboard=True)
-        if fishing_daily_done_for_today(self.get_fishing_state(target)):
+        wait = await self.fishing_tick(target_identity, ignore_dashboard=True)
+        if fishing_daily_done_for_today(self.get_fishing_state(target_identity)):
             auto_state = self.get_fishing_auto_state()
-            auto_state.setdefault("completed", {})[target] = _today()
-            auto_state["last_detail"] = f"{target} 今日钓鱼完成，准备下一个身份"
+            auto_state.setdefault("completed", {})[target_identity] = _today()
+            auto_state["last_detail"] = f"{target_identity} 今日钓鱼完成，准备下一个身份"
             auto_state["next_action_at"] = ""
             self.save_state()
+            self.fishing_auto_update_global_progress(bait=bait)
             return 5
         return wait
 

@@ -140,6 +140,8 @@
         .command-toggle.paused { background: rgba(239,68,68,0.24); border-color: rgba(248,113,113,0.45); }
         .command-toggle.paused::after { left: 0.18rem; background: #fecaca; }
         .command-toggle.updating { opacity: 0.58; cursor: wait; }
+        .command-bait-select { height: 1.55rem; border: 1px solid rgba(255,255,255,0.14); background: rgba(15,23,42,0.92); color: var(--text-primary); border-radius: 6px; padding: 0 0.38rem; font-size: 0.72rem; outline: none; }
+        .command-bait-select:disabled { opacity: 0.58; cursor: wait; }
         .command-delete { border: 1px solid rgba(239,68,68,0.38); background: rgba(239,68,68,0.12); color: #fecaca; border-radius: 6px; padding: 0.22rem 0.42rem; font-size: 0.7rem; cursor: pointer; }
         .command-delete:hover { background: rgba(239,68,68,0.2); }
         .tone-ready .command-status { background: rgba(16,185,129,0.18); color: #34d399; }
@@ -1239,6 +1241,12 @@
                 const controlLabel = paused ? '暂停' : '启用';
                 const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
                 const isNextDue = dueKey && commandItemKey(item) === dueKey;
+                const baitOptions = Array.isArray(item.bait_options) ? item.bait_options : [];
+                const baitSelect = baitOptions.length ? `
+                    <select class="command-bait-select" ${pending ? 'disabled' : ''} title="选择鱼饵" onchange="setFishingAutoBait('${escapeJs(panelKey)}', this.value)">
+                        ${baitOptions.map(bait => `<option value="${escapeHtml(bait)}" ${bait === item.bait_value ? 'selected' : ''}>${escapeHtml(bait)}</option>`).join('')}
+                    </select>
+                ` : '';
                 return `
                     <div class="command-row tone-${tone} ${isNextDue ? 'next-due' : ''}">
                         <div class="command-main">
@@ -1247,6 +1255,7 @@
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
                         <div class="command-control" title="${escapeHtml(controlTitle)}">
+                            ${baitSelect}
                             <button class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
                             <span>${pending ? '处理中' : controlLabel}</span>
                         </div>
@@ -1680,6 +1689,29 @@
             } catch (e) {
                 console.error('Custom command delete failed:', e);
                 alert('删除自定义指令失败。');
+            }
+        }
+
+        async function setFishingAutoBait(panelKey, bait) {
+            try {
+                const r = await fetch(apiUrl('/api/fishing-auto-bait'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({bait})
+                });
+                const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || data.success === false) {
+                    alert(data.msg || `设置鱼饵失败：HTTP ${r.status}`);
+                    await updateStatus();
+                    return;
+                }
+                setTimeout(() => updateStatus(), 30);
+            } catch (e) {
+                console.error('Fishing auto bait update failed:', e);
+                alert('设置全自动钓鱼鱼饵失败。');
+                await updateStatus();
+            } finally {
+                if (commandModalKey === panelKey) renderCommandModal(panelKey);
             }
         }
 
