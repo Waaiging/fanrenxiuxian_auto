@@ -857,6 +857,118 @@ def fishing_auto_global_path():
     return os.path.join(CONFIG_DIR, "fishing_auto_global.json")
 
 
+def fishing_auto_identity_key(account, identity):
+    return f"{account}|{str(identity or '主魂').strip() or '主魂'}"
+
+
+def save_json_atomic(path, data):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def account_state_path(account):
+    return os.path.join(CONFIG_DIR, f"state_{account}.json")
+
+
+def load_account_state_raw(account):
+    path = account_state_path(account)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def fishing_identity_state_raw(root, identity, create=False):
+    identity = str(identity or "主魂").strip() or "主魂"
+    if identity == "主魂":
+        if create:
+            return root.setdefault("fishing", {})
+        return root.get("fishing", {}) if isinstance(root.get("fishing"), dict) else {}
+    avatars = root.setdefault("avatars", {}) if create else root.get("avatars", {})
+    if not isinstance(avatars, dict):
+        return {}
+    avatar = avatars.setdefault(identity, {}) if create else avatars.get(identity, {})
+    if not isinstance(avatar, dict):
+        return {}
+    if create:
+        return avatar.setdefault("fishing", {})
+    return avatar.get("fishing", {}) if isinstance(avatar.get("fishing"), dict) else {}
+
+
+def set_fishing_auto_holder_state(account, identity, username="dashboard"):
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().strftime(TIME_FORMAT)
+    holder = {
+        "account": account,
+        "identity": identity,
+        "updated_at": now,
+        "updated_by": username,
+    }
+
+    global_path = fishing_auto_global_path()
+    try:
+        with open(global_path, "r", encoding="utf-8") as f:
+            global_state = json.load(f)
+        if not isinstance(global_state, dict):
+            global_state = {}
+    except Exception:
+        global_state = {}
+    if global_state.get("date") != today:
+        bait = global_state.get("preferred_bait") if global_state.get("preferred_bait") in FISHING_CONTROL_BAITS else FISHING_BAIT
+        global_state = {"date": today, "preferred_bait": bait, "completed": {}}
+    global_state.setdefault("preferred_bait", FISHING_BAIT)
+    global_state.setdefault("completed", {})
+    global_state["date"] = today
+    global_state["rod_holder"] = holder
+    global_state["active"] = {
+        "account": account,
+        "identity": identity,
+        "key": fishing_auto_identity_key(account, identity),
+        "updated_at": now,
+        "updated_by": username,
+    }
+    global_state["transfer"] = {}
+    global_state["updated_at"] = now
+    save_json_atomic(global_path, global_state)
+
+    for account_name in FISHING_AUTO_CONTROL_ACCOUNTS:
+        state_path = account_state_path(account_name)
+        root = load_account_state_raw(account_name)
+        if not root:
+            continue
+        changed = False
+        for candidate in FISHING_AUTO_ACCOUNT_IDENTITIES.get(account_name, ("主魂",)):
+            fishing = fishing_identity_state_raw(root, candidate, create=(account_name == account and candidate == identity))
+            if not isinstance(fishing, dict):
+                continue
+            owned = bool(account_name == account and candidate == identity)
+            if fishing.get("rod_owned") is not owned:
+                fishing["rod_owned"] = owned
+                changed = True
+        auto_state = root.setdefault("fishing_auto", {})
+        if account_name == account:
+            auto_state["rod_holder"] = identity
+            auto_state["active_identity"] = identity
+            auto_state["last_status"] = "holder_set"
+            auto_state["last_detail"] = f"dashboard 指定鱼竿持有者：{identity}"
+            auto_state["next_action_at"] = ""
+            changed = True
+        elif auto_state.get("rod_holder") or auto_state.get("active_identity"):
+            auto_state["rod_holder"] = ""
+            auto_state["active_identity"] = ""
+            changed = True
+        if changed:
+            save_json_atomic(state_path, root)
+    return holder
+
+
 def load_fishing_auto_global_dashboard_state():
     path = fishing_auto_global_path()
     try:
@@ -1040,6 +1152,10 @@ def fishing_auto_dashboard_summary(states):
         "target": target or {},
         "rod_holder": holder_label,
         "rod_holder_detail": holder if isinstance(holder, dict) else {},
+        "holder_options": [
+            {"account": item["account"], "identity": item["identity"], "label": item["label"]}
+            for item in identities
+        ],
         "transfer": transfer_view,
         "completed_count": completed_count,
         "pending_count": max(0, total_count - completed_count),
@@ -3677,6 +3793,27 @@ async def set_fishing_auto_bait(payload: dict = Body(...), username: str = Depen
     with STATUS_LOCK:
         STATUS_CACHE.clear()
     return {"success": True, "bait": bait, "enabled": enabled}
+
+
+@app.post("/api/fishing-auto-holder")
+async def set_fishing_auto_holder(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Manually correct the global auto-fishing rod holder."""
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "主魂").strip() or "主魂"
+    if account not in FISHING_AUTO_CONTROL_ACCOUNTS:
+        return {"success": False, "msg": "未知账号"}
+    if identity not in FISHING_AUTO_ACCOUNT_IDENTITIES.get(account, ("主魂",)):
+        return {"success": False, "msg": "未知身份"}
+    holder = set_fishing_auto_holder_state(account, identity, username=username)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "account": holder["account"],
+        "identity": holder["identity"],
+        "label": fishing_auto_identity_label(holder["account"], holder["identity"]),
+    }
+
 
 @app.post("/api/custom-command")
 async def upsert_custom_command(payload: dict = Body(...), username: str = Depends(authenticate)):

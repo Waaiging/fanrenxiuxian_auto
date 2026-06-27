@@ -570,6 +570,7 @@
         let commandRecordAccountNames = {};
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
+        let fishingAutoHolderPending = false;
         const commandPausePending = {};
 
         function apiUrl(path) {
@@ -1091,6 +1092,9 @@
             const baitOptions = Array.isArray(data.bait_options) && data.bait_options.length
                 ? data.bait_options : ['凡饵', '灵虫饵', '灵米饵', '妖血饵'];
             const bait = data.bait || '灵米饵';
+            const holderOptions = Array.isArray(data.holder_options) ? data.holder_options : [];
+            const holderDetail = data.rod_holder_detail || {};
+            const holderKey = holderDetail.account && holderDetail.identity ? `${holderDetail.account}|${holderDetail.identity}` : '';
             const current = data.current || {};
             const targetIdentity = data.target || {};
             const transfer = data.transfer || {};
@@ -1124,6 +1128,13 @@
                         <span class="fishing-auto-status tone-${statusTone}">${escapeHtml(enabled ? '启用' : '暂停')}</span>
                         <select id="fishing-auto-bait-select" class="fishing-auto-select" ${fishingAutoHomePending ? 'disabled' : ''} onchange="setFishingAutoBait('', this.value)">
                             ${baitOptions.map(option => `<option value="${escapeHtml(option)}" ${option === bait ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}
+                        </select>
+                        <select id="fishing-auto-holder-select" class="fishing-auto-select" ${fishingAutoHolderPending ? 'disabled' : ''} onchange="setFishingAutoHolder(this.value)" title="鱼竿持有者">
+                            <option value="">鱼竿持有者</option>
+                            ${holderOptions.map(option => {
+                                const value = `${option.account || ''}|${option.identity || ''}`;
+                                return `<option value="${escapeHtml(value)}" ${value === holderKey ? 'selected' : ''}>${escapeHtml(option.label || value)}</option>`;
+                            }).join('')}
                         </select>
                         <span class="fishing-auto-switch">
                             <button class="command-toggle ${enabled ? '' : 'paused'} ${fishingAutoHomePending ? 'updating' : ''}" ${fishingAutoHomePending ? 'disabled' : ''} onclick="toggleFishingAutoHome(${enabled ? 'true' : 'false'})" aria-label="${escapeHtml(enabled ? '暂停全自动钓鱼' : '启用全自动钓鱼')}"></button>
@@ -1825,6 +1836,33 @@
                 await updateStatus();
             } finally {
                 if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            }
+        }
+
+        async function setFishingAutoHolder(value) {
+            if (!value || fishingAutoHolderPending) return;
+            const [account, identity] = String(value).split('|');
+            if (!account || !identity) return;
+            fishingAutoHolderPending = true;
+            renderFishingAutoSummary(lastFishingAutoSummary || {});
+            try {
+                const r = await fetch(apiUrl('/api/fishing-auto-holder'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({account, identity})
+                });
+                const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || data.success === false) {
+                    alert(data.msg || `设置鱼竿持有者失败：HTTP ${r.status}`);
+                    return;
+                }
+                setTimeout(() => updateStatus(), 30);
+            } catch (e) {
+                console.error('Fishing auto holder update failed:', e);
+                alert('设置鱼竿持有者失败。');
+            } finally {
+                fishingAutoHolderPending = false;
+                renderFishingAutoSummary(lastFishingAutoSummary || {});
             }
         }
 

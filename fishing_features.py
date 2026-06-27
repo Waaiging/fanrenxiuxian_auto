@@ -439,8 +439,11 @@ def _load_fishing_auto_global_state():
     defaults = _fishing_auto_default_global_state()
     if data.get("date") != _today():
         keep_bait = data.get("preferred_bait") if data.get("preferred_bait") in FISHING_CONTROL_BAITS else FISHING_BAIT
+        keep_holder = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
         data = defaults
         data["preferred_bait"] = keep_bait
+        if keep_holder.get("account") and keep_holder.get("identity"):
+            data["rod_holder"] = keep_holder
         return data
     for key, value in defaults.items():
         data.setdefault(key, value)
@@ -1764,7 +1767,12 @@ class FishingMixin:
             active_key = _fishing_auto_identity_key(active.get("account"), active.get("identity"))
             pending_keys = {item["key"] for item in snapshot["pending"]}
             if active_key not in pending_keys:
-                next_item = snapshot["pending"][0] if snapshot["pending"] else {}
+                holder = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
+                holder_key = _fishing_auto_identity_key(holder.get("account"), holder.get("identity"))
+                next_item = next(
+                    (item for item in snapshot["pending"] if item["key"] == holder_key),
+                    snapshot["pending"][0] if snapshot["pending"] else {},
+                )
                 data["active"] = {
                     "account": next_item.get("account", ""),
                     "identity": next_item.get("identity", ""),

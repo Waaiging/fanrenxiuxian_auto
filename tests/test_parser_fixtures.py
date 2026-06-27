@@ -1620,6 +1620,106 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(transfer["status"], "listed")
         self.assertEqual(transfer["listing_id"], "23733")
 
+    def test_fishing_auto_new_day_starts_from_recorded_rod_holder(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+            avatars = ["问心子", "素心子", "缘生子"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {},
+                    "fishing_auto": {"preferred_bait": "灵米饵"},
+                    "avatars": {
+                        "问心子": {"fishing": {}},
+                        "素心子": {"fishing": {}},
+                        "缘生子": {"fishing": {"rod_owned": True}},
+                    },
+                }
+                self.ticked = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            async def fishing_auto_find_rod_holder(self, identities=None, scan=False):
+                raise AssertionError("recorded holder should choose the target before scanning")
+
+            async def fishing_tick(self, identity, ignore_dashboard=False):
+                self.ticked.append((identity, ignore_dashboard))
+                return 42
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "main": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                    "sub": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                    "xiaohao": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                }, f, ensure_ascii=False)
+            for filename in ("state_main.json", "state_sub.json"):
+                with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
+                    json.dump({"fishing": {}, "avatars": {}}, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": "2026-01-01",
+                    "preferred_bait": "灵米饵",
+                    "active": {"account": "main", "identity": "主魂", "key": "main|主魂"},
+                    "rod_holder": {"account": "xiaohao", "identity": "缘生子", "updated_at": "2026-01-01 00:00:00"},
+                    "completed": {},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertEqual(asyncio.run(actor.fishing_auto_tick()), 42)
+                global_state = fishing_features._load_fishing_auto_global_state()
+
+        self.assertEqual(actor.ticked, [("缘生子", True)])
+        self.assertEqual(global_state["date"], today)
+        self.assertEqual(global_state["rod_holder"]["account"], "xiaohao")
+        self.assertEqual(global_state["rod_holder"]["identity"], "缘生子")
+        self.assertEqual(global_state["active"]["account"], "xiaohao")
+        self.assertEqual(global_state["active"]["identity"], "缘生子")
+
+    def test_dashboard_can_set_fishing_auto_rod_holder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for account in ("main", "sub", "xiaohao"):
+                identities = fishing_features.FISHING_AUTO_ACCOUNT_IDENTITIES[account]
+                state = {"fishing": {}, "fishing_auto": {}, "avatars": {}}
+                for identity in identities:
+                    if identity != "主魂":
+                        state["avatars"][identity] = {"fishing": {}}
+                with open(os.path.join(tmpdir, f"state_{account}.json"), "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False)
+
+            with patch.object(dashboard_server, "CONFIG_DIR", tmpdir):
+                result = asyncio.run(dashboard_server.set_fishing_auto_holder(
+                    {"account": "xiaohao", "identity": "缘生子"},
+                    username="fixture",
+                ))
+                with open(os.path.join(tmpdir, "fishing_auto_global.json"), "r", encoding="utf-8") as f:
+                    global_state = json.load(f)
+                with open(os.path.join(tmpdir, "state_xiaohao.json"), "r", encoding="utf-8") as f:
+                    xiaohao_state = json.load(f)
+                with open(os.path.join(tmpdir, "state_main.json"), "r", encoding="utf-8") as f:
+                    main_state = json.load(f)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["label"], "小号[缘生子]")
+        self.assertEqual(global_state["rod_holder"]["account"], "xiaohao")
+        self.assertEqual(global_state["rod_holder"]["identity"], "缘生子")
+        self.assertEqual(global_state["active"]["key"], "xiaohao|缘生子")
+        self.assertTrue(xiaohao_state["avatars"]["缘生子"]["fishing"]["rod_owned"])
+        self.assertFalse(xiaohao_state["fishing"]["rod_owned"])
+        self.assertFalse(main_state["fishing"]["rod_owned"])
+
     def test_fishing_auto_chat_control_writes_single_global_switch(self):
         class DummyFishing(FishingMixin):
             account_key = "main"
