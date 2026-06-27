@@ -28,10 +28,13 @@ from command_modules import (
 )
 from fishing_features import (
     FishingMixin,
+    fishing_catch_summary,
     parse_fishing_control_text,
     parse_buy_bait,
+    parse_exchange_response,
     parse_fishing_basket,
     parse_fishing_start,
+    parse_missing_resources,
     parse_nest_response,
     parse_rod_response,
 )
@@ -1082,10 +1085,29 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(buy["status"], "success")
         self.assertEqual(buy["count"], 20)
 
-        nest = parse_nest_response("打窝失败，资源不足：灵米饵x3。")
+        missing = parse_missing_resources("打窝失败，资源不足：灵米饵x3, 凝血草x5。")
+        self.assertEqual(missing, [
+            {"name": "灵米饵", "count": 3},
+            {"name": "凝血草", "count": 5},
+        ])
+
+        buy_missing = parse_buy_bait("鱼饵购买失败，资源不足：凝血草x23。")
+        self.assertEqual(buy_missing["status"], "insufficient_resource")
+        self.assertEqual(buy_missing["missing_resources"], [{"name": "凝血草", "count": 23}])
+
+        exchange = parse_exchange_response("**兑换成功！**\n你消耗了 **100** 点贡献，获得了【凝血草】x5，已放入你的储物袋。")
+        self.assertEqual(exchange["status"], "success")
+        self.assertEqual(exchange["material"], "凝血草")
+        self.assertEqual(exchange["count"], 5)
+
+        nest = parse_nest_response("打窝失败，资源不足：灵米饵x3, 凝血草x5。")
         self.assertEqual(nest["status"], "missing_resource")
         self.assertEqual(nest["missing_name"], "灵米饵")
         self.assertEqual(nest["missing_count"], 3)
+        self.assertEqual(nest["missing_resources"], [
+            {"name": "灵米饵", "count": 3},
+            {"name": "凝血草", "count": 5},
+        ])
 
         active_nest = parse_nest_response("你已打下【灵草窝】，还可影响 **1** 竿，不可重复叠加。")
         self.assertEqual(active_nest["status"], "already_active")
@@ -1227,6 +1249,75 @@ class ParserFixtureTests(unittest.TestCase):
         )
         self.assertEqual(actor.fishing_next_nest("主魂"), "灵草窝")
 
+    def test_fishing_missing_nest_bait_and_blood_grass_retry_same_nest(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+                self.attempts = 0
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".打窝 灵草窝":
+                    self.attempts += 1
+                    if self.attempts == 1:
+                        return "打窝失败，资源不足：灵米饵x3, 凝血草x5。"
+                    return "**【打窝已成】**\n你在水脉交汇处撒下 **【灵草窝】**，接下来 **4** 竿会受其牵引。"
+                if command == ".买鱼饵 灵米饵 3":
+                    return "**【渔具铺】**\n你购得 **【灵米饵】x3**。"
+                if command == ".兑换 凝血草*5":
+                    return "**兑换成功！**\n你消耗了 **100** 点贡献，获得了【凝血草】x5，已放入你的储物袋。"
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        actor.get_fishing_state("主魂")["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
+        self.assertTrue(asyncio.run(actor.fishing_try_nest("主魂")))
+        self.assertEqual(actor.commands, [
+            ".打窝 灵草窝",
+            ".买鱼饵 灵米饵 3",
+            ".兑换 凝血草*5",
+            ".打窝 灵草窝",
+        ])
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["current_nest"], "灵草窝")
+        self.assertNotEqual(
+            fishing.get("nest_blocked", {}).get("灵草窝"),
+            datetime.now().strftime("%Y-%m-%d"),
+        )
+
+    def test_fishing_buy_bait_exchanges_blood_grass_then_retries(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+                self.buy_attempts = 0
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".买鱼饵 灵虫饵 20":
+                    self.buy_attempts += 1
+                    if self.buy_attempts == 1:
+                        return "鱼饵购买失败，资源不足：凝血草x23。"
+                    return "**【渔具铺】**\n你购得 **【灵虫饵】x20**。"
+                if command == ".兑换 凝血草*23":
+                    return "**兑换成功！**\n你消耗了 **460** 点贡献，获得了【凝血草】x23，已放入你的储物袋。"
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        self.assertTrue(asyncio.run(actor.fishing_buy_bait("主魂", "灵虫饵", 20)))
+        self.assertEqual(actor.commands, [
+            ".买鱼饵 灵虫饵 20",
+            ".兑换 凝血草*23",
+            ".买鱼饵 灵虫饵 20",
+        ])
+        self.assertEqual(actor.get_fishing_state("主魂")["baits"]["灵虫饵"], 20)
+
     def test_fishing_nest_plan_excludes_yaoxing_and_uses_two_rice_chaff(self):
         actor = type("DummyFishing", (FishingMixin,), {
             "__init__": lambda self: setattr(self, "state", {"fishing": {}}),
@@ -1350,6 +1441,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn(datetime.now().strftime("%Y-%m-%d"), fishing["next_action_at"])
 
     def test_fishing_daily_done_auto_pauses_dashboard_and_notifies(self):
+        self.assertEqual(
+            fishing_catch_summary({"青鳞小鲫": 2, "银须灵鲢": 1, "空": 0}),
+            "青鳞小鲫 x2、银须灵鲢 x1",
+        )
+
         class DummyFishing(FishingMixin):
             account_key = "xiaohao"
 
@@ -1387,6 +1483,7 @@ class ParserFixtureTests(unittest.TestCase):
             "daily_limit": 20,
             "active": True,
             "active_due_at": now_str(),
+            "daily_catches": {"青鳞小鲫": 2},
         })
 
         notices = []
@@ -1406,7 +1503,10 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0][0], "钓鱼完成")
         self.assertIn("已自动暂停 dashboard 指令：.钓鱼 灵米饵", notices[0][1])
+        self.assertIn("今日鱼获：青鳞小鲫 x2、银须灵鲢 x1", notices[0][1])
+        self.assertIn("最后一竿：银须灵鲢", notices[0][1])
         fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 2, "银须灵鲢": 1})
         today = datetime.now().strftime("%Y-%m-%d")
         self.assertEqual(fishing["daily_done_auto_paused_date"], today)
         self.assertEqual(fishing["daily_done_notified_date"], today)

@@ -43,6 +43,7 @@ FISHING_NEST_BAIT_REQUIREMENTS = {
 }
 
 FISHING_BAIT_NAMES = {"凡饵", "灵虫饵", "灵米饵", "妖血饵"}
+FISHING_EXCHANGEABLE_MATERIALS = {"凝血草"}
 FISHING_DAILY_STALE_STATUSES = {
     "daily_done",
     "synced",
@@ -70,6 +71,7 @@ def fishing_default_state():
         "daily_limit": FISHING_DAILY_LIMIT,
         "baits": {},
         "catches": {},
+        "daily_catches": {},
         "current_nest": "",
         "current_nest_remaining": 0,
         "nest_plan_date": "",
@@ -127,6 +129,7 @@ def reset_stale_fishing_daily_state(state, today=None):
         state.get("daily_done_basket_sync_date"),
         state.get("daily_done_auto_paused_date"),
         state.get("daily_done_notified_date"),
+        state.get("daily_catches"),
         state.get("current_nest"),
         int(state.get("current_nest_remaining") or 0) > 0,
         state.get("last_status") in FISHING_DAILY_STALE_STATUSES,
@@ -138,6 +141,7 @@ def reset_stale_fishing_daily_state(state, today=None):
     state["daily_done_basket_sync_date"] = ""
     state["daily_done_auto_paused_date"] = ""
     state["daily_done_notified_date"] = ""
+    state["daily_catches"] = {}
     state["current_nest"] = ""
     state["current_nest_remaining"] = 0
     if state.get("last_status") in FISHING_DAILY_STALE_STATUSES:
@@ -196,6 +200,21 @@ def fishing_dashboard_bait(state):
 
 def fishing_dashboard_command(state):
     return fishing_command_for_bait(fishing_dashboard_bait(state))
+
+
+def fishing_catch_summary(catches):
+    if not isinstance(catches, dict):
+        return ""
+    parts = []
+    for name, count in catches.items():
+        name = str(name or "").strip()
+        try:
+            count = int(count or 0)
+        except Exception:
+            count = 0
+        if name and count > 0:
+            parts.append(f"{name} x{count}")
+    return "、".join(parts)
 
 
 def parse_fishing_control_text(text):
@@ -389,9 +408,22 @@ def parse_fishing_start(text):
     return result
 
 
+def parse_missing_resources(text):
+    clean = _strip_markdown(text)
+    match = re.search(r"资源不足：\s*([^。\n]+)", clean)
+    if not match:
+        return []
+    resources = []
+    for name, count in re.findall(r"([^,，、\sx]+?)\s*x\s*(\d+)", match.group(1)):
+        name = name.strip()
+        if name:
+            resources.append({"name": name, "count": int(count)})
+    return resources
+
+
 def parse_buy_bait(text):
     clean = _strip_markdown(text)
-    result = {"matched": False, "status": "", "bait": "", "count": 0}
+    result = {"matched": False, "status": "", "bait": "", "count": 0, "missing_resources": []}
     buy_match = re.search(r"购得\s*【([^】]+)】x(\d+)", clean)
     if buy_match:
         result.update({
@@ -404,7 +436,27 @@ def parse_buy_bait(text):
     if "渔具铺中并无此等鱼饵" in clean:
         result.update({"matched": True, "status": "invalid_bait"})
     elif "资源不足" in clean or "灵石不足" in clean or "材料不足" in clean:
-        result.update({"matched": True, "status": "insufficient_resource"})
+        result.update({
+            "matched": True,
+            "status": "insufficient_resource",
+            "missing_resources": parse_missing_resources(clean),
+        })
+    return result
+
+
+def parse_exchange_response(text):
+    clean = _strip_markdown(text)
+    result = {"matched": False, "status": "", "material": "", "count": 0}
+    success_match = re.search(r"获得了【([^】]+)】x(\d+)", clean)
+    if "兑换成功" in clean or success_match:
+        result["matched"] = True
+        result["status"] = "success"
+        if success_match:
+            result["material"] = success_match.group(1).strip()
+            result["count"] = int(success_match.group(2))
+        return result
+    if "贡献不足" in clean or "资源不足" in clean or "无法兑换" in clean:
+        result.update({"matched": True, "status": "failed"})
     return result
 
 
@@ -417,6 +469,7 @@ def parse_nest_response(text):
         "remaining": 0,
         "missing_name": "",
         "missing_count": 0,
+        "missing_resources": [],
     }
     success_match = re.search(r"撒下\s*【([^】]+)】.*接下来\s*(\d+)\s*竿", clean)
     if "【打窝已成】" in clean or success_match:
@@ -439,11 +492,13 @@ def parse_nest_response(text):
 
     missing_match = re.search(r"资源不足：\s*([^x。\n]+)x(\d+)", clean)
     if missing_match:
+        missing_resources = parse_missing_resources(clean)
         result.update({
             "matched": True,
             "status": "missing_resource",
             "missing_name": missing_match.group(1).strip(),
             "missing_count": int(missing_match.group(2)),
+            "missing_resources": missing_resources,
         })
         return result
 
@@ -701,6 +756,9 @@ class FishingMixin:
             f"已自动暂停 dashboard 指令：{command}。\n"
             "明天需要继续钓鱼时，请在 dashboard 手动启用。"
         )
+        catches_summary = fishing_catch_summary(state.get("daily_catches", {}))
+        if catches_summary:
+            text += f"\n今日鱼获：{catches_summary}"
         if state.get("last_catch"):
             text += f"\n最后一竿：{state.get('last_catch')}"
         if not pause_changed:
@@ -993,7 +1051,51 @@ class FishingMixin:
         self.save_state()
         return True
 
-    async def fishing_buy_bait(self, identity, bait, count):
+    async def fishing_exchange_material(self, identity, material, count):
+        material = str(material or "").strip()
+        count = max(1, int(count or 1))
+        if material not in FISHING_EXCHANGEABLE_MATERIALS:
+            return False
+        command = f".兑换 {material}*{count}"
+        resp = await self.send_fishing_command(identity, command, timeout=60)
+        text = self.fishing_response_text(resp)
+        parsed = parse_exchange_response(text)
+        state = self.get_fishing_state(identity)
+        state["last_response"] = text[:500]
+        if parsed.get("status") == "success":
+            state["last_status"] = "material_exchanged"
+            state["last_detail"] = f"兑换 {material} x{parsed.get('count') or count}"
+            self.save_state()
+            return True
+        self.fishing_set_status(identity, "exchange_failed", f"{material} x{count} 兑换失败", FISHING_RETRY_SECONDS, text)
+        return False
+
+    async def fishing_resolve_missing_resources(self, identity, resources):
+        resources = resources or []
+        if not resources:
+            return False
+        resolved = False
+        for item in resources:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            count = int(item.get("count") or 0)
+            if not name or count <= 0:
+                continue
+            if name in FISHING_BAIT_NAMES:
+                if not await self.fishing_buy_bait(identity, name, count):
+                    return False
+                resolved = True
+                continue
+            if name in FISHING_EXCHANGEABLE_MATERIALS:
+                if not await self.fishing_exchange_material(identity, name, count):
+                    return False
+                resolved = True
+                continue
+            return False
+        return resolved
+
+    async def fishing_buy_bait(self, identity, bait, count, _resolved_resources=False):
         count = max(1, int(count or 1))
         command = f".买鱼饵 {bait} {count}"
         resp = await self.send_fishing_command(identity, command, timeout=90)
@@ -1008,6 +1110,12 @@ class FishingMixin:
             state["last_detail"] = f"购入 {bait} x{parsed.get('count') or count}"
             self.save_state()
             return True
+        if (
+            parsed.get("status") == "insufficient_resource"
+            and not _resolved_resources
+            and await self.fishing_resolve_missing_resources(identity, parsed.get("missing_resources") or [])
+        ):
+            return await self.fishing_buy_bait(identity, bait, count, _resolved_resources=True)
         self.fishing_set_status(identity, "bait_buy_failed", f"{bait} x{count} 购买失败", FISHING_RETRY_SECONDS, text)
         return False
 
@@ -1081,9 +1189,12 @@ class FishingMixin:
         if parsed.get("status") == "missing_resource":
             missing_name = parsed.get("missing_name", "")
             missing_count = int(parsed.get("missing_count") or 0)
-            if missing_name in FISHING_BAIT_NAMES and missing_count > 0:
-                if await self.fishing_buy_bait(identity, missing_name, missing_count):
-                    return await self.fishing_try_nest(identity)
+            resources = parsed.get("missing_resources") or []
+            if not resources and missing_name and missing_count > 0:
+                resources = [{"name": missing_name, "count": missing_count}]
+            if await self.fishing_resolve_missing_resources(identity, resources):
+                return await self.fishing_try_nest(identity)
+            if any((item.get("name") in FISHING_BAIT_NAMES or item.get("name") in FISHING_EXCHANGEABLE_MATERIALS) for item in resources if isinstance(item, dict)):
                 return False
             state.setdefault("nest_blocked", {})[nest] = _today()
             self.fishing_set_status(identity, "nest_blocked", f"{nest} 缺少 {missing_name}x{missing_count}", 60, text)
@@ -1233,6 +1344,9 @@ class FishingMixin:
         if parsed.get("status") == "success":
             state["last_status"] = "caught"
             state["last_catch"] = parsed.get("catch", "")
+            if state["last_catch"]:
+                daily_catches = state.setdefault("daily_catches", {})
+                daily_catches[state["last_catch"]] = int(daily_catches.get(state["last_catch"], 0)) + 1
             state["last_detail"] = f"提竿成功{('：' + state['last_catch']) if state['last_catch'] else ''}"
             state["consecutive_empty"] = 0
         elif parsed.get("status") == "empty":
