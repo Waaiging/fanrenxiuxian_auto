@@ -39,7 +39,10 @@ from command_modules import (
     yuanying_out_plan,
 )
 from fishing_features import (
+    FISHING_AUTO_CONTROL_COMMANDS,
     FISHING_DAILY_LIMIT,
+    fishing_auto_bait_for_state,
+    fishing_auto_dashboard_state,
     fishing_dashboard_bait,
     fishing_dashboard_command,
     fishing_dashboard_state,
@@ -756,6 +759,73 @@ def fishing_command(state):
     )
 
 
+def fishing_auto_commands(state):
+    auto_state = state.get("fishing_auto", {}) if isinstance(state, dict) else {}
+    auto_state = fishing_auto_dashboard_state(auto_state)
+    preferred_bait = fishing_auto_bait_for_state(auto_state)
+    active_identity = str(auto_state.get("active_identity") or "").strip()
+    rod_holder = str(auto_state.get("rod_holder") or "").strip()
+    completed = auto_state.get("completed", {}) if isinstance(auto_state.get("completed"), dict) else {}
+    detail_parts = [f"鱼饵 {preferred_bait}"]
+    if active_identity:
+        detail_parts.append(f"当前 {active_identity}")
+    if rod_holder:
+        detail_parts.append(f"鱼竿 {rod_holder}")
+    if completed:
+        detail_parts.append(f"已完成 {len(completed)}")
+    last_detail = str(auto_state.get("last_detail") or "").strip()
+    if last_detail:
+        detail_parts.append(last_detail)
+
+    status_map = {
+        "enabled": "已启用",
+        "running": "运行中",
+        "transferring": "转移鱼竿",
+        "transferred": "已转移",
+        "transfer_failed": "转移失败",
+        "no_rod_holder": "找鱼竿",
+        "done": "今日已满",
+        "paused": "已暂停",
+        "waiting": "等待中",
+    }
+    last_status = str(auto_state.get("last_status") or "paused")
+    next_action = parse_state_time(auto_state.get("next_action_at", ""))
+    rows = []
+    for command in FISHING_AUTO_CONTROL_COMMANDS:
+        bait = command.split()[-1] if command.split() else preferred_bait
+        is_selected = bait == preferred_bait
+        if next_action and next_action > datetime.now() and is_selected:
+            next_seconds = max(0, int((next_action - datetime.now()).total_seconds()))
+            rows.append(command_row(
+                command,
+                f"全自动钓鱼({bait})",
+                "等待中",
+                "cooldown",
+                format_remaining(next_seconds),
+                str(auto_state.get("next_action_at") or ""),
+                " · ".join(detail_parts),
+                "钓鱼",
+                schedule_type="cooldown",
+                next_seconds=next_seconds,
+                default_paused=True,
+            ))
+            continue
+        rows.append(command_row(
+            command,
+            f"全自动钓鱼({bait})",
+            status_map.get(last_status, "就绪") if is_selected else "可选鱼饵",
+            "ready" if is_selected and last_status not in {"paused", "done"} else "unknown",
+            "0秒",
+            str(auto_state.get("next_action_at") or ""),
+            " · ".join(detail_parts + ([] if is_selected else [f"启用后改用 {bait}"])),
+            "钓鱼",
+            schedule_type="cooldown",
+            next_seconds=0,
+            default_paused=True,
+        ))
+    return rows
+
+
 def yinluo_commands(state):
     yinluo = state.get("yinluo", {}) if isinstance(state, dict) else {}
     if not isinstance(yinluo, dict):
@@ -1053,6 +1123,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
+        rows.extend(fishing_auto_commands(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -1071,6 +1142,7 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
+        rows.extend(fishing_auto_commands(state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
@@ -1085,6 +1157,7 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
+        rows.extend(fishing_auto_commands(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
@@ -3283,7 +3356,16 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
                 "updated_by": username,
             }
         else:
-            if default_paused:
+            if command in FISHING_AUTO_CONTROL_COMMANDS:
+                for auto_command in FISHING_AUTO_CONTROL_COMMANDS:
+                    identity_controls[auto_command] = {
+                        "disabled": auto_command != command,
+                        "command": auto_command,
+                        "label": "全自动钓鱼",
+                        "updated_at": datetime.now().strftime(TIME_FORMAT),
+                        "updated_by": username,
+                    }
+            elif default_paused:
                 identity_controls[control_key] = {
                     "disabled": False,
                     "command": command,

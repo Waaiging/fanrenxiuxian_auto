@@ -1074,6 +1074,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
                 if not manual_reply:
                     self.maybe_record_avatar_passive_states(msg)
+                await self.maybe_record_fishing_rod_message(msg, text, sender_cache)
 
                 # 星宫化身专属：全天候被动截获好星相
                 await self.maybe_handle_star_gazing_opportunity(msg, text, sender_cache)
@@ -4867,6 +4868,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         # 侍妾神通循环（继承自 ConcubineMixin）
         asyncio.create_task(self.run_concubine_loop())
         asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
+        asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         asyncio.create_task(self.run_field_training_loop())

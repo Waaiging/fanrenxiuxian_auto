@@ -29,6 +29,7 @@ from command_modules import (
 from fishing_features import (
     FishingMixin,
     fishing_catch_summary,
+    parse_fishing_auto_control_text,
     parse_fishing_control_text,
     parse_buy_bait,
     parse_exchange_response,
@@ -38,6 +39,8 @@ from fishing_features import (
     parse_missing_resources,
     parse_nest_response,
     parse_rod_response,
+    parse_trade_listing_response,
+    parse_trade_purchase_response,
 )
 from yinluo_features import (
     YINLUO_MASTER_COMMAND,
@@ -1184,11 +1187,18 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(lucky_rod["loot"], {"煞气小刀": 1})
         self.assertEqual(parse_fishing_loot_lines("- 伴生机缘：【煞气小刀】x1"), {"煞气小刀": 1})
 
+        listing = parse_trade_listing_response("上架成功，挂单ID：23733。")
+        self.assertEqual(listing["status"], "success")
+        self.assertEqual(listing["listing_id"], "23733")
+        self.assertEqual(parse_trade_purchase_response("购买成功，获得了【青竹鱼竿】x1。")["status"], "success")
+
     def test_fishing_control_text_is_bare_and_limited(self):
         self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
         self.assertEqual(parse_fishing_control_text(" 钓鱼   灵虫饵 "), "灵虫饵")
         self.assertEqual(parse_fishing_control_text(".钓鱼 灵米饵"), "")
         self.assertEqual(parse_fishing_control_text("钓鱼 妖血饵"), "")
+        self.assertEqual(parse_fishing_auto_control_text("全自动钓鱼 灵米饵"), "灵米饵")
+        self.assertEqual(parse_fishing_auto_control_text(".全自动钓鱼 灵米饵"), "")
 
     def test_fishing_chat_control_enables_selected_bait(self):
         class DummyFishing(FishingMixin):
@@ -1380,6 +1390,42 @@ class ParserFixtureTests(unittest.TestCase):
         ])
         self.assertEqual(actor.get_fishing_state("主魂")["baits"]["灵虫饵"], 20)
 
+    def test_fishing_auto_transfer_rod_uses_listing_then_purchase(self):
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["缘生子"]
+
+            def __init__(self):
+                self.state = {"fishing": {}, "avatars": {"缘生子": {}}}
+                self.commands = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append((identity, command))
+                if identity == "缘生子" and command == ".上架 凝血草 换 青竹鱼竿*1":
+                    return "上架成功，挂单ID：23733。"
+                if identity == "主魂" and command == ".购买 23733":
+                    return "购买成功，获得了【青竹鱼竿】x1。"
+                raise AssertionError(f"unexpected command: {identity} {command}")
+
+        actor = DummyFishing()
+        actor.get_fishing_state("主魂")["rod_owned"] = True
+        actor.get_fishing_state("缘生子")["rod_owned"] = False
+
+        self.assertTrue(asyncio.run(actor.fishing_auto_transfer_rod("主魂", "缘生子")))
+        self.assertEqual(actor.commands, [
+            ("缘生子", ".上架 凝血草 换 青竹鱼竿*1"),
+            ("主魂", ".购买 23733"),
+        ])
+        self.assertFalse(actor.get_fishing_state("主魂")["rod_owned"])
+        self.assertTrue(actor.get_fishing_state("缘生子")["rod_owned"])
+        self.assertEqual(actor.get_fishing_auto_state()["rod_holder"], "缘生子")
+
     def test_fishing_nest_plan_excludes_yaoxing_and_uses_two_rice_chaff(self):
         actor = type("DummyFishing", (FishingMixin,), {
             "__init__": lambda self: setattr(self, "state", {"fishing": {}}),
@@ -1479,50 +1525,40 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["daily_done_basket_sync_date"], "")
         self.assertEqual(fishing["next_action_at"], "")
 
-    def test_fishing_basket_sync_calibrates_daily_catches(self):
+    def test_fishing_basket_sync_does_not_calibrate_daily_catches(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
                 self.state = {"fishing": {}}
                 self.commands = []
-                self.responses = [
-                    (
-                        "**【鱼篓】**\n"
-                        "青竹钓竿：**已持有**\n"
-                        "今日竿数：**0/20**\n"
-                        "当前窝料：无\n\n"
-                        "**鱼获**\n暂无\n"
-                    ),
-                    (
-                        "**【鱼篓】**\n"
-                        "青竹钓竿：**已持有**\n"
-                        "今日竿数：**20/20**\n"
-                        "当前窝料：无\n\n"
-                        "**鱼获**\n"
-                        "- 青鳞小鲫 x11\n"
-                        "- 银须灵鲢 x7\n"
-                        "- 赤尾火鲤 x1\n"
-                    ),
-                ]
 
             def save_state(self):
                 pass
 
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
-                return self.responses.pop(0)
+                return (
+                    "**【鱼篓】**\n"
+                    "青竹钓竿：**已持有**\n"
+                    "今日竿数：**20/20**\n"
+                    "当前窝料：无\n\n"
+                    "**鱼获**\n"
+                    "- 青鳞小鲫 x11\n"
+                    "- 银须灵鲢 x7\n"
+                    "- 赤尾火鲤 x1\n"
+                )
 
         actor = DummyFishing()
-        self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["basket_catches_baseline"], {})
+        fishing["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
         fishing["daily_catches"] = {"青鳞小鲫": 8, "银须灵鲢": 4, "赤尾火鲤": 1}
 
         self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(fishing["today_count"], 20)
-        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 11, "银须灵鲢": 7, "赤尾火鲤": 1})
+        self.assertEqual(fishing["catches"], {"青鳞小鲫": 11, "银须灵鲢": 7, "赤尾火鲤": 1})
+        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 8, "银须灵鲢": 4, "赤尾火鲤": 1})
 
-    def test_fishing_basket_sync_uses_zero_count_as_baseline(self):
+    def test_fishing_basket_sync_keeps_historical_catches_out_of_daily_totals(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
                 self.state = {"fishing": {}}
@@ -1552,12 +1588,14 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["basket_catches_baseline"], {"青鳞小鲫": 2})
+        self.assertEqual(fishing["catches"], {"青鳞小鲫": 2})
         self.assertEqual(fishing["daily_catches"], {})
 
         self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 1})
+        self.assertEqual(fishing["today_count"], 1)
+        self.assertEqual(fishing["catches"], {"青鳞小鲫": 3})
+        self.assertEqual(fishing["daily_catches"], {})
 
     def test_fishing_unrecognized_raise_does_not_increment_count(self):
         class DummyFishing(FishingMixin):
@@ -1585,6 +1623,27 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["current_nest_remaining"], 1)
         self.assertEqual(fishing["last_status"], "raise_unrecognized")
         self.assertIn(datetime.now().strftime("%Y-%m-%d"), fishing["next_action_at"])
+
+    def test_fishing_rod_response_message_id_dedupes_daily_catches(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+        actor = DummyFishing()
+        msg = SimpleNamespace(
+            id=101,
+            text="**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！",
+        )
+
+        self.assertTrue(asyncio.run(actor.fishing_record_rod_response("主魂", msg, finish_daily=False)))
+        self.assertTrue(asyncio.run(actor.fishing_record_rod_response("主魂", msg, finish_daily=False)))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 1)
+        self.assertEqual(fishing["daily_catches"], {"银须灵鲢": 1})
+        self.assertEqual(fishing["recorded_rod_message_ids"], [101])
 
     def test_fishing_daily_done_auto_pauses_dashboard_and_notifies(self):
         self.assertEqual(
@@ -1730,6 +1789,29 @@ class ParserFixtureTests(unittest.TestCase):
         )
         self.assertEqual(row["command"], ".钓鱼 灵虫饵")
         self.assertIn("饵料 灵虫饵", row["detail"])
+
+    def test_dashboard_fishing_auto_rows_allow_bait_selection(self):
+        state = {
+            "fishing_auto": {
+                "preferred_bait": "灵虫饵",
+                "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_status": "running",
+                "active_identity": "主魂",
+                "rod_holder": "主魂",
+            }
+        }
+        commands = [
+            command
+            for panel in build_command_panels("main", state)
+            for command in panel.get("commands", [])
+            if str(command.get("command") or "").startswith(".全自动钓鱼")
+        ]
+        self.assertEqual(
+            {command["command"] for command in commands},
+            {".全自动钓鱼 灵米饵", ".全自动钓鱼 灵虫饵"},
+        )
+        selected = next(command for command in commands if command["command"] == ".全自动钓鱼 灵虫饵")
+        self.assertIn("鱼饵 灵虫饵", selected["detail"])
 
     def test_fishing_stale_daily_count_resets_for_dashboard(self):
         today = datetime.now().strftime("%Y-%m-%d")

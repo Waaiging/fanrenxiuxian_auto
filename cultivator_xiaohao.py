@@ -4024,6 +4024,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 self.update_identity_passively(msg)
                 await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                 self.maybe_record_avatar_passive_states(msg)
+                await self.maybe_record_fishing_rod_message(msg, text, sender)
             if await handle_anti_bot_challenge(self, msg, text, sender, log, title="万灵宗自证告警"): return
             if is_game_bot_sender(self, sender) and self.should_send_keyword_alert(msg, text): await self.send_keyword_alert(msg, text, title="万灵宗关键词提醒")
             self.maybe_record_field_training_passive(msg, text)
@@ -6271,6 +6272,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_yuanying_out_loop())
         asyncio.create_task(self.run_rift_search_loop())
         asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
+        asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
 
         # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
         for avatar in self.avatars:

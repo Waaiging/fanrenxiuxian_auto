@@ -2877,6 +2877,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                 if not manual_reply:
                     self.maybe_record_avatar_passive_states(msg)
+                await self.maybe_record_fishing_rod_message(msg, text, sender)
 
             # 反机器人验证：如果机器人发来验证提示，自动处理
             if await handle_anti_bot_challenge(
@@ -6147,6 +6148,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_yuanying_out_loop())     # 元婴出窍
         asyncio.create_task(self.run_rift_search_loop())      # 探寻裂缝
         asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
+        asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
         if self.main_star_palace_enabled:
             asyncio.create_task(self.run_treasure_touch_loop())   # 抚摸法宝
         # 化身闭关修炼循环（深度闭关模式，各化身错开启动避免冲突）

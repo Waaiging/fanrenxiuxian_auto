@@ -81,6 +81,8 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
     ".垂钓": {"track_sends": False, "alert": False},
     ".钓鱼状态": {"track_sends": False, "alert": False},
     ".提竿": {"track_sends": False, "alert": False},
+    ".上架": {"track_sends": False, "alert": False},
+    ".购买": {"track_sends": False, "alert": False},
 }
 
 PARAM_COMMAND_ROOTS = {
@@ -562,7 +564,15 @@ def command_response_family(command):
         return cmd
     if cmd in {".元婴出窍", ".元婴闭关"}:
         return ".元婴出窍"
-    if cmd in {".渔具铺", ".鱼篓", ".钓鱼状态"} or cmd.startswith(".买鱼饵") or cmd.startswith(".钓鱼") or cmd.startswith(".垂钓") or cmd.startswith(".打窝") or cmd == ".提竿":
+    if (
+        cmd in {".渔具铺", ".鱼篓", ".钓鱼状态", ".提竿"}
+        or cmd.startswith(".买鱼饵")
+        or cmd.startswith(".钓鱼")
+        or cmd.startswith(".垂钓")
+        or cmd.startswith(".打窝")
+        or cmd.startswith(".上架")
+        or cmd.startswith(".购买")
+    ):
         return "fishing"
     if (
         cmd in {".我的阴罗幡", ".升级阴罗幡", ".每日献祭", ".血洗山林", ".召唤魔影", ".一键收取精华", ".一键收取"}
@@ -818,6 +828,8 @@ def feedback_response_matches_command(command, text):
             "已打下", "还可影响", "不可重复叠加",
             "你挂上", "抛竿入水", "今日已垂钓", "鱼获已入鱼篓",
             "购得 【", "鱼篓中没有", "已有一竿尚未收起", "尚无【青竹钓竿】",
+            "上架成功", "挂单成功", "交易挂单", "成功上架", "已上架",
+            "购买成功", "交易成功", "挂单不存在", "已被购买",
         ])
     if expected == "yinluo":
         return any(k in clean for k in [
