@@ -1196,8 +1196,10 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
         self.assertEqual(parse_fishing_control_text(" 钓鱼   灵虫饵 "), "灵虫饵")
         self.assertEqual(parse_fishing_control_text(".钓鱼 灵米饵"), "")
-        self.assertEqual(parse_fishing_control_text("钓鱼 妖血饵"), "")
+        self.assertEqual(parse_fishing_control_text("钓鱼 凡饵"), "凡饵")
+        self.assertEqual(parse_fishing_control_text("钓鱼 妖血饵"), "妖血饵")
         self.assertEqual(parse_fishing_auto_control_text("全自动钓鱼 灵米饵"), "灵米饵")
+        self.assertEqual(parse_fishing_auto_control_text("全自动钓鱼 妖血饵"), "妖血饵")
         self.assertEqual(parse_fishing_auto_control_text(".全自动钓鱼 灵米饵"), "")
 
     def test_fishing_chat_control_enables_selected_bait(self):
@@ -1950,30 +1952,66 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(row["command"], ".钓鱼 灵虫饵")
         self.assertIn("饵料 灵虫饵", row["detail"])
 
-    def test_dashboard_fishing_auto_row_allows_bait_selection(self):
+    def test_dashboard_fishing_auto_summary_allows_bait_selection(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        due_at = (datetime.now() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         state = {
             "fishing_auto": {
                 "preferred_bait": "灵虫饵",
-                "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_sync_date": today,
                 "last_status": "running",
                 "active_identity": "主魂",
                 "rod_holder": "主魂",
-            }
+            },
+            "fishing": {
+                "last_sync_date": today,
+                "last_status": "fishing",
+                "last_detail": "等待提竿",
+                "today_count": 3,
+                "daily_limit": 20,
+                "active": True,
+                "active_due_at": due_at,
+                "rod_owned": True,
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch.object(dashboard_server, "CONFIG_DIR", tmpdir):
-            commands = [
-                command
-                for panel in build_command_panels("main", state)
-                for command in panel.get("commands", [])
-                if str(command.get("command") or "").startswith(".全自动钓鱼")
-            ]
-        self.assertEqual(len(commands), 1)
-        selected = commands[0]
-        self.assertEqual(selected["command"], ".全自动钓鱼")
-        self.assertEqual(selected["bait_value"], "灵虫饵")
-        self.assertEqual(selected["bait_options"], ["灵米饵", "灵虫饵"])
-        self.assertIn("鱼饵 灵虫饵", selected["detail"])
+            controls = {
+                account: {
+                    "主魂": {
+                        ".全自动钓鱼": {
+                            "disabled": False,
+                            "command": ".全自动钓鱼",
+                            "label": "全自动钓鱼",
+                            "bait": "灵虫饵",
+                        }
+                    }
+                }
+                for account in ("main", "sub", "xiaohao")
+            }
+            with open(os.path.join(tmpdir, "command_controls.json"), "w", encoding="utf-8") as f:
+                json.dump(controls, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": today,
+                    "preferred_bait": "灵虫饵",
+                    "active": {"account": "main", "identity": "主魂", "key": "main|主魂"},
+                    "rod_holder": {"account": "main", "identity": "主魂"},
+                    "completed": {},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+            summary = dashboard_server.fishing_auto_dashboard_summary({
+                "main": state,
+                "sub": {},
+                "xiaohao": {},
+            })
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["bait"], "灵虫饵")
+        self.assertEqual(summary["bait_options"], ["凡饵", "灵虫饵", "灵米饵", "妖血饵"])
+        self.assertEqual(summary["current"]["label"], "主号[主魂]")
+        self.assertEqual(summary["current"]["today_count"], 3)
+        self.assertEqual(summary["rod_holder"], "主号[主魂]")
+        self.assertIn("主号[主魂] 钓鱼中", summary["status"])
 
     def test_fishing_stale_daily_count_resets_for_dashboard(self):
         today = datetime.now().strftime("%Y-%m-%d")

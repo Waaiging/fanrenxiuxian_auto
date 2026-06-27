@@ -103,6 +103,33 @@
         .runtime-item-name { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.35rem; }
         .runtime-item-pid { color: var(--accent-color); font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
         .runtime-item-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fishing-auto-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; padding: 1rem; backdrop-filter: blur(12px); }
+        .fishing-auto-header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; margin-bottom: 0.85rem; }
+        .fishing-auto-title { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+        .fishing-auto-title strong { color: var(--text-primary); font-size: 0.98rem; }
+        .fishing-auto-title span { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.35; }
+        .fishing-auto-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: 0.55rem; flex-wrap: wrap; }
+        .fishing-auto-status { border-radius: 999px; padding: 0.24rem 0.62rem; font-size: 0.74rem; font-weight: 900; white-space: nowrap; }
+        .fishing-auto-status.tone-active { background: rgba(0,210,255,0.16); color: var(--accent-color); }
+        .fishing-auto-status.tone-flow { background: rgba(236,72,153,0.16); color: #f9a8d4; }
+        .fishing-auto-status.tone-cooldown { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .fishing-auto-status.tone-done { background: rgba(148,163,184,0.16); color: #cbd5e1; }
+        .fishing-auto-status.tone-paused { background: rgba(239,68,68,0.18); color: #fca5a5; }
+        .fishing-auto-status.tone-unknown { background: rgba(100,116,139,0.16); color: #94a3b8; }
+        .fishing-auto-select { height: 1.8rem; border: 1px solid rgba(255,255,255,0.14); background: rgba(15,23,42,0.92); color: var(--text-primary); border-radius: 7px; padding: 0 0.48rem; font-size: 0.75rem; outline: none; }
+        .fishing-auto-select:disabled { opacity: 0.58; cursor: wait; }
+        .fishing-auto-switch { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; }
+        .fishing-auto-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.55rem; margin-bottom: 0.75rem; }
+        .fishing-auto-metric { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.62rem 0.7rem; min-width: 0; }
+        .fishing-auto-metric-label { color: var(--text-secondary); font-size: 0.68rem; margin-bottom: 0.24rem; }
+        .fishing-auto-metric-value { color: var(--text-primary); font-size: 0.86rem; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fishing-auto-progress { height: 0.42rem; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,0.08); margin: 0.25rem 0 0.82rem; }
+        .fishing-auto-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #10b981, #00d2ff); width: 0; transition: width 0.25s ease; }
+        .fishing-auto-identities { display: flex; flex-wrap: wrap; gap: 0.34rem; }
+        .fishing-auto-chip { border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.035); color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.67rem; padding: 0.22rem 0.42rem; white-space: nowrap; }
+        .fishing-auto-chip.active { color: var(--accent-color); border-color: rgba(0,210,255,0.38); background: rgba(0,210,255,0.1); }
+        .fishing-auto-chip.done { color: #34d399; border-color: rgba(52,211,153,0.3); }
+        .fishing-auto-chip.paused { color: #fca5a5; border-color: rgba(248,113,113,0.24); }
         .account-health { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.65rem; margin: 0.2rem 0 1rem; }
         .account-health-title { display: flex; justify-content: space-between; gap: 0.6rem; color: var(--text-secondary); font-size: 0.72rem; font-weight: 800; margin-bottom: 0.52rem; }
         .account-health-next { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -267,6 +294,8 @@
             main { grid-template-columns: 1fr; padding: 1rem; }
             .runtime-header { flex-direction: column; }
             .runtime-git { text-align: left; }
+            .fishing-auto-header { flex-direction: column; }
+            .fishing-auto-controls { width: 100%; justify-content: flex-start; }
             .log-tools { grid-template-columns: 1fr; align-items: stretch; }
             .log-filter-summary { text-align: left; min-width: 0; }
             .log-search-row { flex-wrap: wrap; }
@@ -433,6 +462,9 @@
         <section class="runtime-section" id="runtime-summary">
             <div class="record-empty">运行信息加载中...</div>
         </section>
+        <section class="fishing-auto-section" id="fishing-auto-summary">
+            <div class="record-empty">全自动钓鱼状态加载中...</div>
+        </section>
         <div id="account-cards" style="display: contents;"></div>
         <section class="command-record-section">
             <div class="record-header">
@@ -536,6 +568,8 @@
         let commandRecordRows = [];
         let commandRecordUpdatedAt = '';
         let commandRecordAccountNames = {};
+        let lastFishingAutoSummary = null;
+        let fishingAutoHomePending = false;
         const commandPausePending = {};
 
         function apiUrl(path) {
@@ -1043,6 +1077,85 @@
                 </div>
                 <div class="runtime-grid">
                     ${accountRows || '<div class="record-empty">暂无账号运行信息。</div>'}
+                </div>
+            `;
+        }
+
+        function renderFishingAutoSummary(summary) {
+            const target = document.getElementById('fishing-auto-summary');
+            if (!target) return;
+            const data = summary || {};
+            lastFishingAutoSummary = data;
+            const enabled = Boolean(data.enabled);
+            const statusTone = String(data.status_tone || 'unknown').replace(/[^a-z0-9_-]/gi, '') || 'unknown';
+            const baitOptions = Array.isArray(data.bait_options) && data.bait_options.length
+                ? data.bait_options : ['凡饵', '灵虫饵', '灵米饵', '妖血饵'];
+            const bait = data.bait || '灵米饵';
+            const current = data.current || {};
+            const targetIdentity = data.target || {};
+            const transfer = data.transfer || {};
+            const total = Number(data.total_count || 0);
+            const completed = Number(data.completed_count || 0);
+            const pending = Number(data.pending_count || Math.max(0, total - completed));
+            const percent = total > 0 ? Math.max(0, Math.min(100, (completed / total) * 100)) : 0;
+            const currentLabel = current.label || (enabled ? '等待队列同步' : '--');
+            const currentDetail = current.label
+                ? `${Number(current.today_count || 0)}/${Number(current.daily_limit || 20)} · ${current.detail || current.status || '--'}`
+                : '--';
+            const transferText = transfer.listing_id
+                ? `${transfer.from_label || '--'} -> ${transfer.to_label || '--'} · 挂单 ${transfer.listing_id}`
+                : (transfer.status ? `${transfer.from_label || '--'} -> ${transfer.to_label || '--'} · ${transfer.status}` : '--');
+            const identityChips = (Array.isArray(data.identities) ? data.identities : []).map(item => {
+                const classes = ['fishing-auto-chip'];
+                if (item.active) classes.push('active');
+                else if (item.done) classes.push('done');
+                else if (item.status === 'paused') classes.push('paused');
+                const countText = `${Number(item.today_count || 0)}/${Number(item.daily_limit || 20)}`;
+                const title = `${item.label || ''} · ${countText} · ${item.detail || item.status || ''}`;
+                return `<span class="${classes.join(' ')}" title="${escapeHtml(title)}">${escapeHtml(item.label || '--')} ${escapeHtml(countText)}</span>`;
+            }).join('');
+            target.innerHTML = `
+                <div class="fishing-auto-header">
+                    <div class="fishing-auto-title">
+                        <strong>全自动钓鱼</strong>
+                        <span>${escapeHtml(data.status || '状态未同步')}</span>
+                    </div>
+                    <div class="fishing-auto-controls">
+                        <span class="fishing-auto-status tone-${statusTone}">${escapeHtml(enabled ? '启用' : '暂停')}</span>
+                        <select id="fishing-auto-bait-select" class="fishing-auto-select" ${fishingAutoHomePending ? 'disabled' : ''} onchange="setFishingAutoBait('', this.value)">
+                            ${baitOptions.map(option => `<option value="${escapeHtml(option)}" ${option === bait ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}
+                        </select>
+                        <span class="fishing-auto-switch">
+                            <button class="command-toggle ${enabled ? '' : 'paused'} ${fishingAutoHomePending ? 'updating' : ''}" ${fishingAutoHomePending ? 'disabled' : ''} onclick="toggleFishingAutoHome(${enabled ? 'true' : 'false'})" aria-label="${escapeHtml(enabled ? '暂停全自动钓鱼' : '启用全自动钓鱼')}"></button>
+                            <span>${escapeHtml(fishingAutoHomePending ? '处理中' : (enabled ? '启用' : '暂停'))}</span>
+                        </span>
+                    </div>
+                </div>
+                <div class="fishing-auto-body">
+                    <div class="fishing-auto-metric">
+                        <div class="fishing-auto-metric-label">当前钓鱼身份</div>
+                        <div class="fishing-auto-metric-value" title="${escapeHtml(currentDetail)}">${escapeHtml(currentLabel)}</div>
+                    </div>
+                    <div class="fishing-auto-metric">
+                        <div class="fishing-auto-metric-label">队列目标</div>
+                        <div class="fishing-auto-metric-value">${escapeHtml(targetIdentity.label || '--')}</div>
+                    </div>
+                    <div class="fishing-auto-metric">
+                        <div class="fishing-auto-metric-label">鱼竿持有者</div>
+                        <div class="fishing-auto-metric-value">${escapeHtml(data.rod_holder || '--')}</div>
+                    </div>
+                    <div class="fishing-auto-metric">
+                        <div class="fishing-auto-metric-label">鱼竿转移</div>
+                        <div class="fishing-auto-metric-value" title="${escapeHtml(transferText)}">${escapeHtml(transferText)}</div>
+                    </div>
+                    <div class="fishing-auto-metric">
+                        <div class="fishing-auto-metric-label">今日进度</div>
+                        <div class="fishing-auto-metric-value">${escapeHtml(`${completed}/${total || '--'} 完成 · ${pending} 待钓`)}</div>
+                    </div>
+                </div>
+                <div class="fishing-auto-progress" title="${escapeHtml(`${completed}/${total || 0}`)}"><span style="width: ${percent.toFixed(1)}%"></span></div>
+                <div class="fishing-auto-identities">
+                    ${identityChips || '<span class="fishing-auto-chip">暂无身份状态</span>'}
                 </div>
             `;
         }
@@ -1715,6 +1828,41 @@
             }
         }
 
+        async function toggleFishingAutoHome(disabled) {
+            if (fishingAutoHomePending) return;
+            fishingAutoHomePending = true;
+            renderFishingAutoSummary(lastFishingAutoSummary || {});
+            const bait = document.getElementById('fishing-auto-bait-select')?.value || lastFishingAutoSummary?.bait || '灵米饵';
+            try {
+                const r = await fetch(apiUrl('/api/command-control'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        account: 'main',
+                        identity: '主魂',
+                        control_key: '.全自动钓鱼',
+                        command: '.全自动钓鱼',
+                        label: '全自动钓鱼',
+                        disabled: Boolean(disabled),
+                        default_paused: true,
+                        bait
+                    })
+                });
+                const data = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${r.status}`);
+                    return;
+                }
+                setTimeout(() => updateStatus(), 30);
+            } catch (e) {
+                console.error('Fishing auto toggle failed:', e);
+                alert('全自动钓鱼开关请求失败。');
+            } finally {
+                fishingAutoHomePending = false;
+                renderFishingAutoSummary(lastFishingAutoSummary || {});
+            }
+        }
+
         async function toggleCommandPause(panelKey, account, identity, controlKey, command, label, disabled, defaultPaused = false) {
             const pendingKey = commandPauseKey(account, identity, controlKey);
             if (commandPausePending[pendingKey]) return;
@@ -1760,6 +1908,7 @@
                 const data = await r.json();
                 document.getElementById('server-time').innerText = data.server_time;
                 renderRuntimeSummary(data);
+                renderFishingAutoSummary(data.fishing_auto);
                 
                 let html = '';
                 window.commandPanelDataMap = {};

@@ -39,13 +39,17 @@ from command_modules import (
     yuanying_out_plan,
 )
 from fishing_features import (
+    FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTO_CONTROL_COMMAND,
+    FISHING_AUTO_CONTROL_ACCOUNTS,
     FISHING_AUTO_CONTROL_COMMANDS,
+    FISHING_BAIT,
     FISHING_CONTROL_BAITS,
     FISHING_DAILY_LIMIT,
     fishing_auto_bait_from_entry,
     fishing_auto_bait_for_state,
     fishing_auto_dashboard_state,
+    fishing_daily_done_for_today,
     fishing_dashboard_bait,
     fishing_dashboard_command,
     fishing_dashboard_state,
@@ -124,6 +128,7 @@ SERVER_STARTED_AT = datetime.fromtimestamp(SERVER_START_TS).strftime(TIME_FORMAT
 GIT_META_CACHE = {}
 GIT_META_CACHE_SECONDS = 60
 ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
+ACCOUNT_SHORT_NAMES = {"main": "主号", "sub": "副号", "xiaohao": "小号"}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
@@ -843,6 +848,208 @@ def fishing_auto_commands(account, state):
     return [row]
 
 
+def fishing_auto_identity_label(account, identity):
+    identity = str(identity or "主魂").strip() or "主魂"
+    return f"{ACCOUNT_SHORT_NAMES.get(account, account)}[{identity}]"
+
+
+def fishing_auto_global_path():
+    return os.path.join(CONFIG_DIR, "fishing_auto_global.json")
+
+
+def load_fishing_auto_global_dashboard_state():
+    path = fishing_auto_global_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    view = {
+        "date": data.get("date") or today,
+        "preferred_bait": data.get("preferred_bait") if data.get("preferred_bait") in FISHING_CONTROL_BAITS else FISHING_BAIT,
+        "active": data.get("active") if isinstance(data.get("active"), dict) else {},
+        "rod_holder": data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {},
+        "completed": data.get("completed") if isinstance(data.get("completed"), dict) else {},
+        "transfer": data.get("transfer") if isinstance(data.get("transfer"), dict) else {},
+        "updated_at": data.get("updated_at") or "",
+    }
+    if view["date"] != today:
+        view["active"] = {}
+        view["completed"] = {}
+        view["transfer"] = {}
+    return view
+
+
+def fishing_state_for_identity(root_state, identity):
+    root_state = root_state if isinstance(root_state, dict) else {}
+    identity = str(identity or "主魂").strip() or "主魂"
+    if identity == "主魂":
+        fishing = root_state.get("fishing", {})
+    else:
+        avatars = root_state.get("avatars", {}) if isinstance(root_state.get("avatars"), dict) else {}
+        avatar = avatars.get(identity, {}) if isinstance(avatars.get(identity), dict) else {}
+        fishing = avatar.get("fishing", {})
+    return fishing_dashboard_state(fishing if isinstance(fishing, dict) else {})
+
+
+def fishing_auto_control_summary(controls=None):
+    controls = controls if isinstance(controls, dict) else load_command_controls()
+    entries = []
+    baits = []
+    for account in FISHING_AUTO_CONTROL_ACCOUNTS:
+        account_controls = controls.get(account, {})
+        if not isinstance(account_controls, dict):
+            continue
+        identity_controls = account_controls.get("主魂", {})
+        if not isinstance(identity_controls, dict):
+            continue
+        entry = identity_controls.get(FISHING_AUTO_CONTROL_COMMAND)
+        if isinstance(entry, dict):
+            entries.append({"account": account, "entry": entry})
+            bait = str(entry.get("bait") or "").strip()
+            if bait in FISHING_CONTROL_BAITS:
+                baits.append(bait)
+    enabled_accounts = [
+        item["account"]
+        for item in entries
+        if not bool(item["entry"].get("disabled"))
+    ]
+    return {
+        "enabled": bool(enabled_accounts),
+        "partial": 0 < len(enabled_accounts) < len(FISHING_AUTO_CONTROL_ACCOUNTS),
+        "enabled_accounts": enabled_accounts,
+        "bait": baits[0] if baits else FISHING_BAIT,
+    }
+
+
+def fishing_auto_dashboard_summary(states):
+    states = states if isinstance(states, dict) else {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    controls = load_command_controls()
+    control = fishing_auto_control_summary(controls)
+    global_state = load_fishing_auto_global_dashboard_state()
+    bait = control.get("bait") or global_state.get("preferred_bait") or FISHING_BAIT
+    if bait not in FISHING_CONTROL_BAITS:
+        bait = FISHING_BAIT
+
+    identities = []
+    active_round = None
+    holder = global_state.get("rod_holder") if isinstance(global_state.get("rod_holder"), dict) else {}
+    for account in FISHING_AUTO_CONTROL_ACCOUNTS:
+        root = states.get(account, {}) if isinstance(states.get(account), dict) else {}
+        for identity in FISHING_AUTO_ACCOUNT_IDENTITIES.get(account, ("主魂",)):
+            fishing = fishing_state_for_identity(root, identity)
+            count = int(fishing.get("today_count") or 0)
+            limit = int(fishing.get("daily_limit") or FISHING_DAILY_LIMIT)
+            done = fishing_daily_done_for_today(fishing, today=today)
+            active_due_at = str(fishing.get("active_due_at") or "")
+            active_due = parse_state_time(active_due_at)
+            remaining = max(0, int((active_due - datetime.now()).total_seconds())) if active_due else None
+            is_active = bool(fishing.get("active")) and (
+                not active_due or active_due.strftime("%Y-%m-%d") == today
+            )
+            item = {
+                "account": account,
+                "account_name": ACCOUNT_SHORT_NAMES.get(account, account),
+                "identity": identity,
+                "label": fishing_auto_identity_label(account, identity),
+                "today_count": count,
+                "daily_limit": limit,
+                "done": bool(done),
+                "status": str(fishing.get("last_status") or "paused"),
+                "detail": str(fishing.get("last_detail") or ""),
+                "active": is_active,
+                "active_due_at": active_due_at,
+                "remaining_seconds": remaining,
+                "rod_owned": fishing.get("rod_owned"),
+            }
+            identities.append(item)
+            if not holder and fishing.get("rod_owned") is True:
+                holder = {"account": account, "identity": identity, "updated_at": ""}
+            if item["active"] and active_round is None:
+                active_round = item
+
+    by_key = {f"{item['account']}|{item['identity']}": item for item in identities}
+    active = global_state.get("active") if isinstance(global_state.get("active"), dict) else {}
+    target = None
+    active_key = str(active.get("key") or "")
+    if active_key and active_key in by_key and not by_key[active_key].get("done"):
+        target = by_key[active_key]
+    if target is None:
+        for item in identities:
+            if not item.get("done"):
+                target = item
+                break
+
+    holder_label = ""
+    if isinstance(holder, dict) and holder.get("account") and holder.get("identity"):
+        holder_label = fishing_auto_identity_label(holder.get("account"), holder.get("identity"))
+
+    transfer = global_state.get("transfer") if isinstance(global_state.get("transfer"), dict) else {}
+    transfer_view = {}
+    if transfer:
+        transfer_view = {
+            "status": str(transfer.get("status") or ""),
+            "listing_id": str(transfer.get("listing_id") or ""),
+            "from_label": fishing_auto_identity_label(transfer.get("from_account"), transfer.get("from_identity")),
+            "to_label": fishing_auto_identity_label(transfer.get("to_account"), transfer.get("to_identity")),
+            "updated_at": str(transfer.get("updated_at") or transfer.get("started_at") or ""),
+        }
+
+    completed_count = sum(1 for item in identities if item.get("done"))
+    total_count = len(identities)
+    enabled = bool(control.get("enabled"))
+    partial = bool(control.get("partial"))
+    current = active_round or target
+    if not enabled:
+        status_text = "已暂停"
+        status_tone = "paused"
+    elif completed_count >= total_count and total_count:
+        status_text = "今日已全部完成"
+        status_tone = "done"
+    elif transfer_view:
+        status_text = "鱼竿转移中"
+        status_tone = "flow"
+    elif active_round:
+        due_text = format_remaining(active_round["remaining_seconds"]) if active_round.get("remaining_seconds") is not None else ""
+        status_text = f"{active_round['label']} 钓鱼中{f'，{due_text} 后提竿' if due_text else ''}"
+        status_tone = "active"
+    elif target:
+        status_text = f"等待 {target['label']}"
+        status_tone = "cooldown"
+    else:
+        status_text = "等待队列同步"
+        status_tone = "unknown"
+    if partial:
+        status_text = f"部分启用 · {status_text}"
+
+    return {
+        "enabled": enabled,
+        "partial": partial,
+        "bait": bait,
+        "bait_options": list(FISHING_CONTROL_BAITS),
+        "command": FISHING_AUTO_CONTROL_COMMAND,
+        "control_key": FISHING_AUTO_CONTROL_COMMAND,
+        "label": "全自动钓鱼",
+        "status": status_text,
+        "status_tone": status_tone,
+        "current": current or {},
+        "target": target or {},
+        "rod_holder": holder_label,
+        "rod_holder_detail": holder if isinstance(holder, dict) else {},
+        "transfer": transfer_view,
+        "completed_count": completed_count,
+        "pending_count": max(0, total_count - completed_count),
+        "total_count": total_count,
+        "identities": identities,
+        "updated_at": global_state.get("updated_at") or "",
+        "date": today,
+    }
+
+
 def yinluo_commands(state):
     yinluo = state.get("yinluo", {}) if isinstance(state, dict) else {}
     if not isinstance(yinluo, dict):
@@ -1140,7 +1347,6 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(account, state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -1159,7 +1365,6 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(account, state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
@@ -1174,7 +1379,6 @@ def main_soul_panel(account, state):
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(fishing_command(state))
-        rows.extend(fishing_auto_commands(account, state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
@@ -3247,8 +3451,10 @@ def status(username: str = Depends(authenticate)):
                 return cached
             result = {}
             runtime_accounts = {}
+            states = {}
             for key, info in ACCOUNT_DISPLAY_NAMES.items():
                 state = get_state(key)
+                states[key] = state
                 pids = account_process_pids(key) if os.name != 'nt' else None
                 process_info = account_runtime_info(key, pids=pids)
                 runtime_accounts[key] = process_info
@@ -3265,6 +3471,7 @@ def status(username: str = Depends(authenticate)):
                 "accounts": result,
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "runtime": dashboard_runtime_info(runtime_accounts),
+                "fishing_auto": fishing_auto_dashboard_summary(states),
             }
             STATUS_CACHE["at"] = now_ts
             STATUS_CACHE["data"] = payload
@@ -3375,7 +3582,7 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
                         bait = old_entry.get("bait")
                         break
             if bait not in FISHING_CONTROL_BAITS:
-                bait = FISHING_CONTROL_BAITS[0]
+                bait = FISHING_BAIT
             for auto_account in WINDOW_MAP:
                 account_controls = data.setdefault(auto_account, {})
                 identity_controls = account_controls.setdefault("主魂", {})
