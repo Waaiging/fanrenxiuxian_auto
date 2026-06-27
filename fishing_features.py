@@ -992,18 +992,37 @@ class FishingMixin:
         state = self.get_fishing_state(identity)
         today = _today()
         if state.get("daily_done_basket_sync_date") == today:
-            await self.fishing_finish_daily_done(identity, reason="daily limit already synced")
-            return True
+            if fishing_daily_done_for_today(state, today=today):
+                await self.fishing_finish_daily_done(identity, reason="daily limit already synced")
+                return True
+            state["daily_done_basket_sync_date"] = ""
+            state["last_status"] = "synced"
+            state["last_detail"] = (
+                f"鱼篓校准 {state.get('today_count')}/{state.get('daily_limit')}，继续钓鱼"
+            )
+            state["next_action_at"] = ""
+            self.save_state()
+            return False
         ok = await self.fishing_sync_basket(identity)
         state = self.get_fishing_state(identity)
-        if ok:
-            state["daily_done_basket_sync_date"] = today
+        if not ok:
+            return False
+        if not fishing_daily_done_for_today(state, today=today):
+            state["daily_done_basket_sync_date"] = ""
+            state["last_status"] = "synced"
+            state["last_detail"] = (
+                f"鱼篓校准 {state.get('today_count')}/{state.get('daily_limit')}，继续钓鱼"
+            )
+            state["next_action_at"] = ""
+            self.save_state()
+            return False
+        state["daily_done_basket_sync_date"] = today
         state["last_status"] = "daily_done"
         state["last_detail"] = f"今日已垂钓 {state.get('today_count')}/{state.get('daily_limit')}"
         state["next_action_at"] = _next_day_action_time()
         self.save_state()
         await self.fishing_finish_daily_done(identity, reason="daily limit reached")
-        return ok
+        return True
 
     async def fishing_raise_rod_current_identity(self, identity):
         previous_last_sent_id = getattr(self, "last_sent_id", None)
@@ -1034,12 +1053,17 @@ class FishingMixin:
         state["active_due_at"] = ""
         state["active_started_at"] = ""
         state["active_bait"] = ""
-        state["last_round_at"] = now_str()
-        state["today_count"] = min(int(state.get("daily_limit") or FISHING_DAILY_LIMIT), int(state.get("today_count") or 0) + 1)
-        if state.get("current_nest") and int(state.get("current_nest_remaining") or 0) > 0:
-            state["current_nest_remaining"] = max(0, int(state.get("current_nest_remaining") or 0) - 1)
-            if state["current_nest_remaining"] <= 0:
-                state["current_nest"] = ""
+        counted_rod = parsed.get("status") in {"success", "empty"}
+        if counted_rod:
+            state["last_round_at"] = now_str()
+            state["today_count"] = min(
+                int(state.get("daily_limit") or FISHING_DAILY_LIMIT),
+                int(state.get("today_count") or 0) + 1,
+            )
+            if state.get("current_nest") and int(state.get("current_nest_remaining") or 0) > 0:
+                state["current_nest_remaining"] = max(0, int(state.get("current_nest_remaining") or 0) - 1)
+                if state["current_nest_remaining"] <= 0:
+                    state["current_nest"] = ""
         if parsed.get("status") == "success":
             state["last_status"] = "caught"
             state["last_catch"] = parsed.get("catch", "")

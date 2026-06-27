@@ -1210,6 +1210,73 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["last_status"], "daily_done")
         self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
 
+    def test_fishing_basket_sync_below_limit_does_not_mark_daily_done(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                if command == ".鱼篓":
+                    return (
+                        "**【鱼篓】**\n"
+                        "青竹钓竿：**已持有**\n"
+                        "今日竿数：**19/20**\n"
+                        "当前窝料：无\n\n"
+                        "**鱼饵**\n暂无\n\n"
+                        "**鱼获**\n- 银须灵鲢 x1\n"
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "today_count": 20,
+            "daily_limit": 20,
+            "last_status": "daily_done",
+            "next_action_at": "2099-01-01 00:05:00",
+        })
+
+        self.assertFalse(asyncio.run(actor.fishing_sync_daily_done_basket("主魂")))
+        self.assertEqual(actor.commands, [".鱼篓"])
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 19)
+        self.assertEqual(fishing["last_status"], "synced")
+        self.assertEqual(fishing["daily_done_basket_sync_date"], "")
+        self.assertEqual(fishing["next_action_at"], "")
+
+    def test_fishing_unrecognized_raise_does_not_increment_count(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "today_count": 19,
+            "daily_limit": 20,
+            "active": True,
+            "active_due_at": now_str(),
+            "current_nest": "米糠小窝",
+            "current_nest_remaining": 1,
+        })
+
+        self.assertFalse(asyncio.run(actor.fishing_record_rod_response("主魂", "这不是提竿回复")))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 19)
+        self.assertEqual(fishing["current_nest_remaining"], 1)
+        self.assertEqual(fishing["last_status"], "raise_unrecognized")
+        self.assertIn(datetime.now().strftime("%Y-%m-%d"), fishing["next_action_at"])
+
     def test_fishing_daily_done_auto_pauses_dashboard_and_notifies(self):
         class DummyFishing(FishingMixin):
             account_key = "xiaohao"
