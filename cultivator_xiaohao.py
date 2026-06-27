@@ -6150,6 +6150,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     record_star_gazing_event("xiaohao", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
+                    self.maybe_record_daily_reward_from_edited_message(msg, text, source="edited message")
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁，加入账号强匹配）
                     if self.is_rift_weakness_response(text) and is_edited_message_for_current_account(self, msg, text):
                         identity = tracked_command_identity_for_reply(self, msg) or getattr(self, "current_identity", "主魂")

@@ -1007,7 +1007,7 @@ async def maybe_handle_han_soul_choice(actor, msg, text, sender=None, logger=Non
 
 # ---- 告警发送 ----
 
-async def send_text_alert(actor, title, text, logger=None):
+async def send_text_alert(actor, title, text, logger=None, parse_mode=None):
     """发送告警消息给用户（优先使用 bot token，降级到客户端）"""
     alert_text = f"【{title}】\n{text}"
     config = getattr(actor, "config", {}) or {}
@@ -1018,7 +1018,10 @@ async def send_text_alert(actor, title, text, logger=None):
     if bot_token:
         try:
             final_target = int(target) if isinstance(target, str) and target.lstrip("-").isdigit() else target
-            data = json.dumps({"chat_id": final_target, "text": alert_text}).encode("utf-8")
+            payload = {"chat_id": final_target, "text": alert_text}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 data=data, headers={"Content-Type": "application/json"},
@@ -1036,7 +1039,10 @@ async def send_text_alert(actor, title, text, logger=None):
                 final_target = target
                 if isinstance(target, str) and not target.startswith("@") and not target.lstrip("-").isdigit():
                     final_target = f"@{target}"
-                await client.send_message(final_target, alert_text)
+                kwargs = {}
+                if parse_mode and parse_mode != "MarkdownV2":
+                    kwargs["parse_mode"] = parse_mode
+                await client.send_message(final_target, alert_text, **kwargs)
                 sent = True
             except Exception as exc:
                 if logger:
@@ -1811,6 +1817,12 @@ def dashboard_command_disabled(actor, command, identity=None):
         return False, "", None
     identities = [str(identity or getattr(actor, "current_identity", "主魂") or "主魂"), "*"]
     keys = command_control_candidate_keys(command)
+    bypass = getattr(actor, "_dashboard_command_bypass", None)
+    if bypass:
+        for ident in identities:
+            for key in keys:
+                if (ident, key) in bypass or ("*", key) in bypass or (ident, "*") in bypass:
+                    return False, "", None
     for ident in identities:
         ident_controls = controls.get(ident, {})
         if not isinstance(ident_controls, dict):

@@ -265,11 +265,11 @@ class ParserFixtureTests(unittest.TestCase):
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
 
-        self.assertIn("账号：DummyAvatarCommon", summary)
-        self.assertIn("主魂：", summary)
-        self.assertIn(".元婴闭关：1 次；修为 +2000、煞气小刀 +1", summary)
-        self.assertIn("缘生子：", summary)
-        self.assertIn(".探寻裂缝：1 次；宗门贡献 +5、灵石 +3", summary)
+        self.assertIn("账号：*DummyAvatarCommon*", summary)
+        self.assertIn("*主魂*", summary)
+        self.assertIn("\\- *\\.元婴闭关*：1 次（成功 1）；*修为 \\+2000、煞气小刀 \\+1*", summary)
+        self.assertIn("*缘生子*", summary)
+        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*宗门贡献 \\+5、灵石 \\+3*", summary)
 
     def test_daily_reward_hooks_for_yuanying_rift_and_field_training(self):
         actor = DummyAvatarCommon()
@@ -294,9 +294,9 @@ class ParserFixtureTests(unittest.TestCase):
 
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn(".元婴出窍：1 次；修为 +1200", summary)
-        self.assertIn(".探寻裂缝：1 次；空间碎片 +2", summary)
-        self.assertIn(".野外历练：1 次；修为 +300、灵石 +4", summary)
+        self.assertIn("\\- *\\.元婴出窍*：1 次（成功 1）；*修为 \\+1200*", summary)
+        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*空间碎片 \\+2*", summary)
+        self.assertIn("\\- *\\.野外历练*：1 次（成功 1）；*修为 \\+300、灵石 \\+4*", summary)
 
         sub_treasure = treasure_touch_plan(".抚摸法宝 青竹蜂云剑")
         self.assertEqual(sub_treasure.command, ".抚摸法宝 青竹蜂云剑")
@@ -312,6 +312,159 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(ask_dao.next_key, "next_ask_dao_time")
         self.assertEqual(ask_dao.max_retries, 1)
         self.assertTrue(ask_dao.force_identity_check)
+
+    def test_daily_reward_records_edited_settlements_and_field_training_failure(self):
+        actor = DummyAvatarCommon()
+        actor.command_avatar_map = {1001: "缘生子", 1002: "缘生子"}
+        actor.current_identity = "主魂"
+        actor.my_info = SimpleNamespace(username="TitanCreeper")
+        pending_msg = DummyMessage(
+            2001,
+            text="**【野外历练】**\n@foo 选择【均衡】策略，正向荒野深处行去...",
+            reply_to_msg_id=1001,
+        )
+        success_msg = DummyMessage(
+            2001,
+            text="**【野外历练 · 灵机暗藏】**\n@foo 采得一份机缘，获得修为 **+157**。",
+            reply_to_msg_id=1001,
+        )
+        failure_msg = DummyMessage(
+            2002,
+            text="**【野外历练 · 妖兽遭遇】**\n@foo 负伤而归，修为折损 **67** 点。",
+            reply_to_msg_id=1002,
+        )
+
+        self.assertFalse(actor.maybe_record_daily_reward_from_edited_message(pending_msg, pending_msg.text))
+        self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(success_msg, success_msg.text))
+        self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(failure_msg, failure_msg.text))
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        summary = actor.build_daily_reward_summary_text(today)
+        self.assertIn("\\- *\\.野外历练*：2 次（成功 1 / 失败 1）；*修为 \\+90*", summary)
+        self.assertEqual(len(actor.state["daily_reward_events"]), 2)
+
+    def test_daily_reward_edited_final_commands_parse_rewards(self):
+        actor = DummyAvatarCommon()
+        actor.current_identity = "主魂"
+        actor.my_info = SimpleNamespace(username="TitanCreeper")
+        cases = [
+            (".深度闭关", "📜 **修士 ****@TitanCreeper**** 深度闭关总结**\n本次深度闭关，你的修为最终变化了 **15246** 点！"),
+            (".探寻裂缝", "探寻裂缝成功，发现秘藏，获得【空间碎片】x2，宗门贡献 +5。"),
+            (".探渊 青蛟", "青蛟自万兽渊归来，带回【兽骨】x3，获得修为 +120。"),
+            (".元婴闭关", "**【元婴闭关结算】**\n元婴闭关结束，获得修为 +2000。"),
+            (".元婴出窍", "**【元婴归窍总结】**\n元婴神游归来，带回了以下收获：修为 +1200。"),
+        ]
+        for index, (command, text) in enumerate(cases, start=1):
+            msg = DummyMessage(3000 + index, text=text, reply_to_msg_id=4000 + index)
+            actor.command_avatar_map = {4000 + index: "主魂"}
+            actor.feedback_commands = {4000 + index: command}
+            self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(msg, text), command)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        summary = actor.build_daily_reward_summary_text(today)
+        self.assertIn("\\- *\\.深度闭关*：1 次（成功 1）；*修为 \\+15246*", summary)
+        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*宗门贡献 \\+5、空间碎片 \\+2*", summary)
+        self.assertIn("\\- *\\.探渊*：1 次（成功 1）；*修为 \\+120、兽骨 \\+3*", summary)
+        self.assertIn("\\- *\\.元婴闭关*：1 次（成功 1）；*修为 \\+2000*", summary)
+        self.assertIn("\\- *\\.元婴出窍*：1 次（成功 1）；*修为 \\+1200*", summary)
+
+    def test_daily_reward_parser_counts_unquantified_bracket_rewards(self):
+        actor = DummyAvatarCommon()
+        rewards = actor.parse_reward_items_from_text(
+            "【探寻成功】你的元婴满载而归，为你带来了：【法则碎片·木】, "
+            "【法则碎片·木】, 一份意外之喜 【九转凝魂丹丹方】！"
+        )
+
+        self.assertEqual(rewards.get("法则碎片·木"), 2)
+        self.assertEqual(rewards.get("九转凝魂丹丹方"), 1)
+        self.assertNotIn("探寻成功", rewards)
+
+    def test_daily_reward_field_training_beast_encounter_can_succeed(self):
+        actor = DummyAvatarCommon()
+        text = "【野外历练 · 妖兽遭遇】一番斗法后，妖兽伏诛。获得修为 +3213，获得【阴魂丝】x2。"
+        rewards = actor.parse_reward_items_from_text(text)
+
+        self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练", text, rewards), "成功")
+
+    def test_daily_reward_field_training_ignores_destiny_prefix(self):
+        actor = DummyAvatarCommon()
+        beast_text = (
+            "【野外历练 · 妖兽遭遇】\n"
+            "命盘【贪狼】照命，主偏财夺势。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n"
+            "【改命待发】此道改命尚可维持 23小时59分钟\n"
+            "【天星偏转】 趋吉偏转，材料显化上扬\n"
+            "@wuxinglinggen 遭遇 裂风妖禽。\n"
+            "战力对比: 你 8300822 / 妖兽 10131646，胜算 44%。\n"
+            "一番斗法后，妖兽伏诛。\n"
+            "获得修为 +45000，获得【四级妖丹】x1。"
+        )
+        rescue_text = (
+            "【野外历练 · 改命脱险】\n"
+            "命盘【贪狼】照命，主偏财夺势。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n"
+            "【天星偏转】 趋吉偏转，材料显化上扬\n"
+            "@wuxinglinggen 遭遇 幽冥鬼蛛，本已要负伤折返，司命盘却替你撬开了一线退路。\n"
+            "【改命回天】你强行拨正命轨，硬从凶数中抢回一线生机。\n"
+            "你虽未能尽取机缘，却仍带回了【三级妖丹】x1，且本次未损修为。"
+        )
+
+        beast_rewards = actor.parse_reward_items_from_text(
+            actor.daily_reward_parse_text_for_command(".野外历练 深入", beast_text)
+        )
+        rescue_rewards = actor.parse_reward_items_from_text(
+            actor.daily_reward_parse_text_for_command(".野外历练 深入", rescue_text)
+        )
+
+        self.assertEqual(beast_rewards, {"修为": 45000, "四级妖丹": 1})
+        self.assertEqual(rescue_rewards, {"三级妖丹": 1})
+        self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", beast_text, beast_rewards), "成功")
+        self.assertNotIn("宗门贡献", beast_rewards)
+        self.assertNotIn("贪狼", beast_rewards)
+
+    def test_daily_reward_summary_reparses_old_field_training_events(self):
+        actor = DummyAvatarCommon()
+        today = datetime.now().strftime("%Y-%m-%d")
+        text = (
+            "【野外历练 · 妖兽遭遇】\n"
+            "命盘【贪狼】照命。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n"
+            "@wuxinglinggen 遭遇 裂风妖禽。\n"
+            "一番斗法后，妖兽伏诛。\n"
+            "获得修为 +45000，获得【四级妖丹】x1。"
+        )
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "无咎子",
+            "command": ".野外历练",
+            "rewards": {"宗门贡献": 30, "修为": 45000, "四级妖丹": 1},
+            "excerpt": text,
+            "clean": text,
+        }]
+
+        summary = actor.build_daily_reward_summary_text(today)
+
+        self.assertIn("*无咎子*", summary)
+        self.assertIn("*修为 \\+45000、四级妖丹 \\+1*", summary)
+        self.assertNotIn("宗门贡献", summary)
+
+    def test_daily_reward_summary_drops_legacy_field_training_destiny_rewards(self):
+        actor = DummyAvatarCommon()
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "无咎子",
+            "command": ".野外历练",
+            "rewards": {"宗门贡献": 30, "三级妖丹": 1},
+            "excerpt": "【野外历练 · 改命脱险】 命盘【贪狼】... 【推命命中】宗门贡献 +30 ...",
+        }]
+
+        summary = actor.build_daily_reward_summary_text(today)
+
+        self.assertIn("*三级妖丹 \\+1*", summary)
+        self.assertNotIn("宗门贡献", summary)
 
     def test_common_message_age_seconds_handles_timezone_and_missing_date(self):
         actor = DummyCommon()
@@ -1746,6 +1899,58 @@ class ParserFixtureTests(unittest.TestCase):
                     self.assertNotIn(".全自动钓鱼 灵虫饵", controls[account]["主魂"])
         self.assertEqual(actor.get_fishing_auto_state()["preferred_bait"], "灵虫饵")
         self.assertGreater(actor.saved, 0)
+
+    def test_fishing_auto_internal_send_bypasses_individual_pause(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+            current_identity = "缘生子"
+            topic_id = None
+            last_sent_id = None
+
+            def __init__(self):
+                self.state = {"fishing_auto": {}, "avatars": {"缘生子": {}}}
+                self.sent = []
+
+            def save_state(self):
+                pass
+
+            async def send_and_wait_feedback_identity(self, identity, message, **kwargs):
+                if not log_utils.command_send_allowed(self, message):
+                    return ""
+                self.sent.append((identity, message))
+                return "【开始垂钓】灵线入水，静候鱼儿上钩。"
+
+            async def send_and_wait_feedback(self, message, **kwargs):
+                if not log_utils.command_send_allowed(self, message):
+                    return ""
+                self.sent.append(("主魂", message))
+                return "【开始垂钓】灵线入水，静候鱼儿上钩。"
+
+        actor = DummyFishing()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            controls = {
+                "xiaohao": {
+                    "缘生子": {
+                        ".钓鱼 灵米饵": {
+                            "disabled": True,
+                            "command": ".钓鱼 灵米饵",
+                            "label": "钓鱼",
+                        }
+                    }
+                }
+            }
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump(controls, f, ensure_ascii=False)
+            with patch.object(log_utils, "COMMAND_CONTROL_FILE", controls_path), \
+                    patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(log_utils.dashboard_command_disabled(actor, ".钓鱼 灵米饵", "缘生子")[0])
+                actor._fishing_auto_dashboard_bypass = True
+                resp = asyncio.run(actor.send_fishing_command("缘生子", ".钓鱼 灵米饵"))
+
+                self.assertIn("开始垂钓", resp)
+                self.assertEqual(actor.sent, [("缘生子", ".钓鱼 灵米饵")])
+                self.assertTrue(log_utils.dashboard_command_disabled(actor, ".钓鱼 灵米饵", "缘生子")[0])
 
     def test_fishing_nest_plan_excludes_yaoxing_and_uses_two_rice_chaff(self):
         actor = type("DummyFishing", (FishingMixin,), {

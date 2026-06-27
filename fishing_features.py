@@ -9,6 +9,7 @@ from common_command_features import add_seconds_str, is_future, now_str, seconds
 from log_utils import (
     COMMAND_CONTROL_FILE,
     _is_own_outgoing_sender,
+    command_control_candidate_keys,
     feedback_response_matches_command,
     is_game_bot_sender,
     log_incoming_message,
@@ -1208,32 +1209,53 @@ class FishingMixin:
         return False
 
     async def send_fishing_command(self, identity, command, timeout=60):
+        bypass_added = set()
+        if getattr(self, "_fishing_auto_dashboard_bypass", False):
+            bypass = getattr(self, "_dashboard_command_bypass", None)
+            if not isinstance(bypass, set):
+                bypass = set()
+                setattr(self, "_dashboard_command_bypass", bypass)
+            identities = {
+                str(identity or "主魂").strip() or "主魂",
+                str(getattr(self, "current_identity", "") or "").strip() or "主魂",
+            }
+            for ident in identities:
+                for key in command_control_candidate_keys(command):
+                    entry = (ident, key)
+                    if entry not in bypass:
+                        bypass.add(entry)
+                        bypass_added.add(entry)
         previous_last_sent_id = getattr(self, "last_sent_id", None)
-        if identity == "主魂":
-            response = await self.send_and_wait_feedback(
-                command,
-                timeout=timeout,
-                max_retries=0,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
-            )
-        else:
-            response = await self.send_and_wait_feedback_identity(
-                identity,
-                command,
-                timeout=timeout,
-                max_retries=0,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
-            )
-        if self.fishing_response_text(response):
+        try:
+            if identity == "主魂":
+                response = await self.send_and_wait_feedback(
+                    command,
+                    timeout=timeout,
+                    max_retries=0,
+                    suppress_no_response_alert=True,
+                    return_response_msg=True,
+                )
+            else:
+                response = await self.send_and_wait_feedback_identity(
+                    identity,
+                    command,
+                    timeout=timeout,
+                    max_retries=0,
+                    suppress_no_response_alert=True,
+                    return_response_msg=True,
+                )
+            if self.fishing_response_text(response):
+                return response
+            sent_id = getattr(self, "last_sent_id", None)
+            if sent_id and sent_id != previous_last_sent_id:
+                polled = await self.fishing_poll_reply_to_sent_command(identity, command, sent_id)
+                if polled:
+                    return polled
             return response
-        sent_id = getattr(self, "last_sent_id", None)
-        if sent_id and sent_id != previous_last_sent_id:
-            polled = await self.fishing_poll_reply_to_sent_command(identity, command, sent_id)
-            if polled:
-                return polled
-        return response
+        finally:
+            bypass = getattr(self, "_dashboard_command_bypass", None)
+            if isinstance(bypass, set) and bypass_added:
+                bypass.difference_update(bypass_added)
 
     async def fishing_poll_reply_to_sent_command(self, identity, command, sent_id, timeout=8):
         client = getattr(self, "client", None)
@@ -2371,7 +2393,12 @@ class FishingMixin:
         auto_state["last_detail"] = f"当前 {target_identity} 使用 {bait} 钓鱼"
         auto_state["next_action_at"] = ""
         self.save_state()
-        wait = await self.fishing_tick(target_identity, ignore_dashboard=True)
+        old_bypass = getattr(self, "_fishing_auto_dashboard_bypass", False)
+        self._fishing_auto_dashboard_bypass = True
+        try:
+            wait = await self.fishing_tick(target_identity, ignore_dashboard=True)
+        finally:
+            self._fishing_auto_dashboard_bypass = old_bypass
         if fishing_daily_done_for_today(self.get_fishing_state(target_identity)):
             auto_state = self.get_fishing_auto_state()
             auto_state.setdefault("completed", {})[target_identity] = _today()

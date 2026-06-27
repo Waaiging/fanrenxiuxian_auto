@@ -5917,6 +5917,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     record_star_gazing_event("sub", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
+                    self.maybe_record_daily_reward_from_edited_message(msg, text, source="edited message")
                     if self.maybe_record_main_yuanying_retreat_settlement_reply(msg, text, source="edited message"):
                         self.save_state()
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本
