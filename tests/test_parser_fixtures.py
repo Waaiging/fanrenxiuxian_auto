@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import concubine_features
 import common_command_features
+import auto_reply_features
 import cultivator_xiaohao
 import dashboard_server
 import fishing_features
@@ -138,6 +139,64 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_auto_exchange_wraps_exchange_with_concubine_place_and_recall(self):
+        actions = []
+
+        class FakeClient:
+            async def send_message(self, chat_id, command, reply_to=None):
+                actions.append(("direct", command, reply_to))
+                return SimpleNamespace(id=900 + len(actions), text=command)
+
+        class DummyActor:
+            def __init__(self):
+                self.client = FakeClient()
+                self.target_chat_id = -100123
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = ["素心子"]
+                self.avatar_usernames = {"hajiimiii": "素心子"}
+                self.identity_usernames = {"主魂": ["TitanCreeper"]}
+                self.my_info = SimpleNamespace(id=42, username="TitanCreeper")
+                self.current_identity = "主魂"
+                self.active_atomic_task = None
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                actions.append((identity, command, kwargs.get("reply_to")))
+                self.current_identity = identity
+                return SimpleNamespace(text="OK")
+
+        class FakeEvent:
+            def __init__(self):
+                self.message = SimpleNamespace(
+                    id=321,
+                    text="【hajiimiii】南陇侯给出选项：.交换",
+                    entities=[],
+                    reply_to=None,
+                )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        delays = []
+
+        async def fake_sleep(seconds):
+            delays.append(seconds)
+
+        actor = DummyActor()
+        with patch("auto_reply_features.asyncio.sleep", new=fake_sleep):
+            handled = asyncio.run(auto_reply_features.maybe_auto_reply_exchange(actor, FakeEvent()))
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            actions,
+            [
+                ("素心子", ".安置侍妾", None),
+                ("素心子", ".交换 法宝", 321),
+                ("direct", ".召回侍妾", None),
+            ],
+        )
+        self.assertEqual(delays[-2:], [5, 5])
+        self.assertIsNone(actor.active_atomic_task)
+
     def test_field_training_plan_preserves_identity_specific_prefixes(self):
         plan = field_training_plan_from_features(
             "无咎子",

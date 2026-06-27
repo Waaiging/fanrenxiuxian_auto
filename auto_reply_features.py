@@ -18,6 +18,9 @@ from log_utils import command_send_allowed, format_in_log, is_game_bot_sender, r
 # =====================================================================
 EXCHANGE_MAIN_COMMAND = ".交换 功法"
 EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
+CONCUBINE_PLACE_COMMAND = ".安置侍妾"
+CONCUBINE_RECALL_COMMAND = ".召回侍妾"
+EXCHANGE_CONCUBINE_DELAY_SECONDS = 5
 
 
 # =====================================================================
@@ -101,6 +104,83 @@ def exchange_command_for_identity(identity):
     return EXCHANGE_MAIN_COMMAND if (identity or "主魂") == "主魂" else EXCHANGE_AVATAR_COMMAND
 
 
+async def _send_direct_auto_reply_command(actor, command, reply_to=None):
+    """发送自动回复辅助指令；用于需要绕过通用自动禁用策略的短流程。"""
+    remember_script_send_intent(actor, command)
+    sent = await actor.client.send_message(
+        actor.target_chat_id,
+        command,
+        reply_to=reply_to,
+    )
+    remember_script_sent_message(actor, sent)
+    schedule_command_auto_delete(actor, sent, text=command, logger=_logger(actor))
+    return sent
+
+
+async def _send_auto_reply_identity_command(
+    actor,
+    identity,
+    command,
+    *,
+    reply_to=None,
+    timeout=45,
+    max_retries=2,
+    suppress_no_response_alert=False,
+):
+    """按身份发送自动回复指令；旧脚本则退回到直接发送。"""
+    if hasattr(actor, "send_and_wait_feedback_identity"):
+        return await actor.send_and_wait_feedback_identity(
+            identity,
+            command,
+            timeout=timeout,
+            max_retries=max_retries,
+            reply_to=reply_to,
+            suppress_no_response_alert=suppress_no_response_alert,
+        )
+
+    if not command_send_allowed(actor, command, _logger(actor)):
+        return None
+    return await _send_direct_auto_reply_command(actor, command, reply_to=reply_to)
+
+
+async def _run_exchange_reply_sequence(actor, identity, exchange_command, reply_to):
+    """南陇侯交换：安置侍妾 -> 交换 -> 召回侍妾，期间避免其它身份命令插队。"""
+    current_task = asyncio.current_task()
+    claimed_atomic = False
+    if hasattr(actor, "active_atomic_task"):
+        while actor.active_atomic_task is not None and actor.active_atomic_task != current_task:
+            await asyncio.sleep(0.5)
+        if actor.active_atomic_task is None:
+            actor.active_atomic_task = current_task
+            claimed_atomic = True
+
+    try:
+        await _send_auto_reply_identity_command(
+            actor,
+            identity,
+            CONCUBINE_PLACE_COMMAND,
+            timeout=5,
+            max_retries=0,
+            suppress_no_response_alert=True,
+        )
+        await asyncio.sleep(EXCHANGE_CONCUBINE_DELAY_SECONDS)
+
+        await _send_auto_reply_identity_command(
+            actor,
+            identity,
+            exchange_command,
+            reply_to=reply_to,
+            timeout=45,
+        )
+        await asyncio.sleep(EXCHANGE_CONCUBINE_DELAY_SECONDS)
+
+        # .召回侍妾在通用自动指令策略里被禁用；这里是南陇侯交换的显式收尾。
+        await _send_direct_auto_reply_command(actor, CONCUBINE_RECALL_COMMAND)
+    finally:
+        if claimed_atomic and getattr(actor, "active_atomic_task", None) == current_task:
+            actor.active_atomic_task = None
+
+
 # =====================================================================
 # 对外接口函数
 # =====================================================================
@@ -173,32 +253,15 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
         )
         await asyncio.sleep(delay)
 
-        if hasattr(actor, "send_and_wait_feedback_identity"):
-            await actor.send_and_wait_feedback_identity(
-                identity, cmd, timeout=45, reply_to=msg.id
-            )
-        else:
-            # 兼容没有身份管线的旧脚本。
-            if not command_send_allowed(actor, cmd, _logger(actor)):
-                return True
-            remember_script_send_intent(actor, cmd)
-            sent = await actor.client.send_message(
-                actor.target_chat_id,
-                cmd,
-                reply_to=msg.id,
-            )
-            remember_script_sent_message(actor, sent)
-            schedule_command_auto_delete(actor, sent, text=cmd, logger=_logger(actor))
-            # 记录已发送消息 ID，供后续 is_auto_reply_followup 使用
-            sent_ids = getattr(actor, "auto_reply_sent_ids", None)
-            if sent_ids is None:
-                sent_ids = set()
-                actor.auto_reply_sent_ids = sent_ids
-            sent_ids.add(sent.id)
+        await _run_exchange_reply_sequence(actor, identity, cmd, reply_to=msg.id)
 
         _identity = getattr(actor, "current_identity", None)
         _tag = f" [{_identity}]" if _identity else ""
-        _logger(actor).info(f"🟢 OUT{_tag}:\n{cmd} (reply_to={msg.id})")
+        _logger(actor).info(
+            f"OUT{_tag}:\n"
+            f"{CONCUBINE_PLACE_COMMAND} -> {cmd} -> {CONCUBINE_RECALL_COMMAND} "
+            f"(exchange reply_to={msg.id})"
+        )
         return True
     except Exception as e:
         _logger(actor).error(f"Auto exchange reply failed for message {msg.id}: {e}")
