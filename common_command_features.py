@@ -65,6 +65,7 @@ BUSHI_WENTIAN_COMMAND = ".卜筮问天"
 BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
 BUSHI_WENTIAN_DAILY_LIMIT = 10
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
+YUANYING_REBIRTH_WAIT_SECONDS = 365 * 24 * 3600   # 探寻裂缝失败后等待手动 .重生 成功
 YUANYING_OUT_CD_SECONDS = 8 * 3600
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 ASK_DAO_CD_SECONDS = 12 * 3600
@@ -922,6 +923,8 @@ class CommonCommandMixin:
     def identity_pause_seconds(self, identity="主魂"):
         identity = str(identity or "主魂").strip() or "主魂"
         entry = self.identity_pause_entry(identity)
+        if entry.get("wait_for_rebirth"):
+            return YUANYING_REBIRTH_WAIT_SECONDS
         pause_until = entry.get("until", "")
         if not pause_until:
             return 0
@@ -970,6 +973,22 @@ class CommonCommandMixin:
             self.state["main_soul_pause_reason"] = str(reason or "").strip()
         self.save_state()
         return pause_until
+
+    def set_identity_rebirth_pending_pause(self, identity, reason="肉体破碎/元婴虚弱，等待 .重生"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        reason = str(reason or "").strip() or "肉体破碎/元婴虚弱，等待 .重生"
+        pauses = self.ensure_identity_pause_state()
+        pauses[identity] = {
+            "until": "",
+            "reason": reason,
+            "wait_for_rebirth": True,
+            "started_at": now_str(),
+        }
+        if identity == "主魂":
+            self.state["main_soul_pause_until"] = ""
+            self.state["main_soul_pause_reason"] = reason
+        self.save_state()
+        return "等待 .重生 1 / .重生 2 / .重生 3 任一成功"
 
     def clear_identity_pause(self, identity="主魂", reason=""):
         identity = str(identity or "主魂").strip() or "主魂"
@@ -1066,6 +1085,16 @@ class CommonCommandMixin:
         if not is_yuanying_rebirth_block_response(text):
             return False
 
+        wait_for_rebirth = bool(self.identity_pause_entry(identity).get("wait_for_rebirth"))
+        if wait_for_rebirth:
+            pause_until = self.identity_pause_entry(identity).get("until", "") or "等待 .重生 1 / .重生 2 / .重生 3 任一成功"
+            self.clear_identity_command_guard(identity, reason="yuanying rebirth pending")
+            log.warning(
+                f"Yuanying rebirth still pending for [{identity}] from {source or command or 'message'}; "
+                "auto commands remain paused until rebirth succeeds."
+            )
+            return True
+
         current_remaining = self.identity_pause_seconds(identity)
         if current_remaining > YUANYING_REBIRTH_PENDING_PAUSE_SECONDS:
             pause_until = self.identity_pause_entry(identity).get("until", "")
@@ -1084,6 +1113,24 @@ class CommonCommandMixin:
         )
         return True
 
+    def mark_identity_rift_rebirth_pending(self, identity, response="", source=".探寻裂缝"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        pause_label = self.set_identity_rebirth_pending_pause(
+            identity,
+            "肉体破碎/元婴虚弱，等待重生",
+        )
+        if identity == "主魂":
+            self.state["next_rift_search_time"] = ""
+        elif identity in getattr(self, "avatars", []):
+            self.set_avatar_state(identity, "next_rift_search_time", "")
+        self.clear_identity_command_guard(identity, reason="rift rebirth pending")
+        self.save_state()
+        self.common_command_logger().critical(
+            f"Rift weakness detected from {source}. Identity [{identity}] paused until rebirth succeeds. "
+            f"{response or ''}"
+        )
+        return pause_label
+
     async def wait_while_identity_paused(self, identity, command=""):
         """Wait outside physical send locks while one identity is paused."""
         identity = str(identity or "主魂").strip() or "主魂"
@@ -1096,7 +1143,7 @@ class CommonCommandMixin:
             if now_mono - last_log > 300:
                 entry = self.identity_pause_entry(identity)
                 reason = entry.get("reason") or "身份暂停"
-                until = entry.get("until", "")
+                until = entry.get("until", "") or ("等待 .重生 1 / .重生 2 / .重生 3 任一成功" if entry.get("wait_for_rebirth") else "")
                 self.common_command_logger().info(
                     f"Identity [{identity}] command paused ({command or 'unknown'}): "
                     f"{reason}; resume at {until}."
@@ -1113,7 +1160,7 @@ class CommonCommandMixin:
             return False
         entry = self.identity_pause_entry(identity)
         reason = entry.get("reason") or "身份暂停"
-        until = entry.get("until", "")
+        until = entry.get("until", "") or ("等待 .重生 1 / .重生 2 / .重生 3 任一成功" if entry.get("wait_for_rebirth") else "")
         self.common_command_logger().info(f"{loop_name} [{identity}] paused: {reason}; resume at {until}.")
         await asyncio.sleep(max(30, min(int(remaining), 300)))
         return True
@@ -2012,6 +2059,12 @@ class CommonCommandMixin:
             self.save_state()
             log.warning(f"{prefix}{command}: unavailable but no cooldown parsed; retry at {state[next_key]}.")
             return False
+
+        if command == ".探寻裂缝" and self.is_rift_weakness_response(resp):
+            self.mark_identity_rift_rebirth_pending(identity, resp, source=command)
+            self.record_daily_reward_event(identity, command, resp, source=command)
+            log.critical(f"{prefix}{command}: rift weakness detected; identity paused until rebirth succeeds.")
+            return True
 
         now = now_str()
         success_keywords = [

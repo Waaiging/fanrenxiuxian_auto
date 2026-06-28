@@ -982,6 +982,28 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(state["last_rift_search_time"])
         self.assertGreater(common_seconds_until(state["next_rift_search_time"]), 11 * 3600)
 
+    def test_rift_weakness_pauses_identity_until_rebirth_success(self):
+        actor = DummyAvatarCommon()
+        text = "【不敌败退】肉身破碎，元婴虚弱逃遁，需夺舍重生后方可行动。"
+
+        self.assertTrue(actor.record_identity_fixed_cd_command_response(
+            "缘生子",
+            text,
+            ".探寻裂缝",
+            "last_rift_search_time",
+            "next_rift_search_time",
+            12 * 3600,
+        ))
+
+        entry = actor.identity_pause_entry("缘生子")
+        self.assertTrue(entry.get("wait_for_rebirth"))
+        self.assertGreater(actor.identity_pause_seconds("缘生子"), 300 * 24 * 3600)
+        self.assertEqual(actor.get_avatar_state("缘生子").get("next_rift_search_time"), "")
+
+        success = "先前肉身陨落的修士，其元婴已成功夺舍重生！"
+        self.assertTrue(actor.record_identity_yuanying_recovery_from_text("缘生子", success, source="manual .重生 2"))
+        self.assertEqual(actor.identity_pause_seconds("缘生子"), 0)
+
     def test_common_yuanying_retreat_waits_for_settlement(self):
         class DummyRetreat(DummyCommon):
             yuanying_main_command = ".元婴闭关"
@@ -1840,6 +1862,73 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(global_state["rod_holder"]["identity"], "缘生子")
         self.assertEqual(global_state["active"]["account"], "xiaohao")
         self.assertEqual(global_state["active"]["identity"], "缘生子")
+
+    def test_fishing_auto_waits_between_identity_handoffs(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["无咎子"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "fishing_auto": {"preferred_bait": "灵米饵"},
+                    "avatars": {"无咎子": {"fishing": {"rod_owned": True}}},
+                }
+                self.ticked = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            async def fishing_tick(self, identity, ignore_dashboard=False):
+                self.ticked.append((identity, ignore_dashboard))
+                raise AssertionError("handoff delay should wait before fishing_tick")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "main": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                    "sub": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                    "xiaohao": {"主魂": {".全自动钓鱼": {"disabled": False, "bait": "灵米饵"}}},
+                }, f, ensure_ascii=False)
+            for filename in ("state_sub.json", "state_xiaohao.json"):
+                with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
+                    json.dump({
+                        "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                        "avatars": {
+                            name: {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}}
+                            for name in ("厚土", "缘生子", "寻真子", "问心子", "素心子")
+                        },
+                    }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": today,
+                    "preferred_bait": "灵米饵",
+                    "active": {"account": "main", "identity": "主魂", "key": "main|主魂"},
+                    "rod_holder": {"account": "main", "identity": "无咎子"},
+                    "completed": {},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                wait = asyncio.run(actor.fishing_auto_tick())
+                global_state = fishing_features._load_fishing_auto_global_state()
+
+        self.assertGreater(wait, 0)
+        self.assertLessEqual(wait, 300)
+        self.assertEqual(actor.ticked, [])
+        self.assertEqual(global_state["active"]["key"], "main|无咎子")
+        self.assertGreater(common_seconds_until(global_state["handoff_not_before"]), 25 * 60)
+        self.assertEqual(actor.get_fishing_auto_state()["last_status"], "handoff_wait")
 
     def test_dashboard_can_set_fishing_auto_rod_holder(self):
         with tempfile.TemporaryDirectory() as tmpdir:

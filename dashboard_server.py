@@ -808,6 +808,7 @@ def fishing_auto_commands(account, state):
         "transferred": "已转移",
         "transfer_failed": "转移失败",
         "no_rod_holder": "找鱼竿",
+        "handoff_wait": "接力等待",
         "done": "今日已满",
         "paused": "已暂停",
         "waiting": "等待中",
@@ -1422,13 +1423,14 @@ def apply_identity_pause(panel, state):
     """Show state-level identity pauses without affecting other panels."""
     identity = panel.get("identity") or "主魂"
     entry = identity_pause_entry(state, identity)
+    wait_for_rebirth = bool(entry.get("wait_for_rebirth"))
     target = parse_state_time(entry.get("until", ""))
-    if not target or target <= datetime.now():
+    if not wait_for_rebirth and (not target or target <= datetime.now()):
         return panel
-    seconds = max(0, int((target - datetime.now()).total_seconds()))
+    seconds = max(0, int((target - datetime.now()).total_seconds())) if target else 365 * 24 * 3600
     reason = clean_custom_text(entry.get("reason") or "身份暂停", 80)
-    remaining = format_remaining(seconds)
-    until = entry.get("until", "")
+    remaining = "等待重生" if wait_for_rebirth else format_remaining(seconds)
+    until = entry.get("until", "") or ("等待 .重生 1 / .重生 2 / .重生 3 任一成功" if wait_for_rebirth else "")
     for row in panel.get("commands") or []:
         old_status = row.get("status", "")
         old_detail = row.get("detail", "")
@@ -1438,7 +1440,7 @@ def apply_identity_pause(panel, state):
         row["at"] = until
         row["next_seconds"] = seconds
         row["detail"] = (
-            f"{reason}，暂停至 {until}"
+            f"{reason}，{('恢复条件：' + until) if wait_for_rebirth else ('暂停至 ' + until)}"
             f"{f' · 原状态：{old_status}' if old_status else ''}"
             f"{f' · {old_detail}' if old_detail else ''}"
         )

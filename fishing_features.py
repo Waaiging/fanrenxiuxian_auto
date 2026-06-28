@@ -45,6 +45,7 @@ FISHING_RETRY_SECONDS = 2 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_RETRY_SECONDS = 5 * 60
+FISHING_AUTO_HANDOFF_DELAY_SECONDS = 30 * 60
 FISHING_ROD_ITEM = "青竹钓竿"
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 
@@ -411,7 +412,11 @@ def _fishing_auto_state_file(account):
 
 
 def _fishing_auto_identity_key(account, identity):
-    return f"{account}|{str(identity or '主魂').strip() or '主魂'}"
+    account = str(account or "").strip()
+    identity = str(identity or "").strip() or "主魂"
+    if not account:
+        return ""
+    return f"{account}|{identity}"
 
 
 def _fishing_auto_default_global_state():
@@ -422,6 +427,8 @@ def _fishing_auto_default_global_state():
         "rod_holder": {},
         "completed": {},
         "transfer": {},
+        "handoff_not_before": "",
+        "handoff_from": {},
         "updated_at": now_str(),
     }
 
@@ -1801,6 +1808,17 @@ class FishingMixin:
                     "key": next_item.get("key", ""),
                     "updated_at": now_str(),
                 } if next_item else {}
+                if active_key and next_item and next_item.get("key") != active_key:
+                    data["handoff_not_before"] = add_seconds_str(now_str(), FISHING_AUTO_HANDOFF_DELAY_SECONDS)
+                    data["handoff_from"] = {
+                        "account": active.get("account", ""),
+                        "identity": active.get("identity", ""),
+                        "key": active_key,
+                        "completed_at": now_str(),
+                    }
+                elif not next_item:
+                    data["handoff_not_before"] = ""
+                    data["handoff_from"] = {}
             _save_fishing_auto_global_state(data)
             return data, snapshot
         finally:
@@ -1812,6 +1830,14 @@ class FishingMixin:
         if not active and snapshot["pending"]:
             active = snapshot["pending"][0]
         return data, snapshot, active
+
+    def fishing_auto_handoff_wait_seconds(self, global_state):
+        if not isinstance(global_state, dict):
+            return 0
+        handoff_at = str(global_state.get("handoff_not_before") or "").strip()
+        if not handoff_at or not is_future(handoff_at):
+            return 0
+        return max(0, int(seconds_until(handoff_at)))
 
     def fishing_auto_current_global_transfer(self):
         data = _load_fishing_auto_global_state()
@@ -2320,6 +2346,19 @@ class FishingMixin:
         if not target_account or not target_identity:
             self.fishing_auto_set_status("waiting", "等待全局钓鱼队列", 60)
             return 60
+        handoff_wait = self.fishing_auto_handoff_wait_seconds(global_state)
+        if handoff_wait > 0:
+            from_info = global_state.get("handoff_from") if isinstance(global_state.get("handoff_from"), dict) else {}
+            from_label = _fishing_auto_identity_key(from_info.get("account"), from_info.get("identity"))
+            detail = f"等待钓鱼身份切换延时，下一位 {target_account}[{target_identity}]"
+            if from_label.strip("|"):
+                detail += f"；上一位 {from_label}"
+            self.fishing_auto_set_status(
+                "handoff_wait",
+                detail,
+                min(handoff_wait, FISHING_AUTO_HANDOFF_DELAY_SECONDS),
+            )
+            return max(1, min(handoff_wait, 300))
         if target_account != account:
             self.fishing_auto_set_status(
                 "waiting",

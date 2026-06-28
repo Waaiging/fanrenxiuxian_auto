@@ -1886,20 +1886,16 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             response: 触发停止的回复文本（附带在告警中供用户参考）
         """
         identity = str(identity or "").strip() or "主魂"
-        pause_until = self.set_identity_pause(identity, 6 * 3600, "肉体破碎/元婴虚弱")
-        if identity == "主魂":
-            self.state["next_rift_search_time"] = pause_until
-        elif identity in self.avatars:
-            self.set_avatar_state(identity, "next_rift_search_time", pause_until)
-        self.save_state()
+        pause_until = self.mark_identity_rift_rebirth_pending(identity, response, source=".探寻裂缝")
         await send_text_alert(
             self,
             "凌霄宫探寻裂缝告警",
-            f"探寻裂缝触发元婴虚弱期，主号身份【{identity}】已暂停 6 小时；其他身份继续执行。\n\n"
-            f"恢复时间：{pause_until}\n\n机器人回复：\n{response}",
+            f"探寻裂缝触发元婴虚弱期，主号身份【{identity}】已暂停；其他身份继续执行。\n\n"
+            f"恢复条件：发送 `.重生 1` / `.重生 2` / `.重生 3` 任一成功后自动恢复。\n"
+            f"当前状态：{pause_until}\n\n机器人回复：\n{response}",
             log,
         )
-        log.critical(f"Rift weakness detected. Identity [{identity}] paused until {pause_until}; other identities continue.\n{response}")
+        log.critical(f"Rift weakness detected. Identity [{identity}] paused until rebirth succeeds; other identities continue.\n{response}")
 
     # ------------------------------------------------------------------
     # 元婴出窍循环
