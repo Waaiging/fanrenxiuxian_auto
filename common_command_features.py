@@ -23,6 +23,7 @@ from log_utils import (
     actor_account_key,
     avatar_marker_identity_from_text,
     dashboard_command_disabled,
+    identity_from_single_username_mention,
     identity_plain_usernames,
     is_game_bot_sender,
     is_reply_to_untracked_message,
@@ -410,7 +411,6 @@ class CommonCommandMixin:
 
     def daily_reward_enabled_commands(self):
         return {
-            ".深度闭关",
             ".元婴出窍",
             ".元婴闭关",
             ".探寻裂缝",
@@ -434,7 +434,6 @@ class CommonCommandMixin:
 
     def daily_reward_edited_settlement_commands(self):
         return {
-            ".深度闭关",
             ".探寻裂缝",
             ".野外历练",
             ".探渊",
@@ -463,7 +462,7 @@ class CommonCommandMixin:
 
         candidate_starts = []
         for pattern in (
-            r"@[A-Za-z0-9_]{2,}\s*(?:遭遇|采得|发现|误入|寻得|负伤|一时|本已|选择)",
+            r"@[A-Za-z0-9_]{2,}\s*(?:遭遇|在|采得|发现|误入|寻得|负伤|一时|本已|选择)",
             r"@\S{2,40}\s*遭遇",
             r"战力对比\s*[:：]",
             r"一番斗法后",
@@ -573,8 +572,10 @@ class CommonCommandMixin:
             )
             if cultivation < 0 or any(marker in clean for marker in failure_markers):
                 return "失败"
-            if self.is_field_training_settlement_response(clean) or rewards:
+            if cultivation > 0:
                 return "成功"
+            if self.is_field_training_settlement_response(clean) or rewards:
+                return "失败"
             return ""
         if any(marker in clean for marker in ("失败", "不敌败退", "身受重创", "倒退", "折损")):
             return "失败"
@@ -590,7 +591,7 @@ class CommonCommandMixin:
         if root == ".深度闭关":
             return "深度闭关总结" in clean or "修为最终变化" in clean
         if root in {".元婴出窍", ".元婴闭关"}:
-            return is_yuanying_out_settlement_response(clean) or "元婴闭关结算" in clean
+            return any(k in clean for k in ("元神归窍总结", "元婴归窍总结", "带回了以下收获", "元婴闭关结算"))
         if root == ".探寻裂缝":
             if any(k in clean for k in ("冷却", "后再", "尚未", "请在", "送入其中探寻机缘")):
                 return False
@@ -653,6 +654,8 @@ class CommonCommandMixin:
         rewards = self.parse_reward_items_from_text(reward_clean)
         final = bool(final or self.daily_reward_is_final_settlement_text(root or command, clean))
         outcome = outcome or self.daily_reward_outcome_from_text(root or command, clean, rewards)
+        if not final and not rewards:
+            return False
         if message_key:
             for old in reversed(events[-80:]):
                 if old.get("date") != event_date or old.get("message_key") != message_key:
@@ -744,6 +747,9 @@ class CommonCommandMixin:
         identity = avatar_marker_identity_from_text(text)
         if identity:
             return identity
+        identity = identity_from_single_username_mention(self, text)
+        if identity:
+            return identity
         identity = self._field_training_identity_from_text(text)
         if identity:
             return identity
@@ -766,6 +772,7 @@ class CommonCommandMixin:
         if (
             not tracked_command_identity_for_reply(self, msg)
             and not avatar_marker_identity_from_text(clean)
+            and not identity_from_single_username_mention(self, clean)
             and not text_targets_current_account(self, msg, clean)
         ):
             return False
@@ -790,6 +797,15 @@ class CommonCommandMixin:
         for event in events:
             identity = event.get("identity") or "主魂"
             command = event.get("command") or "未知指令"
+            command_root = str(command or "").split()[0]
+            if command_root == ".深度闭关":
+                continue
+            raw_text = event.get("clean") or event.get("excerpt") or ""
+            if not event.get("final") and not event.get("rewards"):
+                continue
+            stored_rewards = event.get("rewards") if isinstance(event.get("rewards"), dict) else {}
+            if not stored_rewards and raw_text and not self.daily_reward_is_final_settlement_text(command, raw_text):
+                continue
             bucket = grouped.setdefault(identity, {}).setdefault(command, {
                 "count": 0,
                 "rewards": {},
@@ -798,8 +814,6 @@ class CommonCommandMixin:
                 "outcomes": {},
             })
             bucket["count"] += 1
-            raw_text = event.get("clean") or event.get("excerpt") or ""
-            command_root = str(command or "").split()[0]
             rewards = {}
             if raw_text:
                 reward_text = self.daily_reward_parse_text_for_command(command, raw_text)
@@ -821,6 +835,9 @@ class CommonCommandMixin:
                 bucket["unparsed"] += 1
                 if event.get("excerpt") and len(bucket["samples"]) < 2:
                     bucket["samples"].append(event.get("excerpt"))
+
+        if not grouped:
+            return ""
 
         lines = [
             self.telegram_markdown_v2_bold("周期收益日报"),

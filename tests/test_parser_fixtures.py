@@ -348,7 +348,6 @@ class ParserFixtureTests(unittest.TestCase):
         actor.current_identity = "主魂"
         actor.my_info = SimpleNamespace(username="TitanCreeper")
         cases = [
-            (".深度闭关", "📜 **修士 ****@TitanCreeper**** 深度闭关总结**\n本次深度闭关，你的修为最终变化了 **15246** 点！"),
             (".探寻裂缝", "探寻裂缝成功，发现秘藏，获得【空间碎片】x2，宗门贡献 +5。"),
             (".探渊 青蛟", "青蛟自万兽渊归来，带回【兽骨】x3，获得修为 +120。"),
             (".元婴闭关", "**【元婴闭关结算】**\n元婴闭关结束，获得修为 +2000。"),
@@ -362,11 +361,61 @@ class ParserFixtureTests(unittest.TestCase):
 
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("\\- *\\.深度闭关*：1 次（成功 1）；*修为 \\+15246*", summary)
         self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*宗门贡献 \\+5、空间碎片 \\+2*", summary)
         self.assertIn("\\- *\\.探渊*：1 次（成功 1）；*修为 \\+120、兽骨 \\+3*", summary)
         self.assertIn("\\- *\\.元婴闭关*：1 次（成功 1）；*修为 \\+2000*", summary)
         self.assertIn("\\- *\\.元婴出窍*：1 次（成功 1）；*修为 \\+1200*", summary)
+
+    def test_daily_reward_ignores_deep_meditation(self):
+        actor = DummyAvatarCommon()
+        text = "📜 **修士 ****@TitanCreeper**** 深度闭关总结**\n本次深度闭关，你的修为最终变化了 **15246** 点！"
+        msg = DummyMessage(3100, text=text, reply_to_msg_id=4100)
+        actor.command_avatar_map = {4100: "主魂"}
+        actor.feedback_commands = {4100: ".深度闭关"}
+
+        self.assertFalse(actor.maybe_record_daily_reward_from_edited_message(msg, text))
+        actor.state["daily_reward_events"] = [{
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "time": now_str(),
+            "identity": "主魂",
+            "command": ".深度闭关",
+            "rewards": {"修为": 15246},
+            "excerpt": text,
+            "clean": text,
+            "final": True,
+        }]
+
+        self.assertEqual(actor.build_daily_reward_summary_text(datetime.now().strftime("%Y-%m-%d")), "")
+
+    def test_daily_reward_records_avatar_yuanying_edited_summary_by_username(self):
+        actor = DummyAvatarCommon()
+        actor.avatars = ["无咎子"]
+        actor.avatar_usernames = {"wuxinglinggen": "无咎子"}
+        actor.my_info = SimpleNamespace(username="Waaiging")
+        pending_text = "✨ **元神回响**：感应到 @wuxinglinggen 的元婴已神游归来，正在清点收获..."
+        final_text = (
+            "📜 **修士 ****@wuxinglinggen**** 元神归窍总结**\n"
+            "你的元婴在虚空中神游八小时，带回了以下收获：\n"
+            " - **【三级妖丹】x3**\n"
+            " - **【养魂木】x2**\n"
+            " - **【天火液丹方】x1**\n"
+            "**元婴成长**:\n"
+            " - 获得了 **1536** 点经验。"
+        )
+
+        self.assertFalse(actor.record_daily_reward_event("无咎子", ".元婴出窍", pending_text, source="passive"))
+        self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(DummyMessage(3200, text=final_text), final_text))
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        events = actor.state["daily_reward_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["identity"], "无咎子")
+        summary = actor.build_daily_reward_summary_text(today)
+        self.assertIn("*无咎子*", summary)
+        self.assertIn("三级妖丹 \\+3", summary)
+        self.assertIn("养魂木 \\+2", summary)
+        self.assertIn("天火液丹方 \\+1", summary)
+        self.assertIn("经验 \\+1536", summary)
 
     def test_daily_reward_parser_counts_unquantified_bracket_rewards(self):
         actor = DummyAvatarCommon()
@@ -408,6 +457,14 @@ class ParserFixtureTests(unittest.TestCase):
             "【改命回天】你强行拨正命轨，硬从凶数中抢回一线生机。\n"
             "你虽未能尽取机缘，却仍带回了【三级妖丹】x1，且本次未损修为。"
         )
+        chance_text = (
+            "【野外历练 · 灵机暗藏】\n"
+            "命盘【贪狼】照命，主偏财夺势。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n"
+            "【天星偏转】 趋吉偏转，材料显化上扬\n"
+            "@wuxinglinggen 在山涧残阵旁避开妖兽踪迹，采得一份机缘。\n"
+            "获得修为 +45000，获得【四级妖丹】x1。"
+        )
 
         beast_rewards = actor.parse_reward_items_from_text(
             actor.daily_reward_parse_text_for_command(".野外历练 深入", beast_text)
@@ -415,10 +472,15 @@ class ParserFixtureTests(unittest.TestCase):
         rescue_rewards = actor.parse_reward_items_from_text(
             actor.daily_reward_parse_text_for_command(".野外历练 深入", rescue_text)
         )
+        chance_rewards = actor.parse_reward_items_from_text(
+            actor.daily_reward_parse_text_for_command(".野外历练 深入", chance_text)
+        )
 
         self.assertEqual(beast_rewards, {"修为": 45000, "四级妖丹": 1})
         self.assertEqual(rescue_rewards, {"三级妖丹": 1})
+        self.assertEqual(chance_rewards, {"修为": 45000, "四级妖丹": 1})
         self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", beast_text, beast_rewards), "成功")
+        self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", rescue_text, rescue_rewards), "失败")
         self.assertNotIn("宗门贡献", beast_rewards)
         self.assertNotIn("贪狼", beast_rewards)
 
