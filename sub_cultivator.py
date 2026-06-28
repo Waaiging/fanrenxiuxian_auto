@@ -6,7 +6,7 @@ Sub Cultivator v1.0 (Star Palace / 星宫 Edition)
 模块功能概览：
   - 星辰牵引（天雷星）：36 小时周期拉起星辰，自动处理冷却与修为不足。
   - 星辰安抚：每 6 小时检查观星台，发现黯淡/紊乱立即安抚。
-  - 观星与改换星移：监听 Good 级显化事件，在显化后分层发送 .改换星移 以抢占最终结算前窗口。
+  - 观星与改换星移：监听 Good 级显化事件，在显化前后分层发送 .改换星移 以抢占最终结算前窗口。
   - 周天星斗大阵（启阵/助阵）：12 小时冷却，成功后 5h55m 强行出关以利用增益。
   - 深度闭关：自动维持深度闭关状态，出关后重新开启。
   - 元婴出窍：8 小时周期。
@@ -162,7 +162,8 @@ STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机
 STAR_GAZING_INTERVAL_HOURS = 3                      # 星盘显现间隔 3 小时（每 3 小时整点一次）
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60           # 在显现前 3 分钟开始监听消息
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60               # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)     # 动态预测窗口边界，具体发送点由历史快报样本决定
+STAR_GAZING_SHIFT_PROFILE = "middle"
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (3, 6)      # 副号抢中窗，补主号早窗之后的空档
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                 # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1                  # 改换星移只发 1 次（晚发策略不需要重试）
@@ -177,8 +178,14 @@ STAR_GAZING_ROTATING_AVATARS = ["厚土", "缘生子", "寻真子"]  # 观星轮
 
 
 def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
-    """Return a history-based shift send time after the manifest boundary."""
-    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
+    """Return this account's layered shift send time."""
+    return predicted_star_shift_dt(
+        target_dt,
+        now=now,
+        fate_type=fate_type,
+        logger=logger,
+        shift_profile=STAR_GAZING_SHIFT_PROFILE,
+    )
 
 MAIN_STAR_PALACE_STATE_KEYS = {
     "next_star_check_time",

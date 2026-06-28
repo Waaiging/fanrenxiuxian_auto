@@ -98,7 +98,8 @@ from log_utils import (
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)      # 动态预测窗口边界，具体发送点由历史快报样本决定
+STAR_GAZING_SHIFT_PROFILE = "dynamic"
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)      # 小号保留历史动态晚窗，覆盖结算较慢的轮次
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
@@ -131,8 +132,14 @@ STAR_GAZING_VALID_RESULT_KEYWORDS = (
 
 
 def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
-    """Return a history-based shift send time after the manifest boundary."""
-    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
+    """Return this account's layered shift send time."""
+    return predicted_star_shift_dt(
+        target_dt,
+        now=now,
+        fate_type=fate_type,
+        logger=logger,
+        shift_profile=STAR_GAZING_SHIFT_PROFILE,
+    )
 
 # =====================================================================
 # 路径与常量配置

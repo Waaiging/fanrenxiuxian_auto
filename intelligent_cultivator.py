@@ -29,7 +29,8 @@ import json
 STAR_GAZING_INTERVAL_HOURS = 3
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60
-STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)
+STAR_GAZING_SHIFT_PROFILE = "early"
+STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (-3, 2)
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1
 STAR_GAZING_SHIFT_REPEAT_COUNT = 1
@@ -70,8 +71,14 @@ from datetime import datetime, timedelta  # 日期时间处理
 
 
 def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
-    """Return a history-based shift send time after the manifest boundary."""
-    return predicted_star_shift_dt(target_dt, now=now, fate_type=fate_type, logger=logger)
+    """Return this account's layered shift send time."""
+    return predicted_star_shift_dt(
+        target_dt,
+        now=now,
+        fate_type=fate_type,
+        logger=logger,
+        shift_profile=STAR_GAZING_SHIFT_PROFILE,
+    )
 
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 

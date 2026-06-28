@@ -18,6 +18,10 @@ LOCK_FILE = os.path.join(CONFIG_DIR, "star_gazing_events.lock")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 STAR_SHIFT_DEFAULT_SEND_RANGE = (21, 24)
+STAR_SHIFT_PROFILE_WINDOWS = {
+    "early": (-3, 2),
+    "middle": (3, 6),
+}
 STAR_SHIFT_MIN_SEND_DELAY_SECONDS = 6
 STAR_SHIFT_MAX_SEND_DELAY_SECONDS = 28
 STAR_SHIFT_RESULT_DELAY_SECONDS = 8
@@ -193,10 +197,16 @@ def predict_star_shift_delay_range(
     fate_type="",
     now=None,
     history_file=EVENT_FILE,
+    shift_profile="dynamic",
 ):
-    """Predict a post-manifest .改换星移 send window from collected history."""
+    """Predict a .改换星移 send window from a fixed profile or collected history."""
     now = now or datetime.now(_local_tz()).replace(tzinfo=None)
     target_dt = target_dt.replace(tzinfo=None)
+    profile = str(shift_profile or "dynamic").strip().lower()
+    if profile in STAR_SHIFT_PROFILE_WINDOWS:
+        min_delay, max_delay = STAR_SHIFT_PROFILE_WINDOWS[profile]
+        return min_delay, max_delay, f"{profile} fixed window"
+
     title = _fate_title(fate_type)
     news_items = _unique_news_offsets(_load_star_gazing_records(history_file), now=now)
 
@@ -271,24 +281,28 @@ def predicted_star_shift_dt(
     fate_type="",
     history_file=EVENT_FILE,
     logger=None,
+    shift_profile="dynamic",
 ):
-    """Return a dynamic .改换星移 send time after the manifest boundary."""
+    """Return a .改换星移 send time around the manifest boundary."""
     now = now or datetime.now(_local_tz()).replace(tzinfo=None)
     min_delay, max_delay, reason = predict_star_shift_delay_range(
         target_dt,
         fate_type=fate_type,
         now=now,
         history_file=history_file,
+        shift_profile=shift_profile,
     )
     elapsed = (now - target_dt).total_seconds()
     if elapsed > min_delay:
         min_delay = min(max_delay, max(min_delay, int(elapsed) + 1))
     delay = random.randint(int(min_delay), int(max_delay))
     if logger:
+        profile = str(shift_profile or "dynamic").strip().lower()
+        window = f"{min_delay:+d}~{max_delay:+d}s"
         logger.info(
-            f"Star gazing: dynamic shift window +{min_delay}-{max_delay}s "
+            f"Star gazing: {profile} shift window {window} "
             f"for {target_dt.strftime(TIME_FORMAT)} ({fate_type or 'unknown fate'}; {reason}); "
-            f"selected +{delay}s."
+            f"selected {delay:+d}s."
         )
     return target_dt + timedelta(seconds=delay)
 

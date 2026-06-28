@@ -3172,16 +3172,20 @@ class ParserFixtureTests(unittest.TestCase):
             self.assertLessEqual(send_dt, manifest_dt - timedelta(seconds=60))
             self.assertFalse(immediate_shift)
 
-    def test_star_gazing_shift_time_is_after_manifest_all_accounts(self):
+    def test_star_gazing_shift_time_uses_layered_windows_all_accounts(self):
         target = datetime(2026, 6, 15, 12, 0, 0)
 
-        for module in (intelligent_cultivator, sub_cultivator, cultivator_xiaohao):
+        cases = (
+            (intelligent_cultivator, -3, 2),
+            (sub_cultivator, 3, 6),
+            (cultivator_xiaohao, 6, 28),
+        )
+        for module, min_delay, max_delay in cases:
             with self.subTest(module=module.__name__):
                 for _ in range(20):
                     shift_dt = module.star_gazing_shift_dt(target)
-                    self.assertGreater(shift_dt, target)
-                    self.assertGreaterEqual(shift_dt, target + timedelta(seconds=6))
-                    self.assertLessEqual(shift_dt, target + timedelta(seconds=28))
+                    self.assertGreaterEqual(shift_dt, target + timedelta(seconds=min_delay))
+                    self.assertLessEqual(shift_dt, target + timedelta(seconds=max_delay))
 
     def test_star_shift_predictor_defaults_without_history(self):
         target = datetime(2026, 6, 26, 15, 0, 0)
@@ -3197,6 +3201,23 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual((min_delay, max_delay), (21, 24))
         self.assertIn("default", reason)
+
+    def test_star_shift_predictor_fixed_profiles_ignore_history(self):
+        target = datetime(2026, 6, 26, 15, 0, 0)
+        now = datetime(2026, 6, 26, 14, 59, 0)
+
+        for profile, expected in (("early", (-3, 2)), ("middle", (3, 6))):
+            with self.subTest(profile=profile):
+                min_delay, max_delay, reason = star_gazing_collector.predict_star_shift_delay_range(
+                    target,
+                    fate_type="Good - 星辰异象",
+                    now=now,
+                    history_file=os.path.join(tempfile.gettempdir(), "missing-star-gazing-events.jsonl"),
+                    shift_profile=profile,
+                )
+
+                self.assertEqual((min_delay, max_delay), expected)
+                self.assertIn(profile, reason)
 
     def test_star_shift_predictor_uses_recent_type_history(self):
         target = datetime(2026, 6, 26, 15, 0, 0)
