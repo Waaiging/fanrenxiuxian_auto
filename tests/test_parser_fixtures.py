@@ -2575,7 +2575,9 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertLessEqual(wait, 300)
         self.assertEqual(actor.ticked, [])
         self.assertEqual(global_state["active"]["key"], "main|无咎子")
-        self.assertGreater(common_seconds_until(global_state["handoff_not_before"]), 25 * 60)
+        handoff_wait = common_seconds_until(global_state["handoff_not_before"])
+        self.assertGreater(handoff_wait, 30)
+        self.assertLessEqual(handoff_wait, 2 * 60)
         self.assertEqual(actor.get_fishing_auto_state()["last_status"], "handoff_wait")
 
     def test_fishing_auto_restores_incomplete_handoff_source(self):
@@ -3437,6 +3439,45 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["today_count"], 0)
         self.assertEqual(fishing["daily_done_auto_paused_date"], "")
         self.assertEqual(fishing["daily_done_notified_date"], "")
+
+    def test_fishing_gift_target_uses_message_event_cache(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+            target_chat_id = 1680975844
+
+            def fishing_logger(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "message_events.sqlite3")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE message_events (
+                        account TEXT,
+                        is_out INTEGER,
+                        chat_id INTEGER,
+                        msg_id INTEGER,
+                        created_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO message_events(account,is_out,chat_id,msg_id,created_at) VALUES(?,?,?,?,?)",
+                    ("main", 1, -1001680975844, 11299077, "2026-07-02 00:18:50"),
+                )
+                conn.execute(
+                    "INSERT INTO message_events(account,is_out,chat_id,msg_id,created_at) VALUES(?,?,?,?,?)",
+                    ("main", 1, -1001680975844, 11303198, "2026-07-02 01:29:31"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "MESSAGE_EVENTS_DB_FILE", db_path):
+                self.assertEqual(actor.fishing_find_recent_account_message_id_from_events("main"), 11303198)
 
     def test_fishing_lingchong_control_sets_preferred_bait(self):
         class DummyFishing(FishingMixin):

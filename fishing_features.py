@@ -2,12 +2,14 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until, str_to_dt
 from log_utils import (
     COMMAND_CONTROL_FILE,
+    MESSAGE_EVENTS_DB_FILE,
     _is_own_outgoing_sender,
     command_control_candidate_keys,
     feedback_response_matches_command,
@@ -50,7 +52,7 @@ FISHING_RETRY_SECONDS = 2 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_RETRY_SECONDS = 5 * 60
-FISHING_AUTO_HANDOFF_DELAY_SECONDS = 30 * 60
+FISHING_AUTO_HANDOFF_DELAY_SECONDS = 2 * 60
 FISHING_ROD_ITEM = "青竹钓竿"
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 FISHING_ROD_GIFT_COMMAND = f".赠送 {FISHING_ROD_ITEM}*1"
@@ -2009,7 +2011,57 @@ class FishingMixin:
                     log.info(f"Fishing auto rod scan [{identity}] failed: {exc}")
         return ""
 
-    async def fishing_find_recent_account_message_id(self, account, limit=200):
+    def fishing_find_recent_account_message_id_from_events(self, account):
+        account = str(account or "").strip()
+        if not account:
+            return 0
+        target_chat_id = getattr(self, "target_chat_id", None)
+        chat_ids = []
+        try:
+            chat_value = int(target_chat_id)
+            chat_ids.extend([chat_value, int(f"-100{abs(chat_value)}")])
+        except Exception:
+            pass
+        try:
+            conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=2)
+            try:
+                params = [account]
+                chat_filter = ""
+                if chat_ids:
+                    placeholders = ",".join("?" for _ in chat_ids)
+                    chat_filter = f" AND chat_id IN ({placeholders})"
+                    params.extend(chat_ids)
+                row = conn.execute(
+                    f"""
+                    SELECT msg_id
+                    FROM message_events
+                    WHERE account = ?
+                      AND is_out = 1
+                      AND msg_id IS NOT NULL
+                      AND msg_id > 0
+                      {chat_filter}
+                    ORDER BY created_at DESC, msg_id DESC
+                    LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log = self.fishing_logger()
+            if log:
+                log.info(f"Fishing gift target event lookup for {account} failed: {exc}")
+            return 0
+        try:
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    async def fishing_find_recent_account_message_id(self, account, limit=1000):
+        event_msg_id = self.fishing_find_recent_account_message_id_from_events(account)
+        if event_msg_id > 0:
+            return event_msg_id
+
         client = getattr(self, "client", None)
         target_chat_id = getattr(self, "target_chat_id", None)
         if client is None or target_chat_id is None:
@@ -2017,19 +2069,23 @@ class FishingMixin:
         sender_ids = {str(item) for item in FISHING_ACCOUNT_SENDER_IDS.get(str(account or ""), set())}
         if not sender_ids:
             return 0
+        batches = []
+        topic_id = getattr(self, "topic_id", None)
         try:
-            messages = await client.get_messages(target_chat_id, limit=limit)
+            if topic_id:
+                batches.append(await client.get_messages(target_chat_id, limit=limit, reply_to=int(topic_id)))
+            batches.append(await client.get_messages(target_chat_id, limit=limit))
         except Exception as exc:
             log = self.fishing_logger()
             if log:
                 log.info(f"Fishing gift target lookup for {account} failed: {exc}")
-            return 0
-        for msg in messages or []:
-            try:
-                if str(getattr(msg, "sender_id", "")) in sender_ids:
-                    return int(getattr(msg, "id", 0) or 0)
-            except Exception:
-                continue
+        for messages in batches:
+            for msg in messages or []:
+                try:
+                    if str(getattr(msg, "sender_id", "")) in sender_ids:
+                        return int(getattr(msg, "id", 0) or 0)
+                except Exception:
+                    continue
         return 0
 
     async def fishing_auto_gift_rod_to_account_main(self, holder, target_account, reply_to=None):
