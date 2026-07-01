@@ -2559,8 +2559,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         返回 True 表示执行了操作（包括无响应的情况），False 表示未到时间或条件不满足。
         """
         now = now or datetime.now()
-        if not self.main_star_palace_enabled:
-            return False
         fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
         if not fallback_dt or now < fallback_dt:
             return False
@@ -2575,6 +2573,37 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             today = now.strftime("%Y-%m-%d")
             self.state["last_star_gazing_fallback_date"] = today
             self.save_state()
+
+            selected_avatar = ""
+            if not self.main_star_palace_enabled:
+                selected_avatar, _ = self.choose_star_gazing_avatar_for_today(today)
+                if not selected_avatar:
+                    log.info(f"Star gazing fallback: all rotating avatars already observed on {today}; skipping.")
+                    return True
+
+                target_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                manifest_key = dt_to_str(target_dt)
+                self.state["star_gazing_claimed_manifest_time"] = manifest_key
+                self.state["star_gazing_claimed_avatar"] = selected_avatar
+                self.state["pending_star_gazing_manifest_time"] = manifest_key
+                self.state["pending_star_gazing_fate_type"] = "Good - daily fallback"
+                self.state["pending_star_gazing_date"] = today
+                self.state["pending_star_gazing_target_time"] = dt_to_str(now)
+                self.state["pending_star_gazing_scheduled_time"] = dt_to_str(now)
+                self.state["next_star_gazing_time"] = dt_to_str(now)
+                self.save_state()
+
+                log.info(
+                    f"Star gazing fallback: no .观星 today; sending .观星 as {selected_avatar} at 23:59."
+                )
+                await self.schedule_star_gazing_simple(
+                    now,
+                    immediate_shift=False,
+                    avatar=selected_avatar,
+                    manifest_dt=target_dt,
+                    gazing_date=today,
+                )
+                return True
 
             log.info("Star gazing fallback: no .观星 today; sending .观星 at 23:59.")
             resp_msg = await self.send_and_wait_feedback(

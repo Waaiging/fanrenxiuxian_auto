@@ -98,6 +98,8 @@ from log_utils import (
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
 STAR_GAZING_COMMAND_LEAD_SECONDS = 60                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
+STAR_GAZING_DAILY_FALLBACK_HOUR = 23                 # 每日备用观星时间：23:59（当天未观星时的兜底）
+STAR_GAZING_DAILY_FALLBACK_MINUTE = 59
 STAR_GAZING_SHIFT_PROFILE = "dynamic"
 STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)      # 小号保留历史动态晚窗，覆盖结算较慢的轮次
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
@@ -4361,6 +4363,44 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def star_gazing_final_report_seen(self, target_dt):
         return self.common_star_gazing_final_report_seen(target_dt)
 
+    def star_gazing_sent_on_date(self, date_str=None):
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        if self.state.get("last_gazing_date") == date_str:
+            return True
+        for avatar in STAR_GAZING_ROTATING_AVATARS:
+            if self.get_avatar_state(avatar).get("last_gazing_date") == date_str:
+                return True
+        return False
+
+    def star_shift_done_today(self, today=None):
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        if self.state.get("last_star_shift_date") == today:
+            return True
+        for avatar in STAR_GAZING_ROTATING_AVATARS:
+            if self.get_avatar_state(avatar).get("last_star_shift_date") == today:
+                return True
+        return False
+
+    def daily_star_gazing_fallback_dt(self, now=None):
+        return self.common_daily_star_gazing_fallback_dt(
+            now or datetime.now(),
+            hour=STAR_GAZING_DAILY_FALLBACK_HOUR,
+            minute=STAR_GAZING_DAILY_FALLBACK_MINUTE,
+        )
+
+    def has_pending_star_gazing_action(self):
+        pending_shift = self.state.get("pending_star_shift_target_time", "")
+        if pending_shift and is_future(pending_shift):
+            return True
+        for avatar in STAR_GAZING_ROTATING_AVATARS:
+            pending = self.get_avatar_state(avatar).get("pending_star_gazing_target_time", "")
+            if pending and is_future(pending):
+                return True
+        return False
+
+    def pending_daily_star_gazing_fallback_dt(self, now=None):
+        return self.common_pending_daily_star_gazing_fallback_dt(now or datetime.now())
+
     def record_star_gazing_final_report_if_needed(self, msg, text, source="new message"):
         if not self.is_star_gazing_final_report(text):
             return False
@@ -4828,6 +4868,78 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             if self.active_atomic_task == asyncio.current_task():
                 self.active_atomic_task = None
                 log.info(f"🔓 [ATOMIC LOCK] Released by AvatarStarGazing-{avatar}")
+
+    async def maybe_run_daily_star_gazing_fallback(self, now=None):
+        """Send one fallback .观星 through a rotating Star Palace avatar at 23:59."""
+        now = now or datetime.now()
+        fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
+        if not fallback_dt or now < fallback_dt:
+            return False
+
+        async with self.star_gazing_lock:
+            now = datetime.now()
+            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
+            if not fallback_dt or now < fallback_dt:
+                return False
+
+            today = now.strftime("%Y-%m-%d")
+            self.state["last_star_gazing_fallback_date"] = today
+            selected_avatar, _ = self.choose_star_gazing_avatar_for_today(today)
+            if not selected_avatar:
+                log.info(f"Avatar Star gazing fallback: all rotating avatars already observed on {today}; skipping.")
+                self.save_state()
+                return True
+
+            if self.dashboard_command_paused(".观星", selected_avatar):
+                log.info(f"Avatar Star gazing fallback: .观星 paused for {selected_avatar}; skipping 23:59 fallback.")
+                self.clear_avatar_star_gazing_pending(selected_avatar)
+                self.clear_star_gazing_round_claim()
+                self.save_state()
+                return True
+
+            target_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            manifest_key = dt_to_str(target_dt)
+            self.state["star_gazing_claimed_manifest_time"] = manifest_key
+            self.state["star_gazing_claimed_avatar"] = selected_avatar
+            self.state["pending_star_gazing_manifest_time"] = manifest_key
+            self.state["pending_star_gazing_fate_type"] = "Good - daily fallback"
+            self.set_avatar_state(selected_avatar, "pending_star_gazing_date", today)
+            self.set_avatar_state(selected_avatar, "pending_star_gazing_target_time", dt_to_str(now))
+            self.set_avatar_state(selected_avatar, "next_star_gazing_time", dt_to_str(now))
+            self.save_state()
+
+            log.info(
+                f"Avatar Star gazing fallback: no .观星 today; sending .观星 as "
+                f"{selected_avatar} at 23:59."
+            )
+            await self.avatar_schedule_star_gazing_simple(
+                selected_avatar,
+                now,
+                immediate_shift=False,
+                manifest_dt=target_dt,
+                gazing_date=today,
+            )
+            return True
+
+    async def run_star_gazing_loop(self):
+        await self.startup_done.wait()
+        while self.is_running:
+            now = datetime.now()
+            if await self.maybe_run_daily_star_gazing_fallback(now):
+                await asyncio.sleep(5)
+                continue
+
+            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
+            if fallback_dt and now < fallback_dt:
+                wait_sec = (fallback_dt - now).total_seconds()
+                log.info(
+                    f"Avatar Star gazing fallback waiting {int(wait_sec)}s until "
+                    f"{dt_to_str(fallback_dt)}."
+                )
+                await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
+                continue
+
+            await asyncio.sleep(scheduler_sleep_seconds(600))
 
     async def avatar_handle_star_gazing_opportunity(self, avatar, msg, text, sender):
         is_our_good = self.star_gazing_good_opportunity(text)
@@ -6272,6 +6384,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_rift_search_loop())
         asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
         asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
+        asyncio.create_task(self.run_star_gazing_loop())
 
         # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
         for avatar in self.avatars:

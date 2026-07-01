@@ -4714,6 +4714,107 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state.get("pending_star_gazing_manifest_time", ""), "")
         self.assertEqual(xiaohao_state.get("star_gazing_claimed_manifest_time", ""), "")
 
+    def test_sub_daily_star_gazing_fallback_uses_avatar_when_main_star_palace_disabled(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 1, 23, 59, 2)
+                return value.replace(tzinfo=tz) if tz else value
+
+        async def run_case():
+            actor = SubCultivator.__new__(SubCultivator)
+            actor.main_star_palace_enabled = False
+            actor.avatars = ["厚土", "寻真子"]
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_schedule(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.schedule_star_gazing_simple = fake_schedule
+            actor.state = {
+                "last_gazing_date": "",
+                "last_star_shift_date": "",
+                "last_star_gazing_fallback_date": "",
+                "star_gazing_avatar_index": 0,
+                "avatars": {"厚土": {}, "寻真子": {}},
+            }
+            with patch.object(sub_cultivator, "datetime", FixedDatetime):
+                handled = await actor.maybe_run_daily_star_gazing_fallback()
+            return handled, actor.state, scheduled
+
+        handled, state, scheduled = asyncio.run(run_case())
+        self.assertTrue(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-01")
+        self.assertEqual(state["star_gazing_claimed_avatar"], "厚土")
+        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-02 00:00:00")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][1]["avatar"], "厚土")
+        self.assertEqual(scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"), "2026-07-02 00:00:00")
+        self.assertEqual(scheduled[0][1]["gazing_date"], "2026-07-01")
+
+    def test_xiaohao_daily_star_gazing_fallback_schedules_rotating_avatar(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 1, 23, 59, 5)
+                return value.replace(tzinfo=tz) if tz else value
+
+        async def run_case():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            actor.avatars = ["素心子", "缘生子"]
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            actor.dashboard_command_paused = lambda command, identity=None: False
+            scheduled = []
+
+            async def fake_schedule(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.avatar_schedule_star_gazing_simple = fake_schedule
+            actor.state = {
+                "last_gazing_date": "",
+                "last_star_shift_date": "",
+                "last_star_gazing_fallback_date": "",
+                "star_gazing_avatar_index": 1,
+                "avatars": {"素心子": {}, "缘生子": {}},
+            }
+            with patch.object(cultivator_xiaohao, "datetime", FixedDatetime):
+                handled = await actor.maybe_run_daily_star_gazing_fallback()
+            return handled, actor.state, scheduled
+
+        handled, state, scheduled = asyncio.run(run_case())
+        self.assertTrue(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-01")
+        self.assertEqual(state["star_gazing_claimed_avatar"], "缘生子")
+        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-02 00:00:00")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0][0], "缘生子")
+        self.assertEqual(scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"), "2026-07-02 00:00:00")
+        self.assertEqual(scheduled[0][1]["gazing_date"], "2026-07-01")
+
+    def test_xiaohao_daily_star_gazing_fallback_skips_after_avatar_observed(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 1, 23, 58, 30)
+                return value.replace(tzinfo=tz) if tz else value
+
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["素心子", "缘生子"]
+        actor.save_state = lambda: None
+        actor.state = {
+            "last_star_gazing_fallback_date": "",
+            "last_star_shift_date": "",
+            "avatars": {
+                "素心子": {"last_gazing_date": "2026-07-01"},
+                "缘生子": {},
+            },
+        }
+        with patch.object(cultivator_xiaohao, "datetime", FixedDatetime):
+            self.assertIsNone(actor.pending_daily_star_gazing_fallback_dt())
+
     def test_passive_claimed_star_gazing_result_marks_avatar_all_accounts(self):
         class FixedDatetime(datetime):
             @classmethod
