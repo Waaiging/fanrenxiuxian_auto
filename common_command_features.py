@@ -549,8 +549,8 @@ class CommonCommandMixin:
         key = getattr(self, "account_key", "") or ""
         return {
             "main": "主号",
-            "sub": "副号",
-            "xiaohao": "小号",
+            "sub": "星宫号",
+            "xiaohao": "副号",
         }.get(key, key or self.__class__.__name__)
 
     def clean_reward_text(self, text):
@@ -644,12 +644,21 @@ class CommonCommandMixin:
         if not clean:
             return {}
         rewards = {}
+        bracket_reward_stop_names = {
+            "深度闭关总结", "元婴闭关结算", "元婴归窍总结", "元神归窍总结", "元婴成长",
+            "探寻成功", "不敌败退", "遭遇风暴", "激战得胜", "大凶·虚空噬体", "元婴遁逃·虚弱",
+            "凌霄云阶", "天门洞开", "周天巡天", "天门余韵", "罡风淬体",
+            "天人感应", "推命命中", "改命待发", "天星偏转", "改命回天",
+            "战斗加成", "凌霄神通",
+        }
 
         def add(name, amount):
             name = str(name or "").strip(" ：:，,。.;；-+")
             if not name:
                 return
             if name in {"x", "X", "本次", "额外", "收益", "奖励", "获得", "收获", "共计"}:
+                return
+            if name in bracket_reward_stop_names:
                 return
             if any(ch in name for ch in "【】[]"):
                 return
@@ -664,17 +673,24 @@ class CommonCommandMixin:
         for name, amount in re.findall(r"【([^】]{1,30})】\s*[xX*＊]\s*([+-]?\d[\d,]*)", clean):
             add(name, amount)
 
-        bracket_reward_context = ("获得", "得到", "带回", "带来", "收获", "发现", "意外之喜", "奖励")
-        bracket_reward_stop_names = {
-            "深度闭关总结", "元婴闭关结算", "元婴归窍总结", "元神归窍总结",
-            "探寻成功", "不敌败退", "遭遇风暴",
-        }
         for match in re.finditer(r"【([^】]{1,30})】(?!\s*[xX*＊]\s*[+-]?\d)", clean):
             name = match.group(1).strip()
             if not name or name in bracket_reward_stop_names or name.startswith("野外历练"):
                 continue
-            window = clean[max(0, match.start() - 30):min(len(clean), match.end() + 30)]
-            if any(marker in window for marker in bracket_reward_context):
+            before = clean[max(0, match.start() - 16):match.start()]
+            after = clean[match.end():min(len(clean), match.end() + 24)]
+            if "灵兽" in before and re.match(r"\s*(?:成功|击败|出战|休息|已)", after):
+                continue
+            if re.match(r"\s*(?:因与|，?斗法|照命|成功击败|已助阵|正在|尚需)", after):
+                continue
+            context_before = clean[max(0, match.start() - 44):match.start()]
+            context_after = clean[match.end():min(len(clean), match.end() + 20)]
+            before_reward = any(marker in context_before for marker in (
+                "为你带来了", "带来了", "带回了", "获得了", "获得", "得到", "收获",
+                "发现", "意外之喜", "奖励", "战利品", "至宝", "额外收获",
+            ))
+            after_reward = any(marker in context_after for marker in ("x", "X", "＊", "*"))
+            if before_reward or after_reward:
                 add(name, 1)
 
         for name, amount in re.findall(
@@ -773,6 +789,9 @@ class CommonCommandMixin:
             else:
                 parts.append(f"{name} {value}")
         return "、".join(parts)
+
+    def daily_reward_plain_command_label(self, command):
+        return str(command or "未知指令").split()[0] or "未知指令"
 
     def telegram_markdown_v2_escape(self, text):
         return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text or ""))
@@ -1002,9 +1021,8 @@ class CommonCommandMixin:
             return ""
 
         lines = [
-            self.telegram_markdown_v2_bold("周期收益日报"),
-            f"统计日期：{self.telegram_markdown_v2_code(summary_date)}",
-            f"账号：{self.telegram_markdown_v2_bold(self.daily_reward_account_label())}",
+            f"统计日期：{summary_date}",
+            f"账号：{self.daily_reward_account_label()}",
         ]
         identity_order = ["主魂"] + [name for name in getattr(self, "avatars", []) if name != "主魂"]
         identity_order += [name for name in grouped if name not in identity_order]
@@ -1013,11 +1031,11 @@ class CommonCommandMixin:
             if not commands:
                 continue
             lines.append("")
-            lines.append(self.telegram_markdown_v2_bold(identity))
+            lines.append(f"【{identity}】")
             for command in sorted(commands):
                 bucket = commands[command]
                 reward_text = self.summarize_reward_items(bucket["rewards"])
-                detail = self.telegram_markdown_v2_bold(reward_text) if reward_text else "收益未解析"
+                detail = reward_text if reward_text else "收益未解析"
                 if bucket["unparsed"] and reward_text:
                     detail += f"；未解析 {bucket['unparsed']} 次"
                 outcome_text = ""
@@ -1027,12 +1045,12 @@ class CommonCommandMixin:
                     preferred += [name for name in sorted(outcomes) if name not in preferred]
                     outcome_text = "（" + " / ".join(f"{name} {outcomes[name]}" for name in preferred) + "）"
                 lines.append(
-                    f"\\- {self.telegram_markdown_v2_bold(command)}："
+                    f"- {self.daily_reward_plain_command_label(command)}："
                     f"{bucket['count']} 次{outcome_text}；{detail}"
                 )
                 if not reward_text:
                     for sample in bucket["samples"]:
-                        lines.append(f"  \\- 摘录：{self.telegram_markdown_v2_escape(sample)}")
+                        lines.append(f"  - 摘录：{sample}")
         return "\n".join(lines)
 
     async def send_daily_reward_summary_for_date(self, summary_date):
@@ -1045,7 +1063,7 @@ class CommonCommandMixin:
         if not text:
             return False
         log = self.common_command_logger()
-        sent = await send_text_alert(self, "周期收益日报", text, log, parse_mode="MarkdownV2")
+        sent = await send_text_alert(self, "周期收益日报", text, log)
         if sent:
             log.info(f"Daily reward summary sent for {summary_date}.")
         else:

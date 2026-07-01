@@ -556,11 +556,11 @@ class ParserFixtureTests(unittest.TestCase):
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
 
-        self.assertIn("账号：*DummyAvatarCommon*", summary)
-        self.assertIn("*主魂*", summary)
-        self.assertIn("\\- *\\.元婴闭关*：1 次（成功 1）；*修为 \\+2000、煞气小刀 \\+1*", summary)
-        self.assertIn("*缘生子*", summary)
-        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*宗门贡献 \\+5、灵石 \\+3*", summary)
+        self.assertIn("账号：DummyAvatarCommon", summary)
+        self.assertIn("【主魂】", summary)
+        self.assertIn("- .元婴闭关：1 次（成功 1）；修为 +2000、煞气小刀 +1", summary)
+        self.assertIn("【缘生子】", summary)
+        self.assertIn("- .探寻裂缝：1 次（成功 1）；宗门贡献 +5、灵石 +3", summary)
 
     def test_daily_reward_hooks_for_yuanying_rift_and_field_training(self):
         actor = DummyAvatarCommon()
@@ -585,9 +585,9 @@ class ParserFixtureTests(unittest.TestCase):
 
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("\\- *\\.元婴出窍*：1 次（成功 1）；*修为 \\+1200*", summary)
-        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*空间碎片 \\+2*", summary)
-        self.assertIn("\\- *\\.野外历练*：1 次（成功 1）；*修为 \\+300、灵石 \\+4*", summary)
+        self.assertIn("- .元婴出窍：1 次（成功 1）；修为 +1200", summary)
+        self.assertIn("- .探寻裂缝：1 次（成功 1）；空间碎片 +2", summary)
+        self.assertIn("- .野外历练：1 次（成功 1）；修为 +300、灵石 +4", summary)
 
         sub_treasure = treasure_touch_plan(".抚摸法宝 青竹蜂云剑")
         self.assertEqual(sub_treasure.command, ".抚摸法宝 青竹蜂云剑")
@@ -631,7 +631,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("\\- *\\.野外历练*：2 次（成功 1 / 失败 1）；*修为 \\+90*", summary)
+        self.assertIn("- .野外历练：2 次（成功 1 / 失败 1）；修为 +90", summary)
         self.assertEqual(len(actor.state["daily_reward_events"]), 2)
 
     def test_daily_reward_edited_final_commands_parse_rewards(self):
@@ -652,10 +652,10 @@ class ParserFixtureTests(unittest.TestCase):
 
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("\\- *\\.探寻裂缝*：1 次（成功 1）；*宗门贡献 \\+5、空间碎片 \\+2*", summary)
-        self.assertIn("\\- *\\.探渊*：1 次（成功 1）；*修为 \\+120、兽骨 \\+3*", summary)
-        self.assertIn("\\- *\\.元婴闭关*：1 次（成功 1）；*修为 \\+2000*", summary)
-        self.assertIn("\\- *\\.元婴出窍*：1 次（成功 1）；*修为 \\+1200*", summary)
+        self.assertIn("- .探寻裂缝：1 次（成功 1）；宗门贡献 +5、空间碎片 +2", summary)
+        self.assertIn("- .探渊：1 次（成功 1）；修为 +120、兽骨 +3", summary)
+        self.assertIn("- .元婴闭关：1 次（成功 1）；修为 +2000", summary)
+        self.assertIn("- .元婴出窍：1 次（成功 1）；修为 +1200", summary)
 
     def test_daily_reward_ignores_deep_meditation(self):
         actor = DummyAvatarCommon()
@@ -702,11 +702,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["identity"], "无咎子")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("*无咎子*", summary)
-        self.assertIn("三级妖丹 \\+3", summary)
-        self.assertIn("养魂木 \\+2", summary)
-        self.assertIn("天火液丹方 \\+1", summary)
-        self.assertIn("经验 \\+1536", summary)
+        self.assertIn("【无咎子】", summary)
+        self.assertIn("三级妖丹 +3", summary)
+        self.assertIn("养魂木 +2", summary)
+        self.assertIn("天火液丹方 +1", summary)
+        self.assertIn("经验 +1536", summary)
 
     def test_daily_reward_parser_counts_unquantified_bracket_rewards(self):
         actor = DummyAvatarCommon()
@@ -718,6 +718,81 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rewards.get("法则碎片·木"), 2)
         self.assertEqual(rewards.get("九转凝魂丹丹方"), 1)
         self.assertNotIn("探寻成功", rewards)
+
+    def test_daily_reward_parser_filters_status_titles_and_counts_treasure(self):
+        actor = DummyAvatarCommon()
+        rift_text = (
+            "【激战得胜】\n"
+            "经过一番苦战，你成功斩杀了时空异兽！\n"
+            "你从其残骸中，获得了【法则碎片·空间】x1、【四级妖丹】x5，"
+            "以及一件至宝：【太虚仙露】！"
+        )
+        stairs_text = (
+            "【凌霄云阶】\n"
+            "你一举踏破十二重云阶，完成了第 19 轮【周天巡天】！\n"
+            "并获得 12小时 的【天门余韵】，斗法战力提升 12%。\n"
+            "本次获得 296 点修为、42 点宗门贡献。\n"
+            "额外收获: 【养魂木】x3、【天雷竹】x1"
+        )
+        collect_text = (
+            "收集完成！你获得了：【天雷竹】x10, 【金精矿】x3, 【二级妖丹】x10。\n"
+            "【天人感应】因与侍妾心意相通，其中有 2 次收集触发了双倍收获！"
+        )
+        abyss_text = (
+            "胜利！\n"
+            "你的灵兽【六翼】成功击败了对手！它带回了战利品：\n"
+            "- 获得 291 点经验, 【三级妖丹】x1, 【蛮荒兽血】x2。"
+        )
+
+        self.assertEqual(actor.parse_reward_items_from_text(rift_text), {
+            "法则碎片·空间": 1,
+            "四级妖丹": 5,
+            "太虚仙露": 1,
+        })
+        stairs_rewards = actor.parse_reward_items_from_text(stairs_text)
+        self.assertEqual(stairs_rewards, {
+            "修为": 296,
+            "宗门贡献": 42,
+            "养魂木": 3,
+            "天雷竹": 1,
+        })
+        self.assertNotIn("周天巡天", stairs_rewards)
+        self.assertNotIn("天门余韵", stairs_rewards)
+        collect_rewards = actor.parse_reward_items_from_text(collect_text)
+        self.assertEqual(collect_rewards, {"天雷竹": 10, "金精矿": 3, "二级妖丹": 10})
+        self.assertNotIn("天人感应", collect_rewards)
+        abyss_rewards = actor.parse_reward_items_from_text(abyss_text)
+        self.assertEqual(abyss_rewards, {"经验": 291, "三级妖丹": 1, "蛮荒兽血": 2})
+        self.assertNotIn("六翼", abyss_rewards)
+
+    def test_daily_reward_summary_plain_text_for_xiaohao(self):
+        actor = DummyAvatarCommon()
+        actor.account_key = "xiaohao"
+        actor.avatars = ["问心子"]
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "问心子",
+            "command": ".探寻裂缝",
+            "clean": (
+                "【激战得胜】经过一番苦战，你成功斩杀了时空异兽！"
+                "你从其残骸中，获得了【法则碎片·空间】x1、【四级妖丹】x5，"
+                "以及一件至宝：【太虚仙露】！"
+            ),
+            "rewards": {},
+            "final": True,
+        }]
+
+        summary = actor.build_daily_reward_summary_text(today)
+
+        self.assertFalse(summary.startswith("周期收益日报"))
+        self.assertIn("账号：副号", summary)
+        self.assertIn("【问心子】", summary)
+        self.assertIn("- .探寻裂缝：1 次（成功 1）；四级妖丹 +5、太虚仙露 +1、法则碎片·空间 +1", summary)
+        self.assertNotIn("\\-", summary)
+        self.assertNotIn("\\+", summary)
+        self.assertNotIn("激战得胜", summary)
 
     def test_daily_reward_ignores_rift_intermediate_edit(self):
         actor = DummyAvatarCommon()
@@ -779,7 +854,7 @@ class ParserFixtureTests(unittest.TestCase):
         ))
         today = datetime.now().strftime("%Y-%m-%d")
         summary = actor.build_daily_reward_summary_text(today)
-        self.assertIn("\\- *\\.探寻裂缝*：1 次（失败 1）", summary)
+        self.assertIn("- .探寻裂缝：1 次（失败 1）", summary)
 
     def test_daily_reward_field_training_beast_encounter_can_succeed(self):
         actor = DummyAvatarCommon()
@@ -860,8 +935,8 @@ class ParserFixtureTests(unittest.TestCase):
 
         summary = actor.build_daily_reward_summary_text(today)
 
-        self.assertIn("*无咎子*", summary)
-        self.assertIn("*修为 \\+45000、四级妖丹 \\+1*", summary)
+        self.assertIn("【无咎子】", summary)
+        self.assertIn("修为 +45000、四级妖丹 +1", summary)
         self.assertNotIn("宗门贡献", summary)
 
     def test_daily_reward_summary_drops_legacy_field_training_destiny_rewards(self):
@@ -878,7 +953,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         summary = actor.build_daily_reward_summary_text(today)
 
-        self.assertIn("*三级妖丹 \\+1*", summary)
+        self.assertIn("三级妖丹 +1", summary)
         self.assertNotIn("宗门贡献", summary)
 
     def test_common_message_age_seconds_handles_timezone_and_missing_date(self):
