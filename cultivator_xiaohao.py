@@ -78,7 +78,7 @@ from log_utils import (
     record_message_event,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
-    schedule_command_auto_delete, send_text_alert, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
+    schedule_command_auto_delete, send_text_alert, sender_is_pause_admin, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
     feedback_response_conflicts,
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
@@ -4052,8 +4052,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender):
                     return
-                _sender_id = getattr(msg, "sender_id", None)
-                if _sender_id and _sender_id in self.pause_admins:
+                if sender_is_pause_admin(self, msg):
                     stripped = text.strip()
                     if stripped in ("止", ".止", "0", ".0"):
                         if self.pause_event.is_set():

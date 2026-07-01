@@ -1099,9 +1099,7 @@ def is_clear_history_command(actor, msg, text, sender=None):
         return False
     if not _chat_matches_actor_target(actor, msg):
         return False
-    sender_id = getattr(msg, "sender_id", None)
-    admins = getattr(actor, "pause_admins", set()) or set()
-    return bool(sender_id and sender_id in admins)
+    return sender_is_pause_admin(actor, msg)
 
 
 async def clear_actor_command_history(actor, older_than_minutes=CLEAR_HISTORY_OLDER_THAN_MINUTES, scan_limit=None, topic_only=False, logger=None):
@@ -2225,6 +2223,21 @@ def _is_own_outgoing_sender(actor, msg):
         avatar_ids.update(_sender_id_variants(key))
     if sender_variants & avatar_ids:
         return True
+
+    admin_ids = set()
+    for value in getattr(actor, "pause_admins", set()) or set():
+        admin_ids.update(_sender_id_variants(value))
+    return bool(sender_variants & admin_ids)
+
+
+def sender_is_pause_admin(actor, msg):
+    """Return True when a control message comes from this account or a configured admin/avatar sender."""
+    if _is_own_outgoing_sender(actor, msg):
+        return True
+
+    sender_variants = _sender_id_variants(getattr(msg, "sender_id", None))
+    if not sender_variants:
+        return False
 
     admin_ids = set()
     for value in getattr(actor, "pause_admins", set()) or set():

@@ -192,12 +192,15 @@ def parse_yinluo_convert(text):
     clean = _strip_markdown(text)
     success = re.search(r"煞气池增加了\s*(\d+)\s*点", clean)
     if success:
-        return {"matched": True, "status": "success", "sha_gain": int(success.group(1))}
+        return {"matched": True, "status": "success", "sha_gain": int(success.group(1)), "cooldown_seconds": 0}
     if "开始运转魔功" in clean:
-        return {"matched": True, "status": "pending", "sha_gain": 0}
-    if "修为不足" in clean or "无法" in clean:
-        return {"matched": True, "status": "blocked", "sha_gain": 0}
-    return {"matched": False, "status": "", "sha_gain": 0}
+        return {"matched": True, "status": "pending", "sha_gain": 0, "cooldown_seconds": 0}
+    cooldown_seconds = _parse_duration_seconds(clean)
+    if cooldown_seconds > 0 and any(key in clean for key in ("失败", "冷却", "请在", "后再", "尚需", "无法", "修为不足")):
+        return {"matched": True, "status": "cooldown", "sha_gain": 0, "cooldown_seconds": cooldown_seconds}
+    if "修为不足" in clean or "无法" in clean or "失败" in clean:
+        return {"matched": True, "status": "blocked", "sha_gain": 0, "cooldown_seconds": 3600}
+    return {"matched": False, "status": "", "sha_gain": 0, "cooldown_seconds": 0}
 
 
 def parse_yinluo_imprison(text):
@@ -465,7 +468,11 @@ class YinluoMixin:
         if parsed.get("status") == "pending":
             self.yinluo_set_status(identity, "convert_pending", "等待化功为煞结算", 60, text)
             return True
-        self.yinluo_set_status(identity, "convert_failed", "化功为煞失败", 3600, text)
+        if parsed.get("status") in ("cooldown", "blocked"):
+            wait = max(60, int(parsed.get("cooldown_seconds") or 3600))
+            self.yinluo_set_status(identity, "convert_failed", f"化功为煞失败，{wait}秒后重试", wait, text)
+            return False
+        self.yinluo_set_status(identity, "convert_failed", "化功为煞回复未识别", 3600, text)
         return False
 
     async def yinluo_imprison_fierce_soul(self, identity):
@@ -525,7 +532,6 @@ class YinluoMixin:
                 continue
             if parsed.get("status") == "sha_not_enough":
                 await self.yinluo_convert_sha(identity)
-                self.yinluo_set_status(identity, "sha_not_enough", "煞气不足，已尝试化功为煞", 10, text)
                 return False
             self.yinluo_set_status(identity, "imprison_failed", "囚禁魂魄失败", YINLUO_RETRY_SECONDS, text)
             return False
@@ -595,6 +601,9 @@ class YinluoMixin:
             return wait
 
         state = self.get_yinluo_state(identity)
+        if is_future(state.get("next_action_at", "")):
+            return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 3600))
+
         if state.get("imprison_sync_pending"):
             if is_future(state.get("next_action_at", "")):
                 return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 300))

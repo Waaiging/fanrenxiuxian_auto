@@ -126,6 +126,7 @@ from log_utils import (
     remember_script_send_intent,  # 记录脚本发送意图
     remember_script_sent_message, # 记录脚本已发送的消息
     schedule_command_auto_delete, # 安排命令自动删除
+    sender_is_pause_admin,     # 判断暂停/恢复控制消息是否来自授权发送者
     send_text_alert,           # 发送文本告警
     is_edited_message_for_current_account, # 判定消息是否针对当前账号的编辑
     feedback_response_conflicts, # 判定回复文本是否属于其他指令家族
@@ -1035,8 +1036,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender_check):
                     return
-                _sender_id = getattr(msg, "sender_id", None)
-                if _sender_id and _sender_id in self.pause_admins:
+                if sender_is_pause_admin(self, msg):
                     stripped = text.strip()
                     if stripped in ("止", ".止", "0", ".0"):
                         if self.pause_event.is_set():

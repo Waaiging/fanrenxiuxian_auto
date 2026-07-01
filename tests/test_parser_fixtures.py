@@ -46,11 +46,13 @@ from fishing_features import (
     parse_trade_purchase_response,
 )
 from yinluo_features import (
+    YINLUO_CONVERT_COMMAND,
     YINLUO_MASTER_COMMAND,
     YINLUO_SOUL,
     YinluoMixin,
     parse_yinluo_appease,
     parse_yinluo_blood_wash,
+    parse_yinluo_convert,
     parse_yinluo_imprison,
     parse_yinluo_status,
     parse_yinluo_summon_shadow,
@@ -3451,6 +3453,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(summon_success["status"], "success")
         self.assertEqual(summon_success["soul"], YINLUO_SOUL)
 
+        convert_cd = parse_yinluo_convert("化功为煞失败，魔功反噬尚需调息，请在 **1小时2分钟3秒** 后再试。")
+        self.assertTrue(convert_cd["matched"])
+        self.assertEqual(convert_cd["status"], "cooldown")
+        self.assertEqual(convert_cd["cooldown_seconds"], 3723)
+
         imprison = parse_yinluo_imprison("一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
         self.assertEqual(imprison["status"], "success")
         self.assertEqual(imprison["slot"], 1)
@@ -3608,6 +3615,47 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(yinluo_state["reserves"][YINLUO_SOUL], 0)
         self.assertEqual(yinluo_state["slots"][2]["status"], "炼化中")
 
+    def test_yinluo_convert_failure_cooldown_survives_sha_not_enough_flow(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "reserves": {YINLUO_SOUL: 1},
+                    "sha_current": 1000,
+                    "sha_max": 25000,
+                    "slots": {
+                        1: {"status": "空闲", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""},
+                    },
+                })
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                if command == ".囚禁魂魄 1 凶兽戾魄":
+                    return DummyMessage(601, text="煞气不足，无法囚禁魂魄。")
+                if command == YINLUO_CONVERT_COMMAND:
+                    return DummyMessage(602, text="化功为煞失败，魔功反噬尚需调息，请在 **1小时** 后再试。")
+                raise AssertionError(f"unexpected command: {command}")
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+        actor = DummyYinluo()
+        self.assertFalse(asyncio.run(actor.yinluo_imprison_fierce_soul("缘生子")))
+        self.assertEqual(actor.sent, [".囚禁魂魄 1 凶兽戾魄", YINLUO_CONVERT_COMMAND])
+
+        yinluo_state = actor.get_yinluo_state("缘生子")
+        self.assertEqual(yinluo_state["last_status"], "convert_failed")
+        self.assertIn("化功为煞失败", yinluo_state["last_detail"])
+        self.assertGreaterEqual(common_seconds_until(yinluo_state["next_action_at"]), 3500)
+
+        wait = asyncio.run(actor.yinluo_tick("缘生子"))
+        self.assertGreaterEqual(wait, 3500)
+        self.assertEqual(actor.sent, [".囚禁魂魄 1 凶兽戾魄", YINLUO_CONVERT_COMMAND])
+
     def test_yinluo_expired_sync_time_does_not_send_master_command(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
@@ -3751,6 +3799,19 @@ class ParserFixtureTests(unittest.TestCase):
 
         msg.sender_id = 777
         self.assertFalse(log_utils.is_clear_history_command(actor, msg, "c", sender=None))
+
+    def test_pause_admin_accepts_current_account_and_sender_variants(self):
+        actor = SimpleNamespace(
+            my_info=SimpleNamespace(id=42),
+            pause_admins={888, -1003999815554},
+            _avatar_chat_ids={"-1003658665113": "问心子"},
+        )
+
+        self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=42, out=False)))
+        self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=777, out=True)))
+        self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=3999815554, out=False)))
+        self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=-1003658665113, out=False)))
+        self.assertFalse(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=123, out=False)))
 
     def test_clear_actor_command_history_deletes_only_old_dot_commands(self):
         old = datetime.now(timezone.utc) - timedelta(minutes=40)
