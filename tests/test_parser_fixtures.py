@@ -8399,10 +8399,12 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao.state["avatars"]["问心子"]["cloud_stairs_progress"], "8 / 12 阶")
         self.assertTrue(xiaohao.state["avatars"]["问心子"]["next_stairs_time"])
 
-    def test_xiaohao_lingxiao_mismatch_disables_cloud_stairs(self):
+    def test_xiaohao_lingxiao_mismatch_invalidates_identity_cache(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.avatars = ["问心子"]
-        actor.state = {"avatars": {"问心子": {"cloud_stairs_progress": "11 / 12 阶"}}}
+        actor._current_identity = "问心子"
+        actor._main_confirmed = True
+        actor.state = {"current_identity": "问心子", "avatars": {"问心子": {"cloud_stairs_progress": "11 / 12 阶"}}}
         actor.save_state = lambda: None
 
         result = actor.record_avatar_cloud_stairs_response(
@@ -8412,14 +8414,18 @@ class ParserFixtureTests(unittest.TestCase):
 
         state = actor.state["avatars"]["问心子"]
         self.assertFalse(result)
-        self.assertTrue(state["cloud_stairs_disabled"])
-        self.assertEqual(state["next_stairs_time"], "")
+        self.assertEqual(actor.current_identity, "")
+        self.assertTrue(state["next_stairs_time"])
+        self.assertEqual(state.get("heart_platform_date", ""), "")
 
     def test_xiaohao_heart_platform_mismatch_does_not_mark_used(self):
         async def run_case():
             actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
             actor.avatars = ["问心子"]
+            actor._current_identity = "问心子"
+            actor._main_confirmed = True
             actor.state = {
+                "current_identity": "问心子",
                 "avatars": {
                     "问心子": {
                         "cloud_stairs_progress": "11 / 12 阶",
@@ -8444,9 +8450,47 @@ class ParserFixtureTests(unittest.TestCase):
         result, state = asyncio.run(run_case())
         avatar_state = state["avatars"]["问心子"]
         self.assertFalse(result)
-        self.assertTrue(avatar_state["cloud_stairs_disabled"])
+        self.assertEqual(state["current_identity"], "")
         self.assertEqual(avatar_state.get("heart_platform_date", ""), "")
         self.assertEqual(avatar_state.get("last_heart_time", ""), "")
+
+    def test_xiaohao_lingxiao_commands_force_fresh_avatar_switch(self):
+        async def run_case():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            actor.avatars = ["问心子"]
+            actor._current_identity = "问心子"
+            actor._main_confirmed = False
+            actor.state = {"current_identity": "问心子", "avatars": {"问心子": {}}}
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.save_state = lambda: None
+            actor.should_wait_for_atomic_task = lambda *args, **kwargs: False
+            actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+            actor.time_critical_identity_command = lambda command: False
+            actor.time_critical_defer_wait = lambda *args, **kwargs: -1
+            actor.apply_switch_guard_backoff = lambda *args, **kwargs: False
+            actor.check_and_record_switch_ban = lambda *args, **kwargs: False
+            sent = []
+
+            async def fake_raw(command, *args, **kwargs):
+                sent.append(command)
+                if command == ".切换 问心子":
+                    return "切换成功！你的神念已附着在 **【问心子】** 之上。"
+                return "ok"
+
+            actor._send_and_wait_feedback_raw = fake_raw
+            resp = await actor.send_and_wait_feedback_identity(
+                "问心子",
+                ".问心台",
+                force_identity_check=True,
+                max_retries=0,
+            )
+            return sent, resp
+
+        sent, resp = asyncio.run(run_case())
+        self.assertEqual(sent, [".切换 问心子", ".问心台"])
+        self.assertEqual(resp, "ok")
 
     def test_main_heart_platform_mismatch_does_not_mark_used(self):
         async def run_case():

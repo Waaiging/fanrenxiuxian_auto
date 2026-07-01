@@ -938,31 +938,28 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         clean = str(text or "").replace("**", "")
         return "你并非凌霄宫弟子" in clean or "云阶禁制不会为你显现" in clean
 
-    def mark_avatar_lingxiao_disabled(self, avatar, response_text="", source="Cloud stairs"):
+    def mark_avatar_lingxiao_identity_mismatch(self, avatar, response_text="", source="Cloud stairs"):
         state = self.get_avatar_state(avatar)
-        state["cloud_stairs_disabled"] = True
-        state["cloud_stairs_disabled_time"] = now_str()
-        state["cloud_stairs_disabled_reason"] = str(response_text or "")[:160]
-        state["next_stairs_time"] = ""
-        state["next_heart_time"] = ""
-        state["nine_heaven_wind_cd_time"] = ""
+        state["cloud_stairs_identity_mismatch_time"] = now_str()
+        state["cloud_stairs_identity_mismatch_reason"] = str(response_text or "")[:160]
+        state["next_stairs_time"] = add_seconds_str(now_str(), 120)
         state["heart_platform_date"] = ""
         state["last_heart_time"] = ""
+        state["next_heart_time"] = ""
+        self.current_identity = ""
+        self._main_confirmed = False
         self.save_state()
-        log.error(
-            f"{source} [{avatar}]: disabled Lingxiao cloud-stairs commands; "
-            "bot says this identity is not a Lingxiao disciple."
+        log.warning(
+            f"{source} [{avatar}]: bot says non-Lingxiao disciple; "
+            "invalidating cached identity and retrying after forced switch."
         )
-
-    def avatar_lingxiao_commands_disabled(self, avatar):
-        return bool(self.get_avatar_state(avatar).get("cloud_stairs_disabled"))
 
     def record_avatar_cloud_stairs_response(self, avatar, stairs_resp, source="Cloud stairs climb"):
         if not stairs_resp:
             return False
 
         if self.is_lingxiao_unavailable_response(stairs_resp):
-            self.mark_avatar_lingxiao_disabled(avatar, stairs_resp, source=source)
+            self.mark_avatar_lingxiao_identity_mismatch(avatar, stairs_resp, source=source)
             return False
 
         # ---- 登阶成功 ----
@@ -1108,8 +1105,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return bool(last_wind and (not last_stairs or last_wind > last_stairs))
 
     def is_avatar_nine_heaven_wind_ready(self, avatar):
-        if self.avatar_lingxiao_commands_disabled(avatar):
-            return False
         wind_cd_time = self.get_avatar_state(avatar).get("nine_heaven_wind_cd_time", 0)
         return not wind_cd_time or (isinstance(wind_cd_time, str) and not is_future(wind_cd_time))
 
@@ -1118,7 +1113,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return False
 
         if self.is_lingxiao_unavailable_response(wind_resp):
-            self.mark_avatar_lingxiao_disabled(avatar, wind_resp, source=source)
+            self.mark_avatar_lingxiao_identity_mismatch(avatar, wind_resp, source=source)
             return False
 
         cd = self.parse_wait_time(wind_resp, line_identifier="引九天罡风")
@@ -1166,9 +1161,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return False
 
     async def maybe_use_nine_heaven_wind(self, avatar, source="Nine Heaven Wind"):
-        if self.avatar_lingxiao_commands_disabled(avatar):
-            log.info(f"{source} [{avatar}]: Lingxiao commands disabled; skip .引九天罡风.")
-            return False
         if self.avatar_has_pending_wind_buff(avatar):
             log.info(f"{source} [{avatar}]: pending Wind buff already exists; skip .引九天罡风.")
             return True
@@ -1203,9 +1195,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 today: 日期字符串
                 allow_daily_fallback: 是否允许每日保底触发
             """
-            if self.avatar_lingxiao_commands_disabled(avatar):
-                log.info(f"Heart Platform [{avatar}] skipped: Lingxiao commands disabled.")
-                return False
             late_fallback = allow_daily_fallback and self.is_heart_platform_fallback_due(today)
             # 非高阶（8-11）且非保底时间，跳过
             if not (8 <= curr_step <= 11) and not late_fallback:
@@ -1239,7 +1228,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             hp_resp = await self.send_and_wait_feedback_identity(avatar, ".问心台", force_identity_check=True)
             if hp_resp:
                 if self.is_lingxiao_unavailable_response(hp_resp):
-                    self.mark_avatar_lingxiao_disabled(avatar, hp_resp, source="Heart Platform")
+                    self.mark_avatar_lingxiao_identity_mismatch(avatar, hp_resp, source="Heart Platform")
                     return False
                 if any(k in hp_resp for k in ["问心台", "已经", "明天", "成功", "感受到", "感悟", "今日"]):
                     self.set_avatar_state(avatar, "heart_platform_date", today)
@@ -1277,9 +1266,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             if initial_delay > 0:
                 await asyncio.sleep(initial_delay)
             while self.is_running:
-                if self.avatar_lingxiao_commands_disabled(avatar):
-                    log.info(f"Cloud stairs [{avatar}] disabled: identity is not a Lingxiao disciple.")
-                    return
                 pass  # Concurrent avatars do not wait for main identity.
                 # ---- 1. 天阶状态检查 ----
                 # 天阶状态只作为缓存缺失时的补账；正常登阶按固定 3 小时 CD 执行。
@@ -1293,8 +1279,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     status_resp = None
                 if status_resp:
                     if self.is_lingxiao_unavailable_response(status_resp):
-                        self.mark_avatar_lingxiao_disabled(avatar, status_resp, source="Cloud stairs status")
-                        return
+                        self.mark_avatar_lingxiao_identity_mismatch(avatar, status_resp, source="Cloud stairs status")
+                        await asyncio.sleep(scheduler_sleep_seconds(120))
+                        continue
                     self._avatar_update_cloud_stairs_progress_from_text(avatar, status_resp, source="Cloud stairs status")
                     self.update_completed_weeks_from_text(status_resp, source="Cloud stairs status")
     
@@ -1567,6 +1554,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         log.warning(f"Switch command guard backoff for [{command}] until {ban_expire}.")
         return True
 
+    def command_requires_fresh_identity_confirm(self, message):
+        command = str(message or "").strip().split()[0]
+        return command in {".问心台", ".登天阶", ".天阶状态", ".引九天罡风"}
+
     async def send_and_wait_feedback_identity(self, identity, message, timeout=45, max_retries=2, force_identity_check=False, **kwargs):
         """
         带身份感知的物理串行发送管线。
@@ -1588,6 +1579,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return None
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
+        force_fresh_identity_confirm = (
+            bool(force_identity_check)
+            and identity in self.avatars
+            and self.command_requires_fresh_identity_confirm(message)
+        )
 
         _t0 = time.monotonic()
         log.info(f"[DEBUG-IDENTITY] [{identity}] ENTER send_and_wait_feedback_identity, cmd={message!r}, lock_held={self.avatar_send_lock.locked()}")
@@ -1640,14 +1636,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                             )
                 
                 if not should_yield:
-                    if self.current_identity != identity:
+                    needs_switch = self.current_identity != identity or force_fresh_identity_confirm
+                    if needs_switch:
                         ban_time = self.state.get("next_switch_allowed_time", "")
                         if ban_time and is_future(ban_time):
                             log.warning(f"🚫 Global switch is banned until {ban_time}. Blocking switch to {identity}.")
                             return None
                         switch_target = "主魂" if identity == "主魂" else identity
                         switch_cmd = f".切换 {switch_target}"
-                        log.info(f"🔄 Avatar switch: {self.current_identity} → {identity} (sending {switch_cmd})")
+                        if self.current_identity == identity and force_fresh_identity_confirm:
+                            log.info(f"🔄 Avatar switch: fresh-confirming {identity} before {message} (sending {switch_cmd})")
+                        else:
+                            log.info(f"🔄 Avatar switch: {self.current_identity} → {identity} (sending {switch_cmd})")
                         log.info(f"[DEBUG-IDENTITY] [{identity}] sending switch cmd: {switch_cmd}")
                         switch_resp = await self._send_and_wait_feedback_raw(
                             switch_cmd,
@@ -1664,7 +1664,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                             log.error(f"❌ Switch to {identity} failed due to global command ban. Blocking subsequent command: {message}")
                             return None
                         is_success = False
-                        if self.current_identity == identity:
+                        if self.current_identity == identity and not force_fresh_identity_confirm:
                             is_success = True
                             log.info(f"✅ Avatar switch passively confirmed: now {identity}")
                         if resp_str and any(k in resp_str for k in ["成功", "已切换", "当前操控", identity]):
