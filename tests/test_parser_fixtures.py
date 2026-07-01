@@ -787,7 +787,7 @@ class ParserFixtureTests(unittest.TestCase):
         summary = actor.build_daily_reward_summary_text(today)
 
         self.assertFalse(summary.startswith("周期收益日报"))
-        self.assertIn("账号：副号", summary)
+        self.assertIn("账号：小号", summary)
         self.assertIn("【问心子】", summary)
         self.assertIn("- .探寻裂缝：1 次（成功 1）；四级妖丹 +5、太虚仙露 +1、法则碎片·空间 +1", summary)
         self.assertNotIn("\\-", summary)

@@ -549,8 +549,8 @@ class CommonCommandMixin:
         key = getattr(self, "account_key", "") or ""
         return {
             "main": "主号",
-            "sub": "星宫号",
-            "xiaohao": "副号",
+            "sub": "副号",
+            "xiaohao": "小号",
         }.get(key, key or self.__class__.__name__)
 
     def clean_reward_text(self, text):
