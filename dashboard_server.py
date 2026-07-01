@@ -135,6 +135,7 @@ STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "sub": {"厚土", "缘生子", "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
+SUB_STAR_PALACE_AVATARS = {"厚土", "寻真子"}
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 
 ACCOUNT_PROFILE_USERNAMES = {
@@ -576,6 +577,7 @@ def command_row(
     schedule_type="",
     next_seconds=None,
     default_paused=False,
+    actionable=True,
 ):
     """Build one command-row object for the dashboard."""
     row = {
@@ -594,6 +596,8 @@ def command_row(
         row["next_seconds"] = max(0, int(next_seconds))
     if default_paused:
         row["default_paused"] = True
+    if not actionable:
+        row["actionable"] = False
     return row
 
 
@@ -690,11 +694,11 @@ def watch_command(command, label=None, detail="同步/记录回复", group=""):
 
 
 def manual_command(command, label=None, detail="按需发送", group=""):
-    return command_row(command, label, "按需", "manual", detail=detail, group=group)
+    return command_row(command, label, "按需", "manual", detail=detail, group=group, actionable=False)
 
 
 def flow_command(command, label=None, detail="流程内自动发送", group=""):
-    return command_row(command, label, "流程内", "flow", detail=detail, group=group)
+    return command_row(command, label, "流程内", "flow", detail=detail, group=group, actionable=False)
 
 
 def fishing_command(state):
@@ -1486,6 +1490,8 @@ def main_soul_panel(account, state):
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
+        hunt_stopped = bool(state.get("beast_hunt_stopped"))
+        hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         rows.extend([
             daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
@@ -1500,7 +1506,14 @@ def main_soul_panel(account, state):
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
-            time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽"),
+            (
+                command_row(
+                    ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
+                    detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False
+                )
+                if hunt_stopped
+                else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
+            ),
             manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
             manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
             manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
@@ -1569,7 +1582,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             time_command(
                 star_gazing_state,
                 "pending_star_shift_target_time",
-                ".改换星移 @Waaiging",
+                ".改换星移 @Weeguu",
                 "改换星移",
                 waiting="已排程",
                 ready="监听中",
@@ -1586,6 +1599,8 @@ def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
     rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
+    if name == YINLUO_IDENTITY:
+        rows.extend(yinluo_commands(state))
     if name == "缘生子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -1593,15 +1608,16 @@ def star_avatar_commands(name, state):
         ])
     rows.append(fishing_command(state))
     rows.extend(meditation_commands(state, include_force_exit=True))
-    rows.extend(xiaohao_star_attraction_commands(state))
-    rows.extend([
-        time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
-        daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
-        time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
-        time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
-        time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
-        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
-    ])
+    rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
+    if name in SUB_STAR_PALACE_AVATARS:
+        rows.extend(xiaohao_star_attraction_commands(state))
+        rows.extend([
+            time_command(state, "next_formation_time", ".启阵", "启阵", group="阵法"),
+            time_command(state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
+            time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
+            time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
+        ])
+    rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
     return rows
 

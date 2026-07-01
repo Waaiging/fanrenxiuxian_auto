@@ -482,23 +482,53 @@ class YinluoMixin:
             if int(state.get("sha_current") or 0) < YINLUO_REFINE_COST_SHA:
                 return False
 
-        slot = slots[0]
-        text = await self.send_yinluo_command(identity, f".囚禁魂魄 {slot} {YINLUO_SOUL}", timeout=60)
-        parsed = parse_yinluo_imprison(text)
-        state = self.get_yinluo_state(identity)
-        if parsed.get("status") == "success":
-            state["sha_current"] = max(0, int(state.get("sha_current") or 0) - YINLUO_REFINE_COST_SHA)
-            reserves = state.setdefault("reserves", {})
-            reserves[YINLUO_SOUL] = max(0, int(reserves.get(YINLUO_SOUL, 0)) - 1)
-            state.setdefault("slots", {})[slot] = {"status": "炼化中", "soul": YINLUO_SOUL, "remaining_seconds": 12 * 3600, "due_at": add_seconds_str(now_str(), 12 * 3600)}
-            self.yinluo_set_status(identity, "imprisoned", f"{slot}号槽囚禁 {YINLUO_SOUL}", 5, text)
-            return True
-        if parsed.get("status") == "sha_not_enough":
-            await self.yinluo_convert_sha(identity)
-            self.yinluo_set_status(identity, "sha_not_enough", "煞气不足，已尝试化功为煞", 10, text)
+        attempted_slots = set()
+        synced_after_busy = False
+        while True:
+            slots = [slot for slot in self.yinluo_empty_slots(identity) if slot not in attempted_slots]
+            if not slots:
+                self.yinluo_set_status(identity, "no_empty_slot_after_sync", "未解析到可囚禁的空闲炼化槽", YINLUO_SYNC_SECONDS)
+                return False
+
+            slot = slots[0]
+            attempted_slots.add(slot)
+            text = await self.send_yinluo_command(identity, f".囚禁魂魄 {slot} {YINLUO_SOUL}", timeout=60)
+            parsed = parse_yinluo_imprison(text)
+            state = self.get_yinluo_state(identity)
+            if parsed.get("status") == "success":
+                state["sha_current"] = max(0, int(state.get("sha_current") or 0) - YINLUO_REFINE_COST_SHA)
+                reserves = state.setdefault("reserves", {})
+                reserves[YINLUO_SOUL] = max(0, int(reserves.get(YINLUO_SOUL, 0)) - 1)
+                state.setdefault("slots", {})[slot] = {"status": "炼化中", "soul": YINLUO_SOUL, "remaining_seconds": 12 * 3600, "due_at": add_seconds_str(now_str(), 12 * 3600)}
+                self.yinluo_set_status(identity, "imprisoned", f"{slot}号槽囚禁 {YINLUO_SOUL}", 5, text)
+                return True
+            if parsed.get("status") == "slot_busy":
+                slots_state = state.setdefault("slots", {})
+                slots_state[slot] = {
+                    "status": "状态待同步",
+                    "soul": "",
+                    "remaining_seconds": 0,
+                    "remaining_text": "",
+                    "due_at": "",
+                }
+                state["imprison_sync_pending"] = True
+                state["next_sync_at"] = ""
+                self.yinluo_set_status(identity, "slot_busy_syncing", f"{slot}号槽正在运转，重新同步阴罗幡", 5, text)
+                if synced_after_busy:
+                    return False
+                synced_after_busy = True
+                if not await self.yinluo_sync_banner(identity):
+                    return False
+                state = self.get_yinluo_state(identity)
+                state["imprison_sync_pending"] = False
+                self.save_state()
+                continue
+            if parsed.get("status") == "sha_not_enough":
+                await self.yinluo_convert_sha(identity)
+                self.yinluo_set_status(identity, "sha_not_enough", "煞气不足，已尝试化功为煞", 10, text)
+                return False
+            self.yinluo_set_status(identity, "imprison_failed", "囚禁魂魄失败", YINLUO_RETRY_SECONDS, text)
             return False
-        self.yinluo_set_status(identity, "imprison_failed", "囚禁魂魄失败", YINLUO_RETRY_SECONDS, text)
-        return False
 
     async def yinluo_collect_essence(self, identity):
         text = await self.send_yinluo_command(identity, ".一键收取精华", timeout=60)

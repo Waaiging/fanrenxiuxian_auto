@@ -40,7 +40,7 @@ STAR_GAZING_DAILY_FALLBACK_MINUTE = 59
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59
 STAR_GAZING_ROTATING_AVATARS = ["素缘子"]
-STAR_GAZING_SHIFT_TARGET = "@Waaiging"
+STAR_GAZING_SHIFT_TARGET = "@Weeguu"
 STAR_ATTRACTION_TARGET = "天雷星"
 STAR_ATTRACTION_COMMAND = f".牵引星辰 {STAR_ATTRACTION_TARGET}"
 STAR_ATTRACTION_COOLDOWN_SECONDS = 36 * 3600
@@ -85,7 +85,7 @@ from telethon import TelegramClient, events  # Telegram 客户端框架，消息
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
 from common_command_features import CommonCommandMixin, common_command_default_state
-from command_feedback import send_and_wait_feedback_common
+from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 from fishing_features import FishingMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
@@ -453,7 +453,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         }
         self.spirit_tree_avatar = SPIRIT_TREE_AVATAR
         self.identity_usernames = {
-            "主魂": ["Waaiging"],
+            "主魂": ["Weeguu"],
         }
         self.avatar_features = {
             "无咎子": {"meditation_prefix": ".推命", "training_prefix_commands": [".推命 探索", ".改命 探索"], "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True},
@@ -633,7 +633,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         """
         # 整体任务守卫：防止打断正在进行的共历心劫、观星等
         current_t = asyncio.current_task()
-        while self.active_atomic_task is not None and self.active_atomic_task != current_t:
+        while self.should_wait_for_atomic_task(message):
             await asyncio.sleep(0.5)
 
         # 暂停阻断守卫
@@ -661,6 +661,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             return msg.id
         except Exception as e:
             log.error(f"Send Error [{message}] reply_to={target_reply}: {e}")
+            await _handle_telegram_send_protection(
+                self, message, e, logger=log, identity=getattr(self, "current_identity", "主魂")
+            )
             return None
 
     async def auto_delete(self, msg):
@@ -695,7 +698,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         """
         # 整体任务守卫
         current_t = asyncio.current_task()
-        while self.active_atomic_task is not None and self.active_atomic_task != current_t:
+        while self.should_wait_for_atomic_task(message):
             await asyncio.sleep(0.5)
 
         if str(message or "").strip() == ".查看闭关" and not force_meditation_check:
@@ -2148,8 +2151,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         """
         每日任务循环。
         每天早上 7:00 执行一次，完成以下任务：
-          1. 闯塔（.闯塔，配合 .借天门势）
-          2. 宗门点卯（.宗门点卯）
+          1. 宗门点卯（.宗门点卯）
+          2. 闯塔（.闯塔，配合 .借天门势）
 
         实现细节：
           - 使用 state["done"] 记录今日已完成的任务，防止重复执行
@@ -2158,7 +2161,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         return await self.run_common_daily_tasks_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".闯塔", ".宗门点卯"],
+            [".宗门点卯", ".闯塔"],
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
             send_kwargs_func=lambda command: {"return_msg": True},
@@ -2453,6 +2456,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "last_field_training_time": "",
             "bushi_wentian_date": "", "bushi_wentian_count": 0, "bushi_wentian_exchange_count": 0,
+            "bushi_wentian_kunwu_exchanged": False,
             "nickname": "", "in_deep_meditation": False,
             "deep_meditation_end_time": "", "deep_meditation_guard_until": "",
             "meditation_restart_pending": False,
@@ -3694,7 +3698,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
         # 整体任务守卫
         current_t = asyncio.current_task()
-        while self.active_atomic_task is not None and self.active_atomic_task != current_t:
+        while self.should_wait_for_atomic_task(message):
             await asyncio.sleep(0.5)
 
         if str(message or "").strip() == ".查看闭关" and identity in self.avatars and not force_meditation_check:
@@ -3832,7 +3836,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             return
         # 整体任务守卫
         current_t = asyncio.current_task()
-        while self.active_atomic_task is not None and self.active_atomic_task != current_t:
+        while self.should_wait_for_atomic_task():
             await asyncio.sleep(0.5)
 
         if self._main_confirmed:
@@ -3889,9 +3893,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     async def restart_avatar_deep_meditation_direct(self, avatar, reason=""):
         """强行出关后只需要直接补 .深度闭关，不先走 .闭关修炼。"""
         log.info(f"[{avatar}] restarting deep meditation directly ({reason}).")
-        resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, max_retries=1)
-        resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-        if await self.record_avatar_deep_meditation_start(avatar, resp_text):
+        async with self.common_atomic_task(f"Meditation-{avatar}"):
+            resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, max_retries=1)
+            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
+            started = await self.record_avatar_deep_meditation_start(avatar, resp_text)
+        if started:
             log.info(f"[{avatar}] direct deep meditation restart complete ({reason}).")
             return True
 
@@ -4027,6 +4033,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                         log.info(f"🟢 OUT [{avatar}]:\n.稳 ({round_num}/3, try {attempt}/3)")
                     except Exception as e:
                         log.error(f"Avatar [{avatar}] heart trial: failed to send .稳 ({round_num}/3): {e}")
+                        await _handle_telegram_send_protection(
+                            self, ".稳", e, logger=log, identity=avatar
+                        )
                         return False
 
                     result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
@@ -5153,6 +5162,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 self.state["last_star_gazing_fallback_date"] = today
                 self.save_state()
 
+                if self.dashboard_command_paused(".观星", "主魂"):
+                    log.info("Star gazing fallback: .观星 paused by dashboard; skipping 23:59 fallback.")
+                    self.clear_pending_star_gazing_schedule()
+                    self.clear_star_gazing_round_claim()
+                    self.save_state()
+                    return True
+
                 log.info("Star gazing fallback: no .观星 today; sending .观星 at 23:59.")
                 self.active_atomic_task = asyncio.current_task()
                 log.info("🔒 [ATOMIC LOCK] Acquired by StarGazingFallback")
@@ -5336,6 +5352,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     return
 
                 command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
+                if self.dashboard_command_paused(command, "主魂"):
+                    log.info(f"Star gazing: {command} paused by dashboard; clearing pending shift.")
+                    self.clear_pending_star_shift()
+                    self.save_state()
+                    return
                 sent_any = False
                 for idx, send_dt in enumerate(send_times, 1):
                     wait_sec = (send_dt - datetime.now()).total_seconds()
@@ -5443,6 +5464,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             log.info(f"🔒 [ATOMIC LOCK] Acquired by AvatarStarShift-{avatar}")
             try:
                 command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
+                if self.dashboard_command_paused(command, avatar):
+                    log.info(f"Star gazing [{avatar}]: {command} paused by dashboard; skipping .改换星移.")
+                    self.clear_pending_star_shift()
+                    self.save_state()
+                    return
                 if not self.common_mark_star_shift_attempt(
                     avatar,
                     today,
@@ -5498,7 +5524,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 log.info(
                     f"Star gazing [{who}]: waiting {int(wait_sec)}s to send .观星 at {dt_to_str(send_dt)}."
                 )
-                await asyncio.sleep(wait_sec)
+                await self.sleep_then_prepare_time_critical_identity(
+                    send_dt,
+                    who,
+                    command=".观星",
+                    lead_seconds=20,
+                )
 
             today = gazing_date or datetime.now().strftime("%Y-%m-%d")
             if avatar:
@@ -5527,6 +5558,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
             # 发送 .观星
             who = avatar or "主魂"
+            if self.dashboard_command_paused(".观星", who):
+                log.info(f"Star gazing [{who}]: .观星 paused by dashboard; clearing pending schedule.")
+                self.clear_pending_star_gazing_schedule()
+                self.clear_star_gazing_round_claim()
+                self.save_state()
+                return
             self.active_atomic_task = asyncio.current_task()
             log.info(f"🔒 [ATOMIC LOCK] Acquired by StarGazing-{who}")
             try:
@@ -5601,6 +5638,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     if immediate_shift:
                         # ---- 当前窗口活跃：计算发送 .改换星移 的准确时间 ----
                         command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
+                        who = avatar or "主魂"
+                        if self.dashboard_command_paused(command, who):
+                            log.info(f"Star gazing [{who}]: {command} paused by dashboard; skipping active shift.")
+                            if not avatar:
+                                self.clear_pending_star_shift()
+                            self.save_state()
+                            return
                         current_manifest_dt = manifest_dt
                         if current_manifest_dt is None:
                             current_manifest_hour = (datetime.now().hour // STAR_GAZING_INTERVAL_HOURS) * STAR_GAZING_INTERVAL_HOURS
@@ -6172,25 +6216,20 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     async def restart_avatar_deep_meditation_after_star(self, avatar, reason):
             try:
                 log.info(f"Avatar [{avatar}] restarting deep meditation after star action: {reason}")
-                check_resp = await self.send_and_wait_feedback_identity(avatar, ".查看闭关", timeout=30, max_retries=1)
-                check_text = self.response_text(check_resp)
-                if is_deep_meditation_ongoing_response(check_text) or "预计还需" in check_text:
-                    cd = self.parse_wait_time(check_text)
-                    if cd > 0:
-                        self.update_avatar_states(
-                            avatar,
-                            self.meditation_active_state_values(add_seconds_str(now_str(), cd)),
-                        )
-                    return
-                await asyncio.sleep(3)
-                cultivation_resp = await self.send_and_wait_feedback_identity(avatar, ".闭关修炼", timeout=45, max_retries=1)
-                if self.defer_meditation_after_cultivation_cooldown(
-                    avatar, self.response_text(cultivation_resp), f"[{avatar}] star restart .闭关修炼"
-                ):
-                    return
-                await asyncio.sleep(3)
-                deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关", timeout=60, max_retries=1)
-                await self.record_avatar_deep_meditation_start(avatar, self.response_text(deep_resp))
+                result = await self.run_avatar_meditation_restart_chain(
+                    avatar,
+                    source=f"star restart {reason}",
+                    check_timeout=30,
+                    check_retries=1,
+                    cultivation_timeout=45,
+                    cultivation_retries=1,
+                    deep_timeout=60,
+                    deep_retries=1,
+                )
+                if result.get("status") == "unknown_check":
+                    notify_unrecognized_response(
+                        self, ".查看闭关", result.get("text", ""), log, f"观星后闭关/{avatar}/{reason}"
+                    )
             except Exception as e:
                 log.error(f"Avatar [{avatar}] failed to restart deep meditation after star action: {e}")
 
@@ -6434,6 +6473,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 )
                 for avatar in FORMATION_ASSIST_AVATARS:
                     if not self.avatar_features.get(avatar, {}).get("formation_assist"):
+                        continue
+                    if self.dashboard_command_paused(".助阵", avatar):
+                        log.info(f"Avatar [{avatar}] assist skipped: .助阵 paused by dashboard.")
                         continue
                     a_state = self.get_avatar_state(avatar)
                     next_form = a_state.get("next_formation_time", "")

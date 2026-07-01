@@ -11,6 +11,7 @@
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 等脚本共享使用。
 """
 import asyncio
+import re
 import time
 from datetime import datetime
 
@@ -31,7 +32,207 @@ from log_utils import (
     schedule_command_auto_delete, # 安排消息自动删除
     wait_for_bot_activity_before_send,  # 等待机器人活跃后再发消息
     send_text_alert,              # 异常报警发送
+    force_command_guard_block,     # 响应异常时强制暂停当前指令
 )
+
+REPEATED_RESPONSE_GUARD_WINDOW_SECONDS = 3 * 60
+REPEATED_RESPONSE_GUARD_LIMIT = 3
+REPEATED_RESPONSE_GUARD_BLOCK_SECONDS = 60 * 60
+REPEATED_RESPONSE_GUARD_EXCLUDED_PREFIXES = (
+    ".查看闭关",
+    ".我的状态",
+    ".状态",
+    ".鱼篓",
+    ".钓鱼状态",
+    ".我的洞府",
+)
+TIMED_RESPONSE_GUARD_KEYWORDS = (
+    "冷却",
+    "剩余",
+    "还需",
+    "尚需",
+    "预计还需",
+    "后再",
+    "后可",
+    "请在",
+    "调息",
+    "休整",
+)
+TIMED_RESPONSE_GUARD_EXCLUDED_PREFIXES = (
+    ".查看闭关",
+    ".我的状态",
+    ".状态",
+    ".鱼篓",
+    ".钓鱼状态",
+    ".我的洞府",
+    ".我的阴罗幡",
+    ".我的侍妾",
+    ".观星台",
+)
+
+TELEGRAM_WRITE_RESTRICTED_PATTERNS = (
+    "CHAT_WRITE_FORBIDDEN",
+    "USER_BANNED_IN_CHANNEL",
+    "CHAT_SEND_PLAIN_FORBIDDEN",
+    "CHAT_ADMIN_REQUIRED",
+    "You can't write in this chat",
+    "You're banned from sending messages",
+    "banned from sending messages",
+    "not enough rights to send",
+)
+TELEGRAM_FLOOD_WAIT_PATTERNS = (
+    "FLOOD_WAIT",
+    "A wait of",
+    "seconds is required",
+)
+
+
+def _normalize_repeated_response_text(text):
+    clean = str(text or "").replace("**", "").replace("`", "")
+    clean = re.sub(r"^\s*\[Avatar:\s*[^\]]+\]\s*", "", clean, flags=re.I)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:500]
+
+
+def _record_repeated_response_guard(actor, message, response_text, logger=None, identity=None):
+    command = str(message or "").strip()
+    if not command or any(command.startswith(prefix) for prefix in REPEATED_RESPONSE_GUARD_EXCLUDED_PREFIXES):
+        return False
+    signature = _normalize_repeated_response_text(response_text)
+    if len(signature) < 8:
+        return False
+
+    now = time.monotonic()
+    current_id = str(identity or getattr(actor, "current_identity", "主魂") or "主魂")
+    key = f"{current_id}\u001f{command}"
+    guard = getattr(actor, "_repeated_response_guard", None)
+    if guard is None:
+        guard = {}
+        setattr(actor, "_repeated_response_guard", guard)
+
+    entry = guard.get(key) or {}
+    if entry.get("signature") == signature and now - float(entry.get("first_seen", now)) <= REPEATED_RESPONSE_GUARD_WINDOW_SECONDS:
+        entry["count"] = int(entry.get("count") or 1) + 1
+        entry["last_seen"] = now
+    else:
+        entry = {"signature": signature, "count": 1, "first_seen": now, "last_seen": now, "alerted": False}
+    guard[key] = entry
+
+    if entry["count"] < REPEATED_RESPONSE_GUARD_LIMIT or entry.get("alerted"):
+        return False
+
+    entry["alerted"] = True
+    preview = signature[:120]
+    reason_text = (
+        f"{REPEATED_RESPONSE_GUARD_WINDOW_SECONDS // 60}分钟内同一回复重复 "
+        f"{entry['count']} 次，疑似指令状态未推进，已暂停该命令 "
+        f"{REPEATED_RESPONSE_GUARD_BLOCK_SECONDS // 60} 分钟。回复摘录：{preview}"
+    )
+    force_command_guard_block(
+        actor,
+        command,
+        REPEATED_RESPONSE_GUARD_BLOCK_SECONDS,
+        logger=logger,
+        identity=current_id,
+        reason="repeated_response",
+        alert=True,
+        reason_text=reason_text,
+    )
+    return True
+
+
+def _record_timed_response_guard(actor, message, response_text, logger=None, identity=None):
+    command = str(message or "").strip()
+    if not command or any(command.startswith(prefix) for prefix in TIMED_RESPONSE_GUARD_EXCLUDED_PREFIXES):
+        return False
+    clean = str(response_text or "").replace("**", "").replace("`", "")
+    if not any(keyword in clean for keyword in TIMED_RESPONSE_GUARD_KEYWORDS):
+        return False
+    parser = getattr(actor, "parse_wait_time", None)
+    if not callable(parser):
+        return False
+    try:
+        wait = int(parser(clean) or 0)
+    except Exception:
+        wait = 0
+    if wait <= 0:
+        return False
+
+    wait = min(wait + 60, 7 * 24 * 3600)
+    current_id = str(identity or getattr(actor, "current_identity", "主魂") or "主魂")
+    force_command_guard_block(
+        actor,
+        command,
+        wait,
+        logger=logger,
+        identity=current_id,
+        reason="timed_response",
+        alert=False,
+    )
+    if logger:
+        logger.info(
+            f"Timed response parsed for [{command}] ({current_id}); "
+            f"backing off {wait}s instead of retrying blindly."
+        )
+    return True
+
+
+def _is_telegram_send_protection_error(exc):
+    name = exc.__class__.__name__
+    text = f"{name}: {exc}"
+    if any(pattern in text for pattern in TELEGRAM_WRITE_RESTRICTED_PATTERNS):
+        return True, "write_restricted"
+    if any(pattern in text for pattern in TELEGRAM_FLOOD_WAIT_PATTERNS):
+        return True, "flood_wait"
+    return False, ""
+
+
+async def _handle_telegram_send_protection(actor, message, exc, logger=None, identity=None):
+    matched, reason = _is_telegram_send_protection_error(exc)
+    if not matched:
+        return False
+
+    current_id = str(identity or getattr(actor, "current_identity", "主魂") or "主魂")
+    try:
+        setattr(actor, "is_running", False)
+        setattr(actor, "_telegram_send_protection_stop", {
+            "identity": current_id,
+            "command": str(message or ""),
+            "reason": reason,
+            "error": str(exc),
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        state = getattr(actor, "state", None)
+        if isinstance(state, dict):
+            state["telegram_send_protection_stop"] = getattr(actor, "_telegram_send_protection_stop")
+            save_state = getattr(actor, "save_state", None)
+            if callable(save_state):
+                save_state()
+    except Exception:
+        pass
+
+    if logger:
+        logger.critical(
+            f"Telegram send protection triggered; stopping script. "
+            f"identity={current_id}, command={message!r}, reason={reason}, error={exc}"
+        )
+
+    try:
+        await send_text_alert(
+            actor,
+            "Telegram发送保护",
+            (
+                f"账号身份：{current_id}\n"
+                f"指令：{message}\n"
+                f"原因：{reason}\n"
+                f"错误：{exc}\n"
+                "已自动停止当前脚本，避免继续触发 Telegram 限制。"
+            ),
+            logger=logger,
+        )
+    except Exception:
+        pass
+    return True
 
 
 async def send_and_wait_feedback_common(
@@ -159,6 +360,7 @@ async def send_and_wait_feedback_common(
                 record_recent_profile_command(actor, msg_id, message, _identity or "主魂", source="auto")
             except Exception as exc:
                 logger.error(f"Send Error [{message}] reply_to={target_reply}: {exc}")
+                await _handle_telegram_send_protection(actor, message, exc, logger=logger, identity=getattr(actor, "current_identity", "主魂"))
                 break
 
             actor.last_sent_id = msg_id
@@ -189,6 +391,12 @@ async def send_and_wait_feedback_common(
                 )
                 record_cultivation_delta_from_text(
                     actor, resp_text, identity=_identity or "主魂", logger=logger, source=message, msg=final_resp_msg
+                )
+                _record_timed_response_guard(
+                    actor, message, resp_text, logger=logger, identity=_identity or "主魂"
+                )
+                _record_repeated_response_guard(
+                    actor, message, resp_text, logger=logger, identity=_identity or "主魂"
                 )
                 if hasattr(actor, "record_identity_yuanying_recovery_from_text"):
                     actor.record_identity_yuanying_recovery_from_text(

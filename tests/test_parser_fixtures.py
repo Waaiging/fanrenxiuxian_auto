@@ -12,6 +12,7 @@ from unittest.mock import patch
 import concubine_features
 import common_command_features
 import auto_reply_features
+import command_feedback
 import cultivator_xiaohao
 import dashboard_server
 import fishing_features
@@ -39,6 +40,7 @@ from fishing_features import (
     parse_fishing_start,
     parse_missing_resources,
     parse_nest_response,
+    parse_rod_gift_response,
     parse_rod_response,
     parse_trade_listing_response,
     parse_trade_purchase_response,
@@ -74,6 +76,15 @@ class DummyConcubine(ConcubineMixin):
 
     def parse_wait_time(self, text, *args, **kwargs):
         return parse_duration_seconds(text)
+
+
+class DummyAtomicConcubine(ConcubineMixin):
+    def __init__(self):
+        self.active_atomic_task = None
+
+    def time_critical_identity_command(self, command):
+        command = str(command or "").strip()
+        return command == ".观星" or command.startswith(".观星 ") or command == ".改换星移" or command.startswith(".改换星移 ")
 
 
 class DummyCommon(CommonCommandMixin):
@@ -139,6 +150,205 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_time_critical_wait_clears_stale_star_schedule(self):
+        actor = DummyAvatarCommon()
+        avatar = actor.get_avatar_state("缘生子")
+        stale = add_seconds_str(now_str(), -600)
+        avatar["pending_star_gazing_target_time"] = stale
+        avatar["next_star_gazing_time"] = stale
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(common_command_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertEqual(actor.time_critical_identity_wait("缘生子"), -1)
+
+        self.assertEqual(avatar["pending_star_gazing_target_time"], "")
+        self.assertEqual(avatar["next_star_gazing_time"], "")
+
+    def test_time_critical_wait_keeps_recent_star_schedule_due(self):
+        actor = DummyAvatarCommon()
+        avatar = actor.get_avatar_state("缘生子")
+        avatar["pending_star_gazing_target_time"] = add_seconds_str(now_str(), -30)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(common_command_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertEqual(actor.time_critical_identity_wait("缘生子"), 0)
+
+        self.assertNotEqual(avatar["pending_star_gazing_target_time"], "")
+
+    def test_concubine_atomic_batch_blocks_regular_identity_switches(self):
+        async def scenario():
+            actor = DummyAtomicConcubine()
+            acquired = asyncio.Event()
+            release = asyncio.Event()
+
+            async def hold_batch():
+                async with concubine_features._ConcubineAtomicTask(actor, "ConcubineChain-素心子"):
+                    acquired.set()
+                    await release.wait()
+
+            task = asyncio.create_task(hold_batch())
+            await acquired.wait()
+            try:
+                self.assertTrue(actor.should_wait_for_atomic_task(".野外历练"))
+                self.assertTrue(actor.should_wait_for_atomic_task(".侍妾远航 冒险"))
+            finally:
+                release.set()
+                await task
+
+            self.assertFalse(actor.should_wait_for_atomic_task(".野外历练"))
+
+        asyncio.run(scenario())
+
+    def test_concubine_atomic_batch_allows_star_gazing_interrupt(self):
+        async def scenario():
+            actor = DummyAtomicConcubine()
+            acquired = asyncio.Event()
+            release = asyncio.Event()
+
+            async def hold_batch():
+                async with concubine_features._ConcubineAtomicTask(actor, "ConcubineChain-素心子"):
+                    acquired.set()
+                    await release.wait()
+
+            task = asyncio.create_task(hold_batch())
+            await acquired.wait()
+            try:
+                self.assertFalse(actor.should_wait_for_atomic_task(".观星"))
+                self.assertFalse(actor.should_wait_for_atomic_task(".改换星移 @Target"))
+
+                actor.active_atomic_task = asyncio.current_task()
+                self.assertTrue(actor.should_wait_for_atomic_task(".野外历练"))
+                self.assertFalse(actor.should_wait_for_atomic_task(".观星"))
+            finally:
+                release.set()
+                await task
+
+        asyncio.run(scenario())
+
+    def test_meditation_restart_chain_blocks_identity_switches(self):
+        async def scenario():
+            class DummyMeditation(CommonCommandMixin, ConcubineMixin):
+                def __init__(self):
+                    self.state = {"avatars": {"素心子": {}}}
+                    self.active_atomic_task = None
+                    self.sent = []
+                    self.checked = asyncio.Event()
+                    self.release_check = asyncio.Event()
+
+                def get_avatar_state(self, avatar):
+                    return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+                def save_state(self):
+                    pass
+
+                def response_text(self, resp):
+                    return str(resp or "")
+
+                def parse_wait_time(self, text):
+                    return 8 * 3600 if "8小时" in str(text or "") else 0
+
+                def update_avatar_states(self, avatar, values):
+                    self.get_avatar_state(avatar).update(values)
+
+                def set_avatar_state(self, avatar, key, value):
+                    self.get_avatar_state(avatar)[key] = value
+
+                async def record_avatar_deep_meditation_start(self, avatar, response_text):
+                    self.update_avatar_states(avatar, self.meditation_active_state_values("2099-01-01 00:00:00"))
+                    return True
+
+                async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                    self.sent.append((identity, command))
+                    if command == ".查看闭关":
+                        self.checked.set()
+                        await self.release_check.wait()
+                        return "你并未处于深度闭关之中。"
+                    if command == ".闭关修炼":
+                        return "闭关成功，本次修为增加 100 点。"
+                    if command == ".深度闭关":
+                        return "你已进入深度闭关状态，神魂将自行吐纳 **8小时**。"
+                    raise AssertionError(f"unexpected command: {command}")
+
+            actor = DummyMeditation()
+            task = asyncio.create_task(actor.run_avatar_meditation_restart_chain("素心子"))
+            await actor.checked.wait()
+            self.assertTrue(actor.should_wait_for_atomic_task(".野外历练"))
+            actor.release_check.set()
+            result = await task
+            self.assertEqual(result["status"], "started")
+            self.assertEqual(actor.sent, [
+                ("素心子", ".查看闭关"),
+                ("素心子", ".闭关修炼"),
+                ("素心子", ".深度闭关"),
+            ])
+            self.assertFalse(actor.should_wait_for_atomic_task(".野外历练"))
+
+        asyncio.run(scenario())
+
+    def test_avatar_field_training_blocks_switch_until_edited_settlement(self):
+        async def scenario():
+            class DummyFieldTraining(CommonCommandMixin, ConcubineMixin):
+                def __init__(self):
+                    self.state = {"avatars": {"缘生子": {"next_field_training_time": "", "last_field_training_time": ""}}}
+                    self.active_atomic_task = None
+                    self.sent = []
+                    self.waiting_for_edit = asyncio.Event()
+                    self.release_edit = asyncio.Event()
+
+                def get_avatar_state(self, avatar):
+                    return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+                def save_state(self):
+                    pass
+
+                def response_text(self, resp):
+                    return getattr(resp, "text", "") if hasattr(resp, "text") else str(resp or "")
+
+                def parse_wait_time(self, text):
+                    return 0
+
+                def update_avatar_states(self, avatar, values):
+                    self.get_avatar_state(avatar).update(values)
+
+                def set_avatar_state(self, avatar, key, value):
+                    self.get_avatar_state(avatar)[key] = value
+
+                def field_training_plan(self, avatar):
+                    return field_training_plan_from_features(avatar, {"training_cmd": ".野外历练"})
+
+                async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                    self.sent.append((identity, command))
+                    return SimpleNamespace(
+                        id=7001,
+                        text="**【野外历练】**\n@foo 选择【均衡】策略，正向荒野深处行去...",
+                    )
+
+                async def wait_for_field_training_settlement(self, resp, identity="主魂", **kwargs):
+                    self.waiting_for_edit.set()
+                    await self.release_edit.wait()
+                    return SimpleNamespace(
+                        id=7001,
+                        text="**【野外历练 · 灵机暗藏】**\n@foo 采得一份机缘，获得修为 **+157**。",
+                    )
+
+                async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
+                    self.sent.append((identity, ".卜筮问天"))
+                    return True
+
+            actor = DummyFieldTraining()
+            task = asyncio.create_task(actor.common_avatar_field_training_tick("缘生子"))
+            await actor.waiting_for_edit.wait()
+            self.assertTrue(actor.should_wait_for_atomic_task(".查看闭关"))
+            actor.release_edit.set()
+            self.assertEqual(await task, 5)
+            self.assertEqual(actor.sent, [("缘生子", ".野外历练"), ("缘生子", ".卜筮问天")])
+            self.assertFalse(actor.should_wait_for_atomic_task(".查看闭关"))
+            self.assertTrue(actor.get_avatar_state("缘生子")["next_field_training_time"])
+
+        asyncio.run(scenario())
+
     def test_auto_exchange_wraps_exchange_with_concubine_place_and_recall(self):
         actions = []
 
@@ -196,6 +406,85 @@ class ParserFixtureTests(unittest.TestCase):
         )
         self.assertEqual(delays[-2:], [5, 5])
         self.assertIsNone(actor.active_atomic_task)
+
+    def test_auto_merchant_ignores_other_username(self):
+        class DummyActor:
+            def __init__(self):
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = []
+                self.avatar_usernames = {}
+                self.identity_usernames = {"主魂": ["Waaiging"]}
+                self.my_info = SimpleNamespace(id=42, username="Waaiging")
+
+        class FakeEvent:
+            def __init__(self):
+                self.message = SimpleNamespace(
+                    id=421,
+                    text="【天机异动 · 异界商人】请 @AliceI005 速用 .查看货品 与其交易！",
+                    entities=[],
+                    reply_to=None,
+                )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        handled = asyncio.run(auto_reply_features.maybe_auto_reply_exchange(DummyActor(), FakeEvent()))
+        self.assertFalse(handled)
+
+    def test_auto_merchant_buys_priority_goods_for_mentioned_identity(self):
+        actions = []
+        goods_text = """
+【异界商人·玄天】（将在 3599 分钟后离去）
+1. 尘封的储物袋 (剩余: 1)
+2. 掌天瓶的仿制品 (剩余: 1)
+3. 九天息壤 (剩余: 1)
+使用 .购买商品 <编号> 进行交易。
+"""
+
+        class DummyActor:
+            def __init__(self):
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = []
+                self.avatar_usernames = {}
+                self.identity_usernames = {"主魂": ["Waaiging"]}
+                self.my_info = SimpleNamespace(id=42, username="Waaiging")
+                self.current_identity = "主魂"
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                actions.append((identity, command, kwargs.get("reply_to"), kwargs.get("max_retries")))
+                if command == ".查看货品":
+                    return SimpleNamespace(id=777, text=goods_text)
+                return SimpleNamespace(id=778 + len(actions), text="购买成功，宝物已收入储物袋。")
+
+        class FakeEvent:
+            def __init__(self):
+                self.message = SimpleNamespace(
+                    id=422,
+                    text="【天机异动 · 异界商人】请 @Waaiging 速用 .查看货品 与其交易！",
+                    entities=[],
+                    reply_to=None,
+                )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        async def fake_sleep(seconds):
+            return None
+
+        actor = DummyActor()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            merchant_state = os.path.join(tmpdir, "merchant_auto_reply_state.json")
+            with patch("auto_reply_features.asyncio.sleep", new=fake_sleep), \
+                    patch.object(auto_reply_features, "MERCHANT_STATE_FILE", merchant_state):
+                handled = asyncio.run(auto_reply_features.maybe_auto_reply_exchange(actor, FakeEvent()))
+
+        self.assertTrue(handled)
+        self.assertEqual(actions, [
+            ("主魂", ".查看货品", None, 0),
+            ("主魂", ".购买商品 2", None, 0),
+            ("主魂", ".购买商品 3", None, 0),
+            ("主魂", ".购买商品 1", None, 0),
+        ])
 
     def test_field_training_plan_preserves_identity_specific_prefixes(self):
         plan = field_training_plan_from_features(
@@ -427,6 +716,68 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rewards.get("法则碎片·木"), 2)
         self.assertEqual(rewards.get("九转凝魂丹丹方"), 1)
         self.assertNotIn("探寻成功", rewards)
+
+    def test_daily_reward_ignores_rift_intermediate_edit(self):
+        actor = DummyAvatarCommon()
+        actor.command_avatar_map = {4200: "缘生子"}
+        actor.feedback_commands = {4200: ".探寻裂缝"}
+        pending = "元婴在无尽的虚空中穿行，成功捕获了几缕逸散的法则本源！"
+        final = (
+            "【探寻成功】\n"
+            "你的元婴满载而归，为你带来了：【法则碎片·土】, 【法则碎片·空间】！"
+        )
+
+        self.assertFalse(actor.maybe_record_daily_reward_from_edited_message(
+            DummyMessage(3300, text=pending, reply_to_msg_id=4200),
+            pending,
+        ))
+        self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(
+            DummyMessage(3300, text=final, reply_to_msg_id=4200),
+            final,
+        ))
+
+        events = actor.state["daily_reward_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["rewards"].get("法则碎片·土"), 1)
+        self.assertEqual(events[0]["rewards"].get("法则碎片·空间"), 1)
+
+    def test_daily_reward_rift_ignores_destiny_prefix(self):
+        actor = DummyAvatarCommon()
+        text = (
+            "【探寻成功】\n"
+            "命盘【贪狼】照命，主偏财夺势，闭关奇遇与探寻收获更盛。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n"
+            "【天星偏转】 凶险偏移，珍稀显化上扬\n"
+            "你的元婴满载而归，为你带来了：【法则碎片·火】, 【法则碎片·风】, 【法则碎片·金】！"
+        )
+        reward_text = actor.daily_reward_parse_text_for_command(".探寻裂缝", text)
+        rewards = actor.parse_reward_items_from_text(reward_text)
+
+        self.assertEqual(rewards, {
+            "法则碎片·火": 1,
+            "法则碎片·风": 1,
+            "法则碎片·金": 1,
+        })
+
+    def test_daily_reward_records_rift_weakness_failure_without_rewards(self):
+        actor = DummyAvatarCommon()
+        actor.command_avatar_map = {4300: "主魂"}
+        actor.feedback_commands = {4300: ".探寻裂缝"}
+        text = (
+            "【大凶·虚空噬体】\n"
+            "你运气不佳，竟一头撞入了空间裂缝最深处的风暴核心！"
+            "无可抵挡的撕裂之力瞬间将你的肉身化为齑粉！\n"
+            "【元婴遁逃·虚弱】\n"
+            "但你的神魂遭受重创，已陷入 6小时 的【虚弱期】！"
+        )
+
+        self.assertTrue(actor.maybe_record_daily_reward_from_edited_message(
+            DummyMessage(3400, text=text, reply_to_msg_id=4300),
+            text,
+        ))
+        today = datetime.now().strftime("%Y-%m-%d")
+        summary = actor.build_daily_reward_summary_text(today)
+        self.assertIn("\\- *\\.探寻裂缝*：1 次（失败 1）", summary)
 
     def test_daily_reward_field_training_beast_encounter_can_succeed(self):
         actor = DummyAvatarCommon()
@@ -1251,8 +1602,8 @@ class ParserFixtureTests(unittest.TestCase):
         fishing.update({
             "active": True,
             "active_due_at": add_seconds_str(now_str(), -5),
-            "today_count": 7,
-            "daily_limit": 20,
+            "today_count": 3,
+            "daily_limit": 5,
         })
 
         wait = asyncio.run(actor.fishing_switch_wait_or_raise_due(
@@ -1265,7 +1616,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(wait, 0)
         self.assertEqual(actor.commands, [".提竿"])
         self.assertFalse(fishing["active"])
-        self.assertEqual(fishing["today_count"], 8)
+        self.assertEqual(fishing["today_count"], 4)
         self.assertEqual(fishing["last_status"], "caught")
 
     def test_fishing_yields_to_overdue_same_identity_command(self):
@@ -1302,8 +1653,8 @@ class ParserFixtureTests(unittest.TestCase):
         fishing.update({
             "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
             "rod_owned": True,
-            "today_count": 7,
-            "daily_limit": 20,
+            "today_count": 4,
+            "daily_limit": 5,
             "next_action_at": "",
             "active": False,
         })
@@ -1404,17 +1755,17 @@ class ParserFixtureTests(unittest.TestCase):
     def test_fishing_parsers_cover_core_flow(self):
         basket = parse_fishing_basket(
             "**【鱼篓】**\n"
-            "青竹钓竿：**已持有**\n"
+            "鱼竿：**青竹钓竿（每日 5 竿）**\n"
             "钓术：**Lv.0 凡竿**（43熟练度）\n"
-            "今日竿数：**14/20**\n"
+            "今日竿数：**4/5**\n"
             "当前窝料：**灵草窝**（剩余 2 竿）\n\n"
             "**鱼饵**\n- 妖血饵 x6\n- 灵虫饵 x3\n\n"
             "**鱼获**\n- 青鳞小鲫 x7\n"
         )
         self.assertTrue(basket["matched"])
         self.assertTrue(basket["rod_owned"])
-        self.assertEqual(basket["today_count"], 14)
-        self.assertEqual(basket["daily_limit"], 20)
+        self.assertEqual(basket["today_count"], 4)
+        self.assertEqual(basket["daily_limit"], 5)
         self.assertEqual(basket["current_nest"], "灵草窝")
         self.assertEqual(basket["current_nest_remaining"], 2)
         self.assertEqual(basket["baits"]["灵虫饵"], 3)
@@ -1487,6 +1838,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(listing["status"], "success")
         self.assertEqual(listing["listing_id"], "23733")
         self.assertEqual(parse_trade_purchase_response("购买成功，获得了【青竹钓竿】x1。")["status"], "success")
+        self.assertEqual(
+            parse_trade_purchase_response("购买失败！你还缺少：【青竹钓竿】x1。")["status"],
+            "missing_required_rod",
+        )
+        self.assertEqual(parse_rod_gift_response("赠送成功！你将【青竹钓竿】x1赠予了对方。")["status"], "success")
 
     def test_fishing_control_text_is_bare_and_limited(self):
         self.assertEqual(parse_fishing_control_text("钓鱼 灵米饵"), "灵米饵")
@@ -1542,8 +1898,8 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
-                if command == ".买鱼饵 灵虫饵 20":
-                    return "**【渔具铺】**\n你购得 **【灵虫饵】x20**。"
+                if command == ".买鱼饵 灵虫饵 5":
+                    return "**【渔具铺】**\n你购得 **【灵虫饵】x5**。"
                 if command == ".钓鱼 灵虫饵":
                     return (
                         "**【灵溪垂钓】**\n"
@@ -1555,13 +1911,13 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         fishing = actor.get_fishing_state("主魂")
         fishing["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
-        fishing["daily_limit"] = 20
+        fishing["daily_limit"] = 5
         self.assertTrue(asyncio.run(actor.fishing_ensure_daily_bait("主魂")))
         self.assertTrue(asyncio.run(actor.fishing_start_round("主魂")))
-        self.assertEqual(actor.commands, [".买鱼饵 灵虫饵 20", ".钓鱼 灵虫饵"])
+        self.assertEqual(actor.commands, [".买鱼饵 灵虫饵 5", ".钓鱼 灵虫饵"])
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(fishing["active_bait"], "灵虫饵")
-        self.assertEqual(fishing["baits"]["灵虫饵"], 19)
+        self.assertEqual(fishing["baits"]["灵虫饵"], 4)
 
     def test_fishing_existing_nest_reply_syncs_without_incrementing_count(self):
         class DummyFishing(FishingMixin):
@@ -1581,7 +1937,7 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         fishing = actor.get_fishing_state("主魂")
         fishing["last_sync_date"] = datetime.now().strftime("%Y-%m-%d")
-        fishing["nest_counts"] = {"灵草窝": 1}
+        fishing["nest_counts"] = {}
 
         self.assertTrue(asyncio.run(actor.fishing_try_nest("主魂")))
         self.assertEqual(actor.commands, [".打窝 灵草窝"])
@@ -1724,6 +2080,97 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.get_fishing_state("缘生子")["rod_owned"])
         self.assertEqual(actor.get_fishing_auto_state()["rod_holder"], "缘生子")
 
+    def test_fishing_auto_transfer_rod_missing_rod_invalidates_stale_holder(self):
+        class DummyFishing(FishingMixin):
+            account_key = "xiaohao"
+            avatars = ["问心子", "素心子"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {},
+                    "fishing_auto": {"rod_holder": "主魂"},
+                    "avatars": {"问心子": {}, "素心子": {}},
+                }
+                self.commands = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append((identity, command))
+                if identity == "素心子" and command == ".上架 凝血草 换 青竹钓竿*1":
+                    return "上架成功，挂单ID：23842。"
+                if identity == "主魂" and command == ".购买 23842":
+                    return "购买失败！你还缺少：【青竹钓竿】x1。"
+                raise AssertionError(f"unexpected command: {identity} {command}")
+
+        actor = DummyFishing()
+        actor.get_fishing_state("主魂")["rod_owned"] = True
+        actor.get_fishing_state("问心子")["rod_owned"] = True
+        actor.get_fishing_state("素心子")["rod_owned"] = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "rod_holder": {"account": "xiaohao", "identity": "主魂"},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertFalse(asyncio.run(actor.fishing_auto_transfer_rod("主魂", "素心子")))
+                global_state = fishing_features._load_fishing_auto_global_state()
+
+        self.assertEqual(actor.commands, [
+            ("素心子", ".上架 凝血草 换 青竹钓竿*1"),
+            ("主魂", ".购买 23842"),
+        ])
+        self.assertFalse(actor.get_fishing_state("主魂")["rod_owned"])
+        self.assertTrue(actor.get_fishing_state("问心子")["rod_owned"])
+        self.assertEqual(actor.get_fishing_auto_state()["rod_holder"], "")
+        self.assertEqual(global_state["rod_holder"], {})
+        self.assertEqual(asyncio.run(actor.fishing_auto_find_rod_holder(scan=False)), "问心子")
+
+    def test_fishing_auto_transfer_rod_to_main_uses_reply_gift(self):
+        class FakeClient:
+            async def get_messages(self, chat_id, limit=200):
+                return [SimpleNamespace(id=9101, sender_id=8219248252)]
+
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["缘生子"]
+            target_chat_id = -100123456
+
+            def __init__(self):
+                self.state = {"fishing": {}, "fishing_auto": {}, "avatars": {"缘生子": {}}}
+                self.commands = []
+                self.client = FakeClient()
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60, **kwargs):
+                self.commands.append((identity, command, kwargs.get("reply_to")))
+                if identity == "缘生子" and command == ".赠送 青竹钓竿*1" and kwargs.get("reply_to") == 9101:
+                    return "赠送成功！你将【青竹钓竿】x1赠予了对方。"
+                raise AssertionError(f"unexpected command: {identity} {command} {kwargs}")
+
+        actor = DummyFishing()
+        actor.get_fishing_state("缘生子")["rod_owned"] = True
+        actor.get_fishing_state("主魂")["rod_owned"] = False
+
+        self.assertTrue(asyncio.run(actor.fishing_auto_transfer_rod("缘生子", "主魂")))
+        self.assertEqual(actor.commands, [("缘生子", ".赠送 青竹钓竿*1", 9101)])
+        self.assertFalse(actor.get_fishing_state("缘生子")["rod_owned"])
+        self.assertTrue(actor.get_fishing_state("主魂")["rod_owned"])
+        self.assertEqual(actor.get_fishing_auto_state()["rod_holder"], "主魂")
+
     def test_fishing_auto_cross_account_transfer_listing_purchase_and_adopt(self):
         class DummyFishing(FishingMixin):
             def __init__(self, account_key, avatars):
@@ -1780,6 +2227,68 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sub.commands, [("厚土", ".上架 凝血草 换 青竹钓竿*1")])
         self.assertEqual(main.commands, [("主魂", ".购买 23733")])
 
+    def test_fishing_auto_cross_account_transfer_to_main_uses_reply_gift(self):
+        class FakeClient:
+            async def get_messages(self, chat_id, limit=200):
+                return [SimpleNamespace(id=9201, sender_id=8615886738)]
+
+        class DummyFishing(FishingMixin):
+            def __init__(self, account_key, avatars):
+                self.account_key = account_key
+                self.avatars = avatars
+                self.target_chat_id = -100123456
+                self.client = FakeClient()
+                self.state = {
+                    "fishing": {},
+                    "fishing_auto": {},
+                    "avatars": {avatar: {} for avatar in avatars},
+                }
+                self.commands = []
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+            async def send_fishing_command(self, identity, command, timeout=60, **kwargs):
+                self.commands.append((identity, command, kwargs.get("reply_to")))
+                if self.account_key == "main" and identity == "素缘子" and command == ".赠送 青竹钓竿*1":
+                    if kwargs.get("reply_to") != 9201:
+                        raise AssertionError(f"unexpected reply_to: {kwargs.get('reply_to')}")
+                    return "赠送成功！你将【青竹钓竿】x1赠予了对方。"
+                raise AssertionError(f"unexpected command: {self.account_key} {identity} {command} {kwargs}")
+
+        main = DummyFishing("main", ["素缘子"])
+        sub = DummyFishing("sub", ["厚土"])
+        main.get_fishing_state("素缘子")["rod_owned"] = True
+        sub.get_fishing_state("主魂")["rod_owned"] = False
+        holder = {"account": "main", "identity": "素缘子"}
+        target = {"account": "sub", "identity": "主魂"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                self.assertTrue(asyncio.run(sub.fishing_auto_publish_global_listing(holder, target)))
+                transfer = fishing_features._load_fishing_auto_global_state()["transfer"]
+                self.assertEqual(transfer["status"], "gift_requested")
+                self.assertEqual(transfer["reply_to_msg_id"], 9201)
+
+                self.assertTrue(asyncio.run(main.fishing_auto_handle_global_purchase()))
+                global_state = fishing_features._load_fishing_auto_global_state()
+                self.assertEqual(global_state["transfer"]["status"], "gifted")
+                self.assertFalse(main.get_fishing_state("素缘子")["rod_owned"])
+                self.assertEqual(global_state["rod_holder"]["account"], "sub")
+                self.assertEqual(global_state["rod_holder"]["identity"], "主魂")
+
+                self.assertTrue(sub.fishing_auto_adopt_purchased_global_rod(target))
+                global_state = fishing_features._load_fishing_auto_global_state()
+                self.assertEqual(global_state["transfer"], {})
+                self.assertTrue(sub.get_fishing_state("主魂")["rod_owned"])
+
+        self.assertEqual(sub.commands, [])
+        self.assertEqual(main.commands, [("素缘子", ".赠送 青竹钓竿*1", 9201)])
+
     def test_fishing_auto_target_lists_directly_when_global_holder_is_remote(self):
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -1791,11 +2300,11 @@ class ParserFixtureTests(unittest.TestCase):
                 self.state = {
                     "fishing": {
                         "last_sync_date": today,
-                        "today_count": 20,
-                        "daily_limit": 20,
+                        "today_count": 5,
+                        "daily_limit": 5,
                     },
                     "fishing_auto": {"preferred_bait": "灵米饵"},
-                    "avatars": {"厚土": {"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 20}}},
+                    "avatars": {"厚土": {"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 5}}},
                 }
                 self.commands = []
 
@@ -1822,20 +2331,20 @@ class ParserFixtureTests(unittest.TestCase):
                 }, f, ensure_ascii=False)
             with open(os.path.join(tmpdir, "state_main.json"), "w", encoding="utf-8") as f:
                 json.dump({
-                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
                     "avatars": {
-                        "无咎子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
-                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
-                        "素缘子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "无咎子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "素缘子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
                     },
                 }, f, ensure_ascii=False)
             with open(os.path.join(tmpdir, "state_xiaohao.json"), "w", encoding="utf-8") as f:
                 json.dump({
-                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
                     "avatars": {
-                        "问心子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
-                        "素心子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
-                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}},
+                        "问心子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "素心子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
                     },
                 }, f, ensure_ascii=False)
             with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
@@ -1934,7 +2443,7 @@ class ParserFixtureTests(unittest.TestCase):
 
             def __init__(self):
                 self.state = {
-                    "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
                     "fishing_auto": {"preferred_bait": "灵米饵"},
                     "avatars": {"无咎子": {"fishing": {"rod_owned": True}}},
                 }
@@ -1964,9 +2473,9 @@ class ParserFixtureTests(unittest.TestCase):
             for filename in ("state_sub.json", "state_xiaohao.json"):
                 with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
                     json.dump({
-                        "fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20},
+                        "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
                         "avatars": {
-                            name: {"fishing": {"last_sync_date": today, "today_count": 20, "daily_limit": 20}}
+                            name: {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}}
                             for name in ("厚土", "缘生子", "寻真子", "问心子", "素心子")
                         },
                     }, f, ensure_ascii=False)
@@ -1991,6 +2500,76 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(global_state["active"]["key"], "main|无咎子")
         self.assertGreater(common_seconds_until(global_state["handoff_not_before"]), 25 * 60)
         self.assertEqual(actor.get_fishing_auto_state()["last_status"], "handoff_wait")
+
+    def test_fishing_auto_restores_incomplete_handoff_source(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["无咎子", "缘生子", "素缘子"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
+                    "fishing_auto": {"preferred_bait": "灵米饵"},
+                    "avatars": {
+                        "无咎子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "素缘子": {"fishing": {"last_sync_date": today, "today_count": 4, "daily_limit": 5}},
+                    },
+                }
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(os.path.join(tmpdir, "state_sub.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
+                    "avatars": {
+                        "厚土": {"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 5}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "寻真子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                    },
+                }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "state_xiaohao.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
+                    "avatars": {
+                        "问心子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "素心子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                        "缘生子": {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}},
+                    },
+                }, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": today,
+                    "preferred_bait": "灵米饵",
+                    "active": {"account": "sub", "identity": "厚土", "key": "sub|厚土"},
+                    "rod_holder": {"account": "sub", "identity": "厚土"},
+                    "completed": {},
+                    "transfer": {},
+                    "handoff_not_before": add_seconds_str(now_str(), -60),
+                    "handoff_from": {
+                        "account": "main",
+                        "identity": "素缘子",
+                        "key": "main|素缘子",
+                        "completed_at": now_str(),
+                    },
+                }, f, ensure_ascii=False)
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                global_state, snapshot = actor.fishing_auto_update_global_progress(bait="灵米饵")
+
+        self.assertIn("main|素缘子", {item["key"] for item in snapshot["pending"]})
+        self.assertEqual(global_state["active"]["key"], "main|素缘子")
+        self.assertEqual(global_state["handoff_not_before"], "")
+        self.assertEqual(global_state["handoff_from"], {})
 
     def test_dashboard_can_set_fishing_auto_rod_holder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2110,11 +2689,11 @@ class ParserFixtureTests(unittest.TestCase):
         })()
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(actor.fishing_next_nest("主魂"), "灵草窝")
-        fishing["nest_counts"] = {"灵草窝": 2}
+        fishing["nest_counts"] = {"灵草窝": 1}
         self.assertEqual(actor.fishing_next_nest("主魂"), "米糠小窝")
-        fishing["nest_counts"] = {"灵草窝": 2, "米糠小窝": 1}
+        fishing["nest_counts"] = {"灵草窝": 1, "米糠小窝": 1}
         self.assertEqual(actor.fishing_next_nest("主魂"), "米糠小窝")
-        fishing["nest_counts"] = {"灵草窝": 2, "米糠小窝": 2}
+        fishing["nest_counts"] = {"灵草窝": 1, "米糠小窝": 2}
         self.assertEqual(actor.fishing_next_nest("主魂"), "")
 
     def test_fishing_unrecognized_start_retries_after_two_minutes(self):
@@ -2139,6 +2718,45 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertLessEqual(common_seconds_until(fishing["next_action_at"]), 120)
         self.assertGreater(common_seconds_until(fishing["next_action_at"]), 100)
 
+    def test_fishing_does_not_yield_to_zero_second_impending_command(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.started = False
+
+            def save_state(self):
+                pass
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def _state_impending_command_wait(self, state, identity="主魂"):
+                return 0
+
+            async def fishing_ensure_daily_bait(self, identity):
+                return True
+
+            async def fishing_try_nest(self, identity):
+                return True
+
+            async def fishing_start_round(self, identity):
+                self.started = True
+                self.get_fishing_state(identity)["last_status"] = "fishing"
+                return True
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "rod_owned": True,
+            "today_count": 0,
+            "daily_limit": 5,
+        })
+
+        asyncio.run(actor.fishing_tick("主魂", ignore_dashboard=True))
+        self.assertTrue(actor.started)
+        self.assertEqual(actor.get_fishing_state("主魂")["last_status"], "fishing")
+
     def test_fishing_daily_done_syncs_basket_after_twentieth_rod(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
@@ -2160,7 +2778,7 @@ class ParserFixtureTests(unittest.TestCase):
                     return (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**20/20**\n"
+                        "今日竿数：**5/5**\n"
                         "当前窝料：无\n\n"
                         "**鱼饵**\n- 灵米饵 x0\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
@@ -2170,8 +2788,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         fishing = actor.get_fishing_state("主魂")
         fishing.update({
-            "today_count": 19,
-            "daily_limit": 20,
+            "today_count": 4,
+            "daily_limit": 5,
             "active": True,
             "active_due_at": now_str(),
         })
@@ -2179,8 +2797,8 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(asyncio.run(actor.fishing_raise_rod("主魂")))
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(actor.commands, [".提竿", ".鱼篓"])
-        self.assertEqual(fishing["today_count"], 20)
-        self.assertEqual(fishing["daily_limit"], 20)
+        self.assertEqual(fishing["today_count"], 5)
+        self.assertEqual(fishing["daily_limit"], 5)
         self.assertEqual(fishing["last_status"], "daily_done")
         self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
 
@@ -2199,7 +2817,7 @@ class ParserFixtureTests(unittest.TestCase):
                     return (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**19/20**\n"
+                        "今日竿数：**4/5**\n"
                         "当前窝料：无\n\n"
                         "**鱼饵**\n暂无\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
@@ -2210,8 +2828,8 @@ class ParserFixtureTests(unittest.TestCase):
         fishing = actor.get_fishing_state("主魂")
         fishing.update({
             "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
-            "today_count": 20,
-            "daily_limit": 20,
+            "today_count": 5,
+            "daily_limit": 5,
             "last_status": "daily_done",
             "next_action_at": "2099-01-01 00:05:00",
         })
@@ -2219,7 +2837,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.fishing_sync_daily_done_basket("主魂")))
         self.assertEqual(actor.commands, [".鱼篓"])
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["today_count"], 19)
+        self.assertEqual(fishing["today_count"], 4)
         self.assertEqual(fishing["last_status"], "synced")
         self.assertEqual(fishing["daily_done_basket_sync_date"], "")
         self.assertEqual(fishing["next_action_at"], "")
@@ -2238,7 +2856,7 @@ class ParserFixtureTests(unittest.TestCase):
                 return (
                     "**【鱼篓】**\n"
                     "青竹钓竿：**已持有**\n"
-                    "今日竿数：**20/20**\n"
+                    "今日竿数：**5/5**\n"
                     "当前窝料：无\n\n"
                     "**鱼获**\n"
                     "- 青鳞小鲫 x11\n"
@@ -2253,7 +2871,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertTrue(asyncio.run(actor.fishing_sync_basket("主魂")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["today_count"], 5)
         self.assertEqual(fishing["catches"], {"青鳞小鲫": 11, "银须灵鲢": 7, "赤尾火鲤": 1})
         self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 8, "银须灵鲢": 4, "赤尾火鲤": 1})
 
@@ -2265,14 +2883,14 @@ class ParserFixtureTests(unittest.TestCase):
                     (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**0/20**\n"
+                        "今日竿数：**0/5**\n"
                         "当前窝料：无\n\n"
                         "**鱼获**\n- 青鳞小鲫 x2\n"
                     ),
                     (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**1/20**\n"
+                        "今日竿数：**1/5**\n"
                         "当前窝料：无\n\n"
                         "**鱼获**\n- 青鳞小鲫 x3\n"
                     ),
@@ -2308,8 +2926,8 @@ class ParserFixtureTests(unittest.TestCase):
         fishing = actor.get_fishing_state("主魂")
         fishing.update({
             "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
-            "today_count": 19,
-            "daily_limit": 20,
+            "today_count": 4,
+            "daily_limit": 5,
             "active": True,
             "active_due_at": now_str(),
             "current_nest": "米糠小窝",
@@ -2318,7 +2936,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertFalse(asyncio.run(actor.fishing_record_rod_response("主魂", "这不是提竿回复")))
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["today_count"], 19)
+        self.assertEqual(fishing["today_count"], 4)
         self.assertEqual(fishing["current_nest_remaining"], 1)
         self.assertEqual(fishing["last_status"], "raise_unrecognized")
         self.assertIn(datetime.now().strftime("%Y-%m-%d"), fishing["next_action_at"])
@@ -2336,6 +2954,7 @@ class ParserFixtureTests(unittest.TestCase):
             id=101,
             text="**【提竿成功】**\n水下灵光一翻，竟是一尾 **【银须灵鲢】**！",
         )
+        actor.get_fishing_state("主魂")["active"] = True
 
         self.assertTrue(asyncio.run(actor.fishing_record_rod_response("主魂", msg, finish_daily=False)))
         self.assertTrue(asyncio.run(actor.fishing_record_rod_response("主魂", msg, finish_daily=False)))
@@ -2343,6 +2962,63 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(fishing["today_count"], 1)
         self.assertEqual(fishing["daily_catches"], {"银须灵鲢": 1})
         self.assertEqual(fishing["recorded_rod_message_ids"], [101])
+
+    def test_fishing_inactive_rod_response_does_not_increment_count(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+
+            def save_state(self):
+                pass
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "today_count": 4,
+            "daily_limit": 5,
+            "active": False,
+            "current_nest": "灵草窝",
+            "current_nest_remaining": 1,
+        })
+
+        self.assertTrue(asyncio.run(actor.fishing_record_rod_response(
+            "主魂",
+            "**【空竿】**\n浮漂猛地一沉，又迅速归于平静。",
+        )))
+        fishing = actor.get_fishing_state("主魂")
+        self.assertEqual(fishing["today_count"], 4)
+        self.assertEqual(fishing["current_nest_remaining"], 1)
+        self.assertEqual(fishing["last_status"], "raise_ignored")
+
+    def test_fishing_raise_rod_skips_when_round_already_cleared(self):
+        class DummyFishing(FishingMixin):
+            def __init__(self):
+                self.state = {"fishing": {}}
+                self.commands = []
+
+            def save_state(self):
+                pass
+
+            def fishing_logger(self):
+                return None
+
+            async def send_fishing_command(self, identity, command, timeout=60):
+                self.commands.append(command)
+                raise AssertionError("inactive fishing round should not send .提竿")
+
+        actor = DummyFishing()
+        fishing = actor.get_fishing_state("主魂")
+        fishing.update({
+            "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
+            "today_count": 2,
+            "daily_limit": 5,
+            "active": False,
+            "active_due_at": "",
+        })
+
+        self.assertFalse(asyncio.run(actor.fishing_raise_rod("主魂")))
+        self.assertEqual(actor.commands, [])
 
     def test_fishing_duplicate_final_rod_still_runs_daily_done_notice(self):
         class DummyFishing(FishingMixin):
@@ -2365,7 +3041,7 @@ class ParserFixtureTests(unittest.TestCase):
                     return (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**20/20**\n\n"
+                        "今日竿数：**5/5**\n\n"
                         "**鱼饵**\n- 灵米饵 x6\n\n"
                         "**鱼获**\n- 银须灵鲢 x10\n- 青鳞小鲫 x10\n"
                     )
@@ -2379,8 +3055,8 @@ class ParserFixtureTests(unittest.TestCase):
         fishing = actor.get_fishing_state("厚土")
         fishing.update({
             "last_sync_date": datetime.now().strftime("%Y-%m-%d"),
-            "today_count": 19,
-            "daily_limit": 20,
+            "today_count": 4,
+            "daily_limit": 5,
             "active": True,
             "active_due_at": now_str(),
         })
@@ -2400,12 +3076,12 @@ class ParserFixtureTests(unittest.TestCase):
                     controls = json.load(f)
 
         fishing = actor.get_fishing_state("厚土")
-        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["today_count"], 5)
         self.assertEqual(fishing["daily_catches"], {"青鳞小鲫": 1})
         self.assertEqual(fishing["recorded_rod_message_ids"], [202])
         self.assertEqual(actor.commands, [("厚土", ".鱼篓")])
         self.assertEqual(len(notices), 1)
-        self.assertIn("副号 [厚土] 今日钓鱼已完成 20/20 竿", notices[0][1])
+        self.assertIn("副号 [厚土] 今日钓鱼已完成 5/5 竿", notices[0][1])
         self.assertIn("今日鱼获：青鳞小鲫 x1", notices[0][1])
         self.assertTrue(controls["sub"]["厚土"][".钓鱼 灵米饵"]["disabled"])
 
@@ -2438,7 +3114,7 @@ class ParserFixtureTests(unittest.TestCase):
                     return (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**20/20**\n"
+                        "今日竿数：**5/5**\n"
                         "当前窝料：无\n\n"
                         "**鱼饵**\n- 灵米饵 x0\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
@@ -2452,8 +3128,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor = DummyFishing()
         fishing = actor.get_fishing_state("主魂")
         fishing.update({
-            "today_count": 19,
-            "daily_limit": 20,
+            "today_count": 4,
+            "daily_limit": 5,
             "active": True,
             "active_due_at": now_str(),
             "daily_catches": {"青鳞小鲫": 2},
@@ -2498,12 +3174,12 @@ class ParserFixtureTests(unittest.TestCase):
             async def send_fishing_command(self, identity, command, timeout=60):
                 self.commands.append(command)
                 if command == ".钓鱼 灵米饵":
-                    return "你今日已垂钓 **20/20** 竿，神识已乏，明日再来。"
+                    return "你今日已垂钓 **5/5** 竿，神识已乏，明日再来。"
                 if command == ".鱼篓":
                     return (
                         "**【鱼篓】**\n"
                         "青竹钓竿：**已持有**\n"
-                        "今日竿数：**20/20**\n"
+                        "今日竿数：**5/5**\n"
                         "当前窝料：**灵草窝**（剩余 5 竿）\n\n"
                         "**鱼饵**\n- 灵米饵 x0\n\n"
                         "**鱼获**\n- 银须灵鲢 x1\n"
@@ -2514,7 +3190,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(asyncio.run(actor.fishing_start_round("主魂")))
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(actor.commands, [".钓鱼 灵米饵", ".鱼篓"])
-        self.assertEqual(fishing["today_count"], 20)
+        self.assertEqual(fishing["today_count"], 5)
         self.assertEqual(fishing["last_status"], "daily_done")
         self.assertEqual(fishing["daily_done_basket_sync_date"], datetime.now().strftime("%Y-%m-%d"))
 
@@ -2541,7 +3217,7 @@ class ParserFixtureTests(unittest.TestCase):
                 "preferred_bait": "灵虫饵",
                 "last_sync_date": today,
                 "today_count": 3,
-                "daily_limit": 20,
+                "daily_limit": 5,
                 "last_status": "enabled",
             }
         }
@@ -2570,7 +3246,7 @@ class ParserFixtureTests(unittest.TestCase):
                 "last_status": "fishing",
                 "last_detail": "等待提竿",
                 "today_count": 3,
-                "daily_limit": 20,
+                "daily_limit": 5,
                 "active": True,
                 "active_due_at": due_at,
                 "rod_owned": True,
@@ -2621,12 +3297,12 @@ class ParserFixtureTests(unittest.TestCase):
         state = {
             "fishing": {
                 "last_sync_date": yesterday,
-                "today_count": 20,
-                "daily_limit": 20,
+                "today_count": 5,
+                "daily_limit": 5,
                 "daily_done_auto_paused_date": today,
                 "daily_done_notified_date": today,
                 "last_status": "daily_done",
-                "last_detail": "今日已垂钓 20/20",
+                "last_detail": "今日已垂钓 5/5",
                 "current_nest": "米糠小窝",
                 "current_nest_remaining": 1,
                 "next_action_at": f"{today} 00:05:00",
@@ -2640,7 +3316,7 @@ class ParserFixtureTests(unittest.TestCase):
             if command.get("command") == ".钓鱼 灵米饵"
         )
 
-        self.assertIn("今日 0/20", row["detail"])
+        self.assertIn("今日 0/5", row["detail"])
         self.assertNotIn("米糠小窝", row["detail"])
         self.assertNotEqual(row["status"], "今日已满")
 
@@ -2655,12 +3331,12 @@ class ParserFixtureTests(unittest.TestCase):
                 self.state = {
                     "fishing": {
                         "last_sync_date": yesterday,
-                        "today_count": 20,
-                        "daily_limit": 20,
+                        "today_count": 5,
+                        "daily_limit": 5,
                         "daily_done_auto_paused_date": today,
                         "daily_done_notified_date": today,
                         "last_status": "daily_done",
-                        "last_detail": "今日已垂钓 20/20",
+                        "last_detail": "今日已垂钓 5/5",
                     }
                 }
                 self.config = {}
@@ -2779,6 +3455,8 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(imprison["status"], "success")
         self.assertEqual(imprison["slot"], 1)
         self.assertEqual(imprison["soul"], YINLUO_SOUL)
+        slot_busy = parse_yinluo_imprison("[Avatar: 缘生子]\n此炼化槽正在运转中，无法囚禁新的魂魄。")
+        self.assertEqual(slot_busy["status"], "slot_busy")
 
         appease_done = parse_yinluo_appease("**安抚成功！**\n你消耗了 **50** 点修为，成功安抚了 1 个炼化槽。")
         self.assertEqual(appease_done["status"], "success")
@@ -2885,6 +3563,50 @@ class ParserFixtureTests(unittest.TestCase):
         yinluo_state = actor.get_yinluo_state("缘生子")
         self.assertFalse(yinluo_state["imprison_sync_pending"])
         self.assertEqual(yinluo_state["last_status"], "imprisoned")
+
+    def test_yinluo_slot_busy_syncs_banner_before_next_imprison(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "reserves": {YINLUO_SOUL: 1},
+                    "sha_current": 1800,
+                    "sha_max": 25000,
+                    "slots": {
+                        1: {"status": "空闲", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""},
+                    },
+                })
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                if command == ".囚禁魂魄 1 凶兽戾魄":
+                    return DummyMessage(501, text="[Avatar: 缘生子]\n此炼化槽正在运转中，无法囚禁新的魂魄。")
+                if command == YINLUO_MASTER_COMMAND:
+                    return DummyMessage(
+                        502,
+                        text=(
+                            "**【缘生子的阴罗幡】**\n\n"
+                            "**煞气池**: 1800 / 25000 (7%)\n"
+                            "**幡魂总炼化**: 2 缕\n\n"
+                            "**魂魄储备**:\n"
+                            " - 凶兽戾魄: 1 缕\n\n"
+                            "**炼化槽:**\n"
+                            "**1号槽**: [炼化中] - 妖兽精魄 (剩余: 6小时)\n"
+                            "**2号槽**: [空闲]\n"
+                        ),
+                    )
+                if command == ".囚禁魂魄 2 凶兽戾魄":
+                    return DummyMessage(503, text="一缕【凶兽戾魄】被强行打入2号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        self.assertTrue(asyncio.run(actor.yinluo_imprison_fierce_soul("缘生子")))
+        self.assertEqual(actor.sent, [".囚禁魂魄 1 凶兽戾魄", YINLUO_MASTER_COMMAND, ".囚禁魂魄 2 凶兽戾魄"])
+        yinluo_state = actor.get_yinluo_state("缘生子")
+        self.assertEqual(yinluo_state["last_status"], "imprisoned")
+        self.assertEqual(yinluo_state["reserves"][YINLUO_SOUL], 0)
+        self.assertEqual(yinluo_state["slots"][2]["status"], "炼化中")
 
     def test_yinluo_expired_sync_time_does_not_send_master_command(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
@@ -4552,12 +5274,21 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sent[1][1]["reply_to"], 71001)
         self.assertEqual(actor.state["bushi_wentian_count"], 1)
         self.assertEqual(actor.state["bushi_wentian_exchange_count"], 1)
+        self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
+
+        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
+            "主魂",
+            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
+        ))
+
+        self.assertFalse(ok)
+        self.assertEqual([item[0] for item in sent], [".卜筮问天", ".换取"])
 
     def test_bushi_wentian_daily_limit_skips_send(self):
         actor = DummyCommon()
         actor.state = {
             "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
-            "bushi_wentian_count": 10,
+            "bushi_wentian_count": 8,
             "bushi_wentian_exchange_count": 0,
         }
         actor.dashboard_command_paused = lambda command, identity: False
@@ -4573,6 +5304,61 @@ class ParserFixtureTests(unittest.TestCase):
         ))
 
         self.assertFalse(ok)
+
+    def test_bushi_wentian_preclaims_final_daily_slot_on_no_response(self):
+        actor = DummyCommon()
+        actor.state = {
+            "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
+            "bushi_wentian_count": 7,
+            "bushi_wentian_exchange_count": 0,
+        }
+        actor.dashboard_command_paused = lambda command, identity: False
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
+            "主魂",
+            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
+        ))
+
+        self.assertFalse(ok)
+        self.assertEqual(sent, [".卜筮问天"])
+        self.assertEqual(actor.state["bushi_wentian_count"], 8)
+
+        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
+            "主魂",
+            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
+        ))
+
+        self.assertFalse(ok)
+        self.assertEqual(sent, [".卜筮问天"])
+
+    def test_bushi_wentian_existing_exchange_count_stops_today(self):
+        actor = DummyCommon()
+        actor.state = {
+            "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
+            "bushi_wentian_count": 1,
+            "bushi_wentian_exchange_count": 1,
+        }
+        actor.dashboard_command_paused = lambda command, identity: False
+
+        async def fake_send(*args, **kwargs):
+            raise AssertionError("bushi wentian should stop after today's Kunwu exchange")
+
+        actor.send_and_wait_feedback = fake_send
+
+        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
+            "主魂",
+            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
+        ))
+
+        self.assertFalse(ok)
+        self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
 
     def test_field_training_initial_reply_does_not_trigger_bushi(self):
         actor = DummyCommon()
@@ -6711,6 +7497,63 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(alerts, [(".协同守山", 9999, 30 * 60, 60 * 60)])
 
+    def test_repeated_response_guard_blocks_current_identity_command(self):
+        actor = SimpleNamespace(current_identity="缘生子")
+        calls = []
+        old_force = command_feedback.force_command_guard_block
+        command_feedback.force_command_guard_block = (
+            lambda actor_arg, command, wait, logger=None, identity=None, reason="", alert=False, reason_text="":
+            calls.append((command, wait, identity, reason, alert, reason_text))
+        )
+        try:
+            text = "[Avatar: 缘生子]\n此炼化槽正在运转中，无法囚禁新的魂魄。"
+            command = ".囚禁魂魄 1 凶兽戾魄"
+            self.assertFalse(command_feedback._record_repeated_response_guard(actor, command, text, identity="缘生子"))
+            self.assertFalse(command_feedback._record_repeated_response_guard(actor, command, text, identity="缘生子"))
+            self.assertTrue(command_feedback._record_repeated_response_guard(actor, command, text, identity="缘生子"))
+        finally:
+            command_feedback.force_command_guard_block = old_force
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], ".囚禁魂魄 1 凶兽戾魄")
+        self.assertEqual(calls[0][1], 60 * 60)
+        self.assertEqual(calls[0][2], "缘生子")
+        self.assertEqual(calls[0][3], "repeated_response")
+        self.assertTrue(calls[0][4])
+        self.assertIn("同一回复重复 3 次", calls[0][5])
+
+    def test_telegram_send_protection_stops_actor_on_write_forbidden(self):
+        saved = []
+        alerts = []
+        actor = SimpleNamespace(
+            current_identity="缘生子",
+            is_running=True,
+            state={},
+            save_state=lambda: saved.append(True),
+        )
+        old_alert = command_feedback.send_text_alert
+
+        async def fake_alert(actor_arg, title, text, logger=None, parse_mode=None):
+            alerts.append((title, text))
+            return True
+
+        command_feedback.send_text_alert = fake_alert
+        try:
+            handled = asyncio.run(command_feedback._handle_telegram_send_protection(
+                actor,
+                ".囚禁魂魄 1 凶兽戾魄",
+                RuntimeError("CHAT_WRITE_FORBIDDEN: You can't write in this chat"),
+                identity="缘生子",
+            ))
+        finally:
+            command_feedback.send_text_alert = old_alert
+
+        self.assertTrue(handled)
+        self.assertFalse(actor.is_running)
+        self.assertTrue(saved)
+        self.assertEqual(actor.state["telegram_send_protection_stop"]["reason"], "write_restricted")
+        self.assertEqual(alerts[0][0], "Telegram发送保护")
+
     def test_spirit_tree_harvest_pending_text_waits_for_edited_result(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]
@@ -6789,7 +7632,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertGreater(common_seconds_until(actor.state["next_field_training_time"]), 110 * 60)
 
-    def test_field_training_missing_response_retries_immediately_without_confirmed_cooldown(self):
+    def test_field_training_missing_response_short_backs_off_without_confirmed_cooldown(self):
         actor = DummyCommon()
         actor.state = {
             "last_field_training_time": "",
@@ -6798,15 +7641,19 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.record_field_training_response("", context="test")
 
-        self.assertLessEqual(common_seconds_until(actor.state["next_field_training_time"]), 1)
+        wait = common_seconds_until(actor.state["next_field_training_time"])
+        self.assertGreater(wait, 4 * 60)
+        self.assertLessEqual(wait, 5 * 60)
 
-    def test_avatar_field_training_missing_response_retries_immediately(self):
+    def test_avatar_field_training_missing_response_short_backs_off(self):
         actor = DummyAvatarCommon()
 
         actor.record_identity_field_training_response("缘生子", "", context="test")
 
         next_time = actor.state["avatars"]["缘生子"]["next_field_training_time"]
-        self.assertLessEqual(common_seconds_until(next_time), 1)
+        wait = common_seconds_until(next_time)
+        self.assertGreater(wait, 4 * 60)
+        self.assertLessEqual(wait, 5 * 60)
 
     def test_yuanying_active_and_settlement_do_not_short_retry(self):
         actor = Cultivator.__new__(Cultivator)
@@ -7499,6 +8346,19 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn(".元婴出窍", commands)
         self.assertIn(".探寻裂缝", commands)
 
+    def test_dashboard_sub_yuanshengzi_uses_yinluo_not_star_palace(self):
+        panels = build_command_panels("sub", {"avatars": {"缘生子": {"yinluo": {}}}})
+        yuanshengzi = next(panel for panel in panels if panel.get("identity") == "缘生子")
+        commands = {row.get("command") for row in yuanshengzi.get("commands", [])}
+
+        self.assertIn(".我的阴罗幡", commands)
+        self.assertIn(".血洗山林", commands)
+        self.assertNotIn(".观星台", commands)
+        self.assertNotIn(".启阵", commands)
+        self.assertNotIn(".观星", commands)
+        self.assertNotIn(".改换星移 @Gamling33", commands)
+        self.assertFalse(any(str(command or "").startswith(".牵引星辰") for command in commands))
+
     def test_dashboard_shows_xiaohao_yuanshengzi_yuanying_and_rift(self):
         panels = build_command_panels("xiaohao", {"avatars": {"缘生子": {}}})
         yuanshengzi = next(panel for panel in panels if panel.get("identity") == "缘生子")
@@ -7506,6 +8366,20 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertIn(".元婴出窍", commands)
         self.assertIn(".探寻裂缝", commands)
+
+    def test_dashboard_xiaohao_hunt_stopped_is_not_actionable_due(self):
+        panels = build_command_panels("xiaohao", {
+            "beast_hunt_stopped": True,
+            "beast_hunt_stopped_reason": "第十只灵兽种类是风雀：风希",
+            "avatars": {},
+        })
+        main_panel = next(panel for panel in panels if panel.get("identity") == "主魂")
+        hunt = next(row for row in main_panel.get("commands", []) if row.get("command") == ".寻觅灵兽")
+
+        self.assertEqual(hunt["status"], "已停止")
+        self.assertEqual(hunt["tone"], "done")
+        self.assertFalse(hunt["actionable"])
+        self.assertEqual(hunt["schedule_type"], "cooldown")
 
     def test_dashboard_avatar_field_training_commands_use_current_mode(self):
         panels = build_command_panels("main", {"avatars": {"无咎子": {}, "缘生子": {}, "素缘子": {}}})

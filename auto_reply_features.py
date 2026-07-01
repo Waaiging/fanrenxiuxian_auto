@@ -7,10 +7,13 @@
   1. 南陇侯交换 —— 当游戏机器人提到本账号/化身且给出".交换"选项时，按身份自动回复
 """
 import asyncio
+import json
 import logging
+import os
 import re
+import time
 
-from log_utils import command_send_allowed, format_in_log, is_game_bot_sender, remember_script_send_intent, remember_script_sent_message, schedule_command_auto_delete
+from log_utils import COMMAND_CONTROL_FILE, command_send_allowed, format_in_log, is_game_bot_sender, remember_script_send_intent, remember_script_sent_message, schedule_command_auto_delete
 
 
 # =====================================================================
@@ -21,6 +24,10 @@ EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
 CONCUBINE_PLACE_COMMAND = ".安置侍妾"
 CONCUBINE_RECALL_COMMAND = ".召回侍妾"
 EXCHANGE_CONCUBINE_DELAY_SECONDS = 5
+MERCHANT_LOOK_COMMAND = ".查看货品"
+MERCHANT_BUY_COMMAND_PREFIX = ".购买商品"
+MERCHANT_PRIORITY_ITEMS = ("掌天瓶的仿制品", "九天息壤", "尘封的储物袋")
+MERCHANT_STATE_FILE = os.path.join(os.path.dirname(COMMAND_CONTROL_FILE), "merchant_auto_reply_state.json")
 
 
 # =====================================================================
@@ -102,6 +109,150 @@ def _mentions_self(actor, msg, text):
 def exchange_command_for_identity(identity):
     """三主魂换功法，所有化身换法宝。"""
     return EXCHANGE_MAIN_COMMAND if (identity or "主魂") == "主魂" else EXCHANGE_AVATAR_COMMAND
+
+
+def is_merchant_event_text(text):
+    clean = str(text or "").replace("**", "")
+    return "【天机异动" in clean and "异界商人" in clean and ".查看货品" in clean
+
+
+def parse_merchant_goods(text):
+    clean = str(text or "").replace("**", "").replace("`", "")
+    goods = []
+    for line in clean.splitlines():
+        match = re.match(r"\s*(\d+)\s*[.、]\s*([^(\n（]+)", line)
+        if not match:
+            continue
+        goods.append({
+            "number": int(match.group(1)),
+            "name": match.group(2).strip(),
+        })
+    return goods
+
+
+def merchant_purchase_plan(text):
+    goods = parse_merchant_goods(text)
+    by_name = {item["name"]: item["number"] for item in goods if item.get("name")}
+    plan = []
+    for name in MERCHANT_PRIORITY_ITEMS:
+        number = by_name.get(name)
+        if number:
+            plan.append((name, number))
+    return plan
+
+
+def _merchant_lock_path():
+    return f"{MERCHANT_STATE_FILE}.lock"
+
+
+def _acquire_merchant_lock(timeout=5):
+    deadline = time.time() + max(0.1, float(timeout or 0.1))
+    lock_path = _merchant_lock_path()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii", errors="ignore"))
+            return fd, lock_path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 30:
+                    os.remove(lock_path)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                return None, lock_path
+            time.sleep(0.05)
+
+
+def _release_merchant_lock(lock):
+    if not lock:
+        return
+    fd, lock_path = lock
+    try:
+        if fd is not None:
+            os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+
+def _load_merchant_state():
+    try:
+        with open(MERCHANT_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_merchant_state(data):
+    os.makedirs(os.path.dirname(MERCHANT_STATE_FILE), exist_ok=True)
+    tmp = f"{MERCHANT_STATE_FILE}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data or {}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, MERCHANT_STATE_FILE)
+
+
+def claim_merchant_event(actor, msg_id):
+    account = str(getattr(actor, "account_key", "") or actor.__class__.__name__)
+    key = str(msg_id or "")
+    if not key:
+        return False
+    lock = _acquire_merchant_lock()
+    try:
+        data = _load_merchant_state()
+        events = data.setdefault("events", {})
+        entry = events.get(key)
+        if isinstance(entry, dict) and entry.get("status") in {"claimed", "looked", "purchased", "done"}:
+            return False
+        events[key] = {
+            "status": "claimed",
+            "account": account,
+            "claimed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save_merchant_state(data)
+        return True
+    finally:
+        _release_merchant_lock(lock)
+
+
+def update_merchant_event(msg_id, **values):
+    key = str(msg_id or "")
+    if not key:
+        return
+    lock = _acquire_merchant_lock()
+    try:
+        data = _load_merchant_state()
+        events = data.setdefault("events", {})
+        entry = events.get(key) if isinstance(events.get(key), dict) else {}
+        entry.update(values)
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        events[key] = entry
+        if len(events) > 200:
+            for old_key in list(events.keys())[:-120]:
+                events.pop(old_key, None)
+        _save_merchant_state(data)
+    finally:
+        _release_merchant_lock(lock)
+
+
+def _response_text(response):
+    if response is None:
+        return ""
+    if isinstance(response, str):
+        return response
+    return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+
+def _response_id(response):
+    try:
+        return int(getattr(response, "id", 0) or 0)
+    except Exception:
+        return 0
 
 
 async def _send_direct_auto_reply_command(actor, command, reply_to=None):
@@ -204,6 +355,90 @@ def is_auto_reply_followup(actor, msg, sender=None):
     return True
 
 
+async def maybe_auto_reply_merchant(actor, event, text=None, sender=None):
+    """异界商人：被点名后查看货品，并按优先级购买指定商品。"""
+    msg = event.message
+    text = text if text is not None else (msg.text or "")
+    if not is_merchant_event_text(text):
+        return False
+
+    identity = _mentions_self(actor, msg, text)
+    if not identity:
+        return False
+
+    if sender is None:
+        sender = await event.get_sender()
+    if not is_game_bot_sender(actor, sender):
+        return False
+
+    seen_ids = getattr(actor, "merchant_auto_reply_seen_ids", None)
+    if seen_ids is None:
+        seen_ids = set()
+        actor.merchant_auto_reply_seen_ids = seen_ids
+    if msg.id in seen_ids:
+        return True
+    seen_ids.add(msg.id)
+    if len(seen_ids) > 300:
+        actor.merchant_auto_reply_seen_ids = set(list(seen_ids)[-150:])
+    if not claim_merchant_event(actor, msg.id):
+        _logger(actor).info(f"Auto merchant message {msg.id} already claimed by another script.")
+        return True
+
+    identity = "主魂" if identity == "main" else identity
+    try:
+        _logger(actor).info(
+            f"Auto merchant triggered for {identity}: {MERCHANT_LOOK_COMMAND} (msg {msg.id})."
+        )
+        goods_resp = await _send_auto_reply_identity_command(
+            actor,
+            identity,
+            MERCHANT_LOOK_COMMAND,
+            timeout=45,
+            max_retries=0,
+            suppress_no_response_alert=True,
+        )
+        goods_text = _response_text(goods_resp)
+        plan = merchant_purchase_plan(goods_text)
+        if not plan:
+            update_merchant_event(msg.id, status="done", goods=parse_merchant_goods(goods_text), purchased=[])
+            _logger(actor).info(f"Auto merchant [{identity}]: no priority goods found.")
+            return True
+
+        bought = []
+        for item_name, number in plan:
+            command = f"{MERCHANT_BUY_COMMAND_PREFIX} {number}"
+            _logger(actor).info(f"Auto merchant [{identity}]: buying {item_name} with {command}.")
+            buy_resp = await _send_auto_reply_identity_command(
+                actor,
+                identity,
+                command,
+                timeout=45,
+                max_retries=0,
+                suppress_no_response_alert=True,
+            )
+            bought.append(f"{item_name}#{number}")
+            buy_text = _response_text(buy_resp)
+            if buy_text and any(k in buy_text for k in ("灵石不足", "不足", "无法购买", "购买失败")):
+                _logger(actor).info(
+                    f"Auto merchant [{identity}]: stop after failed buy response for {item_name}: "
+                    f"{buy_text[:120]!r}."
+                )
+                break
+            await asyncio.sleep(2)
+        update_merchant_event(
+            msg.id,
+            status="purchased",
+            goods=parse_merchant_goods(goods_text),
+            purchased=bought,
+        )
+        _logger(actor).info(f"Auto merchant [{identity}] handled purchases: {', '.join(bought)}.")
+        return True
+    except Exception as e:
+        update_merchant_event(msg.id, status="failed", error=str(e)[:200])
+        _logger(actor).error(f"Auto merchant reply failed for message {msg.id}: {e}")
+        return True
+
+
 async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     """
     交换功法/法宝的自动回复处理。
@@ -218,6 +453,8 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     """
     msg = event.message
     text = text if text is not None else (msg.text or "")
+    if await maybe_auto_reply_merchant(actor, event, text=text, sender=sender):
+        return True
     if ".交换" not in _normalized_text(text):
         return False
         

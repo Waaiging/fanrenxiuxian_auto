@@ -195,6 +195,10 @@ class _ConcubineAtomicTask:
         while getattr(self.actor, "active_atomic_task", None) is not None and self.actor.active_atomic_task != self.task:
             await asyncio.sleep(0.5)
         self.actor.active_atomic_task = self.task
+        self.actor._concubine_atomic_task = self.task
+        self.actor._concubine_atomic_label = self.label
+        self.actor._atomic_task_high_priority_bypass_task = self.task
+        self.actor._atomic_task_high_priority_bypass_label = self.label
         self.acquired = True
         log.info(f"Atomic task acquired by {self.label}.")
         return self
@@ -202,6 +206,12 @@ class _ConcubineAtomicTask:
     async def __aexit__(self, exc_type, exc, tb):
         if self.acquired and getattr(self.actor, "active_atomic_task", None) == self.task:
             self.actor.active_atomic_task = None
+        if self.acquired and getattr(self.actor, "_concubine_atomic_task", None) == self.task:
+            self.actor._concubine_atomic_task = None
+            self.actor._concubine_atomic_label = ""
+            if getattr(self.actor, "_atomic_task_high_priority_bypass_task", None) == self.task:
+                self.actor._atomic_task_high_priority_bypass_task = None
+                self.actor._atomic_task_high_priority_bypass_label = ""
             log.info(f"Atomic task released by {self.label}.")
         return False
 
@@ -213,6 +223,32 @@ class _ConcubineAtomicTask:
 
 class ConcubineMixin:
     """侍妾功能混入类，提供侍妾神通的所有操作。"""
+
+    def atomic_task_allows_high_priority_command(self, command):
+        """Allow time-critical commands to interrupt a concubine atomic batch."""
+        task = getattr(self, "_concubine_atomic_task", None)
+        if task is None or task == asyncio.current_task():
+            return False
+        bypass_task = getattr(self, "_atomic_task_high_priority_bypass_task", None)
+        if bypass_task is not task:
+            return False
+        if not hasattr(self, "time_critical_identity_command"):
+            return False
+        return self.time_critical_identity_command(command)
+
+    def should_wait_for_atomic_task(self, command=None):
+        """Return whether a sender should wait for the current atomic task."""
+        current_task = asyncio.current_task()
+        active_task = getattr(self, "active_atomic_task", None)
+        if active_task is not None and active_task != current_task:
+            if not self.atomic_task_allows_high_priority_command(command):
+                return True
+
+        concubine_task = getattr(self, "_concubine_atomic_task", None)
+        if concubine_task is not None and concubine_task != current_task:
+            if not self.atomic_task_allows_high_priority_command(command):
+                return True
+        return False
 
     # ---- 状态管理 ----
 
@@ -1276,6 +1312,10 @@ class ConcubineMixin:
                 self._concubine_task_due("heart_trial", "主魂")
                 and not self._concubine_command_paused(CONCUBINE_TASKS["heart_trial"]["command"], "主魂")
             ):
+                if self._concubine_command_paused(".我的侍妾", "主魂"):
+                    log.info("Concubine chain [主魂]: .我的侍妾 paused; deferring heart trial status check.")
+                    self.defer_concubine_task("heart_trial", 6 * 3600)
+                    return True
                 await self.execute_heart_trial()
                 if not self._concubine_task_ready_for_voyage("heart_trial", "主魂"):
                     log.info("Concubine chain [主魂]: heart trial not completed; continuing to voyage check.")
@@ -1636,6 +1676,14 @@ class ConcubineMixin:
         """
         task = CONCUBINE_TASKS["heart_trial"]
         log.info("Concubine: starting .共历心劫 flow via .我的侍妾")
+        if self._concubine_command_paused(".我的侍妾", "主魂"):
+            log.info("Concubine 共历心劫: .我的侍妾 paused; deferring status check.")
+            self.defer_concubine_task("heart_trial", 6 * 3600)
+            return
+        if self._concubine_command_paused(task["command"], "主魂"):
+            log.info("Concubine 共历心劫: .共历心劫 paused; deferring flow.")
+            self.defer_concubine_task("heart_trial", 6 * 3600)
+            return
         # 每条命令前确保身份对齐（防止化身协程在间隙抢走身份）
         if hasattr(self, 'switch_back_to_main'):
             await self.switch_back_to_main()

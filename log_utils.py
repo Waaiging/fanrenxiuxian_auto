@@ -42,8 +42,8 @@ USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 # 命令守卫参数
 COMMAND_GUARD_WINDOW_SECONDS = 30 * 60      # 监控窗口 30 分钟
 COMMAND_GUARD_BLOCK_SECONDS = 60 * 60       # 触发守卫后拦截 1 小时
-# 发送次数守卫只用于显式标记的失败重试场景；正常业务循环由
-# dashboard、身份暂停、机器人健康暂停等更具体的保护负责。
+# 默认不按发送次数拦截；刷屏保护由连续相同回复熔断处理。
+# 只有显式 track_sends=True 的特殊指令才按发送次数守卫。
 COMMAND_GUARD_DEFAULT_TRACK_SENDS = False
 COMMAND_GUARD_POLICY_OVERRIDES = {
     ".协同守山": {                           # 守山按机器人回执保护，正常成功/短冷却不按发送次数拦截
@@ -54,7 +54,7 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
         "track_sends": False,
     },
     ".宗门传功": {"limit": 6},               # 宗门传功放宽到 6 次
-    ".稳": {"limit": 6},                     # 心劫.稳放宽到 6 次
+    ".稳": {"limit": 18},                    # 心劫.稳不按发送次数拦截，仅保留相同回复熔断
     ".查看闭关": {                           # 闭关状态查询：允许频繁
         "limit": 8,
         "window": 10 * 60,
@@ -78,6 +78,7 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
     ".买鱼饵": {"track_sends": False, "alert": False},
     ".打窝": {"track_sends": False, "alert": False},
     ".钓鱼": {"track_sends": False, "alert": False},
+    ".全自动钓鱼": {"track_sends": False, "alert": False},
     ".垂钓": {"track_sends": False, "alert": False},
     ".钓鱼状态": {"track_sends": False, "alert": False},
     ".提竿": {"track_sends": False, "alert": False},
@@ -543,6 +544,8 @@ def command_response_family(command):
         return "concubine_voyage"
     if cmd == ".天机代卜":
         return "divination"
+    if cmd == ".查看货品" or cmd.startswith(".购买商品"):
+        return "merchant"
     if cmd == ".卜筮问天":
         return "bushi_wentian"
     if cmd == ".换取":
@@ -572,6 +575,7 @@ def command_response_family(command):
         or cmd.startswith(".打窝")
         or cmd.startswith(".上架")
         or cmd.startswith(".购买")
+        or cmd.startswith(".赠送")
     ):
         return "fishing"
     if (
@@ -660,6 +664,8 @@ def text_response_family(text):
         return "divination"
     if "天机代卜" in clean or "天机链路" in clean:
         return "divination"
+    if any(k in clean for k in ["异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤", "储物袋"]):
+        return "merchant"
     if "宗门传功" in clean or "传功玉简" in clean:
         return "sect_skill"
     if any(k in clean for k in ["灵树", "灵果", "采摘期", "成熟采摘期", "造化青莲果", "协同守山", "古剑门", "护山大阵"]):
@@ -778,6 +784,11 @@ def feedback_response_matches_command(command, text):
         ])
     if expected == "divination":
         return any(k in clean for k in ["天机代卜", "天机链路", "卜算", "代卜", "卦象"])
+    if expected == "merchant":
+        return any(k in clean for k in [
+            "异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤",
+            "购买成功", "交易成功", "收入储物袋", "灵石不足", "无法购买", "商品不存在",
+        ])
     if expected == "bushi_wentian":
         return any(k in clean for k in [
             "卜筮问天", "神物现世", "天道示警", "天机罗盘", "卦象显示",
@@ -830,6 +841,7 @@ def feedback_response_matches_command(command, text):
             "购得 【", "鱼篓中没有", "已有一竿尚未收起", "尚无【青竹钓竿】",
             "上架成功", "挂单成功", "交易挂单", "成功上架", "已上架",
             "购买成功", "交易成功", "挂单不存在", "已被购买",
+            "赠送成功", "成功赠送", "已赠送", "送出了", "赠予",
         ])
     if expected == "yinluo":
         return any(k in clean for k in [

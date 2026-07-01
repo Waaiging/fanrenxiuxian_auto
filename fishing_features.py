@@ -35,7 +35,12 @@ FISHING_AUTO_ACCOUNT_IDENTITIES = {
     "sub": ("主魂", "厚土", "缘生子", "寻真子"),
     "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
 }
-FISHING_DAILY_LIMIT = 20
+FISHING_ACCOUNT_SENDER_IDS = {
+    "main": {"8219248252", "-1004240160265", "-1003809391782", "-1003999815554"},
+    "sub": {"8615886738", "-1004237793558", "-1003885521329", "-1003340352216"},
+    "xiaohao": {"8325841058", "-1003658665113", "-1003843934428", "-1003996748766"},
+}
+FISHING_DAILY_LIMIT = 5
 FISHING_ROUND_BUFFER_SECONDS = 5
 FISHING_IMPENDING_GUARD_SECONDS = 120
 FISHING_CROSS_IDENTITY_YIELD_SECONDS = 45
@@ -48,9 +53,10 @@ FISHING_AUTO_RETRY_SECONDS = 5 * 60
 FISHING_AUTO_HANDOFF_DELAY_SECONDS = 30 * 60
 FISHING_ROD_ITEM = "青竹钓竿"
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
+FISHING_ROD_GIFT_COMMAND = f".赠送 {FISHING_ROD_ITEM}*1"
 
 FISHING_NEST_PLAN = (
-    ("灵草窝", 2),
+    ("灵草窝", 1),
     ("米糠小窝", 2),
 )
 
@@ -208,6 +214,7 @@ def fishing_daily_done_for_today(state, today=None):
 
 def fishing_dashboard_state(state, today=None):
     view = dict(state or {}) if isinstance(state, dict) else {}
+    view["daily_limit"] = FISHING_DAILY_LIMIT
     reset_stale_fishing_daily_state(view, today=today)
     return view
 
@@ -529,8 +536,13 @@ def parse_fishing_basket(text):
     if not result["matched"]:
         return result
 
-    if "青竹钓竿：" in clean:
-        result["rod_owned"] = "已持有" in clean
+    rod_match = re.search(r"(?:青竹钓竿|鱼竿)[:：]\s*([^\n]+)", clean)
+    if rod_match:
+        rod_text = rod_match.group(1)
+        if "未持有" in rod_text:
+            result["rod_owned"] = False
+        elif "已持有" in rod_text or "青竹钓竿" in rod_text:
+            result["rod_owned"] = True
 
     skill_match = re.search(r"钓术：\s*(Lv\.\d+\s*[^\n（(]+)\s*[（(](\d+)熟练度", clean)
     if skill_match:
@@ -715,6 +727,20 @@ def parse_trade_purchase_response(text):
         return result
     if any(k in clean for k in ["挂单不存在", "已被购买", "购买失败", "交易失败", "资源不足", "灵石不足"]):
         result["matched"] = True
+        result["status"] = "missing_required_rod" if FISHING_ROD_ITEM in clean and "缺少" in clean else "failed"
+    return result
+
+
+def parse_rod_gift_response(text):
+    clean = _strip_markdown(text)
+    result = {"matched": False, "status": ""}
+    if not clean:
+        return result
+    if any(k in clean for k in ["赠送", "赠予", "送出"]) or FISHING_ROD_ITEM in clean:
+        result["matched"] = True
+    if FISHING_ROD_ITEM in clean and any(k in clean for k in ["赠送成功", "成功赠送", "已赠送", "送出了", "赠予"]):
+        result["status"] = "success"
+    elif any(k in clean for k in ["没有", "不足", "无法", "失败", "不存在", "冷却"]):
         result["status"] = "failed"
     return result
 
@@ -796,6 +822,7 @@ class FishingMixin:
             defaults = fishing_default_state()
             for key, value in defaults.items():
                 state.setdefault(key, value)
+        state["daily_limit"] = FISHING_DAILY_LIMIT
         today = _today()
         reset_stale_fishing_daily_state(state, today=today)
         if state.get("nest_plan_date") != today:
@@ -1215,7 +1242,7 @@ class FishingMixin:
             return True
         return False
 
-    async def send_fishing_command(self, identity, command, timeout=60):
+    async def send_fishing_command(self, identity, command, timeout=60, **kwargs):
         bypass_added = set()
         if getattr(self, "_fishing_auto_dashboard_bypass", False):
             bypass = getattr(self, "_dashboard_command_bypass", None)
@@ -1241,6 +1268,7 @@ class FishingMixin:
                     max_retries=0,
                     suppress_no_response_alert=True,
                     return_response_msg=True,
+                    **kwargs,
                 )
             else:
                 response = await self.send_and_wait_feedback_identity(
@@ -1250,6 +1278,7 @@ class FishingMixin:
                     max_retries=0,
                     suppress_no_response_alert=True,
                     return_response_msg=True,
+                    **kwargs,
                 )
             if self.fishing_response_text(response):
                 return response
@@ -1315,6 +1344,25 @@ class FishingMixin:
         if isinstance(response, str):
             return response
         return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+    def fishing_raise_lock(self, identity):
+        locks = getattr(self, "_fishing_raise_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            setattr(self, "_fishing_raise_locks", locks)
+        key = str(identity or "主魂").strip() or "主魂"
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        return lock
+
+    def fishing_raise_allowed_now(self, identity):
+        state = self.get_fishing_state(identity)
+        if not state.get("active"):
+            return False
+        due_at = state.get("active_due_at", "")
+        return not (due_at and is_future(due_at))
 
     def fishing_set_status(self, identity, status, detail="", next_seconds=None, response=""):
         state = self.get_fishing_state(identity)
@@ -1469,13 +1517,16 @@ class FishingMixin:
         if not parsed.get("matched"):
             self.fishing_set_status(identity, "sync_failed", "鱼篓回复未识别", FISHING_RETRY_SECONDS, text)
             return False
-        for key in ("rod_owned", "skill", "skill_exp", "current_nest", "current_nest_remaining"):
+        if parsed.get("rod_owned") is True:
+            self.fishing_set_local_rod_holder(identity, save=False)
+        elif parsed.get("rod_owned") is False:
+            self.fishing_clear_local_rod_holder(identity, save=False)
+        for key in ("skill", "skill_exp", "current_nest", "current_nest_remaining"):
             if parsed.get(key) is not None:
                 state[key] = parsed.get(key)
         if parsed.get("today_count") is not None:
             state["today_count"] = parsed["today_count"]
-        if parsed.get("daily_limit") is not None:
-            state["daily_limit"] = parsed["daily_limit"]
+        state["daily_limit"] = FISHING_DAILY_LIMIT
         state["baits"] = parsed.get("baits", {})
         state["catches"] = parsed.get("catches", {})
         state["last_sync_date"] = _today()
@@ -1675,7 +1726,7 @@ class FishingMixin:
             return False
         if status == "daily_limit":
             state["today_count"] = parsed.get("today_count") or state.get("today_count", FISHING_DAILY_LIMIT)
-            state["daily_limit"] = parsed.get("daily_limit") or state.get("daily_limit", FISHING_DAILY_LIMIT)
+            state["daily_limit"] = FISHING_DAILY_LIMIT
             state["active"] = False
             state["next_action_at"] = _next_day_action_time()
             state["last_status"] = "daily_done"
@@ -1739,6 +1790,51 @@ class FishingMixin:
         identities.extend(list(getattr(self, "avatars", []) or []))
         return list(dict.fromkeys(str(item or "主魂").strip() or "主魂" for item in identities))
 
+    def fishing_set_local_rod_holder(self, identity, save=True):
+        identity = str(identity or "").strip()
+        if not identity:
+            return False
+        identities = list(dict.fromkeys([*self.fishing_auto_identities(), identity]))
+        for candidate in identities:
+            state = self.get_fishing_state(candidate)
+            state["rod_owned"] = candidate == identity
+            if candidate == identity:
+                state["last_sync_date"] = _today()
+        auto_state = self.get_fishing_auto_state()
+        auto_state["rod_holder"] = identity
+        if save:
+            self.save_state()
+        return True
+
+    def fishing_clear_local_rod_holder(self, identity="", save=True):
+        identity = str(identity or "").strip()
+        if identity:
+            self.get_fishing_state(identity)["rod_owned"] = False
+        auto_state = self.get_fishing_auto_state()
+        if not identity or str(auto_state.get("rod_holder") or "").strip() == identity:
+            auto_state["rod_holder"] = ""
+        if save:
+            self.save_state()
+        return True
+
+    def fishing_auto_invalidate_global_rod_holder(self, holder=None):
+        holder = holder if isinstance(holder, dict) else {}
+        lock = _acquire_fishing_auto_global_lock()
+        try:
+            data = _load_fishing_auto_global_state()
+            current = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
+            if not holder or (
+                current.get("account") == holder.get("account")
+                and current.get("identity") == holder.get("identity")
+            ):
+                data["rod_holder"] = {}
+                data["updated_at"] = now_str()
+                _save_fishing_auto_global_state(data)
+                return True
+            return False
+        finally:
+            _release_command_control_lock(lock)
+
     def fishing_auto_set_status(self, status, detail="", next_seconds=None, response=""):
         state = self.get_fishing_auto_state()
         state["last_status"] = status
@@ -1794,8 +1890,21 @@ class FishingMixin:
                 }
             active = data.get("active") if isinstance(data.get("active"), dict) else {}
             active_key = _fishing_auto_identity_key(active.get("account"), active.get("identity"))
-            pending_keys = {item["key"] for item in snapshot["pending"]}
-            if active_key not in pending_keys:
+            pending_by_key = {item["key"]: item for item in snapshot["pending"]}
+            pending_keys = set(pending_by_key)
+            handoff_from = data.get("handoff_from") if isinstance(data.get("handoff_from"), dict) else {}
+            handoff_key = _fishing_auto_identity_key(handoff_from.get("account"), handoff_from.get("identity"))
+            restore_item = pending_by_key.get(handoff_key)
+            if active_key in pending_keys and restore_item and handoff_key != active_key:
+                data["active"] = {
+                    "account": restore_item.get("account", ""),
+                    "identity": restore_item.get("identity", ""),
+                    "key": restore_item.get("key", ""),
+                    "updated_at": now_str(),
+                }
+                data["handoff_not_before"] = ""
+                data["handoff_from"] = {}
+            elif active_key not in pending_keys:
                 holder = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
                 holder_key = _fishing_auto_identity_key(holder.get("account"), holder.get("identity"))
                 next_item = next(
@@ -1900,6 +2009,77 @@ class FishingMixin:
                     log.info(f"Fishing auto rod scan [{identity}] failed: {exc}")
         return ""
 
+    async def fishing_find_recent_account_message_id(self, account, limit=200):
+        client = getattr(self, "client", None)
+        target_chat_id = getattr(self, "target_chat_id", None)
+        if client is None or target_chat_id is None:
+            return 0
+        sender_ids = {str(item) for item in FISHING_ACCOUNT_SENDER_IDS.get(str(account or ""), set())}
+        if not sender_ids:
+            return 0
+        try:
+            messages = await client.get_messages(target_chat_id, limit=limit)
+        except Exception as exc:
+            log = self.fishing_logger()
+            if log:
+                log.info(f"Fishing gift target lookup for {account} failed: {exc}")
+            return 0
+        for msg in messages or []:
+            try:
+                if str(getattr(msg, "sender_id", "")) in sender_ids:
+                    return int(getattr(msg, "id", 0) or 0)
+            except Exception:
+                continue
+        return 0
+
+    async def fishing_auto_gift_rod_to_account_main(self, holder, target_account, reply_to=None):
+        holder = str(holder or "").strip()
+        target_account = str(target_account or "").strip()
+        if not holder or not target_account:
+            return False
+        reply_to = int(reply_to or 0)
+        if reply_to <= 0:
+            reply_to = await self.fishing_find_recent_account_message_id(target_account)
+        if reply_to <= 0:
+            self.fishing_auto_set_status(
+                "transfer_failed",
+                f"未找到 {target_account} 可 reply 的消息，暂不赠送鱼竿",
+                FISHING_AUTO_RETRY_SECONDS,
+            )
+            return False
+
+        self.fishing_auto_set_status(
+            "transferring",
+            f"{holder} reply {target_account} 消息 {reply_to} 赠送鱼竿到主魂",
+            FISHING_AUTO_RETRY_SECONDS,
+        )
+        gift_resp = await self.send_fishing_command(
+            holder,
+            FISHING_ROD_GIFT_COMMAND,
+            timeout=90,
+            reply_to=reply_to,
+        )
+        gift_text = self.fishing_response_text(gift_resp)
+        gift = parse_rod_gift_response(gift_text)
+        if gift.get("status") != "success":
+            self.fishing_auto_set_status(
+                "transfer_failed",
+                f"{holder} 赠送鱼竿到 {target_account}[主魂] 失败或未识别",
+                FISHING_AUTO_RETRY_SECONDS,
+                gift_text,
+            )
+            return False
+
+        self.fishing_clear_local_rod_holder(holder, save=False)
+        self.fishing_auto_set_status(
+            "transferred",
+            f"鱼竿已赠送给 {target_account}[主魂]",
+            5,
+            gift_text,
+        )
+        self.save_state()
+        return True
+
     async def fishing_auto_publish_global_listing(self, holder, target, _resolved_resources=False):
         if not isinstance(holder, dict) or not isinstance(target, dict):
             return False
@@ -1908,6 +2088,38 @@ class FishingMixin:
         target_identity = str(target.get("identity") or "").strip()
         if not target_identity:
             return False
+        if target_identity == "主魂":
+            reply_to = await self.fishing_find_recent_account_message_id(target.get("account"))
+            if reply_to <= 0:
+                self.fishing_auto_set_status(
+                    "transfer_failed",
+                    f"未找到 {target.get('account')} 可 reply 的消息，暂不请求赠送鱼竿",
+                    FISHING_AUTO_RETRY_SECONDS,
+                )
+                return False
+            lock = _acquire_fishing_auto_global_lock()
+            try:
+                data = _load_fishing_auto_global_state()
+                transfer = data.get("transfer") if isinstance(data.get("transfer"), dict) else {}
+                data["transfer"] = {
+                    "status": "gift_requested",
+                    "from_account": holder.get("account", ""),
+                    "from_identity": holder.get("identity", ""),
+                    "to_account": target.get("account", ""),
+                    "to_identity": target_identity,
+                    "reply_to_msg_id": reply_to,
+                    "started_at": transfer.get("started_at") or now_str(),
+                    "updated_at": now_str(),
+                }
+                _save_fishing_auto_global_state(data)
+            finally:
+                _release_command_control_lock(lock)
+            self.fishing_auto_set_status(
+                "transferring",
+                f"等待 {holder.get('account')}[{holder.get('identity')}] reply 消息 {reply_to} 赠送鱼竿到主魂",
+                FISHING_AUTO_RETRY_SECONDS,
+            )
+            return True
         data, transfer = self.fishing_auto_current_global_transfer()
         if (
             transfer.get("status") in {"listed", "purchased"}
@@ -1971,6 +2183,32 @@ class FishingMixin:
     async def fishing_auto_handle_global_purchase(self):
         account = self.fishing_account_key()
         data, transfer = self.fishing_auto_current_global_transfer()
+        if transfer.get("status") == "gift_requested" and transfer.get("from_account") == account:
+            holder = str(transfer.get("from_identity") or "").strip()
+            target_account = str(transfer.get("to_account") or "").strip()
+            if not holder or not target_account:
+                return False
+            reply_to = int(transfer.get("reply_to_msg_id") or 0)
+            if not await self.fishing_auto_gift_rod_to_account_main(holder, target_account, reply_to=reply_to):
+                return True
+            lock = _acquire_fishing_auto_global_lock()
+            try:
+                data = _load_fishing_auto_global_state()
+                data["rod_holder"] = {
+                    "account": target_account,
+                    "identity": "主魂",
+                    "updated_at": now_str(),
+                }
+                data["transfer"] = {
+                    **transfer,
+                    "status": "gifted",
+                    "gifted_at": now_str(),
+                    "updated_at": now_str(),
+                }
+                _save_fishing_auto_global_state(data)
+            finally:
+                _release_command_control_lock(lock)
+            return True
         if transfer.get("status") != "listed" or transfer.get("from_account") != account:
             return False
         holder = str(transfer.get("from_identity") or "").strip()
@@ -1986,9 +2224,15 @@ class FishingMixin:
         purchase_text = self.fishing_response_text(purchase_resp)
         purchase = parse_trade_purchase_response(purchase_text)
         if purchase.get("status") != "success":
+            missing_rod = purchase.get("status") == "missing_required_rod"
+            if missing_rod:
+                self.fishing_clear_local_rod_holder(holder, save=False)
             lock = _acquire_fishing_auto_global_lock()
             try:
                 data = _load_fishing_auto_global_state()
+                current_holder = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
+                if missing_rod and current_holder.get("account") == account and current_holder.get("identity") == holder:
+                    data["rod_holder"] = {}
                 data["transfer"] = {
                     **transfer,
                     "status": "purchase_failed",
@@ -2000,13 +2244,13 @@ class FishingMixin:
                 _release_command_control_lock(lock)
             self.fishing_auto_set_status(
                 "transfer_failed",
-                f"{holder} 购买挂单 {listing_id} 失败",
+                f"{holder} 购买挂单 {listing_id} 失败，已清理持竿缓存" if missing_rod else f"{holder} 购买挂单 {listing_id} 失败",
                 FISHING_AUTO_RETRY_SECONDS,
                 purchase_text,
             )
             return True
 
-        self.get_fishing_state(holder)["rod_owned"] = False
+        self.fishing_clear_local_rod_holder(holder, save=False)
         lock = _acquire_fishing_auto_global_lock()
         try:
             data = _load_fishing_auto_global_state()
@@ -2038,7 +2282,7 @@ class FishingMixin:
             return False
         data, transfer = self.fishing_auto_current_global_transfer()
         if (
-            transfer.get("status") != "purchased"
+            transfer.get("status") not in {"purchased", "gifted"}
             or transfer.get("to_account") != target.get("account")
             or transfer.get("to_identity") != target.get("identity")
         ):
@@ -2046,8 +2290,8 @@ class FishingMixin:
         identity = str(target.get("identity") or "").strip()
         if not identity:
             return False
+        self.fishing_set_local_rod_holder(identity, save=False)
         state = self.get_fishing_state(identity)
-        state["rod_owned"] = True
         state["last_sync_date"] = _today()
         auto_state = self.get_fishing_auto_state()
         auto_state["rod_holder"] = identity
@@ -2072,6 +2316,23 @@ class FishingMixin:
         auto_state["transfer_from"] = holder
         auto_state["transfer_to"] = target
         auto_state["transfer_started_at"] = now_str()
+        if target == "主魂":
+            auto_state["transfer_listing_id"] = ""
+            if not await self.fishing_auto_gift_rod_to_account_main(holder, self.fishing_account_key()):
+                return False
+            self.fishing_set_local_rod_holder(target, save=False)
+            target_state = self.get_fishing_state(target)
+            target_state["last_sync_date"] = _today()
+            auto_state["rod_holder"] = target
+            auto_state["active_identity"] = target
+            auto_state["transfer_from"] = ""
+            auto_state["transfer_to"] = ""
+            auto_state["transfer_listing_id"] = ""
+            auto_state["last_status"] = "transferred"
+            auto_state["last_detail"] = f"鱼竿已从 {holder} 赠送给 {target}"
+            auto_state["next_action_at"] = ""
+            self.save_state()
+            return True
         self.fishing_auto_set_status(
             "transferring",
             f"{holder} -> {target} 转移鱼竿：等待挂单",
@@ -2109,17 +2370,26 @@ class FishingMixin:
         purchase = parse_trade_purchase_response(purchase_text)
         auto_state["last_response"] = purchase_text[:500]
         if purchase.get("status") != "success":
+            if purchase.get("status") == "missing_required_rod":
+                self.fishing_clear_local_rod_holder(holder, save=False)
+                self.fishing_auto_invalidate_global_rod_holder({
+                    "account": self.fishing_account_key(),
+                    "identity": holder,
+                })
             self.fishing_auto_set_status(
                 "transfer_failed",
-                f"{holder} 购买挂单 {listing_id} 失败",
+                (
+                    f"{holder} 购买挂单 {listing_id} 失败，已清理持竿缓存"
+                    if purchase.get("status") == "missing_required_rod"
+                    else f"{holder} 购买挂单 {listing_id} 失败"
+                ),
                 FISHING_AUTO_RETRY_SECONDS,
                 purchase_text,
             )
             return False
 
-        self.get_fishing_state(holder)["rod_owned"] = False
+        self.fishing_set_local_rod_holder(target, save=False)
         target_state = self.get_fishing_state(target)
-        target_state["rod_owned"] = True
         target_state["last_sync_date"] = _today()
         auto_state["rod_holder"] = target
         auto_state["active_identity"] = target
@@ -2133,25 +2403,37 @@ class FishingMixin:
         return True
 
     async def fishing_raise_rod_current_identity(self, identity):
-        previous_last_sent_id = getattr(self, "last_sent_id", None)
-        resp = await self._send_and_wait_feedback_raw(
-            ".提竿",
-            timeout=60,
-            max_retries=0,
-            suppress_no_response_alert=True,
-            return_response_msg=True,
-        )
-        if not self.fishing_response_text(resp):
-            sent_id = getattr(self, "last_sent_id", None)
-            if sent_id and sent_id != previous_last_sent_id:
-                polled = await self.fishing_poll_reply_to_sent_command(identity, ".提竿", sent_id)
-                if polled:
-                    resp = polled
-        return await self.fishing_record_rod_response(identity, resp)
+        async with self.fishing_raise_lock(identity):
+            if not self.fishing_raise_allowed_now(identity):
+                log = self.fishing_logger()
+                if log:
+                    log.info(f"Fishing [{identity}] raise skipped: no active due round.")
+                return False
+            previous_last_sent_id = getattr(self, "last_sent_id", None)
+            resp = await self._send_and_wait_feedback_raw(
+                ".提竿",
+                timeout=60,
+                max_retries=0,
+                suppress_no_response_alert=True,
+                return_response_msg=True,
+            )
+            if not self.fishing_response_text(resp):
+                sent_id = getattr(self, "last_sent_id", None)
+                if sent_id and sent_id != previous_last_sent_id:
+                    polled = await self.fishing_poll_reply_to_sent_command(identity, ".提竿", sent_id)
+                    if polled:
+                        resp = polled
+            return await self.fishing_record_rod_response(identity, resp)
 
     async def fishing_raise_rod(self, identity):
-        resp = await self.send_fishing_command(identity, ".提竿", timeout=60)
-        return await self.fishing_record_rod_response(identity, resp)
+        async with self.fishing_raise_lock(identity):
+            if not self.fishing_raise_allowed_now(identity):
+                log = self.fishing_logger()
+                if log:
+                    log.info(f"Fishing [{identity}] raise skipped: no active due round.")
+                return False
+            resp = await self.send_fishing_command(identity, ".提竿", timeout=60)
+            return await self.fishing_record_rod_response(identity, resp)
 
     async def fishing_record_rod_response(self, identity, resp, finish_daily=True):
         text = self.fishing_response_text(resp)
@@ -2177,11 +2459,13 @@ class FishingMixin:
                 if len(recorded) > 120:
                     del recorded[:-80]
         state["last_response"] = text[:500]
+        was_active = bool(state.get("active"))
         state["active"] = False
         state["active_due_at"] = ""
         state["active_started_at"] = ""
         state["active_bait"] = ""
-        counted_rod = parsed.get("status") in {"success", "empty"}
+        status = parsed.get("status")
+        counted_rod = status in {"success", "empty"} and was_active
         if counted_rod:
             state["last_round_at"] = now_str()
             state["today_count"] = min(
@@ -2192,7 +2476,7 @@ class FishingMixin:
                 state["current_nest_remaining"] = max(0, int(state.get("current_nest_remaining") or 0) - 1)
                 if state["current_nest_remaining"] <= 0:
                     state["current_nest"] = ""
-        if parsed.get("status") == "success":
+        if status == "success" and counted_rod:
             state["last_status"] = "caught"
             state["last_catch"] = parsed.get("catch", "")
             if state["last_catch"]:
@@ -2204,10 +2488,13 @@ class FishingMixin:
                     daily_loot[name] = int(daily_loot.get(name, 0)) + int(count or 0)
             state["last_detail"] = f"提竿成功{('：' + state['last_catch']) if state['last_catch'] else ''}"
             state["consecutive_empty"] = 0
-        elif parsed.get("status") == "empty":
+        elif status == "empty" and counted_rod:
             state["last_status"] = "empty"
             state["last_detail"] = "空竿"
             state["consecutive_empty"] = int(state.get("consecutive_empty") or 0) + 1
+        elif status in {"success", "empty"}:
+            state["last_status"] = "raise_ignored"
+            state["last_detail"] = "未处于钓鱼中，忽略提竿计数"
         else:
             state["last_status"] = "raise_unrecognized"
             state["last_detail"] = "提竿回复未识别"
@@ -2285,7 +2572,7 @@ class FishingMixin:
         other_identity, other_wait = self.fishing_other_identity_impending_wait(identity)
         if (
             other_identity
-            and 0 <= other_wait <= FISHING_IMPENDING_GUARD_SECONDS
+            and 0 < other_wait <= FISHING_IMPENDING_GUARD_SECONDS
             and not self.fishing_recently_yielded_to_other_identity(identity)
         ):
             state["last_cross_identity_yield_at"] = now_str()
@@ -2298,7 +2585,10 @@ class FishingMixin:
             return FISHING_CROSS_IDENTITY_YIELD_SECONDS
 
         impending = self.fishing_impending_wait(identity)
-        if 0 <= impending <= FISHING_IMPENDING_GUARD_SECONDS:
+        if (
+            (impending > 0 or (impending == 0 and not ignore_dashboard))
+            and impending <= FISHING_IMPENDING_GUARD_SECONDS
+        ):
             self.fishing_set_status(
                 identity,
                 "yielding",
@@ -2409,7 +2699,7 @@ class FishingMixin:
                     rod_holder={"account": account, "identity": target_identity},
                 )
             elif holder == target_identity:
-                target_state["rod_owned"] = True
+                self.fishing_set_local_rod_holder(target_identity, save=False)
                 self.fishing_auto_update_global_progress(
                     bait=bait,
                     rod_holder={"account": account, "identity": target_identity},

@@ -875,6 +875,7 @@
 
         function commandNextSeconds(item) {
             if (item?.control_disabled) return null;
+            if (item?.actionable === false) return null;
             if (typeof item?.next_seconds === 'number' && Number.isFinite(item.next_seconds)) {
                 return Math.max(0, item.next_seconds);
             }
@@ -964,6 +965,7 @@
             const label = String(item?.label || item?.command || '');
             const command = String(item?.command || '');
             const tone = String(item?.tone || '');
+            if (item?.actionable === false) return true;
             if (['watch', 'manual', 'flow', 'paused', 'done'].includes(tone)) return true;
             if (status.includes('监听') || status.includes('让路') || status.includes('等待')) return true;
             if (status.includes('今日已满') || status.includes('未开启') || status.includes('本轮结束')) return true;

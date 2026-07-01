@@ -25,7 +25,10 @@ from log_utils import (
     dashboard_command_disabled,
     identity_from_single_username_mention,
     identity_plain_usernames,
+    is_deep_meditation_ongoing_response,
+    is_deep_meditation_settlement_response,
     is_game_bot_sender,
+    is_not_deep_meditation_response,
     is_reply_to_untracked_message,
     is_yuanying_out_settlement_response,
     is_yuanying_rebirth_block_response,
@@ -60,11 +63,11 @@ COMMAND_CONTROL_FILE = os.path.join(CONFIG_DIR, "command_controls.json")
 CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
-FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 0  # 空回复时下一轮立即重试
+FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 5 * 60  # 空回复短退避，避免 dashboard 长时间显示 0 秒到期
 FIELD_TRAINING_SETTLEMENT_WAIT_SECONDS = 15    # 等待野外历练初始回复编辑为结算
 BUSHI_WENTIAN_COMMAND = ".卜筮问天"
 BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
-BUSHI_WENTIAN_DAILY_LIMIT = 10
+BUSHI_WENTIAN_DAILY_LIMIT = 8
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 YUANYING_REBIRTH_WAIT_SECONDS = 365 * 24 * 3600   # 探寻裂缝失败后等待手动 .重生 成功
 YUANYING_OUT_CD_SECONDS = 8 * 3600
@@ -87,6 +90,12 @@ TIME_CRITICAL_COMMAND_PREFIXES = (
     ".定命",
     ".助阵",
 )
+STALE_STAR_TIME_CRITICAL_KEYS = {
+    "next_star_gazing_time",
+    "pending_star_gazing_target_time",
+    "pending_star_shift_target_time",
+}
+STALE_STAR_TIME_CRITICAL_GRACE_SECONDS = 180
 
 STATE_TIME_COMMAND_MAP = {
     "next_rift_search_time": ".探寻裂缝",
@@ -181,6 +190,7 @@ def common_command_default_state():
         "bushi_wentian_date": "",
         "bushi_wentian_count": 0,
         "bushi_wentian_exchange_count": 0,
+        "bushi_wentian_kunwu_exchanged": False,
         "sect_name": "",
         "sect_war_left": "",
         "sect_war_right": "",
@@ -203,6 +213,48 @@ def common_command_default_state():
 # =====================================================================
 # CommonCommandMixin 混入类
 # =====================================================================
+
+class _CommonAtomicTask:
+    """Shared script-level atomic task gate for multi-command identity chains."""
+
+    def __init__(self, actor, label):
+        self.actor = actor
+        self.label = str(label or "Task")
+        self.task = None
+        self.acquired = False
+        self.reentrant = False
+
+    async def __aenter__(self):
+        if not hasattr(self.actor, "active_atomic_task"):
+            return self
+        self.task = asyncio.current_task()
+        while getattr(self.actor, "active_atomic_task", None) is not None and self.actor.active_atomic_task != self.task:
+            await asyncio.sleep(0.5)
+        if getattr(self.actor, "active_atomic_task", None) == self.task:
+            self.reentrant = True
+            return self
+        self.actor.active_atomic_task = self.task
+        self.actor._common_atomic_task = self.task
+        self.actor._common_atomic_label = self.label
+        self.acquired = True
+        try:
+            self.actor.common_command_logger().info(f"Atomic task acquired by {self.label}.")
+        except Exception:
+            pass
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.acquired and getattr(self.actor, "active_atomic_task", None) == self.task:
+            self.actor.active_atomic_task = None
+        if self.acquired and getattr(self.actor, "_common_atomic_task", None) == self.task:
+            self.actor._common_atomic_task = None
+            self.actor._common_atomic_label = ""
+            try:
+                self.actor.common_command_logger().info(f"Atomic task released by {self.label}.")
+            except Exception:
+                pass
+        return False
+
 
 class CommonCommandMixin:
     """通用固定冷却指令混入类。"""
@@ -407,6 +459,78 @@ class CommonCommandMixin:
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
 
+    def common_atomic_task(self, label):
+        return _CommonAtomicTask(self, label)
+
+    async def run_avatar_meditation_restart_chain(
+        self,
+        avatar,
+        *,
+        initial_check_text=None,
+        check_first=True,
+        prefix="",
+        source="meditation",
+        check_timeout=30,
+        check_retries=1,
+        cultivation_timeout=45,
+        cultivation_retries=1,
+        deep_timeout=60,
+        deep_retries=1,
+    ):
+        """Run .查看闭关 -> optional prefix -> .闭关修炼 -> .深度闭关 as one identity chain."""
+        async with self.common_atomic_task(f"Meditation-{avatar}"):
+            check_text = str(initial_check_text or "")
+            if check_first and initial_check_text is None:
+                check_resp = await self.send_and_wait_feedback_identity(
+                    avatar, ".查看闭关", timeout=check_timeout, max_retries=check_retries,
+                )
+                check_text = self.response_text(check_resp)
+
+            if check_text:
+                if is_deep_meditation_ongoing_response(check_text) or "预计还需" in check_text:
+                    cd = self.parse_wait_time(check_text)
+                    if cd > 0:
+                        self.update_avatar_states(
+                            avatar,
+                            self.meditation_active_state_values(add_seconds_str(now_str(), cd)),
+                        )
+                        return {"status": "ongoing", "wait": cd, "text": check_text}
+                    return {"status": "ongoing_unknown", "wait": 300, "text": check_text}
+                if not (
+                    is_deep_meditation_settlement_response(check_text)
+                    or is_not_deep_meditation_response(check_text)
+                ):
+                    return {"status": "unknown_check", "wait": 600, "text": check_text}
+
+            await asyncio.sleep(3)
+            prefix = str(prefix or "").strip()
+            if prefix:
+                await self.send_and_wait_feedback_identity(avatar, f"{prefix} 闭关")
+                await asyncio.sleep(3)
+
+            cultivation_resp = await self.send_and_wait_feedback_identity(
+                avatar, ".闭关修炼", timeout=cultivation_timeout, max_retries=cultivation_retries,
+            )
+            cultivation_text = self.response_text(cultivation_resp)
+            if not any(k in cultivation_text for k in ["闭关成功", "闭关失败"]):
+                retry_cd = self.defer_meditation_after_cultivation_cooldown(
+                    avatar, cultivation_text, f"[{avatar}] {source} .闭关修炼",
+                )
+                if retry_cd:
+                    return {"status": "deferred", "wait": retry_cd, "text": cultivation_text}
+
+            await asyncio.sleep(3)
+            deep_resp = await self.send_and_wait_feedback_identity(
+                avatar, ".深度闭关", timeout=deep_timeout, max_retries=deep_retries,
+            )
+            deep_text = self.response_text(deep_resp)
+            started = await self.record_avatar_deep_meditation_start(avatar, deep_text)
+            return {
+                "status": "started" if started else "failed",
+                "wait": 60 if started else 600,
+                "text": deep_text,
+            }
+
     # ---- 每日收益汇总 ----
 
     def daily_reward_enabled_commands(self):
@@ -448,6 +572,8 @@ class CommonCommandMixin:
         root = str(command or "").split()[0] if command else ""
         if root == ".野外历练":
             return self.daily_reward_field_training_settlement_text(clean)
+        if root == ".探寻裂缝":
+            return self.daily_reward_rift_settlement_text(clean)
         return clean
 
     def daily_reward_field_training_settlement_text(self, text):
@@ -482,6 +608,35 @@ class CommonCommandMixin:
         if title and title not in tail[:80]:
             return f"{title} {tail}".strip()
         return tail
+
+    def daily_reward_rift_settlement_text(self, text):
+        clean = self.clean_reward_text(text)
+        if not clean:
+            return ""
+
+        candidate_starts = []
+        for pattern in (
+            r"你的元婴满载而归",
+            r"一番斗法后",
+            r"获得修为\s*[+＋-]?\d",
+            r"【遭遇风暴】",
+            r"【不敌败退】",
+            r"【大凶·虚空噬体】",
+            r"【元婴遁逃·虚弱】",
+            r"身受重创",
+            r"遭受重创",
+            r"虚弱期",
+            r"肉身破碎",
+            r"肉身化为",
+            r"修为倒退",
+        ):
+            match = re.search(pattern, clean)
+            if match:
+                candidate_starts.append(match.start())
+
+        if not candidate_starts:
+            return clean
+        return clean[min(candidate_starts):].strip()
 
     def parse_reward_items_from_text(self, text):
         """Best-effort parser for command rewards used by the daily summary."""
@@ -577,7 +732,10 @@ class CommonCommandMixin:
             if self.is_field_training_settlement_response(clean) or rewards:
                 return "失败"
             return ""
-        if any(marker in clean for marker in ("失败", "不敌败退", "身受重创", "倒退", "折损")):
+        if any(marker in clean for marker in (
+            "失败", "不敌败退", "身受重创", "遭受重创", "倒退", "折损",
+            "肉身破碎", "肉身化为", "元婴遁逃", "虚弱期", "大凶",
+        )):
             return "失败"
         if rewards:
             return "成功"
@@ -595,7 +753,11 @@ class CommonCommandMixin:
         if root == ".探寻裂缝":
             if any(k in clean for k in ("冷却", "后再", "尚未", "请在", "送入其中探寻机缘")):
                 return False
-            return any(k in clean for k in ("获得", "收获", "发现", "成功", "时空异兽", "不敌败退", "身受重创"))
+            return any(k in clean for k in (
+                "为你带来了", "带回了", "获得修为", "获得了", "收获", "发现",
+                "时空异兽", "遭遇风暴", "不敌败退", "身受重创", "遭受重创",
+                "肉身破碎", "肉身化为", "元婴遁逃", "虚弱期", "大凶", "修为倒退",
+            ))
         if root in {".探渊", ".灵兽探渊"}:
             return any(k in clean for k in ("探渊", "万兽渊", "获得", "收获", "带回", "战利品", "奖励"))
         return bool(self.parse_reward_items_from_text(clean))
@@ -1574,6 +1736,8 @@ class CommonCommandMixin:
             states.append(self.get_avatar_state(identity))
 
         candidates = []
+        stale_changed = False
+        now = datetime.now()
         for state in states:
             if not isinstance(state, dict):
                 continue
@@ -1586,7 +1750,29 @@ class CommonCommandMixin:
                 if self.state_time_command_paused(key, identity):
                     continue
                 if isinstance(value, str) and value:
-                    candidates.append(seconds_until(value) if is_future(value) else 0)
+                    try:
+                        target = datetime.strptime(value, TIME_FORMAT)
+                    except Exception:
+                        target = None
+                    if target and target > now:
+                        candidates.append(max(0, (target - now).total_seconds()))
+                    elif (
+                        key in STALE_STAR_TIME_CRITICAL_KEYS
+                        and (
+                            target is None
+                            or (now - target).total_seconds() > STALE_STAR_TIME_CRITICAL_GRACE_SECONDS
+                        )
+                    ):
+                        state[key] = ""
+                        stale_changed = True
+                        try:
+                            self.common_command_logger().info(
+                                f"[{identity}] cleared stale star schedule {key}={value!r}."
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        candidates.append(0)
 
             if (
                 (state.get("spirit_tree_guard_pending") or state.get("spirit_tree_invasion_status"))
@@ -1610,6 +1796,11 @@ class CommonCommandMixin:
             if value:
                 candidates.append(seconds_until(value) if is_future(value) else 0)
 
+        if stale_changed:
+            try:
+                self.save_state()
+            except Exception:
+                pass
         return min(candidates) if candidates else -1
 
     def time_critical_defer_wait(self, identity, command, timeout=45):
@@ -1624,6 +1815,91 @@ class CommonCommandMixin:
             timeout = 45
         window = min(120, max(10, timeout + 5))
         return wait if wait <= window else -1
+
+    async def prepare_identity_for_time_critical_command(self, identity, command=".观星", timeout=20):
+        """Pre-switch identity before a narrow-window command without sending the command itself."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        command = str(command or "").strip() or ".观星"
+        log = self.common_command_logger()
+
+        if hasattr(self, "wait_while_identity_paused"):
+            if not await self.wait_while_identity_paused(identity, command):
+                return False
+
+        while hasattr(self, "should_wait_for_atomic_task") and self.should_wait_for_atomic_task(command):
+            await asyncio.sleep(0.5)
+
+        current = getattr(self, "current_identity", "主魂") or "主魂"
+        main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
+        if current == identity and (identity != "主魂" or main_confirmed):
+            return True
+
+        lock = getattr(self, "avatar_send_lock", None)
+        if lock is None or not hasattr(self, "_send_and_wait_feedback_raw"):
+            return False
+
+        async with lock:
+            current = getattr(self, "current_identity", "主魂") or "主魂"
+            main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
+            if current == identity and (identity != "主魂" or main_confirmed):
+                return True
+
+            ban_time = (getattr(self, "state", {}) or {}).get("next_switch_allowed_time", "")
+            if ban_time and is_future(ban_time):
+                log.info(
+                    f"Pre-switch for {command} skipped: switch command is cooling until {ban_time}."
+                )
+                return False
+
+            switch_cmd = f".切换 {identity}"
+            log.info(
+                f"Pre-switch for {command}: {current} -> {identity} before time-critical send."
+            )
+            switch_resp = await self._send_and_wait_feedback_raw(
+                switch_cmd,
+                timeout=timeout,
+                max_retries=1,
+                suppress_no_response_alert=True,
+            )
+            resp_text = self.timed_command_response_text(switch_resp)
+
+            if hasattr(self, "check_and_record_switch_ban") and self.check_and_record_switch_ban(resp_text):
+                return False
+            if not resp_text and hasattr(self, "apply_switch_guard_backoff"):
+                if self.apply_switch_guard_backoff(switch_cmd):
+                    return False
+
+            passively_confirmed = getattr(self, "current_identity", "") == identity
+            confirmed = passively_confirmed or (
+                resp_text and any(k in resp_text for k in ["成功", "已切换", "当前操控", identity])
+            )
+            if not confirmed:
+                log.info(
+                    f"Pre-switch for {command} to {identity} was not confirmed; "
+                    f"response={resp_text[:120]!r}."
+                )
+                return False
+
+            self.current_identity = identity
+            self._main_confirmed = (identity == "主魂")
+            log.info(f"Pre-switch for {command}: identity ready as {identity}.")
+            return True
+
+    async def sleep_then_prepare_time_critical_identity(self, send_dt, identity, command=".观星", lead_seconds=20):
+        """Sleep until the pre-switch lead window, switch identity, then return near send time."""
+        try:
+            lead_seconds = max(0, int(lead_seconds))
+        except Exception:
+            lead_seconds = 20
+        now = datetime.now()
+        pre_switch_at = send_dt - timedelta(seconds=lead_seconds)
+        wait_before_switch = (pre_switch_at - now).total_seconds()
+        if wait_before_switch > 0:
+            await asyncio.sleep(wait_before_switch)
+        await self.prepare_identity_for_time_critical_command(identity, command=command)
+        remaining = (send_dt - datetime.now()).total_seconds()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
     def state_time_command_paused(self, key, identity=""):
         command = self.state_time_command_for_key(key)
@@ -2889,54 +3165,55 @@ class CommonCommandMixin:
             return seconds_until(next_time)
 
         plan = self.field_training_plan(avatar)
-        for step in plan.pre_steps:
-            await self.send_and_wait_feedback_identity(avatar, step.command)
-            if step.delay_after:
-                await asyncio.sleep(step.delay_after)
+        async with self.common_atomic_task(f"FieldTraining-{avatar}"):
+            for step in plan.pre_steps:
+                await self.send_and_wait_feedback_identity(avatar, step.command)
+                if step.delay_after:
+                    await asyncio.sleep(step.delay_after)
 
-        log.info(f"Avatar [{avatar}] field training due: sending {plan.command}")
-        resp = await self.send_and_wait_feedback_identity(
-            avatar,
-            plan.command,
-            timeout=plan.timeout,
-            max_retries=plan.max_retries,
-            force_identity_check=plan.force_identity_check,
-            suppress_no_response_alert=plan.suppress_no_response_alert,
-            return_response_msg=plan.return_response_msg,
-        )
-        resp = await self.wait_for_field_training_settlement(resp, avatar)
-        resp_text = self.response_text(resp) if hasattr(self, "response_text") else self.field_training_response_text(resp)
-
-        if (
-            handle_insufficient_cultivation
-            and "修为不足" in resp_text
-            and hasattr(self, "handle_修为不足")
-        ):
-            async def retry_field_training():
-                retry_resp = await self.send_and_wait_feedback_identity(
-                    avatar,
-                    plan.command,
-                    timeout=plan.timeout,
-                    max_retries=plan.max_retries,
-                    force_identity_check=plan.force_identity_check,
-                    suppress_no_response_alert=plan.suppress_no_response_alert,
-                    return_response_msg=plan.return_response_msg,
-                )
-                return await self.wait_for_field_training_settlement(retry_resp, avatar)
-
-            success, retry_text = await self.handle_修为不足(
+            log.info(f"Avatar [{avatar}] field training due: sending {plan.command}")
+            resp = await self.send_and_wait_feedback_identity(
                 avatar,
-                retry_field_training,
-                cooldown_key="next_field_training_time",
-                cooldown_hours=2,
+                plan.command,
+                timeout=plan.timeout,
+                max_retries=plan.max_retries,
+                force_identity_check=plan.force_identity_check,
+                suppress_no_response_alert=plan.suppress_no_response_alert,
+                return_response_msg=plan.return_response_msg,
             )
-            resp_text = self.response_text(retry_text) if hasattr(self, "response_text") else self.field_training_response_text(retry_text)
-            if not success:
-                self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), FIELD_TRAINING_CD_SECONDS))
-                return 60
+            resp = await self.wait_for_field_training_settlement(resp, avatar)
+            resp_text = self.response_text(resp) if hasattr(self, "response_text") else self.field_training_response_text(resp)
 
-        self.record_identity_field_training_response(avatar, resp_text, "野外历练")
-        await self.maybe_run_bushi_wentian_after_field_training(avatar, resp_text)
+            if (
+                handle_insufficient_cultivation
+                and "修为不足" in resp_text
+                and hasattr(self, "handle_修为不足")
+            ):
+                async def retry_field_training():
+                    retry_resp = await self.send_and_wait_feedback_identity(
+                        avatar,
+                        plan.command,
+                        timeout=plan.timeout,
+                        max_retries=plan.max_retries,
+                        force_identity_check=plan.force_identity_check,
+                        suppress_no_response_alert=plan.suppress_no_response_alert,
+                        return_response_msg=plan.return_response_msg,
+                    )
+                    return await self.wait_for_field_training_settlement(retry_resp, avatar)
+
+                success, retry_text = await self.handle_修为不足(
+                    avatar,
+                    retry_field_training,
+                    cooldown_key="next_field_training_time",
+                    cooldown_hours=2,
+                )
+                resp_text = self.response_text(retry_text) if hasattr(self, "response_text") else self.field_training_response_text(retry_text)
+                if not success:
+                    self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), FIELD_TRAINING_CD_SECONDS))
+                    return 60
+
+            self.record_identity_field_training_response(avatar, resp_text, "野外历练")
+            await self.maybe_run_bushi_wentian_after_field_training(avatar, resp_text)
         return 5
 
     async def run_common_avatar_field_training_loop(
@@ -4019,14 +4296,19 @@ class CommonCommandMixin:
             state["bushi_wentian_date"] = today
             state["bushi_wentian_count"] = 0
             state["bushi_wentian_exchange_count"] = 0
+            state["bushi_wentian_kunwu_exchanged"] = False
             changed = True
         else:
             for key, default in (
                 ("bushi_wentian_count", 0),
                 ("bushi_wentian_exchange_count", 0),
+                ("bushi_wentian_kunwu_exchanged", False),
             ):
                 if key not in state:
-                    state[key] = default
+                    if key == "bushi_wentian_kunwu_exchanged":
+                        state[key] = int(state.get("bushi_wentian_exchange_count", 0) or 0) > 0
+                    else:
+                        state[key] = default
                     changed = True
         if changed:
             self.save_state()
@@ -4052,6 +4334,18 @@ class CommonCommandMixin:
             and any(k in clean for k in ["天道示警", "机缘", "逆天之物"])
         )
 
+    def is_bushi_wentian_kunwu_offer(self, text):
+        clean = str(text or "").replace("**", "")
+        return self.is_bushi_wentian_exchange_offer(clean) and "昆吾通行令" in clean
+
+    def is_bushi_wentian_exchange_success(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        if any(k in clean for k in ("失败", "超时", "消散", "不足", "无法", "没有")):
+            return False
+        return any(k in clean for k in ("天道认可", "换取成功", "已换取", "收入囊中", "献上祭品"))
+
     def is_bushi_wentian_daily_limit_response(self, text):
         clean = str(text or "").replace("**", "")
         return (
@@ -4061,18 +4355,26 @@ class CommonCommandMixin:
         )
 
     async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
-        """Run .卜筮问天 after a real field-training result, up to 10 times per day."""
+        """Run .卜筮问天 after a real field-training result, up to the daily limit."""
         if not self.is_field_training_settlement_response(field_training_text):
             return False
         identity = str(identity or "").strip() or "主魂"
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
             return False
         state = self.ensure_bushi_wentian_state(identity)
-        if int(state.get("bushi_wentian_count", 0) or 0) >= BUSHI_WENTIAN_DAILY_LIMIT:
+        if state.get("bushi_wentian_kunwu_exchanged"):
             return False
+        current_count = int(state.get("bushi_wentian_count", 0) or 0)
+        if current_count >= BUSHI_WENTIAN_DAILY_LIMIT:
+            return False
+        state["bushi_wentian_count"] = min(BUSHI_WENTIAN_DAILY_LIMIT, current_count + 1)
+        self.save_state()
 
         log = self.common_command_logger()
-        log.info(f"[{identity}] Bushi Wentian after field training: sending {BUSHI_WENTIAN_COMMAND}.")
+        log.info(
+            f"[{identity}] Bushi Wentian after field training: sending {BUSHI_WENTIAN_COMMAND} "
+            f"({state['bushi_wentian_count']}/{BUSHI_WENTIAN_DAILY_LIMIT})."
+        )
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
             resp_msg = await self.send_and_wait_feedback_identity(
                 identity,
@@ -4102,12 +4404,7 @@ class CommonCommandMixin:
             self.save_state()
             return False
 
-        state["bushi_wentian_count"] = min(
-            BUSHI_WENTIAN_DAILY_LIMIT,
-            int(state.get("bushi_wentian_count", 0) or 0) + 1,
-        )
-        self.save_state()
-
+        is_kunwu_offer = self.is_bushi_wentian_kunwu_offer(text)
         if not self.is_bushi_wentian_exchange_offer(text):
             return True
 
@@ -4118,7 +4415,7 @@ class CommonCommandMixin:
 
         log.info(f"[{identity}] Bushi Wentian exchange offer detected; replying {BUSHI_WENTIAN_EXCHANGE_COMMAND}.")
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-            await self.send_and_wait_feedback_identity(
+            exchange_resp = await self.send_and_wait_feedback_identity(
                 identity,
                 BUSHI_WENTIAN_EXCHANGE_COMMAND,
                 reply_to=reply_to,
@@ -4128,7 +4425,7 @@ class CommonCommandMixin:
                 suppress_no_response_alert=True,
             )
         else:
-            await self.send_and_wait_feedback(
+            exchange_resp = await self.send_and_wait_feedback(
                 BUSHI_WENTIAN_EXCHANGE_COMMAND,
                 reply_to=reply_to,
                 timeout=60,
@@ -4137,6 +4434,9 @@ class CommonCommandMixin:
             )
         state = self.ensure_bushi_wentian_state(identity)
         state["bushi_wentian_exchange_count"] = int(state.get("bushi_wentian_exchange_count", 0) or 0) + 1
+        exchange_text = self.bushi_wentian_response_text(exchange_resp)
+        if is_kunwu_offer and self.is_bushi_wentian_exchange_success(exchange_text):
+            state["bushi_wentian_kunwu_exchanged"] = True
         self.save_state()
         return True
 
@@ -4429,18 +4729,19 @@ class CommonCommandMixin:
             log = self.common_command_logger()
             plan = self.field_training_plan("主魂")
             cmd = plan.command
-            log.info(f"Field training due: sending {cmd}.")
-            resp = await self.send_and_wait_feedback(
-                cmd,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                suppress_no_response_alert=plan.suppress_no_response_alert,
-                return_response_msg=plan.return_response_msg,
-            )
-            resp = await self.wait_for_field_training_settlement(resp, "主魂")
-            resp_text = self.field_training_response_text(resp)
-            self.record_field_training_response(resp_text)
-            await self.maybe_run_bushi_wentian_after_field_training("主魂", resp_text)
+            async with self.common_atomic_task("FieldTraining-主魂"):
+                log.info(f"Field training due: sending {cmd}.")
+                resp = await self.send_and_wait_feedback(
+                    cmd,
+                    timeout=plan.timeout,
+                    max_retries=plan.max_retries,
+                    suppress_no_response_alert=plan.suppress_no_response_alert,
+                    return_response_msg=plan.return_response_msg,
+                )
+                resp = await self.wait_for_field_training_settlement(resp, "主魂")
+                resp_text = self.field_training_response_text(resp)
+                self.record_field_training_response(resp_text)
+                await self.maybe_run_bushi_wentian_after_field_training("主魂", resp_text)
             await asyncio.sleep(5)
 
     async def run_sect_war_loop(self):
