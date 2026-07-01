@@ -8399,6 +8399,83 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao.state["avatars"]["问心子"]["cloud_stairs_progress"], "8 / 12 阶")
         self.assertTrue(xiaohao.state["avatars"]["问心子"]["next_stairs_time"])
 
+    def test_xiaohao_lingxiao_mismatch_disables_cloud_stairs(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["问心子"]
+        actor.state = {"avatars": {"问心子": {"cloud_stairs_progress": "11 / 12 阶"}}}
+        actor.save_state = lambda: None
+
+        result = actor.record_avatar_cloud_stairs_response(
+            "问心子",
+            "你并非凌霄宫弟子，云阶禁制不会为你显现。"
+        )
+
+        state = actor.state["avatars"]["问心子"]
+        self.assertFalse(result)
+        self.assertTrue(state["cloud_stairs_disabled"])
+        self.assertEqual(state["next_stairs_time"], "")
+
+    def test_xiaohao_heart_platform_mismatch_does_not_mark_used(self):
+        async def run_case():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            actor.avatars = ["问心子"]
+            actor.state = {
+                "avatars": {
+                    "问心子": {
+                        "cloud_stairs_progress": "11 / 12 阶",
+                        "nine_heaven_wind_cd_time": add_seconds_str(now_str(), 3600),
+                    }
+                }
+            }
+            actor.save_state = lambda: None
+
+            async def fake_send(identity, command, *args, **kwargs):
+                self.assertEqual(identity, "问心子")
+                self.assertEqual(command, ".问心台")
+                return "你并非凌霄宫弟子，云阶禁制不会为你显现。"
+
+            actor.send_and_wait_feedback_identity = fake_send
+            return await actor.maybe_use_heart_platform_before_climb(
+                "问心子",
+                11,
+                datetime.now().strftime("%Y-%m-%d"),
+            ), actor.state
+
+        result, state = asyncio.run(run_case())
+        avatar_state = state["avatars"]["问心子"]
+        self.assertFalse(result)
+        self.assertTrue(avatar_state["cloud_stairs_disabled"])
+        self.assertEqual(avatar_state.get("heart_platform_date", ""), "")
+        self.assertEqual(avatar_state.get("last_heart_time", ""), "")
+
+    def test_main_heart_platform_mismatch_does_not_mark_used(self):
+        async def run_case():
+            actor = Cultivator.__new__(Cultivator)
+            actor.state = {
+                "completed_weeks": "0 轮",
+                "heart_platform_date": "",
+                "last_heart_time": "",
+                "nine_heaven_wind_cd_time": "",
+            }
+            actor._main_confirmed = True
+            actor.save_state = lambda: None
+
+            async def fake_send(command, *args, **kwargs):
+                self.assertEqual(command, ".问心台")
+                return "你并非凌霄宫弟子，云阶禁制不会为你显现。"
+
+            actor.send_and_wait_feedback = fake_send
+            await actor.maybe_use_heart_platform_before_climb(
+                11,
+                datetime.now().strftime("%Y-%m-%d"),
+            )
+            return actor.state, actor._main_confirmed
+
+        state, main_confirmed = asyncio.run(run_case())
+        self.assertEqual(state.get("heart_platform_date", ""), "")
+        self.assertEqual(state.get("last_heart_time", ""), "")
+        self.assertFalse(main_confirmed)
+
     def test_xiaohao_no_such_beast_removes_stale_cache(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

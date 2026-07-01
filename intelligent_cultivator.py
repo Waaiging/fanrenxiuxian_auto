@@ -1802,14 +1802,20 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         # 使用问心台
         reason = "late daily fallback" if late_fallback and not (8 <= curr_step <= 11) else "late cloud-stairs climb"
         log.info(f"Progress {curr_step}/12, Wind unavailable, sending .问心台 for {reason}.")
-        self.state["heart_platform_date"] = today
-        self.state["last_heart_time"] = now_str()
-        self.state["next_heart_time"] = add_seconds_str(f"{today} 00:05:00", 24 * 3600)
-        self.save_state()
 
         hp_resp = await self.send_and_wait_feedback(".问心台", force_identity_check=True)
         if hp_resp:
+            if self.is_lingxiao_identity_mismatch_response(hp_resp):
+                self._main_confirmed = False
+                self.state["next_heart_time"] = add_seconds_str(now_str(), 120)
+                self.save_state()
+                log.warning("Heart Platform: main identity mismatch; will force .切换 主魂 before retry.")
+                return
             if any(k in hp_resp for k in ["问心台", "已经", "明天", "成功", "感受到", "感悟", "今日"]):
+                self.state["heart_platform_date"] = today
+                self.state["last_heart_time"] = now_str()
+                self.state["next_heart_time"] = add_seconds_str(f"{today} 00:05:00", 24 * 3600)
+                self.save_state()
                 log.info("Heart Platform used/confirmed for late cloud-stairs climb.")
             else:
                 log.warning(f"Heart Platform response unusual: {hp_resp[:100]}")
