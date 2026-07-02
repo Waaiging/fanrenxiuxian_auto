@@ -5919,6 +5919,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["next_beast_cruise_time"], pasture_until)
         self.assertEqual(actor.state["next_beast_interaction_time"], pasture_until)
 
+    def test_focus_pasture_after_abyss_protection_preserves_status(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "best_beast_name": "六翼",
+            "best_beast_status": "放养中",
+            "focus_pasture_after_abyss_until": add_seconds_str(now_str(), cultivator_xiaohao.PASTURE_CD_SECONDS),
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "放养中", "power": 4096, "exp": 0, "stamina": 80},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        actor.mark_all_pastured_beasts_returned()
+
+        self.assertEqual(actor.state["best_beast_status"], "放养中")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "放养中")
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "休息中")
+
     def test_beast_not_before_helpers_preserve_last_action_times(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
@@ -6438,6 +6457,82 @@ class ParserFixtureTests(unittest.TestCase):
         ]
 
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "六翼")
+
+    def test_focus_beast_pastures_after_abyss_success(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "next_pasture_time": add_seconds_str(now_str(), 3 * 3600),
+            "best_beast_name": "六翼",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        actor.record_daily_reward_event = lambda *args, **kwargs: True
+        sent = []
+
+        async def fake_update():
+            return True
+
+        async def fake_abyss(beast_name):
+            sent.append(f".探渊 {beast_name}")
+            return "你的灵兽【六翼】成功击败了对手！它带回了战利品：【兽骨】x1。"
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".一键放养":
+                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
+            return ""
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.update_beast_cache = fake_update
+        actor.send_abyss_with_busy_retry = fake_abyss
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.execute_abyss_with_fallback()))
+
+        self.assertEqual(sent, [".探渊 六翼", ".一键放养"])
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "放养中")
+        self.assertEqual(actor.state["best_beast_status"], "放养中")
+        self.assertGreater(common_seconds_until(actor.state["next_abyss_time"]), 5 * 3600)
+        self.assertGreater(common_seconds_until(actor.state["focus_pasture_after_abyss_until"]), 3 * 3600)
+
+    def test_focus_beast_abyss_start_response_does_not_pasture_immediately(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "best_beast_name": "六翼",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        actor.record_daily_reward_event = lambda *args, **kwargs: True
+        sent = []
+
+        async def fake_update():
+            return True
+
+        async def fake_abyss(beast_name):
+            sent.append(f".探渊 {beast_name}")
+            return "灵兽【六翼】已出发进入万兽渊历练。"
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return ""
+
+        actor.update_beast_cache = fake_update
+        actor.send_abyss_with_busy_retry = fake_abyss
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_abyss_with_fallback()))
+
+        self.assertEqual(sent, [".探渊 六翼"])
+        self.assertEqual(actor.state.get("focus_pasture_after_abyss_until", ""), "")
 
     def test_recent_profile_fallback_requires_username(self):
         actor = Cultivator.__new__(Cultivator)

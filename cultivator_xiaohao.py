@@ -426,6 +426,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "next_hunt_time": "", "next_steal_time": "", "next_abyss_time": "",
             "next_pasture_time": "", "pasture_pending_count": 0,
             "pasture_returned_count": 0, "pasture_pending_since": "",
+            "focus_pasture_after_abyss_until": "",
             "last_pasture_return_time": "", "next_meditation_retry_time": "",
             "best_beast_injured_time": "", "next_beast_status_check_time": "",
             "best_beast_name": "", "best_beast_power": 0,
@@ -3232,6 +3233,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         """标记放养中的灵兽为已归来（休息中）"""
         names = self.parse_pasture_return_names(text)
         changed = 0
+        if names and any(self.beast_name_matches(name, BEAST_FOCUS_NAME) for name in names):
+            self.state["focus_pasture_after_abyss_until"] = ""
         for beast in self.state.get("beasts_cache", []):
             if names and not any(self.beast_name_matches(beast.get("full_name"), name) for name in names): continue
             if "放养" in (beast.get("status") or ""): beast["status"] = "休息中"; changed += 1
@@ -3244,16 +3247,25 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def mark_all_pastured_beasts_returned(self):
         """全部放养灵兽标记为已归来"""
         changed = 0
+        protect_focus = self.focus_pasture_after_abyss_protected()
         for beast in self.state.get("beasts_cache", []):
+            if protect_focus and self.beast_name_matches(beast.get("full_name", ""), BEAST_FOCUS_NAME):
+                continue
             if "放养" in (beast.get("status") or ""): beast["status"] = "休息中"; changed += 1
         if self.state.get("best_beast_status") and "放养" in self.state.get("best_beast_status"):
-            self.state["best_beast_status"] = "休息中"
+            best_name = self.state.get("best_beast_name", "")
+            if not (protect_focus and self.beast_name_matches(best_name, BEAST_FOCUS_NAME)):
+                self.state["best_beast_status"] = "休息中"
         return changed
 
     def clear_pasture_pending(self):
         self.state["pasture_pending_count"] = 0
         self.state["pasture_returned_count"] = 0
         self.state["pasture_pending_since"] = ""
+
+    def focus_pasture_after_abyss_protected(self):
+        until = self.state.get("focus_pasture_after_abyss_until", "")
+        return bool(until and is_future(until))
 
     def remember_manual_pasture_command_if_needed(self, msg, text):
         """记录手动发送的一键放养命令（用于同步状态）"""
@@ -3486,6 +3498,41 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         log.info(f"Focus pasture: sending .一键放养 for {focus_name} (stamina={stamina}).")
         f_resp = await self.send_and_wait_feedback(".一键放养")
         return self.record_auto_pasture_response(f_resp, cache, focus_name, status, block_actions=False)
+
+    async def pasture_focus_after_abyss(self, beast_name):
+        """六翼探渊结算后立即重新放养，避免被探渊召回后长期停在休息中。"""
+        if not self.beast_name_matches(beast_name, BEAST_FOCUS_NAME):
+            return False
+        focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
+        focus_status = (focus or {}).get("status", "") or self.state.get("best_beast_status", "")
+        if self.is_injury_status(focus_status):
+            log.info(f"Focus pasture after abyss skipped: {BEAST_FOCUS_NAME} status is {focus_status}.")
+            return False
+        if self.is_pastured_status(focus_status):
+            self.state["focus_pasture_after_abyss_until"] = add_seconds_str(now_str(), PASTURE_CD_SECONDS)
+            self.save_state()
+            return True
+        if any(k in focus_status for k in ["探险", "偷菜", "巡游", "巡边"]):
+            self.schedule_pasture_retry(BEAST_ACTION_RETRY_SECONDS)
+            log.info(f"Focus pasture after abyss deferred: {BEAST_FOCUS_NAME} status is {focus_status}.")
+            return False
+        if not await self.ensure_focus_beast_ready_for_pasture():
+            return False
+        await asyncio.sleep(3)
+        log.info(f"Focus pasture after abyss: sending .一键放养 for {BEAST_FOCUS_NAME}.")
+        f_resp = await self.send_and_wait_feedback(".一键放养")
+        before_status = focus_status or "休息中"
+        ok = self.record_auto_pasture_response(
+            f_resp,
+            self.state.get("beasts_cache", []),
+            BEAST_FOCUS_NAME,
+            before_status,
+            block_actions=False,
+        )
+        if ok and self.is_pasture_success(f_resp):
+            self.state["focus_pasture_after_abyss_until"] = add_seconds_str(now_str(), PASTURE_CD_SECONDS)
+            self.save_state()
+        return ok
 
     def is_no_beast_deployed_for_steal_response(self, text):
         """检测偷菜时未出战灵兽的明确失败回复"""
@@ -4089,6 +4136,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 self.state["last_abyss_time"] = now_str()
                 self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600)
                 self.set_best_beast_status(best_name, "休息中")
+                abyss_settled = any(k in a_resp for k in ["获得", "收获", "战利品", "带回", "奖励", "击败"])
+                if self.beast_name_matches(best_name, BEAST_FOCUS_NAME) and abyss_settled:
+                    await self.pasture_focus_after_abyss(best_name)
                 self.save_state()
                 return True
 
