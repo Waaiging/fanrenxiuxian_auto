@@ -52,7 +52,7 @@ FISHING_RETRY_SECONDS = 2 * 60
 FISHING_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_DISABLED_SLEEP_SECONDS = 60
 FISHING_AUTO_RETRY_SECONDS = 5 * 60
-FISHING_AUTO_HANDOFF_DELAY_SECONDS = 2 * 60
+FISHING_AUTO_HANDOFF_DELAY_SECONDS = 30 * 60
 FISHING_ROD_ITEM = "青竹钓竿"
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 FISHING_ROD_GIFT_COMMAND = f".赠送 {FISHING_ROD_ITEM}*1"
@@ -426,6 +426,36 @@ def _fishing_auto_identity_key(account, identity):
     if not account:
         return ""
     return f"{account}|{identity}"
+
+
+def _fishing_auto_first_pending_for_account(pending, account):
+    account = str(account or "").strip()
+    for item in pending or ():
+        if item.get("account") == account:
+            return item
+    return None
+
+
+def _fishing_auto_select_next_pending(pending, active=None, holder=None):
+    pending = list(pending or ())
+    if not pending:
+        return {}
+    active = active if isinstance(active, dict) else {}
+    holder = holder if isinstance(holder, dict) else {}
+    active_account = str(active.get("account") or "").strip()
+    if active_account in FISHING_AUTO_CONTROL_ACCOUNTS:
+        start = FISHING_AUTO_CONTROL_ACCOUNTS.index(active_account)
+        for offset in range(1, len(FISHING_AUTO_CONTROL_ACCOUNTS)):
+            account = FISHING_AUTO_CONTROL_ACCOUNTS[(start + offset) % len(FISHING_AUTO_CONTROL_ACCOUNTS)]
+            item = _fishing_auto_first_pending_for_account(pending, account)
+            if item:
+                return item
+    holder_key = _fishing_auto_identity_key(holder.get("account"), holder.get("identity"))
+    if holder_key:
+        for item in pending:
+            if item.get("key") == holder_key:
+                return item
+    return pending[0]
 
 
 def _fishing_auto_default_global_state():
@@ -1908,11 +1938,7 @@ class FishingMixin:
                 data["handoff_from"] = {}
             elif active_key not in pending_keys:
                 holder = data.get("rod_holder") if isinstance(data.get("rod_holder"), dict) else {}
-                holder_key = _fishing_auto_identity_key(holder.get("account"), holder.get("identity"))
-                next_item = next(
-                    (item for item in snapshot["pending"] if item["key"] == holder_key),
-                    snapshot["pending"][0] if snapshot["pending"] else {},
-                )
+                next_item = _fishing_auto_select_next_pending(snapshot["pending"], active=active, holder=holder)
                 data["active"] = {
                     "account": next_item.get("account", ""),
                     "identity": next_item.get("identity", ""),
@@ -1920,13 +1946,17 @@ class FishingMixin:
                     "updated_at": now_str(),
                 } if next_item else {}
                 if active_key and next_item and next_item.get("key") != active_key:
-                    data["handoff_not_before"] = add_seconds_str(now_str(), FISHING_AUTO_HANDOFF_DELAY_SECONDS)
-                    data["handoff_from"] = {
-                        "account": active.get("account", ""),
-                        "identity": active.get("identity", ""),
-                        "key": active_key,
-                        "completed_at": now_str(),
-                    }
+                    if next_item.get("account") == active.get("account"):
+                        data["handoff_not_before"] = add_seconds_str(now_str(), FISHING_AUTO_HANDOFF_DELAY_SECONDS)
+                        data["handoff_from"] = {
+                            "account": active.get("account", ""),
+                            "identity": active.get("identity", ""),
+                            "key": active_key,
+                            "completed_at": now_str(),
+                        }
+                    else:
+                        data["handoff_not_before"] = ""
+                        data["handoff_from"] = {}
                 elif not next_item:
                     data["handoff_not_before"] = ""
                     data["handoff_from"] = {}

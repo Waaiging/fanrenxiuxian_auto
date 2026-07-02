@@ -2575,10 +2575,52 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertLessEqual(wait, 300)
         self.assertEqual(actor.ticked, [])
         self.assertEqual(global_state["active"]["key"], "main|无咎子")
-        handoff_wait = common_seconds_until(global_state["handoff_not_before"])
-        self.assertGreater(handoff_wait, 30)
-        self.assertLessEqual(handoff_wait, 2 * 60)
+        self.assertGreater(common_seconds_until(global_state["handoff_not_before"]), 25 * 60)
         self.assertEqual(actor.get_fishing_auto_state()["last_status"], "handoff_wait")
+
+    def test_fishing_auto_rotates_to_next_account_before_same_account_identity(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        class DummyFishing(FishingMixin):
+            account_key = "main"
+            avatars = ["无咎子"]
+
+            def __init__(self):
+                self.state = {
+                    "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
+                    "fishing_auto": {"preferred_bait": "灵米饵"},
+                    "avatars": {"无咎子": {"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 5}}},
+                }
+
+            def get_avatar_state(self, avatar):
+                return self.state.setdefault("avatars", {}).setdefault(avatar, {})
+
+            def save_state(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            for filename in ("state_sub.json", "state_xiaohao.json"):
+                with open(os.path.join(tmpdir, filename), "w", encoding="utf-8") as f:
+                    json.dump({"fishing": {"last_sync_date": today, "today_count": 0, "daily_limit": 5}, "avatars": {}}, f, ensure_ascii=False)
+            with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "date": today,
+                    "preferred_bait": "灵米饵",
+                    "active": {"account": "main", "identity": "主魂", "key": "main|主魂"},
+                    "rod_holder": {"account": "main", "identity": "无咎子"},
+                    "completed": {},
+                    "transfer": {},
+                }, f, ensure_ascii=False)
+
+            actor = DummyFishing()
+            with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
+                global_state, snapshot = actor.fishing_auto_update_global_progress(bait="灵米饵")
+
+        self.assertIn("main|无咎子", {item["key"] for item in snapshot["pending"]})
+        self.assertEqual(global_state["active"]["key"], "sub|主魂")
+        self.assertEqual(global_state["handoff_not_before"], "")
+        self.assertEqual(global_state["handoff_from"], {})
 
     def test_fishing_auto_restores_incomplete_handoff_source(self):
         today = datetime.now().strftime("%Y-%m-%d")
