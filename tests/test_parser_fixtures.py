@@ -6109,6 +6109,47 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_name"], "青蛟")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 10 * 60)
 
+    def test_border_patrol_status_records_colon_name_and_return_due(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "猴哥 (巡边中)", "species": "二阶金瞳妖猴", "status": "未知", "power": 195, "exp": 652, "stamina": 28},
+            ],
+        }
+        actor.save_state = lambda: None
+        text = "**【灵兽边境编队】**\n灵兽：**猴哥**\n路线：**夜嗅敌营**\n状态：尚需 **15秒** 可用 `.巡边归来` 结算。"
+
+        self.assertTrue(actor.record_beast_border_patrol_status_response(text))
+
+        self.assertEqual(actor.state["beast_border_patrol_name"], "猴哥")
+        self.assertEqual(actor.state["beasts_cache"][0]["full_name"], "猴哥")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
+        self.assertLessEqual(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 15)
+
+    def test_border_patrol_active_sends_return_before_new_patrol(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "猴哥",
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "巡边中", "power": 195, "exp": 652, "stamina": 28},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 38, "exp": 80, "stamina": 38},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return "灵兽【猴哥】巡边归来，带回【兽粮】x1。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+        self.assertEqual(sent, [".巡边归来"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
     def test_border_patrol_unknown_response_uses_conservative_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {}

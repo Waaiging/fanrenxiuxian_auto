@@ -2465,15 +2465,19 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         """设置最佳灵兽的状态并保存"""
         if not name or not status: return
         old_status = ""
-        if self.state.get("best_beast_name") == name: old_status = self.state.get("best_beast_status", "")
+        if self.beast_name_matches(self.state.get("best_beast_name", ""), name):
+            old_status = self.state.get("best_beast_status", "")
         for beast in self.state.get("beasts_cache", []):
-            if beast.get("full_name") == name: old_status = beast.get("status", "") or old_status; break
+            if self.beast_name_matches(beast.get("full_name", ""), name):
+                old_status = beast.get("status", "") or old_status
+                break
         self.adjust_pasture_pending_for_status_change(name, old_status, status)
-        if self.state.get("best_beast_name") == name:
+        if self.beast_name_matches(self.state.get("best_beast_name", ""), name):
             self.state["best_beast_status"] = status
             self.record_best_beast_status_timing(status, status_cd)
         for beast in self.state.get("beasts_cache", []):
-            if beast.get("full_name") == name:
+            if self.beast_name_matches(beast.get("full_name", ""), name):
+                beast["full_name"] = name
                 beast["status"] = status
                 if status_cd is not None:
                     beast["status_cd"] = status_cd
@@ -2868,10 +2872,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def border_patrol_beast_name_from_text(self, text):
         clean = str(text or "").replace("**", "")
-        for pattern in (r"灵兽【([^】]+)】", r"【([^】]+)】(?:正在)?(?:边境|巡边|巡行)"):
+        for pattern in (
+            r"灵兽[:：]\s*([^\n\r]+)",
+            r"灵兽【([^】]+)】",
+            r"【([^】]+)】(?:正在)?(?:边境|巡边|巡行)",
+        ):
             m = re.search(pattern, clean)
             if m:
-                name = m.group(1).strip()
+                name = re.sub(r"\s*\([^)]*\)", "", m.group(1)).strip()
                 if self.is_valid_beast_name(name):
                     return name
         return ""
@@ -2903,7 +2911,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.save_state()
             return True
         if any(k in resp for k in ["巡边", "巡行", "边境"]):
-            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            name = self.border_patrol_beast_name_from_text(resp)
+            if name:
+                self.state["beast_border_patrol_name"] = name
+                self.set_best_beast_status(name, "巡边中")
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_ACTION_RETRY_SECONDS)
             return True
         self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS)
         notify_unrecognized_response(self, ".巡边状态", resp, log, "灵兽巡边状态")
@@ -2923,7 +2935,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.save_state()
             return True
         if self.is_existing_border_patrol_response(resp):
-            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_ACTION_RETRY_SECONDS)
             return True
         if self.is_beast_stamina_insufficient_response(resp):
             if beast_name:
@@ -2963,6 +2975,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         cd = self.parse_wait_time(resp)
         name = self.border_patrol_beast_name_from_text(resp) or self.state.get("beast_border_patrol_name", "")
         if cd > 0 and any(k in resp for k in ["还需", "尚需", "剩余", "冷却", "巡边", "巡行"]):
+            if name:
+                self.state["beast_border_patrol_name"] = name
+                self.set_best_beast_status(name, "巡边中")
             self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
             self.save_state()
             return True
@@ -2981,8 +2996,25 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return True
         return False
 
+    async def finish_beast_border_patrol_if_active(self):
+        name = str(self.state.get("beast_border_patrol_name") or "").strip()
+        if not name:
+            return False
+        log.info(f"Beast border patrol: {name} is active; sending .巡边归来 before starting another patrol.")
+        resp = await self.send_and_wait_feedback(".巡边归来", timeout=60, max_retries=1)
+        if self.record_beast_border_patrol_return_response(resp):
+            return True
+        status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
+        if self.record_beast_border_patrol_status_response(status_resp):
+            return True
+        self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS)
+        notify_unrecognized_response(self, ".巡边归来", resp, log, "灵兽巡边归来")
+        return False
+
     async def run_beast_border_patrol(self, mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
         mode = self.normalize_beast_border_patrol_mode(mode)
+        if await self.finish_beast_border_patrol_if_active():
+            return True
         beast = self.select_beast_for_border_patrol(self.state.get("beasts_cache", []))
         if not beast:
             recall_beast = self.select_beast_to_recall_for_border_patrol(self.state.get("beasts_cache", []))
