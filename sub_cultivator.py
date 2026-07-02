@@ -3020,6 +3020,52 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
+    def _stale_fishing_active_identities(self, overdue_seconds=10 * 60):
+        stale = []
+        for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
+            try:
+                state = self.get_fishing_state(identity)
+            except Exception:
+                continue
+            due_at = str(state.get("active_due_at") or "").strip()
+            if not state.get("active") or not due_at or is_future(due_at):
+                continue
+            overdue = seconds_until(due_at)
+            if overdue <= -abs(int(overdue_seconds)):
+                stale.append((identity, due_at, int(abs(overdue))))
+        return stale
+
+    async def run_sub_health_watchdog_loop(self):
+        await self.startup_done.wait()
+        lock_started_at = None
+        while getattr(self, "is_running", True):
+            try:
+                stale_fishing = self._stale_fishing_active_identities()
+                if stale_fishing:
+                    detail = ", ".join(
+                        f"{identity} due {due_at} ({overdue}s overdue)"
+                        for identity, due_at, overdue in stale_fishing
+                    )
+                    log.critical(f"Sub watchdog: stale fishing active detected: {detail}; restarting process.")
+                    self.save_state()
+                    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+                if self.avatar_send_lock.locked():
+                    if lock_started_at is None:
+                        lock_started_at = time.monotonic()
+                    held_for = time.monotonic() - lock_started_at
+                    if held_for >= 10 * 60:
+                        log.critical(
+                            f"Sub watchdog: avatar_send_lock held for {held_for:.0f}s; restarting process."
+                        )
+                        self.save_state()
+                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                else:
+                    lock_started_at = None
+            except Exception as exc:
+                log.error(f"Sub watchdog loop error: {exc}", exc_info=True)
+            await asyncio.sleep(60)
+
     async def run_daily_tasks(self):
         """
         每日任务循环，每天 07:15 开始执行。
@@ -6114,6 +6160,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
         asyncio.create_task(startup_sync())
         asyncio.create_task(periodic_log_prune(LOG_FILE))
+        asyncio.create_task(self.run_sub_health_watchdog_loop())
 
         # 启动所有后台循环
         asyncio.create_task(self.run_daily_tasks())           # 每日任务（点卯/闯塔/传功）
