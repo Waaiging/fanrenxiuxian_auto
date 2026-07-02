@@ -6145,6 +6145,26 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.select_beast_for_border_patrol(cache)["full_name"], "青蛟")
 
+    def test_border_patrol_skips_known_low_stamina_candidate(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        cache = [
+            {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 23},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 24},
+        ]
+
+        self.assertEqual(actor.select_beast_for_border_patrol(cache)["full_name"], "麻花藤")
+
+    def test_border_patrol_recall_skips_known_low_stamina_candidate(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        cache = [
+            {"full_name": "青蛟", "species": "二阶蛟龙", "status": "偷菜中", "power": 420, "exp": 8, "stamina": 23},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "偷菜中", "power": 31, "exp": 0, "stamina": 24},
+        ]
+
+        self.assertEqual(actor.select_beast_to_recall_for_border_patrol(cache)["full_name"], "麻花藤")
+
     def test_border_patrol_defaults_to_raid_mode(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
@@ -6183,6 +6203,39 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_name"], "保龄球")
         self.assertEqual(actor.state["beast_border_patrol_mode"], "袭营")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
+    def test_border_patrol_stamina_failure_tries_next_resting_beast(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽巡边 青蛟 袭营":
+                return "灵兽【青蛟】体力不足，至少需要 24 点体力。"
+            if command == ".灵兽巡边 麻花藤 袭营":
+                return "灵兽【麻花藤】领命前往边境巡行，执行【袭营】。"
+            return ""
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+
+        self.assertEqual(sent, [".灵兽巡边 青蛟 袭营", ".灵兽巡边 麻花藤 袭营"])
+        self.assertEqual(actor.state["beasts_cache"][0]["stamina"], 23)
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
+        self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
 
     def test_border_patrol_recalls_highest_stamina_when_no_resting_beast(self):
