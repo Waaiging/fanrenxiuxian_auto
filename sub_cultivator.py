@@ -428,6 +428,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
         # ---- 主魂宗门配置 ----
         self.sect_name = MAIN_SECT_NAME
+        self.identity_sect_names = {
+            "主魂": "元婴宗",
+            "厚土": "星宫",
+            "缘生子": "阴罗宗",
+            "寻真子": "星宫",
+        }
         self.main_star_palace_enabled = False
         self.main_formation_enabled = False
         self.main_concubine_enabled = True

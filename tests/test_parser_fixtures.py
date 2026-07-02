@@ -1430,6 +1430,47 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["huanglong_signup_date"], "2026-07-02")
         self.assertEqual(actor.state["huanglong_signup_status"], "window_closed")
 
+    def test_huanglong_identity_sect_map_sends_matching_avatars_once(self):
+        actor = DummyCommon()
+        actor.sect_name = "万灵宗"
+        actor.avatars = ["问心子", "素心子", "缘生子"]
+        actor.identity_sect_names = {
+            "主魂": "万灵宗",
+            "问心子": "凌霄宫",
+            "素心子": "星宫",
+            "缘生子": "星宫",
+        }
+        sent = []
+
+        async def fake_identity_send(identity, command, **kwargs):
+            sent.append((identity, command, kwargs))
+            return f"{identity}报名成功"
+
+        actor.send_and_wait_feedback_identity = fake_identity_send
+        identities = actor.huanglong_identities_for_sect("星宫")
+
+        self.assertEqual(identities, ["素心子", "缘生子"])
+        self.assertTrue(asyncio.run(actor.maybe_signup_huanglong_identities_now(
+            "星宫",
+            identities,
+            msg_id=2001,
+            now_dt=datetime(2026, 7, 2, 12, 30),
+        )))
+        self.assertFalse(asyncio.run(actor.maybe_signup_huanglong_identities_now(
+            "星宫",
+            identities,
+            msg_id=2002,
+            now_dt=datetime(2026, 7, 2, 12, 45),
+        )))
+
+        self.assertEqual([(item[0], item[1]) for item in sent], [
+            ("素心子", ".报名黄龙山"),
+            ("缘生子", ".报名黄龙山"),
+        ])
+        self.assertTrue(all(item[2]["force_identity_check"] for item in sent))
+        self.assertTrue(actor.huanglong_signup_record_matches("2026-07-02", "星宫", "素心子"))
+        self.assertTrue(actor.huanglong_signup_record_matches("2026-07-02", "星宫", "缘生子"))
+
     def test_common_avatar_star_observatory_parser_extracts_remaining(self):
         actor = DummyAvatarCommon()
         text = """

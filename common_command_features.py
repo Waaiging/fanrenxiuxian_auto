@@ -208,6 +208,7 @@ def common_command_default_state():
         "huanglong_signup_time": "",
         "huanglong_signup_status": "",
         "huanglong_signup_response": "",
+        "huanglong_signup_records": {},
         "custom_command_runs": {},
         "identity_pauses": {},
         "star_gazing_assigned_manifest_time": "",
@@ -4472,6 +4473,36 @@ class CommonCommandMixin:
         """获取本账号的宗门名称"""
         return (getattr(self, "sect_name", "") or self.state.get("sect_name", "") or "").strip()
 
+    def identity_sect_name(self, identity="主魂"):
+        """获取某个身份所属宗门；黄龙山等身份级活动使用。"""
+        identity = str(identity or "主魂").strip() or "主魂"
+        mapping = getattr(self, "identity_sect_names", None)
+        if not isinstance(mapping, dict):
+            mapping = self.state.get("identity_sect_names", {})
+        if isinstance(mapping, dict):
+            sect = str(mapping.get(identity, "") or "").strip()
+            if sect:
+                return sect
+        if identity == "主魂":
+            return self.account_sect_name()
+        return ""
+
+    def identity_sect_map(self):
+        """返回当前脚本所有已知身份的宗门映射。"""
+        identities = ["主魂", *list(getattr(self, "avatars", []) or [])]
+        result = {}
+        for identity in identities:
+            sect = self.identity_sect_name(identity)
+            if sect:
+                result[identity] = sect
+        return result
+
+    def huanglong_identities_for_sect(self, sect):
+        sect = str(sect or "").strip()
+        if not sect:
+            return []
+        return [identity for identity, identity_sect in self.identity_sect_map().items() if identity_sect == sect]
+
     def clean_common_text(self, text):
         """去除 markdown 加粗标记和反引号"""
         return (text or "").replace("**", "").replace("`", "")
@@ -4509,16 +4540,53 @@ class CommonCommandMixin:
             return False, "window_closed"
         return True, "open"
 
-    def huanglong_signup_record_matches(self, date_text, sect):
-        return (
-            self.state.get("huanglong_signup_date") == date_text
-            and self.state.get("huanglong_signup_sect") == sect
-            and self.state.get("huanglong_signup_status") in {
-                "pending", "sent", "no_response", "responded", "window_closed", "paused", "send_error",
-            }
-        )
+    def ensure_huanglong_signup_records(self):
+        records = self.state.get("huanglong_signup_records")
+        if not isinstance(records, dict):
+            records = {}
+            self.state["huanglong_signup_records"] = records
+        return records
 
-    async def maybe_signup_huanglong_now(self, sect, msg_id=None, now_dt=None, preclaimed=False):
+    def huanglong_signup_record_key(self, date_text, identity, sect):
+        return f"{date_text}|{identity or '主魂'}|{sect}"
+
+    def huanglong_signup_record_matches(self, date_text, sect, identity="主魂"):
+        records = self.ensure_huanglong_signup_records()
+        record = records.get(self.huanglong_signup_record_key(date_text, identity, sect))
+        status = ""
+        if isinstance(record, dict):
+            status = record.get("status", "")
+        if not status and identity == "主魂":
+            status = self.state.get("huanglong_signup_status", "")
+            if self.state.get("huanglong_signup_date") != date_text or self.state.get("huanglong_signup_sect") != sect:
+                status = ""
+        return status in {
+            "pending", "sent", "no_response", "responded", "window_closed", "paused", "send_error",
+        }
+
+    def record_huanglong_signup_status(self, date_text, sect, identity, msg_id, status, response=""):
+        identity = str(identity or "主魂").strip() or "主魂"
+        records = self.ensure_huanglong_signup_records()
+        record = {
+            "date": date_text,
+            "sect": sect,
+            "identity": identity,
+            "report_msg_id": str(msg_id or ""),
+            "time": now_str(),
+            "status": status,
+            "response": self.clean_common_text(response)[:500],
+        }
+        records[self.huanglong_signup_record_key(date_text, identity, sect)] = record
+        self.state["huanglong_signup_date"] = date_text
+        self.state["huanglong_signup_sect"] = sect
+        self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+        self.state["huanglong_signup_time"] = record["time"]
+        self.state["huanglong_signup_status"] = status
+        self.state["huanglong_signup_response"] = record["response"]
+        self.save_state()
+        return record
+
+    async def maybe_signup_huanglong_now(self, sect, identity="主魂", msg_id=None, now_dt=None, preclaimed=False):
         """匹配本宗门黄龙山军报后报名；任何结果都不盲目重试。"""
         lock = getattr(self, "_huanglong_signup_lock", None)
         if lock is None:
@@ -4531,69 +4599,71 @@ class CommonCommandMixin:
             now_dt = now_dt or datetime.now()
             today = now_dt.strftime("%Y-%m-%d")
             sect = str(sect or "").strip()
+            identity = str(identity or "主魂").strip() or "主魂"
             if not sect:
                 return False
-            if self.account_sect_name() != sect:
+            if self.identity_sect_name(identity) != sect:
                 return False
 
-            if not preclaimed and self.huanglong_signup_record_matches(today, sect):
+            if not preclaimed and self.huanglong_signup_record_matches(today, sect, identity):
                 return False
 
             in_window, window_status = self.huanglong_signup_window_status(now_dt)
             if not in_window:
                 if window_status == "window_closed":
-                    self.state["huanglong_signup_date"] = today
-                    self.state["huanglong_signup_sect"] = sect
-                    self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
-                    self.state["huanglong_signup_time"] = now_str()
-                    self.state["huanglong_signup_status"] = "window_closed"
-                    self.state["huanglong_signup_response"] = "报名窗口已过，跳过"
-                    self.save_state()
-                    log.info(f"Huanglong signup skipped for {sect}: window closed.")
+                    self.record_huanglong_signup_status(today, sect, identity, msg_id, "window_closed", "报名窗口已过，跳过")
+                    log.info(f"Huanglong signup skipped for {identity}/{sect}: window closed.")
                 else:
-                    log.info(f"Huanglong signup skipped for {sect}: signup window not open yet.")
+                    log.info(f"Huanglong signup skipped for {identity}/{sect}: signup window not open yet.")
                 return False
 
-            if self.identity_pause_seconds("主魂") > 0:
-                self.state["huanglong_signup_date"] = today
-                self.state["huanglong_signup_sect"] = sect
-                self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
-                self.state["huanglong_signup_time"] = now_str()
-                self.state["huanglong_signup_status"] = "paused"
-                self.state["huanglong_signup_response"] = "主魂暂停，跳过"
-                self.save_state()
-                log.info(f"Huanglong signup skipped for {sect}: main identity paused.")
+            if self.identity_pause_seconds(identity) > 0:
+                self.record_huanglong_signup_status(today, sect, identity, msg_id, "paused", f"{identity}暂停，跳过")
+                log.info(f"Huanglong signup skipped for {identity}/{sect}: identity paused.")
                 return False
 
-            self.state["huanglong_signup_date"] = today
-            self.state["huanglong_signup_sect"] = sect
-            self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
-            self.state["huanglong_signup_time"] = now_str()
-            self.state["huanglong_signup_status"] = "pending"
-            self.state["huanglong_signup_response"] = ""
-            self.save_state()
+            self.record_huanglong_signup_status(today, sect, identity, msg_id, "pending", "")
 
             try:
-                log.info(f"Huanglong rotation report matched {sect}; sending {HUANGLONG_SIGNUP_COMMAND}.")
-                resp = await self.send_and_wait_feedback(
-                    HUANGLONG_SIGNUP_COMMAND,
-                    timeout=90,
-                    max_retries=0,
-                    suppress_no_response_alert=True,
-                )
+                log.info(f"Huanglong rotation report matched {identity}/{sect}; sending {HUANGLONG_SIGNUP_COMMAND}.")
+                if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+                    resp = await self.send_and_wait_feedback_identity(
+                        identity,
+                        HUANGLONG_SIGNUP_COMMAND,
+                        timeout=90,
+                        max_retries=0,
+                        suppress_no_response_alert=True,
+                        force_identity_check=True,
+                    )
+                else:
+                    resp = await self.send_and_wait_feedback(
+                        HUANGLONG_SIGNUP_COMMAND,
+                        timeout=90,
+                        max_retries=0,
+                        suppress_no_response_alert=True,
+                    )
                 resp_text = self.common_response_text(resp)
-                self.state["huanglong_signup_time"] = now_str()
-                self.state["huanglong_signup_status"] = "responded" if resp_text else "no_response"
-                self.state["huanglong_signup_response"] = self.clean_common_text(resp_text)[:500]
-                self.save_state()
+                self.record_huanglong_signup_status(
+                    today, sect, identity, msg_id, "responded" if resp_text else "no_response", resp_text
+                )
                 return bool(resp_text)
             except Exception as exc:
-                self.state["huanglong_signup_time"] = now_str()
-                self.state["huanglong_signup_status"] = "send_error"
-                self.state["huanglong_signup_response"] = str(exc)[:500]
-                self.save_state()
-                log.error(f"Huanglong signup send failed: {exc}", exc_info=True)
+                self.record_huanglong_signup_status(today, sect, identity, msg_id, "send_error", str(exc))
+                log.error(f"Huanglong signup send failed for {identity}/{sect}: {exc}", exc_info=True)
                 return False
+
+    async def maybe_signup_huanglong_identities_now(self, sect, identities, msg_id=None, now_dt=None, preclaimed=False):
+        sent = False
+        for identity in identities or []:
+            if await self.maybe_signup_huanglong_now(
+                sect,
+                identity=identity,
+                msg_id=msg_id,
+                now_dt=now_dt,
+                preclaimed=preclaimed,
+            ):
+                sent = True
+        return sent
 
     def maybe_handle_huanglong_report_message(self, msg, text, sender=None):
         """被动检测黄龙山轮值军报，本宗门账号在报名窗口内只报名一次。"""
@@ -4605,42 +4675,41 @@ class CommonCommandMixin:
 
         self.ensure_common_command_state()
         log = self.common_command_logger()
-        account_sect = self.account_sect_name()
         msg_id = getattr(msg, "id", "") if msg is not None else ""
         today = datetime.now().strftime("%Y-%m-%d")
-        if not account_sect:
-            log.warning(f"Huanglong rotation report for {sect} ignored: account sect is empty.")
-            return True
-        if account_sect != sect:
-            log.info(f"Huanglong rotation report for {sect} ignored: account sect is {account_sect}.")
-            return True
-        if self.huanglong_signup_record_matches(today, sect):
+        identities = self.huanglong_identities_for_sect(sect)
+        if not identities:
+            log.info(f"Huanglong rotation report for {sect} ignored: no matching identity in {self.identity_sect_map()}.")
             return True
 
         in_window, window_status = self.huanglong_signup_window_status()
         if not in_window:
             if window_status == "window_closed":
-                self.state["huanglong_signup_date"] = today
-                self.state["huanglong_signup_sect"] = sect
-                self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
-                self.state["huanglong_signup_time"] = now_str()
-                self.state["huanglong_signup_status"] = "window_closed"
-                self.state["huanglong_signup_response"] = "报名窗口已过，跳过"
-                self.save_state()
+                for identity in identities:
+                    if not self.huanglong_signup_record_matches(today, sect, identity):
+                        self.record_huanglong_signup_status(
+                            today, sect, identity, msg_id, "window_closed", "报名窗口已过，跳过"
+                        )
                 log.info(f"Huanglong rotation report for {sect} ignored: signup window closed.")
             else:
                 log.info(f"Huanglong rotation report for {sect} ignored: signup window not open yet.")
             return True
 
-        self.state["huanglong_signup_date"] = today
-        self.state["huanglong_signup_sect"] = sect
-        self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
-        self.state["huanglong_signup_time"] = now_str()
-        self.state["huanglong_signup_status"] = "pending"
-        self.state["huanglong_signup_response"] = ""
-        self.save_state()
+        pending_identities = []
+        for identity in identities:
+            if self.huanglong_signup_record_matches(today, sect, identity):
+                continue
+            self.record_huanglong_signup_status(today, sect, identity, msg_id, "pending", "")
+            pending_identities.append(identity)
+        if not pending_identities:
+            return True
 
-        task = asyncio.create_task(self.maybe_signup_huanglong_now(sect, msg_id=msg_id, preclaimed=True))
+        task = asyncio.create_task(self.maybe_signup_huanglong_identities_now(
+            sect,
+            pending_identities,
+            msg_id=msg_id,
+            preclaimed=True,
+        ))
         setattr(self, "_huanglong_signup_task", task)
         return True
 

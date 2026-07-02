@@ -313,6 +313,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]
         self.keywords = [k.lower() for k in self.mc.get('keywords', [])]
         self.sect_name = "万灵宗"
+        self.identity_sect_names = {
+            "主魂": "万灵宗",
+            "问心子": "凌霄宫",
+            "素心子": "星宫",
+            "缘生子": "星宫",
+        }
         self.field_training_command = ".野外历练 谨慎"
         self.notified_alert_ids = set()
 

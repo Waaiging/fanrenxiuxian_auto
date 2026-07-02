@@ -423,6 +423,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
         # ------ 4. 宗派信息 ------
         self.sect_name = "凌霄宫"
+        self.identity_sect_names = {
+            "主魂": "凌霄宫",
+            "无咎子": "天星宗",
+            "缘生子": "阴罗宗",
+            "素缘子": "星宫",
+        }
         self.lingxiao_enabled = True
 
         # ------ 5. 运行控制 ------
