@@ -6458,7 +6458,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "六翼")
 
-    def test_focus_beast_pastures_after_abyss_success(self):
+    def test_focus_beast_schedules_pasture_after_abyss_success(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "next_pasture_time": add_seconds_str(now_str(), 3 * 3600),
@@ -6479,27 +6479,60 @@ class ParserFixtureTests(unittest.TestCase):
             sent.append(f".探渊 {beast_name}")
             return "你的灵兽【六翼】成功击败了对手！它带回了战利品：【兽骨】x1。"
 
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            if command == ".一键放养":
-                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
-            return ""
-
-        async def fake_sleep(*args, **kwargs):
-            return None
-
         actor.update_beast_cache = fake_update
         actor.send_abyss_with_busy_retry = fake_abyss
-        actor.send_and_wait_feedback = fake_send
 
-        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
-            self.assertTrue(asyncio.run(actor.execute_abyss_with_fallback()))
+        self.assertTrue(asyncio.run(actor.execute_abyss_with_fallback()))
 
-        self.assertEqual(sent, [".探渊 六翼", ".一键放养"])
+        self.assertEqual(sent, [".探渊 六翼"])
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
+        self.assertEqual(actor.state["best_beast_status"], "休息中")
+        self.assertGreater(common_seconds_until(actor.state["next_abyss_time"]), 5 * 3600)
+        self.assertGreater(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 20 * 60)
+        self.assertLess(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 40 * 60)
+        self.assertEqual(actor.state.get("focus_pasture_after_abyss_until", ""), "")
+
+    def test_focus_pasture_after_abyss_success_marks_protected(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "next_focus_pasture_after_abyss_time": add_seconds_str(now_str(), -1),
+            "best_beast_name": "六翼",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        response = "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
+
+        handled = actor.record_auto_pasture_response(response, actor.state["beasts_cache"], "六翼", "休息中")
+        actor.record_focus_pasture_after_abyss_attempt(response, handled)
+
+        self.assertEqual(actor.state["next_focus_pasture_after_abyss_time"], "")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "放养中")
         self.assertEqual(actor.state["best_beast_status"], "放养中")
-        self.assertGreater(common_seconds_until(actor.state["next_abyss_time"]), 5 * 3600)
         self.assertGreater(common_seconds_until(actor.state["focus_pasture_after_abyss_until"]), 3 * 3600)
+
+    def test_focus_pasture_after_abyss_rest_block_reschedules(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "next_focus_pasture_after_abyss_time": add_seconds_str(now_str(), -1),
+            "best_beast_name": "六翼",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        response = "灵兽【六翼】刚刚探渊归来，尚需 23分钟 休养后才能放养。"
+
+        handled = actor.record_auto_pasture_response(response, actor.state["beasts_cache"], "六翼", "休息中")
+        actor.record_focus_pasture_after_abyss_attempt(response, handled)
+
+        self.assertTrue(handled)
+        self.assertGreater(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 20 * 60)
+        self.assertLess(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 25 * 60)
+        self.assertEqual(actor.state.get("focus_pasture_after_abyss_until", ""), "")
 
     def test_focus_beast_abyss_start_response_does_not_pasture_immediately(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
