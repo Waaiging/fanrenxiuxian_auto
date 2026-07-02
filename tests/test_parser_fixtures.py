@@ -1362,6 +1362,74 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.common_record_sect_skill_response("传功失败，需回复主魂消息。"), "invalid")
         self.assertEqual(actor.state["sect_skill_count"], 1)
 
+    def test_huanglong_report_parser_extracts_rotation_sect(self):
+        actor = DummyCommon()
+        text = """
+【黄龙山轮值军报】
+今日黄龙山前线轮值宗门为【凌霄宫】。
+当前符合 结丹初期 及以上且不在黄龙山冷却中的本宗修士：28 人。
+
+轮值宗门弟子可在 14:00 前使用 .报名黄龙山 报名，使用 .黄龙征调 查看名单。
+"""
+
+        self.assertEqual(actor.parse_huanglong_rotation_sect(text), "凌霄宫")
+        self.assertEqual(actor.parse_huanglong_rotation_sect("今日轮值宗门为【凌霄宫】。"), "")
+
+    def test_huanglong_signup_sends_once_for_matching_sect_in_window(self):
+        actor = DummyCommon()
+        actor.sect_name = "凌霄宫"
+        sent = []
+
+        async def fake_send(command, **kwargs):
+            sent.append((command, kwargs))
+            return "报名成功"
+
+        actor.send_and_wait_feedback = fake_send
+        now_dt = datetime(2026, 7, 2, 12, 30)
+
+        self.assertTrue(asyncio.run(actor.maybe_signup_huanglong_now("凌霄宫", msg_id=1001, now_dt=now_dt)))
+        self.assertFalse(asyncio.run(actor.maybe_signup_huanglong_now("凌霄宫", msg_id=1002, now_dt=now_dt)))
+
+        self.assertEqual([item[0] for item in sent], [".报名黄龙山"])
+        self.assertEqual(sent[0][1]["max_retries"], 0)
+        self.assertEqual(actor.state["huanglong_signup_date"], "2026-07-02")
+        self.assertEqual(actor.state["huanglong_signup_sect"], "凌霄宫")
+        self.assertEqual(actor.state["huanglong_signup_status"], "responded")
+
+    def test_huanglong_signup_skips_non_matching_sect(self):
+        actor = DummyCommon()
+        actor.sect_name = "万灵宗"
+
+        async def fake_send(*args, **kwargs):
+            raise AssertionError("non-matching sect should not sign up")
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertFalse(asyncio.run(actor.maybe_signup_huanglong_now(
+            "凌霄宫",
+            msg_id=1001,
+            now_dt=datetime(2026, 7, 2, 12, 30),
+        )))
+        self.assertEqual(actor.state["huanglong_signup_date"], "")
+        self.assertEqual(actor.state["huanglong_signup_status"], "")
+
+    def test_huanglong_signup_skips_after_window(self):
+        actor = DummyCommon()
+        actor.sect_name = "凌霄宫"
+
+        async def fake_send(*args, **kwargs):
+            raise AssertionError("huanglong signup must not send after 14:00")
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertFalse(asyncio.run(actor.maybe_signup_huanglong_now(
+            "凌霄宫",
+            msg_id=1001,
+            now_dt=datetime(2026, 7, 2, 14, 0),
+        )))
+        self.assertEqual(actor.state["huanglong_signup_date"], "2026-07-02")
+        self.assertEqual(actor.state["huanglong_signup_status"], "window_closed")
+
     def test_common_avatar_star_observatory_parser_extracts_remaining(self):
         actor = DummyAvatarCommon()
         text = """

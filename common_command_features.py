@@ -80,6 +80,8 @@ SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
 SECT_WAR_JOIN_COMMAND = ".参战"                 # 参战指令
 SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
+HUANGLONG_REPORT_TITLE = "黄龙山轮值军报"
+HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
 TIME_CRITICAL_COMMAND_PREFIXES = (
     ".灵树灌溉",
     ".协同守山",
@@ -200,6 +202,12 @@ def common_command_default_state():
         "last_sect_war_join_time": "",
         "next_sect_war_join_time": "",
         "last_sect_war_response": "",
+        "huanglong_signup_date": "",
+        "huanglong_signup_sect": "",
+        "huanglong_signup_report_msg_id": "",
+        "huanglong_signup_time": "",
+        "huanglong_signup_status": "",
+        "huanglong_signup_response": "",
         "custom_command_runs": {},
         "identity_pauses": {},
         "star_gazing_assigned_manifest_time": "",
@@ -4468,6 +4476,174 @@ class CommonCommandMixin:
         """去除 markdown 加粗标记和反引号"""
         return (text or "").replace("**", "").replace("`", "")
 
+    def parse_huanglong_rotation_sect(self, text):
+        """从黄龙山轮值军报中解析今日轮值宗门。"""
+        clean = self.clean_common_text(text)
+        if HUANGLONG_REPORT_TITLE not in clean:
+            return ""
+        if "黄龙山" not in clean or "轮值宗门" not in clean:
+            return ""
+
+        patterns = [
+            r"轮值宗门为\s*【([^】]{2,12})】",
+            r"轮值宗门为\s*([一-龥]{2,12})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, clean)
+            if match:
+                return match.group(1).strip()
+
+        for sect in KNOWN_SECTS:
+            if sect in clean:
+                return sect
+        return ""
+
+    def huanglong_signup_window_status(self, now_dt=None):
+        """黄龙山报名只允许 12:00 <= now < 14:00。"""
+        now_dt = now_dt or datetime.now()
+        start = now_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+        end = now_dt.replace(hour=14, minute=0, second=0, microsecond=0)
+        if now_dt < start:
+            return False, "too_early"
+        if now_dt >= end:
+            return False, "window_closed"
+        return True, "open"
+
+    def huanglong_signup_record_matches(self, date_text, sect):
+        return (
+            self.state.get("huanglong_signup_date") == date_text
+            and self.state.get("huanglong_signup_sect") == sect
+            and self.state.get("huanglong_signup_status") in {
+                "pending", "sent", "no_response", "responded", "window_closed", "paused", "send_error",
+            }
+        )
+
+    async def maybe_signup_huanglong_now(self, sect, msg_id=None, now_dt=None, preclaimed=False):
+        """匹配本宗门黄龙山军报后报名；任何结果都不盲目重试。"""
+        lock = getattr(self, "_huanglong_signup_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            setattr(self, "_huanglong_signup_lock", lock)
+
+        async with lock:
+            self.ensure_common_command_state()
+            log = self.common_command_logger()
+            now_dt = now_dt or datetime.now()
+            today = now_dt.strftime("%Y-%m-%d")
+            sect = str(sect or "").strip()
+            if not sect:
+                return False
+            if self.account_sect_name() != sect:
+                return False
+
+            if not preclaimed and self.huanglong_signup_record_matches(today, sect):
+                return False
+
+            in_window, window_status = self.huanglong_signup_window_status(now_dt)
+            if not in_window:
+                if window_status == "window_closed":
+                    self.state["huanglong_signup_date"] = today
+                    self.state["huanglong_signup_sect"] = sect
+                    self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+                    self.state["huanglong_signup_time"] = now_str()
+                    self.state["huanglong_signup_status"] = "window_closed"
+                    self.state["huanglong_signup_response"] = "报名窗口已过，跳过"
+                    self.save_state()
+                    log.info(f"Huanglong signup skipped for {sect}: window closed.")
+                else:
+                    log.info(f"Huanglong signup skipped for {sect}: signup window not open yet.")
+                return False
+
+            if self.identity_pause_seconds("主魂") > 0:
+                self.state["huanglong_signup_date"] = today
+                self.state["huanglong_signup_sect"] = sect
+                self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+                self.state["huanglong_signup_time"] = now_str()
+                self.state["huanglong_signup_status"] = "paused"
+                self.state["huanglong_signup_response"] = "主魂暂停，跳过"
+                self.save_state()
+                log.info(f"Huanglong signup skipped for {sect}: main identity paused.")
+                return False
+
+            self.state["huanglong_signup_date"] = today
+            self.state["huanglong_signup_sect"] = sect
+            self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+            self.state["huanglong_signup_time"] = now_str()
+            self.state["huanglong_signup_status"] = "pending"
+            self.state["huanglong_signup_response"] = ""
+            self.save_state()
+
+            try:
+                log.info(f"Huanglong rotation report matched {sect}; sending {HUANGLONG_SIGNUP_COMMAND}.")
+                resp = await self.send_and_wait_feedback(
+                    HUANGLONG_SIGNUP_COMMAND,
+                    timeout=90,
+                    max_retries=0,
+                    suppress_no_response_alert=True,
+                )
+                resp_text = self.common_response_text(resp)
+                self.state["huanglong_signup_time"] = now_str()
+                self.state["huanglong_signup_status"] = "responded" if resp_text else "no_response"
+                self.state["huanglong_signup_response"] = self.clean_common_text(resp_text)[:500]
+                self.save_state()
+                return bool(resp_text)
+            except Exception as exc:
+                self.state["huanglong_signup_time"] = now_str()
+                self.state["huanglong_signup_status"] = "send_error"
+                self.state["huanglong_signup_response"] = str(exc)[:500]
+                self.save_state()
+                log.error(f"Huanglong signup send failed: {exc}", exc_info=True)
+                return False
+
+    def maybe_handle_huanglong_report_message(self, msg, text, sender=None):
+        """被动检测黄龙山轮值军报，本宗门账号在报名窗口内只报名一次。"""
+        if sender is not None and not is_game_bot_sender(self, sender):
+            return False
+        sect = self.parse_huanglong_rotation_sect(text)
+        if not sect:
+            return False
+
+        self.ensure_common_command_state()
+        log = self.common_command_logger()
+        account_sect = self.account_sect_name()
+        msg_id = getattr(msg, "id", "") if msg is not None else ""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not account_sect:
+            log.warning(f"Huanglong rotation report for {sect} ignored: account sect is empty.")
+            return True
+        if account_sect != sect:
+            log.info(f"Huanglong rotation report for {sect} ignored: account sect is {account_sect}.")
+            return True
+        if self.huanglong_signup_record_matches(today, sect):
+            return True
+
+        in_window, window_status = self.huanglong_signup_window_status()
+        if not in_window:
+            if window_status == "window_closed":
+                self.state["huanglong_signup_date"] = today
+                self.state["huanglong_signup_sect"] = sect
+                self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+                self.state["huanglong_signup_time"] = now_str()
+                self.state["huanglong_signup_status"] = "window_closed"
+                self.state["huanglong_signup_response"] = "报名窗口已过，跳过"
+                self.save_state()
+                log.info(f"Huanglong rotation report for {sect} ignored: signup window closed.")
+            else:
+                log.info(f"Huanglong rotation report for {sect} ignored: signup window not open yet.")
+            return True
+
+        self.state["huanglong_signup_date"] = today
+        self.state["huanglong_signup_sect"] = sect
+        self.state["huanglong_signup_report_msg_id"] = str(msg_id or "")
+        self.state["huanglong_signup_time"] = now_str()
+        self.state["huanglong_signup_status"] = "pending"
+        self.state["huanglong_signup_response"] = ""
+        self.save_state()
+
+        task = asyncio.create_task(self.maybe_signup_huanglong_now(sect, msg_id=msg_id, preclaimed=True))
+        setattr(self, "_huanglong_signup_task", task)
+        return True
+
     def parse_sect_war_sides(self, text):
         """
         从宗门战消息中解析对战双方。
@@ -4682,6 +4858,8 @@ class CommonCommandMixin:
         """
         if not sender or not is_game_bot_sender(self, sender):
             return False
+        if self.maybe_handle_huanglong_report_message(msg, text, sender):
+            return True
         if not self.sect_war_message_should_trigger_status(text):
             return False
         # 回复消息已经由 feedback 机制处理，不需要再触发
