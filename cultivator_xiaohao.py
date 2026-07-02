@@ -4111,6 +4111,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         beasts = self.parse_beasts_info(text)
         if not beasts:
             return False
+        self.preserve_active_beast_statuses_for_roster(beasts)
         self.state["beasts_cache"] = beasts
         self.state["beast_roster_updated_at"] = now_str()
         self.update_best_beast_tracking()
@@ -4118,6 +4119,17 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.save_state()
         log.info(f"Beast roster synced from {source or 'reply'}: {len(beasts)} beasts.")
         return True
+
+    def preserve_active_beast_statuses_for_roster(self, beasts):
+        """本地已确认的长时任务状态优先于 .我的灵兽 的短暂/滞后状态。"""
+        patrol_name = str(self.state.get("beast_border_patrol_name") or "").strip()
+        patrol_next = self.state.get("next_beast_border_patrol_time", "")
+        if patrol_name and patrol_next and is_future(patrol_next):
+            for beast in beasts:
+                if self.beast_name_matches(beast.get("full_name", ""), patrol_name):
+                    beast["full_name"] = patrol_name
+                    beast["status"] = "巡边中"
+                    break
 
     async def update_beast_cache(self):
         """刷新灵兽缓存（发送.我的灵兽并解析结果）"""

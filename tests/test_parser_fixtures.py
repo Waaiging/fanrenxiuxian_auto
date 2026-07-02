@@ -6254,6 +6254,34 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state.get("next_beast_cruise_time"))
         self.assertEqual(actor.select_beast_for_cruise(actor.state["beasts_cache"])["full_name"], "麻花藤")
 
+    def test_roster_refresh_preserves_active_border_patrol_status(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "保龄球",
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S"),
+            "beasts_cache": [],
+        }
+        actor.save_state = lambda: None
+        text = """
+**【灵兽伙伴们】**
+- 保龄球 (休息中)
+  - 种类: 二阶灵兽
+  - 经验: 100
+  - 战力: 278
+  - 体力: 65
+- 猴哥 (放养中)
+  - 种类: 二阶金瞳妖猴
+  - 经验: 652
+  - 战力: 195
+  - 体力: 4
+"""
+
+        self.assertTrue(actor.record_beast_roster_response(text, source="fixture"))
+
+        by_name = {beast["full_name"]: beast for beast in actor.state["beasts_cache"]}
+        self.assertEqual(by_name["保龄球"]["status"], "巡边中")
+        self.assertEqual(actor.state["beast_border_patrol_name"], "保龄球")
+
     def test_border_patrol_active_sends_return_before_new_patrol(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
