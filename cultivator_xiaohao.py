@@ -165,6 +165,9 @@ BEAST_SOOTHE_COMMAND = f".灵兽互动 {BEAST_FOCUS_NAME} 安抚"
 BEAST_INTERACTION_CD_SECONDS = 90 * 60
 BEAST_CRUISE_COMMAND = f".灵兽巡游 {BEAST_FOCUS_NAME}"
 BEAST_CRUISE_CD_SECONDS = 120 * 60
+BEAST_BORDER_PATROL_MODES = ("斥候", "护粮", "袭营")
+BEAST_BORDER_PATROL_DEFAULT_MODE = "袭营"
+BEAST_BORDER_PATROL_CD_SECONDS = 75 * 60
 BEAST_ACTION_RETRY_SECONDS = 10 * 60
 BEAST_INJURY_DEFAULT_RETRY_SECONDS = 4 * 3600
 BEAST_ABYSS_MIN_STAMINA = 30
@@ -406,6 +409,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "last_hunt_time": "", "last_steal_time": "", "last_abyss_time": "",
             "last_beast_interaction_time": "", "next_beast_interaction_time": "",
             "last_beast_cruise_time": "", "next_beast_cruise_time": "",
+            "last_beast_border_patrol_time": "", "next_beast_border_patrol_time": "",
+            "beast_border_patrol_name": "", "beast_border_patrol_mode": BEAST_BORDER_PATROL_DEFAULT_MODE,
             "deep_meditation_end_time": "", "deep_meditation_guard_until": "", "in_deep_meditation": False,
             "concubine_recalled_for_meditation": False, "concubine_recalled_time": "",
             "next_hunt_time": "", "next_steal_time": "", "next_abyss_time": "",
@@ -1405,6 +1410,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "next_pasture_time",
             "next_beast_interaction_time",
             "next_beast_cruise_time",
+            "next_beast_border_patrol_time",
             "next_treasure_touch_time",
             "next_yuanying_out_time",
             "next_rift_search_time",
@@ -2330,7 +2336,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     status == "未知"
                     or self.is_pastured_status(status)
                     or self.is_injury_status(status)
-                    or any(k in status for k in ["探险", "偷菜", "巡游"])
+                    or any(k in status for k in ["探险", "偷菜", "巡游", "巡边"])
                 ):
                     log.info(f"Cruise candidate skipped: {name} status is {status}.")
                     continue
@@ -2369,6 +2375,57 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def select_beast_for_cruise(self, cache=None):
         candidates = self.beast_action_candidates("cruise", cache, BEAST_CRUISE_MIN_STAMINA)
+        return candidates[0] if candidates else None
+
+    def border_patrol_candidate_beasts(self, cache=None):
+        candidates = []
+        for beast in list(cache if cache is not None else self.state.get("beasts_cache", [])):
+            if not self.is_valid_beast_record(beast):
+                continue
+            status = beast.get("status", "未知")
+            name = beast.get("full_name", "")
+            if "休息" not in status:
+                log.info(f"Border patrol candidate skipped: {name} status is {status}.")
+                continue
+            if self.is_injury_status(status) or self.is_pastured_status(status):
+                log.info(f"Border patrol candidate skipped: {name} status is {status}.")
+                continue
+            candidates.append(beast)
+        candidates.sort(
+            key=lambda b: (
+                self.beast_stamina_value(b),
+                b.get("power", 0),
+                b.get("exp", 0),
+                b.get("full_name", ""),
+            ),
+            reverse=True,
+        )
+        return candidates
+
+    def select_beast_for_border_patrol(self, cache=None):
+        candidates = self.border_patrol_candidate_beasts(cache)
+        return candidates[0] if candidates else None
+
+    def select_beast_to_recall_for_border_patrol(self, cache=None):
+        candidates = []
+        for beast in list(cache if cache is not None else self.state.get("beasts_cache", [])):
+            if not self.is_valid_beast_record(beast):
+                continue
+            status = beast.get("status", "未知")
+            name = beast.get("full_name", "")
+            if self.is_injury_status(status) or "巡边" in status:
+                log.info(f"Border patrol recall candidate skipped: {name} status is {status}.")
+                continue
+            candidates.append(beast)
+        candidates.sort(
+            key=lambda b: (
+                self.beast_stamina_value(b),
+                b.get("power", 0),
+                b.get("exp", 0),
+                b.get("full_name", ""),
+            ),
+            reverse=True,
+        )
         return candidates[0] if candidates else None
 
     def get_best_beast(self):
@@ -2495,6 +2552,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         for key in (
             "next_beast_interaction_time",
             "next_beast_cruise_time",
+            "next_beast_border_patrol_time",
             "next_beast_status_check_time",
             "next_pasture_time",
         ):
@@ -2556,12 +2614,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         """判断灵兽状态是否允许探渊"""
         status = status or ""
         if self.is_injury_status(status): return False
-        return not any(k in status for k in ["受伤", "重伤", "治疗", "探险", "偷菜", "巡游"])
+        return not any(k in status for k in ["受伤", "重伤", "治疗", "探险", "偷菜", "巡游", "巡边"])
 
     def can_attempt_steal_status(self, status):
         """判断灵兽状态是否允许偷菜"""
         status = status or ""
-        if any(k in status for k in ["探险", "偷菜", "巡游"]): return False
+        if any(k in status for k in ["探险", "偷菜", "巡游", "巡边"]): return False
         if self.is_injury_status(status): return False
         return True
 
@@ -2793,6 +2851,169 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         log.info(f"Beast cruise deferred: {beast_name} status is {status}, retry in {retry_seconds}s.")
         self.schedule_beast_action_retry("next_beast_cruise_time", max(1800, retry_seconds))
         return False
+
+    # ---- 灵兽：巡边 ----
+
+    def normalize_beast_border_patrol_mode(self, mode=""):
+        mode = str(mode or "").strip()
+        return mode if mode in BEAST_BORDER_PATROL_MODES else BEAST_BORDER_PATROL_DEFAULT_MODE
+
+    def parse_beast_border_patrol_command(self, command):
+        parts = str(command or "").strip().split()
+        if len(parts) < 2:
+            return "", BEAST_BORDER_PATROL_DEFAULT_MODE
+        beast_name = parts[1].strip()
+        mode = parts[2].strip() if len(parts) >= 3 else BEAST_BORDER_PATROL_DEFAULT_MODE
+        return beast_name, self.normalize_beast_border_patrol_mode(mode)
+
+    def border_patrol_beast_name_from_text(self, text):
+        clean = str(text or "").replace("**", "")
+        for pattern in (r"灵兽【([^】]+)】", r"【([^】]+)】(?:正在)?(?:边境|巡边|巡行)"):
+            m = re.search(pattern, clean)
+            if m:
+                name = m.group(1).strip()
+                if self.is_valid_beast_name(name):
+                    return name
+        return ""
+
+    def is_existing_border_patrol_response(self, text):
+        clean = str(text or "").replace("**", "")
+        return "已有灵兽正在边境巡行" in clean or ("已有灵兽" in clean and any(k in clean for k in ["巡边", "巡行", "边境"]))
+
+    def is_border_patrol_status_clear_response(self, text):
+        clean = str(text or "").replace("**", "")
+        return any(k in clean for k in ["暂无灵兽巡边", "没有灵兽巡边", "无灵兽巡边", "未派遣灵兽巡边", "当前没有灵兽"])
+
+    def record_beast_border_patrol_status_response(self, resp):
+        if not resp:
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            return False
+        if self.is_border_patrol_status_clear_response(resp):
+            self.state["beast_border_patrol_name"] = ""
+            self.state["next_beast_border_patrol_time"] = ""
+            self.save_state()
+            return True
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in resp for k in ["巡边", "巡行", "边境", "剩余", "还需", "尚需", "预计"]):
+            name = self.border_patrol_beast_name_from_text(resp)
+            if name:
+                self.state["beast_border_patrol_name"] = name
+                self.set_best_beast_status(name, "巡边中")
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
+            self.save_state()
+            return True
+        if any(k in resp for k in ["巡边", "巡行", "边境"]):
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            return True
+        self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS)
+        notify_unrecognized_response(self, ".巡边状态", resp, log, "灵兽巡边状态")
+        return False
+
+    def record_beast_border_patrol_response(self, resp, beast_name="", mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
+        beast_name = beast_name or self.border_patrol_beast_name_from_text(resp)
+        mode = self.normalize_beast_border_patrol_mode(mode)
+        if not resp:
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            return False
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚需", "还需", "请在", "巡边", "巡行", "边境"]):
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
+            if beast_name:
+                self.state["beast_border_patrol_name"] = beast_name
+            self.save_state()
+            return True
+        if self.is_existing_border_patrol_response(resp):
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+            return True
+        if self.is_beast_stamina_insufficient_response(resp):
+            if beast_name:
+                self.record_beast_stamina_shortage(beast_name, resp, "border patrol")
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 1800)
+            return True
+        if self.handle_no_such_beast_response(beast_name, resp, "border patrol response"):
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", 1800)
+            return True
+        injury_cd = self.record_beast_injury_from_response(beast_name, resp, source="border patrol")
+        if injury_cd >= 0:
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", max(1800, injury_cd))
+            return True
+        if any(k in resp for k in ["需要休息", "休息状态", "无法巡边", "受伤", "重伤", "治疗"]) or (
+            "正在" in resp and "边境巡行" not in resp and "巡边" not in resp
+        ):
+            self.schedule_beast_action_retry("next_beast_border_patrol_time", cd if cd > 0 else 1800)
+            return True
+        if any(k in resp for k in ["灵兽巡边", "边境巡行", "巡边", "边境", "斥候", "护粮", "袭营", "出发", "领命", "成功"]):
+            now = now_str()
+            self.state["last_beast_border_patrol_time"] = now
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now, BEAST_BORDER_PATROL_CD_SECONDS)
+            self.state["beast_border_patrol_name"] = beast_name
+            self.state["beast_border_patrol_mode"] = mode
+            if beast_name:
+                self.set_best_beast_status(beast_name, "巡边中")
+            self.save_state()
+            return True
+        self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS)
+        command = f".灵兽巡边 {beast_name or '<灵兽名>'} {mode}"
+        notify_unrecognized_response(self, command, resp, log, "灵兽巡边")
+        return False
+
+    def record_beast_border_patrol_return_response(self, resp):
+        if not resp:
+            return False
+        cd = self.parse_wait_time(resp)
+        name = self.border_patrol_beast_name_from_text(resp) or self.state.get("beast_border_patrol_name", "")
+        if cd > 0 and any(k in resp for k in ["还需", "尚需", "剩余", "冷却", "巡边", "巡行"]):
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
+            self.save_state()
+            return True
+        if any(k in resp for k in ["巡边归来", "归来", "召回", "返回", "带回", "收获", "获得", "已结束"]):
+            now = now_str()
+            self.state["last_beast_border_patrol_time"] = now
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now, BEAST_BORDER_PATROL_CD_SECONDS)
+            self.state["beast_border_patrol_name"] = ""
+            if name:
+                self.set_best_beast_status(name, "休息中")
+            self.save_state()
+            return True
+        if self.is_border_patrol_status_clear_response(resp):
+            self.state["beast_border_patrol_name"] = ""
+            self.save_state()
+            return True
+        return False
+
+    async def run_beast_border_patrol(self, mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
+        mode = self.normalize_beast_border_patrol_mode(mode)
+        beast = self.select_beast_for_border_patrol(self.state.get("beasts_cache", []))
+        if not beast:
+            recall_beast = self.select_beast_to_recall_for_border_patrol(self.state.get("beasts_cache", []))
+            if not recall_beast:
+                log.info("Beast border patrol skipped: no resting or recallable beast candidate.")
+                self.schedule_beast_action_retry("next_beast_border_patrol_time", 1800)
+                return False
+            recall_name = recall_beast.get("full_name", "")
+            log.info(f"Beast border patrol: no resting candidate; recalling highest-stamina beast {recall_name}.")
+            rest_status, rest_resp = await self.rest_beast_for_abyss(recall_name)
+            if rest_status and "休息" in rest_status:
+                await asyncio.sleep(3)
+                beast = self.get_cached_beast_by_name(recall_name) or recall_beast
+                beast["status"] = "休息中"
+            else:
+                if self.is_existing_border_patrol_response(rest_resp):
+                    status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
+                    return self.record_beast_border_patrol_status_response(status_resp)
+                injury_cd = self.record_beast_injury_from_response(recall_name, rest_resp, source="border patrol recall")
+                retry = injury_cd if injury_cd > 0 else 1800
+                self.schedule_beast_action_retry("next_beast_border_patrol_time", retry)
+                if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
+                    notify_unrecognized_response(self, f".灵兽休息 {recall_name}", rest_resp, log, "巡边前召回")
+                return False
+        beast_name = beast.get("full_name", "")
+        command = f".灵兽巡边 {beast_name} {mode}"
+        resp = await self.send_and_wait_feedback(command, timeout=60, max_retries=1)
+        if self.is_existing_border_patrol_response(resp):
+            status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
+            return self.record_beast_border_patrol_status_response(status_resp)
+        return self.record_beast_border_patrol_response(resp, beast_name, mode)
 
     # ---- 灵兽：放养 ----
 
@@ -3797,7 +4018,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             name_base = re.sub(r'\(.*?\)', '', header).replace('-', '').strip()
             if not self.is_valid_beast_name(name_base):
                 continue
-            status_words = ("出战中", "休息中", "放养中", "受伤", "重伤", "治疗中", "探险中", "偷菜中", "巡游中")
+            status_words = ("出战中", "休息中", "放养中", "受伤", "重伤", "治疗中", "探险中", "偷菜中", "巡游中", "巡边中")
             status = "未知"
             suffix_parts = brackets
             if brackets and any(word in brackets[-1] for word in status_words):
@@ -3901,6 +4122,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return False
         if cmd == ".我的灵兽":
             return self.record_beast_roster_response(text, source="manual .我的灵兽")
+        if cmd.startswith(".灵兽巡边"):
+            beast_name, mode = self.parse_beast_border_patrol_command(cmd)
+            if self.handle_no_such_beast_response(beast_name, text, f"manual {cmd}"):
+                return True
+            return bool(self.record_beast_border_patrol_response(text, beast_name, mode))
+        if cmd == ".巡边状态":
+            return bool(self.record_beast_border_patrol_status_response(text))
+        if cmd == ".巡边归来":
+            return bool(self.record_beast_border_patrol_return_response(text))
 
         beast_name = self.beast_name_from_command(cmd)
         resp_name, resp_status = self.parse_beast_current_status_response(text)
@@ -5678,14 +5908,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS); self.save_state()
             await asyncio.sleep(60)
 
-    # ---- 主循环：灵兽行动（探渊 + 偷菜 + 互动/巡游） ----
+    # ---- 主循环：灵兽行动（探渊 + 偷菜 + 互动/巡边/巡游） ----
 
     async def run_beast_action_timer(self):
         """
         灵兽行动主循环。
-        按优先级执行：探渊(6h) → 偷菜(4h) → 一键放养(4h) → 灵兽互动(90min) → 灵兽巡游(120min)。
+        按优先级执行：探渊(6h) → 偷菜(4h) → 一键放养(4h) → 灵兽互动(90min) → 灵兽巡边(75min) → 灵兽巡游(120min)。
         探渊首选六翼；偷菜首选麻花藤；首选灵兽受伤、忙碌或体力不足时按候选补位。
-        六翼体力低于50时仍优先放养保护，不参与偷菜/巡游/探渊。
+        六翼体力低于50时仍优先放养保护，不参与偷菜/巡边/巡游/探渊。
         """
         await self.startup_done.wait()
         while self.is_running:
@@ -5723,7 +5953,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 need_cruise = not next_cruise or not is_future(next_cruise)
                 if need_cruise and last_cruise:
                     need_cruise = not is_future(add_seconds_str(last_cruise, BEAST_CRUISE_CD_SECONDS))
-                due_any = need_abyss or need_steal or need_pasture or need_interaction or need_cruise
+                last_patrol = self.state.get("last_beast_border_patrol_time", "")
+                next_patrol = self.state.get("next_beast_border_patrol_time", "")
+                need_patrol = not next_patrol or not is_future(next_patrol)
+                if need_patrol and last_patrol:
+                    need_patrol = not is_future(add_seconds_str(last_patrol, BEAST_BORDER_PATROL_CD_SECONDS))
+                due_any = need_abyss or need_steal or need_pasture or need_interaction or need_patrol or need_cruise
                 if not due_any:
                     next_waits = []
                     for wait in (
@@ -5731,11 +5966,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         self.beast_action_wait_seconds("next_steal_time", "last_steal_time", 14400),
                         self.beast_action_wait_seconds("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS),
                         self.beast_action_wait_seconds("next_beast_interaction_time", "last_beast_interaction_time", BEAST_INTERACTION_CD_SECONDS),
+                        self.beast_action_wait_seconds("next_beast_border_patrol_time", "last_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS),
                         self.beast_action_wait_seconds("next_beast_cruise_time", "last_beast_cruise_time", BEAST_CRUISE_CD_SECONDS),
                     ):
                         if wait > 0:
                             next_waits.append(wait)
-                    for next_time in (next_abyss, next_steal, next_pasture, next_interaction, next_cruise):
+                    for next_time in (next_abyss, next_steal, next_pasture, next_interaction, next_patrol, next_cruise):
                         if next_time and is_future(next_time):
                             next_waits.append(seconds_until(next_time))
                     if next_waits: sleep_for = max(30, min(next_waits) + random.randint(10, 30))
@@ -5784,6 +6020,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                             log.info(f"Beast interaction due: sending {interaction_command} (status={focus_status or '未知'}).")
                             i_resp = await self.send_and_wait_feedback(interaction_command, timeout=60, max_retries=1)
                             self.record_beast_interaction_response(i_resp, interaction_command)
+                            self.save_state()
+                        await asyncio.sleep(3)
+                    if need_patrol:
+                        async with AtomicTaskContext(self, "BeastBorderPatrol"):
+                            log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
+                            await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
                             self.save_state()
                         await asyncio.sleep(3)
                     if need_cruise:

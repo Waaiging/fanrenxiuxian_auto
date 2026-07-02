@@ -6025,6 +6025,112 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sent, [".灵兽偷菜"])
         self.assertTrue(actor.state.get("next_steal_time"))
 
+    def test_border_patrol_selects_highest_stamina_resting_beast(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        cache = [
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "出战中", "power": 31, "exp": 0, "stamina": 100},
+        ]
+
+        self.assertEqual(actor.select_beast_for_border_patrol(cache)["full_name"], "青蛟")
+
+    def test_border_patrol_defaults_to_raid_mode(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return "灵兽【青蛟】领命前往边境巡行，执行【袭营】。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+        self.assertEqual(sent, [".灵兽巡边 青蛟 袭营"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "青蛟")
+        self.assertEqual(actor.state["beast_border_patrol_mode"], "袭营")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
+    def test_border_patrol_recalls_highest_stamina_when_no_resting_beast(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 80},
+                {"full_name": "青蛟", "species": "二阶蛟龙", "status": "放养中", "power": 420, "exp": 8, "stamina": 95},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "偷菜中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽休息 麻花藤":
+                return "已将灵兽【麻花藤】召回休息。"
+            if command == ".灵兽巡边 麻花藤 袭营":
+                return "灵兽【麻花藤】领命前往边境巡行，执行【袭营】。"
+            return ""
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+        self.assertEqual(sent, [".灵兽休息 麻花藤", ".灵兽巡边 麻花藤 袭营"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
+        self.assertEqual(actor.state["beasts_cache"][2]["status"], "巡边中")
+
+    def test_border_patrol_existing_runner_queries_status_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command.startswith(".灵兽巡边"):
+                return "已有灵兽正在边境巡行。"
+            return "灵兽【青蛟】正在边境巡行，剩余 12分钟。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+        self.assertEqual(sent, [".灵兽巡边 青蛟 袭营", ".巡边状态"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "青蛟")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 10 * 60)
+
+    def test_border_patrol_unknown_response_uses_conservative_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        actor.save_state = lambda: None
+
+        with patch.object(cultivator_xiaohao, "notify_unrecognized_response") as notify:
+            self.assertFalse(actor.record_beast_border_patrol_response("陌生回应", "青蛟", "袭营"))
+
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+        notify.assert_called_once()
+
+    def test_border_patrol_unknown_status_uses_conservative_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        actor.save_state = lambda: None
+
+        with patch.object(cultivator_xiaohao, "notify_unrecognized_response") as notify:
+            self.assertFalse(actor.record_beast_border_patrol_status_response("陌生状态"))
+
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+        notify.assert_called_once()
+
     def test_manual_steal_pending_target_lock_updates_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {}

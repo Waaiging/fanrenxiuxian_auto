@@ -248,7 +248,7 @@ ACCOUNT_LOG_TAGS = {
     "xiaohao": [
         ".闯塔", ".宗门点卯", ".宗门传功",
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
-        ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游",
+        ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", SUB_TREASURE_TOUCH_COMMAND,
         YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
@@ -1521,6 +1521,9 @@ def main_soul_panel(account, state):
             time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
             time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
             time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
+            time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+            manual_command(".巡边状态", "巡边状态", group="灵兽"),
+            manual_command(".巡边归来", "巡边归来", group="灵兽"),
             time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
         ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
