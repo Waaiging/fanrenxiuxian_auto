@@ -2720,6 +2720,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         if self.handle_no_such_beast_response(BEAST_FOCUS_NAME, resp, "interaction response"):
             self.schedule_beast_action_retry(next_key, 1800)
             return True
+        if self.record_beast_current_status_response(resp, BEAST_FOCUS_NAME, "interaction response", next_key):
+            return True
         if any(k in resp for k in ["没有这只灵兽", "未找到该灵兽", "不存在该灵兽", "无法", "尚未"]):
             self.schedule_beast_action_retry(next_key)
             return True
@@ -2773,6 +2775,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         if injury_cd >= 0:
             self.schedule_beast_action_retry(next_key, max(1800, injury_cd))
             log.info(f"Beast cruise: {beast_name} is injured; status recorded, trying another candidate later.")
+            return True
+        if self.record_beast_current_status_response(resp, beast_name, "cruise response", next_key):
             return True
         if any(k in resp for k in ["需要休息", "休息状态", "无法巡游", "受伤", "重伤", "治疗"]) or (
             "正在" in resp and "正在巡游" not in resp
@@ -2954,6 +2958,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         injury_cd = self.record_beast_injury_from_response(beast_name, resp, source="border patrol")
         if injury_cd >= 0:
             self.schedule_beast_action_retry("next_beast_border_patrol_time", max(1800, injury_cd))
+            return True
+        if self.record_beast_current_status_response(
+            resp,
+            beast_name,
+            "border patrol response",
+            "next_beast_border_patrol_time",
+        ):
             return True
         if any(k in resp for k in ["需要休息", "休息状态", "无法巡边", "受伤", "重伤", "治疗"]) or (
             "正在" in resp and "边境巡行" not in resp and "巡边" not in resp
@@ -4152,6 +4163,43 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             name_match.group(1).strip() if name_match else "",
             status_match.group(1).strip() if status_match else "",
         )
+
+    def record_beast_current_status_response(self, text, beast_name="", source="", retry_key="", retry_seconds=1800):
+        """同步“当前正在(...)，无法...”类回执，避免同一灵兽被多个动作抢用。"""
+        resp_name, resp_status = self.parse_beast_current_status_response(text)
+        target_name = resp_name or beast_name
+        if not target_name or not resp_status:
+            return False
+
+        self.set_best_beast_status(target_name, resp_status)
+        cd = self.parse_wait_time(text)
+        retry = cd if cd > 0 else retry_seconds
+
+        if "巡边" in resp_status:
+            self.state["beast_border_patrol_name"] = target_name
+            if cd > 0:
+                self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
+            else:
+                current = self.state.get("next_beast_border_patrol_time", "")
+                if not current or not is_future(current):
+                    self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), BEAST_ACTION_RETRY_SECONDS)
+
+        if "巡游" in resp_status and cd > 0:
+            self.state["next_beast_cruise_time"] = add_seconds_str(now_str(), cd)
+        if "偷菜" in resp_status and cd > 0:
+            self.state["next_steal_time"] = add_seconds_str(now_str(), cd)
+        if "探险" in resp_status and cd > 0:
+            self.state["next_abyss_time"] = add_seconds_str(now_str(), cd)
+
+        if retry_key:
+            self.schedule_beast_action_retry(retry_key, retry)
+        else:
+            self.save_state()
+        log.info(
+            f"Beast status synced from {source or 'status response'}: "
+            f"{target_name} -> {resp_status}; retry in {retry}s."
+        )
+        return True
 
     def record_manual_beast_command_response(self, command, text):
         """同步手动灵兽指令的机器人回复到 state。"""
@@ -6048,7 +6096,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         focus_status = (focus or {}).get("status", "")
                         if self.is_pastured_status(focus_status):
                             self.defer_beast_actions_while_pastured(BEAST_FOCUS_NAME, "interaction precheck")
-                        elif any(k in focus_status for k in ["探险", "偷菜", "巡游"]):
+                        elif any(k in focus_status for k in ["探险", "偷菜", "巡游", "巡边"]):
                             retry_time = self.state.get("next_beast_status_check_time", "")
                             retry_seconds = int(seconds_until(retry_time)) if retry_time and is_future(retry_time) else BEAST_ACTION_RETRY_SECONDS
                             log.info(f"Beast interaction deferred: {BEAST_FOCUS_NAME} status is {focus_status}, retry in {retry_seconds}s.")

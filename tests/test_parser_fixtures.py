@@ -6235,6 +6235,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
         self.assertLessEqual(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 15)
 
+    def test_cruise_blocked_by_border_patrol_records_beast_status(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "休息中", "power": 195, "exp": 652, "stamina": 28},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 38, "exp": 80, "stamina": 38},
+            ],
+        }
+        actor.save_state = lambda: None
+        text = "你的灵兽【猴哥】当前正在(巡边中)，无法巡游。"
+
+        self.assertTrue(actor.record_manual_beast_command_response(".灵兽巡游 猴哥", text))
+
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
+        self.assertEqual(actor.state["beast_border_patrol_name"], "猴哥")
+        self.assertTrue(actor.state.get("next_beast_border_patrol_time"))
+        self.assertTrue(actor.state.get("next_beast_cruise_time"))
+        self.assertEqual(actor.select_beast_for_cruise(actor.state["beasts_cache"])["full_name"], "麻花藤")
+
     def test_border_patrol_active_sends_return_before_new_patrol(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
