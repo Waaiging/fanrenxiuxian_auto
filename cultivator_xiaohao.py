@@ -3567,6 +3567,31 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         f_resp = await self.send_and_wait_feedback(".一键放养")
         return self.record_auto_pasture_response(f_resp, cache, focus_name, status, block_actions=False)
 
+    async def attempt_focus_pasture_after_abyss(self, beast_name):
+        """六翼探渊结算后先立刻尝试一次放养；若仍需休养则由回执重排。"""
+        if not self.beast_name_matches(beast_name, BEAST_FOCUS_NAME):
+            return False
+        self.state["next_focus_pasture_after_abyss_time"] = now_str()
+        self.set_next_pasture_not_after(now_str())
+        self.save_state()
+        if not await self.ensure_focus_beast_ready_for_pasture():
+            self.schedule_focus_pasture_after_abyss(
+                BEAST_FOCUS_NAME,
+                retry_seconds=BEAST_ACTION_RETRY_SECONDS,
+            )
+            return False
+        log.info(f"Focus pasture after abyss: trying .一键放养 immediately for {BEAST_FOCUS_NAME}.")
+        f_resp = await self.send_and_wait_feedback(".一键放养")
+        handled = self.record_auto_pasture_response(
+            f_resp,
+            self.state.get("beasts_cache", []),
+            BEAST_FOCUS_NAME,
+            "休息中",
+            block_actions=False,
+        )
+        self.record_focus_pasture_after_abyss_attempt(f_resp, handled)
+        return handled
+
     def is_no_beast_deployed_for_steal_response(self, text):
         """检测偷菜时未出战灵兽的明确失败回复"""
         clean = str(text or "")
@@ -4171,7 +4196,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 self.set_best_beast_status(best_name, "休息中")
                 abyss_settled = any(k in a_resp for k in ["获得", "收获", "战利品", "带回", "奖励", "击败"])
                 if self.beast_name_matches(best_name, BEAST_FOCUS_NAME) and abyss_settled:
-                    self.schedule_focus_pasture_after_abyss(best_name, response_text=a_resp)
+                    await self.attempt_focus_pasture_after_abyss(best_name)
                 self.save_state()
                 return True
 
