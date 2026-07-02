@@ -88,6 +88,7 @@ from log_utils import (
     command_send_precheck,      # 不记录发送次数的切换前预检
     handle_clear_history_command, # 处理清屏指令
     handle_anti_bot_challenge,  # 处理游戏机器人的反机器人验证
+    handle_pause_control_command, # 处理暂停/恢复控制
     is_deep_meditation_ongoing_response,       # 检测"闭关进行中"回复
     is_deep_meditation_settlement_response,    # 检测"闭关结算"回复
     is_game_bot_sender,         # 判断发送者是否为游戏机器人
@@ -114,7 +115,6 @@ from log_utils import (
     remember_script_send_intent, # 记录脚本即将发送指令的意图
     remember_script_sent_message, # 记录脚本已发送的消息
     schedule_command_auto_delete, # 安排指令自动删除（隐私）
-    sender_is_pause_admin,     # 判断暂停/恢复控制消息是否来自授权发送者
     send_text_alert,            # 发送文本告警到监控群组
     sender_display_name,        # 获取发送者的显示名
     is_edited_message_for_current_account, # 判定消息是否针对当前账号的编辑
@@ -443,8 +443,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         self.is_running = True    # 主循环开关
         self.pause_event = asyncio.Event()  # 暂停/恢复控制（set=运行中, clear=暂停中）
         self.pause_event.set()    # 默认运行中
+        self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # 止/启管理员名单（只有这些人发"止"才生效）
         self.pause_admins = set(self.mc.get("pause_admins", [8615886738, -1004237793558, -1003885521329, -1003340352216]))  # 主魂(Gamling33)+厚土+缘生子+寻真子
+        self.pause_notify_user_id = 8219248252
         self.my_info = None       # 自身账号信息（启动后填充）
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]  # 要监控的用户
         self.keywords = [k.lower() for k in self.mc.get('keywords', [])]          # 要监控的关键词
@@ -2883,30 +2885,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender_check, log):
                     return
+                if await handle_pause_control_command(self, msg, text, sender_check, log, label="副号脚本"):
+                    return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender_check):
                     return
-                if sender_is_pause_admin(self, msg):
-                    stripped = text.strip()
-                    if stripped in ("止", ".止", "0", ".0"):
-                        if self.pause_event.is_set():
-                            self.pause_event.clear()
-                            self.state["is_paused"] = True
-                            self.save_state()
-                            log.info("⏸️ PAUSE command received. All loops paused.")
-                            await self.client.send_message(8219248252, "⏸️ 副号脚本已暂停。发送「1」恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
-                    elif stripped in ("启", ".启", "1", ".1"):
-                        if not self.pause_event.is_set():
-                            self.pause_event.set()
-                            self.state["is_paused"] = False
-                            self.save_state()
-                            log.info("▶️ RESUME command received. All loops resumed.")
-                            await self.client.send_message(8219248252, "▶️ 副号脚本已恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
 
             # 记录手动发出的消息（不是脚本发的），用于调试和日志追溯
             record_message_event(self, msg, text=text, sender=sender_check, event_kind="new", direction="raw", logger=log)

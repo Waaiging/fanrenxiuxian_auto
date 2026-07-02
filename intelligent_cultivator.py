@@ -99,6 +99,7 @@ from log_utils import (
     force_command_guard_block, # 按业务响应设置命令保护
     handle_clear_history_command, # 处理清屏指令
     handle_anti_bot_challenge, # 处理反机器人验证
+    handle_pause_control_command, # 处理暂停/恢复控制
     is_deep_meditation_ongoing_response,    # 判断是否为"正在深度闭关"的回复
     is_deep_meditation_settlement_response, # 判断是否为"闭关结算"的回复
     is_game_bot_sender,        # 判断消息发送者是否为游戏机器人
@@ -126,7 +127,6 @@ from log_utils import (
     remember_script_send_intent,  # 记录脚本发送意图
     remember_script_sent_message, # 记录脚本已发送的消息
     schedule_command_auto_delete, # 安排命令自动删除
-    sender_is_pause_admin,     # 判断暂停/恢复控制消息是否来自授权发送者
     send_text_alert,           # 发送文本告警
     is_edited_message_for_current_account, # 判定消息是否针对当前账号的编辑
     feedback_response_conflicts, # 判定回复文本是否属于其他指令家族
@@ -438,8 +438,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         self.meditation_state_event = asyncio.Event()  # 被动闭关状态变化时唤醒闭关循环
         self.pause_event = asyncio.Event()          # 暂停/恢复控制（set=运行中, clear=暂停中）
         self.pause_event.set()                      # 默认运行中
+        self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # 止/启管理员名单（只有这些人发"止"才生效）
         self.pause_admins = set(self.mc.get("pause_admins", [8219248252, -1004240160265, -1003809391782, -1003999815554]))  # 主魂(Waaiging)+分身
+        self.pause_notify_user_id = 8219248252
 
         # ---- 身外化身系统 ----
         self.avatars = ["无咎子", "缘生子", "素缘子"]
@@ -1040,30 +1042,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender_check, log):
                     return
+                if await handle_pause_control_command(self, msg, text, sender_check, log, label="凌霄宫脚本"):
+                    return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender_check):
                     return
-                if sender_is_pause_admin(self, msg):
-                    stripped = text.strip()
-                    if stripped in ("止", ".止", "0", ".0"):
-                        if self.pause_event.is_set():
-                            self.pause_event.clear()
-                            self.state["is_paused"] = True
-                            self.save_state()
-                            log.info("⏸️ PAUSE command received. All loops paused.")
-                            await self.client.send_message(8219248252, "⏸️ 凌霄宫脚本已暂停。发送「1」恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
-                    elif stripped in ("启", ".启", "1", ".1"):
-                        if not self.pause_event.is_set():
-                            self.pause_event.set()
-                            self.state["is_paused"] = False
-                            self.save_state()
-                            log.info("▶️ RESUME command received. All loops resumed.")
-                            await self.client.send_message(8219248252, "▶️ 凌霄宫脚本已恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
 
             sender_cache = await event.get_sender()
             record_message_event(self, msg, text=text, sender=sender_cache, event_kind="new", direction="raw", logger=log)

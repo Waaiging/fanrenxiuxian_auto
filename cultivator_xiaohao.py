@@ -64,6 +64,7 @@ from fishing_features import FishingMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
+    handle_pause_control_command,
     is_deep_meditation_ongoing_response, is_deep_meditation_settlement_response, is_game_bot_sender,
     is_yuanying_out_settlement_response,
     is_not_deep_meditation_response, log_edited_message_if_needed, log_incoming_message,
@@ -78,7 +79,7 @@ from log_utils import (
     record_message_event,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
-    schedule_command_auto_delete, send_text_alert, sender_is_pause_admin, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
+    schedule_command_auto_delete, send_text_alert, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
     feedback_response_conflicts,
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
@@ -339,12 +340,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.startup_done = asyncio.Event()
         self.pause_event = asyncio.Event()  # 暂停/恢复控制（set=运行中, clear=暂停中）
         self.pause_event.set()  # 默认运行中
+        self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # startup: check is_paused to restore paused state
         self.active_atomic_task = None       # 整体任务独占锁持有任务
         self.formation_assist_in_progress = False
         self._avatar_loop_count = 0          # 活跃化身循环计数（阻止主循环自动切回主魂）
         # 止/启管理员名单（只有这些人发"止"才生效）
         self.pause_admins = set(self.mc.get("pause_admins", [8325841058, -1003658665113, -1003843934428, -1003996748766]))  # 主魂(TitanCreeper)+问心子+素心子+缘生子
+        self.pause_notify_user_id = 8219248252
         self._pasture_return_seen_counts = {}
         self._manual_pasture_command_ids = {}
 
@@ -4474,30 +4477,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             if not is_game_bot_sender(self, sender) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender, log):
                     return
+                if await handle_pause_control_command(self, msg, text, sender, log, label="万灵宗脚本"):
+                    return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender):
                     return
-                if sender_is_pause_admin(self, msg):
-                    stripped = text.strip()
-                    if stripped in ("止", ".止", "0", ".0"):
-                        if self.pause_event.is_set():
-                            self.pause_event.clear()
-                            self.state["is_paused"] = True
-                            self.save_state()
-                            log.info("⏸️ PAUSE command received. All loops paused.")
-                            await self.client.send_message(8219248252, "⏸️ 万灵宗脚本已暂停。发送「1」恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
-                    elif stripped in ("启", ".启", "1", ".1"):
-                        if not self.pause_event.is_set():
-                            self.pause_event.set()
-                            self.state["is_paused"] = False
-                            self.save_state()
-                            log.info("▶️ RESUME command received. All loops resumed.")
-                            await self.client.send_message(8219248252, "▶️ 万灵宗脚本已恢复运行。")
-                        try: await self.client.delete_messages(self.target_chat_id, msg)
-                        except: pass
-                        return
 
             if log_manual_outgoing_if_needed(self, msg, text=text): return
             if await maybe_handle_han_soul_choice(self, msg, text, sender, log): return

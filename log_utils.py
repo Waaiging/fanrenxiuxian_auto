@@ -2245,6 +2245,121 @@ def sender_is_pause_admin(actor, msg):
     return bool(sender_variants & admin_ids)
 
 
+PAUSE_CONTROL_COMMANDS = {"止", ".止", "0", ".0"}
+RESUME_CONTROL_COMMANDS = {"启", ".启", "1", ".1"}
+
+
+def is_pause_control_text(text):
+    return str(text or "").strip() in (PAUSE_CONTROL_COMMANDS | RESUME_CONTROL_COMMANDS)
+
+
+def pause_control_chat_matches(actor, msg):
+    chat_id = getattr(msg, "chat_id", None)
+    target_chat_id = getattr(actor, "target_chat_id", None)
+    if chat_id is None or target_chat_id is None:
+        return False
+    variants = {str(target_chat_id)}
+    target_str = str(target_chat_id)
+    if target_str.startswith("-100"):
+        variants.add(target_str[4:])
+    elif target_str.startswith("-"):
+        variants.add(target_str[1:])
+    else:
+        variants.add(f"-100{target_str}")
+    return str(chat_id) in variants
+
+
+def notify_pause_control_changed(actor):
+    event = getattr(actor, "pause_control_event", None)
+    if event is not None:
+        try:
+            event.set()
+        except Exception:
+            pass
+
+
+async def handle_pause_control_command(actor, msg, text, sender=None, logger=None, label="脚本"):
+    """Handle account pause/resume commands from authorized senders."""
+    stripped = str(text or "").strip()
+    if stripped not in PAUSE_CONTROL_COMMANDS and stripped not in RESUME_CONTROL_COMMANDS:
+        return False
+    if sender is not None and is_game_bot_sender(actor, sender):
+        return False
+    if not pause_control_chat_matches(actor, msg):
+        if logger:
+            logger.warning(
+                "Pause control ignored: chat mismatch text=%r chat_id=%r target_chat_id=%r sender_id=%r",
+                stripped,
+                getattr(msg, "chat_id", None),
+                getattr(actor, "target_chat_id", None),
+                getattr(msg, "sender_id", None),
+            )
+        return False
+    if not sender_is_pause_admin(actor, msg):
+        if logger:
+            logger.warning(
+                "Pause control ignored: unauthorized sender text=%r sender_id=%r chat_id=%r pause_admins=%r",
+                stripped,
+                getattr(msg, "sender_id", None),
+                getattr(msg, "chat_id", None),
+                sorted(str(v) for v in (getattr(actor, "pause_admins", set()) or set())),
+            )
+        return False
+
+    pause_event = getattr(actor, "pause_event", None)
+    state = getattr(actor, "state", None)
+    save_state = getattr(actor, "save_state", None)
+    client = getattr(actor, "client", None)
+    target_chat_id = getattr(actor, "target_chat_id", None)
+    notify_user_id = getattr(actor, "pause_notify_user_id", 8219248252)
+
+    if stripped in PAUSE_CONTROL_COMMANDS:
+        changed = bool(pause_event and pause_event.is_set())
+        if pause_event and changed:
+            pause_event.clear()
+        if isinstance(state, dict):
+            state["is_paused"] = True
+        if callable(save_state):
+            save_state()
+        notify_pause_control_changed(actor)
+        if logger:
+            logger.info(
+                "⏸️ PAUSE command received%s. All loops paused. sender_id=%r chat_id=%r msg_id=%r",
+                "" if changed else " (already paused)",
+                getattr(msg, "sender_id", None),
+                getattr(msg, "chat_id", None),
+                getattr(msg, "id", None),
+            )
+        if client and changed:
+            await client.send_message(notify_user_id, f"⏸️ {label}已暂停。发送「1」恢复运行。")
+    else:
+        changed = bool(pause_event and not pause_event.is_set())
+        if pause_event and changed:
+            pause_event.set()
+        if isinstance(state, dict):
+            state["is_paused"] = False
+        if callable(save_state):
+            save_state()
+        notify_pause_control_changed(actor)
+        if logger:
+            logger.info(
+                "▶️ RESUME command received%s. All loops resumed. sender_id=%r chat_id=%r msg_id=%r",
+                "" if changed else " (already running)",
+                getattr(msg, "sender_id", None),
+                getattr(msg, "chat_id", None),
+                getattr(msg, "id", None),
+            )
+        if client and changed:
+            await client.send_message(notify_user_id, f"▶️ {label}已恢复运行。")
+
+    if client and target_chat_id is not None:
+        try:
+            await client.delete_messages(target_chat_id, msg)
+        except Exception:
+            pass
+    return True
+
+
 def log_manual_outgoing_if_needed(actor, msg, text=None):
     """检测并记录手动发送的指令（区分脚本自动发 vs 用户手动发）"""
     if not _is_own_outgoing_sender(actor, msg):
