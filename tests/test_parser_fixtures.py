@@ -6168,6 +6168,23 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
 
+    def test_border_patrol_success_with_duration_marks_beast_busy(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "保龄球", "species": "二阶豹麟兽", "status": "休息中", "power": 278, "exp": 291, "stamina": 65},
+            ],
+        }
+        actor.save_state = lambda: None
+        response = "**【灵兽巡边】**\n你放出灵兽【保龄球】执行 **夜嗅敌营**。\n消耗体力 **24**，预计 **75分钟** 后归来。\n\n到时使用 `.巡边归来` 结算。"
+
+        self.assertTrue(actor.record_beast_border_patrol_response(response, "保龄球", "袭营"))
+
+        self.assertEqual(actor.state["beast_border_patrol_name"], "保龄球")
+        self.assertEqual(actor.state["beast_border_patrol_mode"], "袭营")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
     def test_border_patrol_recalls_highest_stamina_when_no_resting_beast(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
@@ -6286,6 +6303,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "beast_border_patrol_name": "猴哥",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(minutes=76)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": "",
             "beasts_cache": [
                 {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "巡边中", "power": 195, "exp": 652, "stamina": 28},
                 {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 38, "exp": 80, "stamina": 38},
@@ -6296,15 +6315,36 @@ class ParserFixtureTests(unittest.TestCase):
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            return "灵兽【猴哥】巡边归来，带回【兽粮】x1。"
+            if command == ".巡边归来":
+                return "灵兽【猴哥】巡边归来，带回【兽粮】x1。"
+            if command == ".灵兽巡边 麻花藤 袭营":
+                return "灵兽【麻花藤】领命前往边境巡行，执行【袭营】。"
+            return ""
 
         actor.send_and_wait_feedback = fake_send
 
         self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
-        self.assertEqual(sent, [".巡边归来"])
-        self.assertEqual(actor.state["beast_border_patrol_name"], "")
+        self.assertEqual(sent, [".巡边归来", ".灵兽巡边 麻花藤 袭营"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
+    def test_border_patrol_return_response_clears_due_without_extra_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "猴哥",
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(minutes=75)).strftime("%Y-%m-%d %H:%M:%S"),
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "巡边中", "power": 195, "exp": 652, "stamina": 28},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        self.assertTrue(actor.record_beast_border_patrol_return_response("灵兽【猴哥】巡边归来，带回【兽粮】x1。"))
+        self.assertEqual(actor.state["beast_border_patrol_name"], "")
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
 
     def test_border_patrol_unknown_response_uses_conservative_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

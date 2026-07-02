@@ -2942,9 +2942,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             return False
         cd = self.parse_wait_time(resp)
         if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚需", "还需", "请在", "巡边", "巡行", "边境"]):
-            self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), cd)
+            now = now_str()
+            self.state["last_beast_border_patrol_time"] = now
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now, cd)
             if beast_name:
                 self.state["beast_border_patrol_name"] = beast_name
+                self.set_best_beast_status(beast_name, "巡边中")
+            self.state["beast_border_patrol_mode"] = mode
             self.save_state()
             return True
         if self.is_existing_border_patrol_response(resp):
@@ -3002,9 +3006,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.save_state()
             return True
         if any(k in resp for k in ["巡边归来", "归来", "召回", "返回", "带回", "收获", "获得", "已结束"]):
-            now = now_str()
-            self.state["last_beast_border_patrol_time"] = now
-            self.state["next_beast_border_patrol_time"] = add_seconds_str(now, BEAST_BORDER_PATROL_CD_SECONDS)
+            self.state["next_beast_border_patrol_time"] = ""
             self.state["beast_border_patrol_name"] = ""
             if name:
                 self.set_best_beast_status(name, "休息中")
@@ -3033,8 +3035,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     async def run_beast_border_patrol(self, mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
         mode = self.normalize_beast_border_patrol_mode(mode)
-        if await self.finish_beast_border_patrol_if_active():
-            return True
+        if str(self.state.get("beast_border_patrol_name") or "").strip():
+            if not await self.finish_beast_border_patrol_if_active():
+                return False
+            if str(self.state.get("beast_border_patrol_name") or "").strip():
+                return True
         beast = self.select_beast_for_border_patrol(self.state.get("beasts_cache", []))
         if not beast:
             recall_beast = self.select_beast_to_recall_for_border_patrol(self.state.get("beasts_cache", []))
