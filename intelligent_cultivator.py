@@ -2176,7 +2176,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             reset_heart_platform_date=True,
         )
 
-    def _stale_fishing_active_identities(self, overdue_seconds=10 * 60):
+    def _stale_fishing_active_identities(self, overdue_seconds=60):
         stale = []
         for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
             try:

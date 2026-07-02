@@ -3020,7 +3020,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         while self.avatar_send_lock.locked():
             await asyncio.sleep(1)
 
-    def _stale_fishing_active_identities(self, overdue_seconds=10 * 60):
+    def _stale_fishing_active_identities(self, overdue_seconds=60):
         stale = []
         for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
             try:
