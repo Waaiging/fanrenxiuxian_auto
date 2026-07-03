@@ -2980,6 +2980,45 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         notify_unrecognized_response(self, ".巡边状态", resp, log, "灵兽巡边状态")
         return False
 
+    def record_border_patrol_candidate_unavailable_response(self, resp, beast_name=""):
+        """记录单只灵兽暂时不能巡边；返回是否也要排除召回兜底。"""
+        clean = str(resp or "").replace("**", "")
+        if not clean or self.is_existing_border_patrol_response(clean) or self.is_beast_stamina_insufficient_response(clean):
+            return None
+
+        cd = self.parse_wait_time(clean)
+        if cd > 0 and any(k in clean for k in ["冷却", "后再", "尚需", "还需", "请在"]):
+            return None
+
+        injury_cd = self.record_beast_injury_from_response(beast_name, clean, source="border patrol")
+        if injury_cd >= 0:
+            log.info(f"Beast border patrol: {beast_name} unavailable due to injury; trying fallback candidate.")
+            return True
+
+        resp_name, resp_status = self.parse_beast_current_status_response(clean)
+        target_name = resp_name or beast_name
+        if target_name and resp_status and "巡边" not in resp_status:
+            self.set_best_beast_status(target_name, resp_status)
+            log.info(
+                f"Beast border patrol: {target_name} is {resp_status}, "
+                "trying another resting candidate before recall fallback."
+            )
+            return bool(self.is_injury_status(resp_status))
+
+        named_candidate = bool(
+            resp_name
+            or (beast_name and beast_name in clean)
+            or "灵兽【" in clean
+        )
+        if named_candidate and any(k in clean for k in ["需要休息", "休息状态", "无法巡边", "受伤", "重伤", "治疗"]):
+            log.info(
+                f"Beast border patrol: {beast_name} cannot patrol from response "
+                f"{clean[:80]}; trying fallback candidate."
+            )
+            self.save_state()
+            return True
+        return None
+
     def record_beast_border_patrol_response(self, resp, beast_name="", mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
         beast_name = beast_name or self.border_patrol_beast_name_from_text(resp)
         mode = self.normalize_beast_border_patrol_mode(mode)
@@ -3088,17 +3127,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 return False
             if str(self.state.get("beast_border_patrol_name") or "").strip():
                 return True
-        failed_names = []
+        patrol_failed_names = []
+        recall_failed_names = []
         last_response = ""
+
+        def remember_failed(target_list, name):
+            if name and not any(self.beast_name_matches(name, failed) for failed in target_list):
+                target_list.append(name)
+
         while True:
             beast = self.select_beast_for_border_patrol(
                 self.state.get("beasts_cache", []),
-                exclude_names=failed_names,
+                exclude_names=patrol_failed_names,
             )
             if not beast:
                 recall_beast = self.select_beast_to_recall_for_border_patrol(
                     self.state.get("beasts_cache", []),
-                    exclude_names=failed_names,
+                    exclude_names=recall_failed_names,
                 )
                 if not recall_beast:
                     log.info(
@@ -3134,8 +3179,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 return self.record_beast_border_patrol_status_response(status_resp)
             if self.is_beast_stamina_insufficient_response(resp):
                 self.record_beast_stamina_shortage(beast_name, resp, "border patrol")
-                if beast_name and not any(self.beast_name_matches(beast_name, name) for name in failed_names):
-                    failed_names.append(beast_name)
+                remember_failed(patrol_failed_names, beast_name)
+                remember_failed(recall_failed_names, beast_name)
+                await asyncio.sleep(3)
+                continue
+            if self.handle_no_such_beast_response(beast_name, resp, "border patrol run"):
+                remember_failed(patrol_failed_names, beast_name)
+                remember_failed(recall_failed_names, beast_name)
+                await asyncio.sleep(3)
+                continue
+            exclude_from_recall = self.record_border_patrol_candidate_unavailable_response(resp, beast_name)
+            if exclude_from_recall is not None:
+                remember_failed(patrol_failed_names, beast_name)
+                if exclude_from_recall:
+                    remember_failed(recall_failed_names, beast_name)
                 await asyncio.sleep(3)
                 continue
             return self.record_beast_border_patrol_response(resp, beast_name, mode)
@@ -4062,8 +4119,27 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def parse_required_beast_stamina(self, text, default=BEAST_ABYSS_MIN_STAMINA):
         clean = str(text or "").replace("**", "")
-        match = re.search(r"至少需要\s*(\d+)\s*点体力", clean)
-        return int(match.group(1)) if match else default
+        for pattern in (
+            r"至少需要\s*(\d+)\s*点?\s*体力",
+            r"需要\s*(\d+)\s*点?\s*体力",
+        ):
+            match = re.search(pattern, clean)
+            if match:
+                return int(match.group(1))
+        return default
+
+    def parse_current_beast_stamina(self, text):
+        """解析体力不足回执中的当前体力，用于修正缓存。"""
+        clean = str(text or "").replace("**", "")
+        for pattern in (
+            r"当前(?:体力)?\s*[:：]?\s*(\d+)",
+            r"现有(?:体力)?\s*[:：]?\s*(\d+)",
+            r"剩余(?:体力)?\s*[:：]?\s*(\d+)",
+        ):
+            match = re.search(pattern, clean)
+            if match:
+                return int(match.group(1))
+        return -1
 
     def record_beast_stamina_shortage(self, beast_name, text, action="abyss"):
         default_required = {
@@ -4071,11 +4147,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "steal": BEAST_STEAL_MIN_STAMINA,
         }.get(action, BEAST_ABYSS_MIN_STAMINA)
         required = self.parse_required_beast_stamina(text, default=default_required)
-        inferred_stamina = max(0, required - 1)
+        current_stamina = self.parse_current_beast_stamina(text)
+        inferred_stamina = current_stamina if current_stamina >= 0 else max(0, required - 1)
         self.set_cached_beast_stamina(beast_name, inferred_stamina)
         if action in ("abyss", "border patrol"):
             self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
-        log.info(f"Beast {action}: {beast_name} stamina below {required}; trying fallback candidate.")
+        log.info(
+            f"Beast {action}: {beast_name} stamina {inferred_stamina} below "
+            f"{required}; trying fallback candidate."
+        )
         self.save_state()
         return required
 
