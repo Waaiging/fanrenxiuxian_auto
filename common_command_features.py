@@ -8,6 +8,15 @@
   3. 固定冷却指令的记录与重试逻辑
 
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
+
+【阅读导览】
+- common_command_default_state：三套脚本都会合并进去的通用 state 字段。
+- CommonCommandMixin 前半段：解析、状态读写、日报统计、身份暂停。
+- 中段：Dashboard 自定义指令、野外历练、元婴/裂缝/法宝等通用循环。
+- 后半段：黄龙山、卜筮问天、宗门战、主循环辅助。
+
+本模块不直接创建 TelegramClient；它假设继承方已经提供 send_and_wait_feedback、
+send_and_wait_feedback_identity、save_state、state、avatars 等能力。
 """
 import asyncio
 import hashlib
@@ -185,7 +194,11 @@ def seconds_until(value):
 # =====================================================================
 
 def common_command_default_state():
-    """返回通用命令的默认状态字典"""
+    """返回通用命令的默认状态字典。
+
+    这些键会被合并进每个账号 state。新增字段时要考虑旧 state 迁移：
+    旧文件里没有的键应通过 setdefault 补齐，不要直接假设存在。
+    """
     return {
         "last_field_training_time": "",
         "next_field_training_time": "",
@@ -224,7 +237,11 @@ def common_command_default_state():
 # =====================================================================
 
 class _CommonAtomicTask:
-    """Shared script-level atomic task gate for multi-command identity chains."""
+    """共享原子任务门闩。
+
+    多步骤链（如野外历练后的卜筮问天、宗门战、化身任务批次）会短暂占用
+    active_atomic_task，普通发送会等待它释放，避免中途被其他循环切身份。
+    """
 
     def __init__(self, actor, label):
         self.actor = actor
@@ -266,7 +283,12 @@ class _CommonAtomicTask:
 
 
 class CommonCommandMixin:
-    """通用固定冷却指令混入类。"""
+    """通用固定冷却指令混入类。
+
+    这里的方法尽量只依赖继承方暴露的统一接口，不直接区分主号/副号/小号。
+    真正的账号差异通过 account_key、identity_sect_names、avatar_features 和
+    各脚本覆盖的 state_time_command_for_key 等钩子注入。
+    """
 
     # ---- 轻量解析/判断工具 ----
 

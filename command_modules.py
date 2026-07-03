@@ -1,3 +1,13 @@
+"""
+【指令计划模块 —— 只描述“该发什么”，不负责真正发送】
+
+这个文件把一些常用指令封装成不可变的 dataclass：
+  - FieldTrainingPlan：野外历练这类可能带前置步骤的计划。
+  - TimedCommandPlan：固定冷却类指令计划，包含 last_key / next_key。
+
+主脚本拿到 plan 后，再交给自己的发送/身份切换/反馈等待逻辑执行。
+这样可以避免每个脚本都手写一套“命令字符串 + state 键名”的映射。
+"""
 from dataclasses import dataclass
 
 
@@ -13,12 +23,18 @@ ASK_DAO_COMMAND = ".问道"
 
 @dataclass(frozen=True)
 class CommandStep:
+    """一个前置步骤，例如历练前先 `.推命 探索`。"""
     command: str
     delay_after: float = 0
 
 
 @dataclass(frozen=True)
 class FieldTrainingPlan:
+    """野外历练计划。
+
+    pre_steps 会先执行，command 是最终历练指令；调用方仍需负责身份切换、
+    超时等待、命令守卫和 state 写入。
+    """
     identity: str
     command: str
     pre_steps: tuple[CommandStep, ...] = ()
@@ -34,6 +50,11 @@ class FieldTrainingPlan:
 
 @dataclass(frozen=True)
 class TimedCommandPlan:
+    """固定冷却指令计划。
+
+    last_key / next_key 是 state 中记录“上次执行”和“下次可执行”的字段名。
+    多账号脚本统一通过这个结构减少硬编码分叉。
+    """
     identity: str
     command: str
     last_key: str

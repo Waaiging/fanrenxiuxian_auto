@@ -1,3 +1,14 @@
+"""
+【阴罗宗功能模块 —— 缘生子的阴罗幡自动化】
+
+主号和副号都有名为“缘生子”的阴罗宗身份，相关指令集中放在这里，
+避免两个脚本改漏。主要流程：
+  1. `.我的阴罗幡` 同步槽位、幡灵、煞气等状态。
+  2. `.化功为煞 10000` 失败/冷却时必须解析回复时间，不能盲目重试。
+  3. 囚禁魂魄、安抚幡灵、血洗山林等流程按 state 里的冷却时间推进。
+
+调用方只需要继承 YinluoMixin，并提供发送指令、状态读写和日志能力。
+"""
 import asyncio
 import re
 from datetime import datetime, timedelta
@@ -10,10 +21,10 @@ YINLUO_MASTER_COMMAND = ".我的阴罗幡"
 YINLUO_SOUL = "凶兽戾魄"
 YINLUO_REFINE_COST_SHA = 1000
 YINLUO_CONVERT_COMMAND = ".化功为煞 10000"
-YINLUO_RETRY_SECONDS = 10 * 60
-YINLUO_SYNC_SECONDS = 30 * 60
-YINLUO_IMPENDING_GUARD_SECONDS = 120
-YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS = 30 * 60
+YINLUO_RETRY_SECONDS = 10 * 60              # 未知/短失败的保守重试间隔
+YINLUO_SYNC_SECONDS = 30 * 60               # 状态缓存最多 30 分钟刷新一次
+YINLUO_IMPENDING_GUARD_SECONDS = 120        # 到点前 2 分钟阻止其他流程抢身份
+YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS = 30 * 60  # 安抚无事可做时降噪
 
 
 def _strip_markdown(text):
@@ -30,6 +41,7 @@ def _next_day_time(hour=0, minute=5):
 
 
 def _parse_duration_seconds(text):
+    """从阴罗宗回复中解析“1小时40分钟43秒”这类冷却文本。"""
     clean = str(text or "")
     total = 0
     matched = False

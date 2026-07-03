@@ -16,6 +16,13 @@ Sub Cultivator v1.0 (Star Palace / 星宫 Edition)
   - 侍妾管理：自动安置/召回侍妾以配合闭关与星辰操作。
   - 野外历练与宗门战：被动处理，简版逻辑。
   - 低价天雷竹告警：监控万宝楼低价上架并发送通知。
+
+【阅读导览】
+- 常量区：副号身份、星宫观星/改换星移窗口、元婴宗与阴罗宗参数。
+- SubCultivator.__init__：账号配置、身份宗门映射、反馈表、锁和 state 初始化。
+- send_and_wait_feedback / send_and_wait_feedback_identity：所有指令发送和身份切换入口。
+- handle_game_response：机器人回复统一入口，负责匹配、同步状态和分发到功能模块。
+- run_*_loop：每个玩法的调度循环；多数循环只看 state 的 next_*_time 决定是否出手。
 """
 
 # ============================================================
@@ -373,6 +380,11 @@ for handler in logging.root.handlers:
 # AtomicTaskContext: 整体性任务独占锁上下文管理器
 # ============================================================
 class AtomicTaskContext:
+    """副号脚本级原子任务锁。
+
+    多步骤流程（如启阵、心劫、观星相关收尾）持有这个锁时，其他普通指令会等待。
+    这样可以避免同一身份在连续回复链中被别的循环切走。
+    """
     def __init__(self, cultivator, name="Task"):
         self.cultivator = cultivator
         self.name = name

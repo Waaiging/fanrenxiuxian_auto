@@ -19,6 +19,13 @@
 - 没有星宫独有的观星/改进星移功能
 - 增加了完整的灵兽培养放养探渊偷菜体系
 - 使用 beast_lock 而非 cmd_lock 管理灵兽操作
+
+【阅读导览】
+- 常量区：灵兽优先级、巡边/放养/探渊冷却、星宫化身观星窗口。
+- CultivatorXiaoHao.__init__：小号主魂与三个化身的身份、宗门、锁和状态。
+- 灵兽相关方法：搜索 “Beast” 或 “border patrol”，是小号最主要的业务逻辑。
+- send_and_wait_feedback / send_and_wait_feedback_identity：所有指令发送和身份切换入口。
+- handle_game_response：所有机器人回复统一入口，手动指令回复也会在这里同步 state。
 """
 import asyncio
 
@@ -274,6 +281,11 @@ def load_config():
 # AtomicTaskContext: 整体性任务独占锁上下文管理器
 # =====================================================================
 class AtomicTaskContext:
+    """小号脚本级原子任务锁。
+
+    用于共历心劫、化身闯塔、星宫收集等连续指令链。灵兽流程另有 beast_lock，
+    两类锁分开是为了避免灵兽长流程把普通身份任务完全堵住。
+    """
     def __init__(self, cultivator, name="Task"):
         self.cultivator = cultivator
         self.name = name
@@ -338,6 +350,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.cmd_lock = asyncio.Lock()
         self.star_gazing_lock = asyncio.Lock()
         self.beast_lock = asyncio.Lock()
+        # beast_lock 专门保护灵兽列表、出战/休息、探渊、偷菜、放养、巡边等状态。
+        # 不和 avatar_send_lock 合并，是为了让身份指令和灵兽内部状态同步更容易排查。
         self.beast_wakeup = asyncio.Event()
         self.startup_done = asyncio.Event()
         self.pause_event = asyncio.Event()  # 暂停/恢复控制（set=运行中, clear=暂停中）

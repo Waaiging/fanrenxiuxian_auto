@@ -5,6 +5,12 @@
 在游戏机器人发出特定消息时，脚本自动进行被动回复。
 目前支持的自动回复场景：
   1. 南陇侯交换 —— 当游戏机器人提到本账号/化身且给出".交换"选项时，按身份自动回复
+  2. 神秘商人 —— 看到目标商品时自动查看货品并购买优先物品
+
+【阅读导览】
+- is_auto_reply_followup：判断某条消息是否属于自动回复链，防止被普通匹配误处理。
+- maybe_auto_reply_merchant：神秘商人购买逻辑，带文件锁和事件去重。
+- maybe_auto_reply_exchange：南陇侯交换逻辑，必要时先安置/召回侍妾。
 """
 import asyncio
 import json
@@ -198,6 +204,10 @@ def _save_merchant_state(data):
 
 
 def claim_merchant_event(actor, msg_id):
+    """领取一次商人事件处理权。
+
+    多个脚本同时看到同一条商人消息时，只允许一个脚本继续购买，避免重复下单。
+    """
     account = str(getattr(actor, "account_key", "") or actor.__class__.__name__)
     key = str(msg_id or "")
     if not key:

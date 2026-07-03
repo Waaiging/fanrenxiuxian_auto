@@ -10,6 +10,13 @@
   5. 消息记录与格式化 —— 统一的消息入/出日志格式
 
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 导入使用。
+
+【阅读导览】
+- 日志记录与 message_events.sqlite3：log_incoming_message / record_message_event。
+- 指令守卫：command_send_precheck / command_send_allowed / force_command_guard_block。
+- 回复匹配：feedback_response_matches_command / feedback_response_conflicts。
+- 账号归属判断：mentions_self / mentions_other_user / text_targets_current_account。
+- 运行安全：机器人活跃检测、反挂机告警、暂停/恢复控制、watchdog_diagnostics。
 """
 import asyncio
 import hashlib
@@ -236,7 +243,11 @@ def cap_command_retries(max_retries):
 # =====================================================================
 
 def command_guard_policy(command, limit, window, block_seconds):
-    """获取命令守卫策略（支持指令级别的覆盖配置，前缀匹配）"""
+    """获取命令守卫策略（支持指令级别的覆盖配置，前缀匹配）。
+
+    这是防刷屏的第一层：不同指令可单独覆盖窗口、次数、是否发送告警。
+    业务逻辑遇到未知回复时应优先设置守卫/冷却，而不是在调用方无限重试。
+    """
     key = str(command or "").strip()
     # 精确匹配优先，否则尝试前缀匹配（如 ".切换" 匹配 ".切换 主魂 (问心子)"）
     policy = COMMAND_GUARD_POLICY_OVERRIDES.get(key, {})
@@ -2749,7 +2760,11 @@ def record_message_event(
     command="",
     logger=None,
 ):
-    """Persist a lightweight raw Telegram event for replay/debugging."""
+    """把一条 Telegram 事件写入 SQLite，供 dashboard 和事后复盘查询。
+
+    这个库比文本日志更适合做结构化统计：方向、身份、指令、reply_to、sender
+    都会单独落字段。这里尽量只记录事实，不做业务决策。
+    """
     if msg is None:
         return False
     text_value = text if text is not None else (getattr(msg, "text", None) or "")

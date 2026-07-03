@@ -1,3 +1,18 @@
+"""
+【钓鱼功能模块 —— 三个账号脚本共享】
+
+这个文件只放“钓鱼/全自动钓鱼”相关逻辑，主号、副号、小号通过
+FishingMixin 继承使用。读代码时可以按下面顺序看：
+  1. 顶部常量：鱼饵、每日上限、跨账号接力、青竹钓竿转移规则。
+  2. parse_* 函数：只负责把机器人回复解析成结构化结果，不发送指令。
+  3. FishingMixin.get_fishing_state：统一维护每个身份的 fishing state。
+  4. FishingMixin 中的 *_tick / *_round / *_auto* 方法：真正的调度和发送流程。
+
+设计原则：
+  - 钓鱼状态必须按“账号 + 身份”隔离，避免主魂/化身互相覆盖。
+  - 身份切换前如果当前身份有未提竿的鱼，先等或提竿，再切换。
+  - 全自动钓鱼通过 fishing_auto_global.json 在三个脚本之间接力，避免单账号刷屏。
+"""
 import asyncio
 import json
 import os
@@ -83,6 +98,14 @@ FISHING_DAILY_STALE_STATUSES = {
 
 
 def fishing_default_state():
+    """单个身份的钓鱼状态。
+
+    这些字段会写进 state_main/state_sub/state_xiaohao：
+      - today_count / daily_limit：当天竿数与上限。
+      - active_*：当前是否有一竿未提，watchdog 也依赖 active_due_at。
+      - baits / catches / daily_loot：鱼饵、鱼获和伴生机缘缓存。
+      - current_nest / nest_*：打窝状态，防止重复消耗窝料。
+    """
     return {
         "last_sync_date": "",
         "last_status": "paused",
@@ -122,6 +145,11 @@ def fishing_default_state():
 
 
 def fishing_auto_default_state():
+    """当前脚本自己的全自动钓鱼视图。
+
+    真正的跨账号队列在 fishing_auto_global.json；这里保存本账号最近状态、
+    当前活跃身份、钓竿持有人和接力进度，供 dashboard 展示和恢复。
+    """
     return {
         "last_sync_date": "",
         "last_status": "paused",
@@ -459,6 +487,11 @@ def _fishing_auto_select_next_pending(pending, active=None, holder=None):
 
 
 def _fishing_auto_default_global_state():
+    """跨账号全自动钓鱼的共享状态。
+
+    三个脚本都会读写这个文件；写入前必须拿文件锁，避免两个脚本同时决定
+    “轮到自己”。handoff_not_before 用来保证账号之间至少隔一段时间再切换。
+    """
     return {
         "date": _today(),
         "preferred_bait": FISHING_BAIT,
@@ -552,6 +585,11 @@ def _fishing_auto_identity_fishing_state(root_state, identity):
 
 
 def parse_fishing_basket(text):
+    """解析 `.鱼篓` 回复。
+
+    返回结构包含是否持有青竹钓竿、今日竿数、窝料、鱼饵、鱼获。
+    注意：这个函数不修改 state，只做纯解析，方便测试覆盖。
+    """
     clean = _strip_markdown(text)
     result = {
         "matched": "【鱼篓】" in clean,
@@ -618,6 +656,11 @@ def parse_fishing_basket(text):
 
 
 def parse_fishing_start(text):
+    """解析 `.钓鱼 <鱼饵>` 起竿回复。
+
+    成功时会解析预计鱼讯秒数；缺鱼饵、无钓竿、今日次数满、已有一竿
+    都会转成明确 status，调用方据此决定买饵/转移钓竿/暂停。
+    """
     clean = _strip_markdown(text)
     result = {
         "matched": False,
@@ -844,7 +887,15 @@ def parse_rod_response(text):
 
 
 class FishingMixin:
+    """钓鱼功能混入类。
+
+    继承方需要提供 send_and_wait_feedback / send_and_wait_feedback_identity、
+    state、save_state、dashboard_command_paused 等基础能力。Mixin 不关心具体账号，
+    只通过 account_key 和 identity 名称读写各自状态。
+    """
+
     def get_fishing_state(self, identity="主魂"):
+        """取得某个身份的钓鱼状态，并在跨天时重置每日字段。"""
         target = self.state if identity == "主魂" else self.get_avatar_state(identity)
         state = target.get("fishing")
         if not isinstance(state, dict):

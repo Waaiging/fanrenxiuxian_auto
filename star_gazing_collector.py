@@ -1,3 +1,15 @@
+"""
+【观星事件采集与改换星移窗口预测】
+
+三套脚本都会监听“星盘显化 / 天机异动”等消息，并把样本写入
+star_gazing_events.jsonl。这个模块负责：
+  1. 记录观星相关事件，供后续排查和统计。
+  2. 根据最近样本预测 `.改换星移` 最合适的发送时间。
+  3. 给不同账号提供 early / middle / dynamic 等错峰窗口。
+
+注意：这里不直接发送 Telegram 消息，只提供记录和时间计算；真正发送在
+intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 中。
+"""
 import hashlib
 import json
 import os
@@ -19,8 +31,8 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 STAR_SHIFT_DEFAULT_SEND_RANGE = (21, 24)
 STAR_SHIFT_PROFILE_WINDOWS = {
-    "early": (-3, 2),
-    "middle": (3, 6),
+    "early": (-3, 2),   # 主号早窗：显化点前后轻微浮动，争取先手
+    "middle": (3, 6),   # 副号中窗：避开主号，仍在结算前
 }
 STAR_SHIFT_MIN_SEND_DELAY_SECONDS = 6
 STAR_SHIFT_MAX_SEND_DELAY_SECONDS = 28
@@ -34,6 +46,7 @@ STAR_SHIFT_RECENT_GLOBAL_DAYS = 3
 STAR_SHIFT_NEWS_OFFSET_MAX_SECONDS = 120
 
 STAR_EVENT_MARKERS = (
+    # 这些关键词用于从群聊消息中识别“可能影响观星排期”的事件。
     "【星盘显化】",
     "【天机异动】",
     "【天机阁快报",

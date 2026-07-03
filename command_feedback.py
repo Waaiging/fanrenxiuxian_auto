@@ -9,6 +9,12 @@
   4. 返回回复内容或消息对象
 
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 等脚本共享使用。
+
+【阅读导览】
+- send_and_wait_feedback_common 是唯一核心入口：发送、登记 pending、等待、重试、清理。
+- _record_repeated_response_guard：同一错误回复反复出现时熔断，防止刷屏。
+- _record_timed_response_guard：回复里带“还需/冷却”时间时，按时间设置命令守卫。
+- _handle_telegram_send_protection：Telegram 自身限流/禁言等发送异常的保护。
 """
 import asyncio
 import re
@@ -95,6 +101,7 @@ def _normalize_repeated_response_text(text):
 
 
 def _record_repeated_response_guard(actor, message, response_text, logger=None, identity=None):
+    """同一指令短时间得到相同异常回复时，自动暂停该指令一段时间。"""
     command = str(message or "").strip()
     if not command or any(command.startswith(prefix) for prefix in REPEATED_RESPONSE_GUARD_EXCLUDED_PREFIXES):
         return False
@@ -142,6 +149,7 @@ def _record_repeated_response_guard(actor, message, response_text, logger=None, 
 
 
 def _record_timed_response_guard(actor, message, response_text, logger=None, identity=None):
+    """回复中带明确冷却时间时，按解析出的时间退避，避免盲目重试。"""
     command = str(message or "").strip()
     if not command or any(command.startswith(prefix) for prefix in TIMED_RESPONSE_GUARD_EXCLUDED_PREFIXES):
         return False

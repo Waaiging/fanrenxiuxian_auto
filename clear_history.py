@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+【清理历史指令工具】
+
+用于扫描 Telegram 会话中本账号发出的点号指令，并删除超过指定时间的旧消息。
+主脚本里的“清屏”控制最终也会复用这里的思路。
+
+注意：
+- 默认会复制 session 后再扫描，降低和正在运行脚本抢 SQLite session 的风险。
+- dry_run=True 时只打印将删除的消息，不真正删除。
+"""
 import argparse
 import asyncio
 import json

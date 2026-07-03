@@ -21,6 +21,13 @@ Intelligent Cultivator v8.5 (LingXiaoGong Edition)
   9. 侍妾神通 —— 侍妾相关操作
   10. BOSS 警报 —— 监测关键词并发送通知
 脚本运行在 WSL 中，通过 Telethon 连接 Telegram，与游戏机器人交互。
+
+【阅读导览】
+- 常量区：账号身份、宗门、各玩法冷却、观星错峰窗口。
+- Cultivator.__init__：账号配置、锁、反馈事件、身份映射、state 初始化。
+- send_and_wait_feedback / send_and_wait_feedback_identity：所有自动指令的发送入口。
+- handle_game_response：所有机器人/手动回复先进入这里，再分发到各功能模块。
+- run_*_loop：每个玩法一个循环，循环之间靠 state 时间和锁协调。
 """
 
 import asyncio          # 异步 I/O 框架，所有游戏交互都是异步的
@@ -197,6 +204,12 @@ SPIRIT_TREE_GUARD_ERROR_BLOCK_SECONDS = 60 * 60
 
 
 def spirit_tree_default_state():
+    """灵树玩法默认状态。
+
+    缘生子负责灵树灌溉、成熟采摘和古剑门来袭守山；这些字段既供主号
+    自己调度，也供 dashboard 展示。成熟期/守山状态需要保守记录，避免
+    重复采摘或在无需守山时连续刷 `.协同守山`。
+    """
     return {
         "next_spirit_tree_irrigation_time": "",
         "spirit_tree_status": SPIRIT_TREE_IRRIGATION_STATUS,
@@ -356,6 +369,11 @@ logging.getLogger('telethon').addFilter(ConnectionFilter())  # Telethon 自身�
 # AtomicTaskContext: 整体性任务独占锁上下文管理器
 # =====================================================================
 class AtomicTaskContext:
+    """脚本级原子任务锁。
+
+    用于共历心劫、灵树采摘、宗门战等多步骤流程。持有期间普通指令会等待，
+    但观星/改换星移等高优先级时机类指令有单独的绕行逻辑，避免错过窗口。
+    """
     def __init__(self, cultivator, name="Task"):
         self.cultivator = cultivator
         self.name = name
@@ -504,6 +522,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         # ------ 8. 反馈事件系统 ------
         # 这是整个脚本的核心机制：发送指令后，通过 feedback_events 等待机器人回复。
         # 每个已发送的指令都有一个 asyncio.Event，当收到对应回复时 set() 它。
+        # 如果你要查“某条命令为什么没等到回复”，优先看这几张表和 log_utils 的
+        # match_pending_feedback_by_reply / match_pending_edited_feedback。
         self.feedback_events = {}                  # {消息ID: asyncio.Event}
         self.last_feedback_text = {}               # {消息ID: 回复文本}
         self.last_feedback_msg = {}                # {消息ID: 回复消息对象}

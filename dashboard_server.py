@@ -10,6 +10,13 @@
   5. 清屏功能 —— 后台清理账号发出的消息
 
 通过 HTTP Basic 认证保护，运行在 0.0.0.0:8000。
+
+【阅读导览】
+- 顶部常量：账号、身份、日志标签、缓存时间和 state 文件路径。
+- get_status / collect_*：从 state、日志、SQLite 事件库汇总展示数据。
+- /api/* 路由：Dashboard 前端调用的接口，通常只做参数校验和结果包装。
+- start/stop/restart 相关函数：通过进程命令管理远端脚本，改动前要确认部署环境。
+- command_controls.json / dashboard_commands.json：面板指令开关和自定义排程的持久化文件。
 """
 import os
 import json
@@ -92,7 +99,7 @@ CLEAR_JOBS = {}                          # 清屏任务状态
 CLEAR_LOCK = threading.Lock()            # 清屏任务锁
 COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
-STATUS_CACHE = {}                        # Dashboard 总状态缓存
+STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前端轮询时反复读大日志
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
 LOG_PAGE_LOCK = threading.Lock()         # 日志分页接口锁
@@ -104,7 +111,7 @@ COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令发送记录接口短缓存
 COMMAND_RECORD_ENDPOINT_LOCK = threading.Lock()
 MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
 MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
-RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存
+RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存，构建成本较高所以单独限时缓存
 RESOURCE_STATS_LOCK = threading.Lock()   # 资源/库存统计锁
 RESOURCE_STATS_BUILD_LOCK = threading.Lock()
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
