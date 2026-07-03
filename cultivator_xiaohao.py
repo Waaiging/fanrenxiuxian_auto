@@ -2616,7 +2616,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         for key in (
             "next_beast_interaction_time",
             "next_beast_cruise_time",
-            "next_beast_border_patrol_time",
             "next_beast_status_check_time",
             "next_pasture_time",
         ):
@@ -2921,6 +2920,24 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return False
 
     # ---- 灵兽：巡边 ----
+
+    def repair_overdue_beast_border_patrol_schedule(self):
+        """巡边已到归来时间时，不允许其他灵兽状态把巡边唤醒时间推到未来。"""
+        name = str(self.state.get("beast_border_patrol_name") or "").strip()
+        last_patrol = self.state.get("last_beast_border_patrol_time", "")
+        next_patrol = self.state.get("next_beast_border_patrol_time", "")
+        if not name or not last_patrol or not next_patrol or not is_future(next_patrol):
+            return False
+        due_at = str_to_dt(last_patrol) + timedelta(seconds=BEAST_BORDER_PATROL_CD_SECONDS)
+        if due_at > datetime.now():
+            return False
+        self.state["next_beast_border_patrol_time"] = ""
+        self.save_state()
+        log.warning(
+            f"Beast border patrol schedule repaired: {name} was due at {dt_to_str(due_at)}, "
+            f"but next patrol had been delayed until {next_patrol}; clearing it for immediate return."
+        )
+        return True
 
     def normalize_beast_border_patrol_mode(self, mode=""):
         mode = str(mode or "").strip()
@@ -6430,6 +6447,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 continue
             sleep_for = 600
             async with self.beast_lock:
+                self.repair_overdue_beast_border_patrol_schedule()
                 last_abyss = self.state.get("last_abyss_time", "")
                 next_abyss = self.state.get("next_abyss_time", "")
                 need_abyss = self.beast_action_due("next_abyss_time", "last_abyss_time", 21600)

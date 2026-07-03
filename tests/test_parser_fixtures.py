@@ -6655,6 +6655,36 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
 
+    def test_pastured_beast_defer_does_not_delay_border_patrol(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        next_patrol = (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "last_pasture_time": now_str(),
+            "next_pasture_time": (datetime.now() + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": next_patrol,
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "休息中", "power": 195, "exp": 652, "stamina": 97},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        actor.defer_beast_actions_while_pastured("猴哥", "fixture")
+
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], next_patrol)
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "放养中")
+
+    def test_repair_overdue_border_patrol_clears_delayed_next_time(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "六翼",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(minutes=80)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.save_state = lambda: None
+
+        self.assertTrue(actor.repair_overdue_beast_border_patrol_schedule())
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
+
     def test_border_patrol_return_response_clears_due_without_extra_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
