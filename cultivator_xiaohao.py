@@ -184,6 +184,7 @@ BEAST_ABYSS_MIN_STAMINA = 30
 BEAST_CRUISE_MIN_STAMINA = 20
 BEAST_STEAL_MIN_STAMINA = 30
 BEAST_FOCUS_PROTECT_STAMINA = 50
+BEAST_ROSTER_AUTO_DAILY_LIMIT = 2
 DAILY_TASK_START_HOUR = 7                      # 每日任务开始时间
 DAILY_TASK_START_MINUTE = 30
 SECT_SKILL_MAX_DAILY = 3                       # 宗门传功每日上限
@@ -449,6 +450,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "best_beast_status": "", "best_beast_stamina": -1, "best_beast_injury_source": "",
             "beast_hunt_stopped": False, "beast_hunt_stopped_reason": "",
             "beasts_cache": [],
+            "beast_roster_updated_at": "",
+            "beast_roster_auto_query_date": "", "beast_roster_auto_query_count": 0,
+            "last_beast_roster_query_time": "", "last_beast_roster_query_result": "",
+            "last_beast_roster_response_excerpt": "", "beast_roster_last_source": "",
             "last_treasure_touch_time": "", "next_treasure_touch_time": "",
             "last_yuanying_out_time": "", "next_yuanying_out_time": "",
             "yuanying_out_active": False, "yuanying_out_end_time": "",
@@ -4193,11 +4198,17 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return ordered
 
     async def execute_abyss_with_fallback(self):
-        """探渊前刷新.我的灵兽；六翼>=50优先，否则按候选体力/战力补位。"""
-        log.info("Abyss: refreshing .我的灵兽 before selecting candidate.")
+        """探渊前按防刷屏标准更新灵兽缓存；六翼>=50优先，否则按候选体力/战力补位。"""
+        log.info("Abyss: checking beast roster cache before selecting candidate.")
         if not await self.update_beast_cache():
-            log.info("Abyss: failed to refresh beast cache; retry later.")
-            self.schedule_abyss_retry(1800)
+            retry_at = self.state.get("next_beast_status_check_time", "")
+            if retry_at and is_future(retry_at):
+                log.info(f"Abyss: beast cache unavailable; retry after roster refresh window {retry_at}.")
+                self.set_next_abyss_not_before(retry_at)
+                self.save_state()
+            else:
+                log.info("Abyss: failed to refresh beast cache; retry later.")
+                self.schedule_abyss_retry(1800)
             return False
 
         candidates = self.abyss_candidate_beasts(self.state.get("beasts_cache", []))
@@ -4365,26 +4376,96 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         """从 .我的灵兽 回复同步灵兽缓存。"""
         if not text or "灵兽" not in text:
             return False
+        self.record_beast_roster_response_metadata(text, source, "received")
         if self.is_pasture_return_message(text):
             self.mark_pastured_beasts_returned(text)
             self.clear_pasture_pending()
             self.state["last_pasture_return_time"] = now_str()
             self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+            self.record_beast_roster_response_metadata(text, source, "pasture_return")
             self.save_state()
             log.info(f"Beast roster sync skipped by pasture-return settlement ({source or 'unknown'}); cache preserved.")
             return True
         beasts = self.parse_beasts_info(text)
         if not beasts:
+            self.record_beast_roster_response_metadata(text, source, "not_roster")
             return False
         self.preserve_active_beast_statuses_for_roster(beasts)
         self.state["beasts_cache"] = beasts
         self.state["beast_roster_updated_at"] = now_str()
+        self.record_beast_roster_response_metadata(text, source, "parsed")
         self.sync_border_patrol_from_roster(beasts)
         self.update_best_beast_tracking()
         self.should_stop_hunt_by_tenth_beast(beasts)
         self.save_state()
         log.info(f"Beast roster synced from {source or 'reply'}: {len(beasts)} beasts.")
         return True
+
+    def record_beast_roster_response_metadata(self, text, source="", result=""):
+        """记录最近一次灵兽列表相关回执，避免只发送不留痕。"""
+        excerpt = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(excerpt) > 240:
+            excerpt = excerpt[:240] + "..."
+        self.state["last_beast_roster_response_excerpt"] = excerpt
+        self.state["beast_roster_last_source"] = source or ""
+        if result:
+            self.state["last_beast_roster_query_result"] = result
+
+    def beast_roster_auto_query_today(self):
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def normalize_beast_roster_auto_query_quota(self):
+        today = self.beast_roster_auto_query_today()
+        changed = False
+        if self.state.get("beast_roster_auto_query_date") != today:
+            self.state["beast_roster_auto_query_date"] = today
+            self.state["beast_roster_auto_query_count"] = 0
+            changed = True
+        try:
+            count = int(self.state.get("beast_roster_auto_query_count", 0) or 0)
+        except Exception:
+            count = 0
+            changed = True
+        if count < 0:
+            count = 0
+            changed = True
+        if self.state.get("beast_roster_auto_query_count") != count:
+            self.state["beast_roster_auto_query_count"] = count
+            changed = True
+        return changed
+
+    def next_beast_roster_auto_query_reset_time(self):
+        tomorrow = (datetime.now() + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+        return dt_to_str(tomorrow)
+
+    def beast_roster_auto_query_remaining(self):
+        self.normalize_beast_roster_auto_query_quota()
+        used = int(self.state.get("beast_roster_auto_query_count", 0) or 0)
+        return max(0, BEAST_ROSTER_AUTO_DAILY_LIMIT - used)
+
+    def record_beast_roster_auto_query_sent(self):
+        self.normalize_beast_roster_auto_query_quota()
+        used = int(self.state.get("beast_roster_auto_query_count", 0) or 0) + 1
+        self.state["beast_roster_auto_query_count"] = used
+        self.state["last_beast_roster_query_time"] = now_str()
+        self.state["last_beast_roster_query_result"] = "sent"
+        self.state["last_beast_roster_response_excerpt"] = ""
+        if used >= BEAST_ROSTER_AUTO_DAILY_LIMIT:
+            self.state["next_beast_status_check_time"] = self.next_beast_roster_auto_query_reset_time()
+        return used
+
+    def defer_beast_roster_auto_query_after_limit(self):
+        reset_at = self.next_beast_roster_auto_query_reset_time()
+        self.state["next_beast_status_check_time"] = reset_at
+        self.state["last_beast_roster_query_result"] = "daily_limit"
+        self.save_state()
+        return reset_at
+
+    def schedule_beast_roster_retry_after_auto_query(self, retry_seconds=1800):
+        if self.beast_roster_auto_query_remaining() <= 0:
+            self.state["next_beast_status_check_time"] = self.next_beast_roster_auto_query_reset_time()
+        else:
+            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), retry_seconds)
 
     def preserve_active_beast_statuses_for_roster(self, beasts):
         """本地已确认的长时任务状态优先于 .我的灵兽 的短暂/滞后状态。"""
@@ -4444,20 +4525,45 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         return True
 
     async def update_beast_cache(self):
-        """刷新灵兽缓存（发送.我的灵兽并解析结果）"""
-        log.info("Refreshing Beast Cache...")
+        """按自定义防刷屏标准刷新灵兽缓存；自动 .我的灵兽 每天最多 2 次。"""
+        if self.normalize_beast_roster_auto_query_quota():
+            self.save_state()
+        cache = self.state.get("beasts_cache", []) or []
+        next_check = self.state.get("next_beast_status_check_time", "")
+        if next_check and is_future(next_check):
+            if cache:
+                log.info(f"Beast Cache: auto .我的灵兽 deferred until {next_check}; using cached roster.")
+                return True
+            log.warning(f"Beast Cache: auto .我的灵兽 deferred until {next_check}, but cache is empty.")
+            return False
+
+        if self.beast_roster_auto_query_remaining() <= 0:
+            reset_at = self.defer_beast_roster_auto_query_after_limit()
+            if cache:
+                log.info(
+                    f"Beast Cache: auto .我的灵兽 daily cap "
+                    f"({BEAST_ROSTER_AUTO_DAILY_LIMIT}) reached; using cached roster until {reset_at}."
+                )
+                return True
+            log.warning(
+                f"Beast Cache: auto .我的灵兽 daily cap "
+                f"({BEAST_ROSTER_AUTO_DAILY_LIMIT}) reached and cache is empty; next refresh after {reset_at}."
+            )
+            return False
+
+        used = self.record_beast_roster_auto_query_sent()
+        self.save_state()
+        log.info(f"Refreshing Beast Cache with .我的灵兽 ({used}/{BEAST_ROSTER_AUTO_DAILY_LIMIT} today).")
         resp = await self.send_and_wait_feedback(".我的灵兽", timeout=45, max_retries=0)
         if resp and "灵兽" in resp:
             if self.is_pasture_return_message(resp):
-                self.mark_pastured_beasts_returned(resp)
-                self.clear_pasture_pending()
-                self.state["last_pasture_return_time"] = now_str()
-                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+                self.record_beast_roster_response(resp, source="auto .我的灵兽")
+                self.schedule_beast_roster_retry_after_auto_query(1800)
                 self.save_state()
                 log.info("Beast Cache: .我的灵兽 was interrupted by pasture return; cache preserved and refresh deferred.")
                 return False
             if not self.record_beast_roster_response(resp, source="auto .我的灵兽"):
-                self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+                self.schedule_beast_roster_retry_after_auto_query(1800)
                 self.save_state()
                 log.warning("Beast Cache: response did not contain a valid beast roster; cache preserved.")
                 return False
@@ -4467,6 +4573,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             )
             log.info(f"Beast Cache: {len(self.state.get('beasts_cache', []))} parsed: {summary}")
             return True
+        self.state["last_beast_roster_query_result"] = "no_response" if not resp else "not_beast_response"
+        if resp:
+            self.record_beast_roster_response_metadata(resp, "auto .我的灵兽", "not_beast_response")
+        self.schedule_beast_roster_retry_after_auto_query(1800)
+        self.save_state()
+        log.warning("Beast Cache: .我的灵兽 did not return a beast roster; cache preserved.")
         return False
 
     def beast_name_from_command(self, command):

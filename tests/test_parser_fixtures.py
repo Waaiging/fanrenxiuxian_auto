@@ -5920,6 +5920,84 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(beasts[0]["status_cd"], 3720)
         self.assertEqual(actor.parse_beasts_info("【灵兽归来】\n体力恢复若干。"), [])
 
+    def test_auto_beast_roster_refresh_counts_and_parses_response(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state = {
+            "beasts_cache": [],
+            "next_beast_status_check_time": "",
+            "beast_roster_auto_query_date": today,
+            "beast_roster_auto_query_count": 0,
+        }
+        actor.save_state = lambda: None
+        sent = []
+        roster = """
+【灵兽伙伴们】
+- 六翼(一阶)(休息中)
+  - 种类: 天鹏
+  - 经验: 12
+  - 战力: 500
+  - 体力: 80
+"""
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return roster
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.update_beast_cache()))
+
+        self.assertEqual(sent, [".我的灵兽"])
+        self.assertEqual(actor.state["beast_roster_auto_query_count"], 1)
+        self.assertEqual(actor.state["last_beast_roster_query_result"], "parsed")
+        self.assertEqual(actor.state["beasts_cache"][0]["full_name"], "六翼 (一阶)")
+        self.assertEqual(actor.state["beasts_cache"][0]["stamina"], 80)
+        self.assertTrue(actor.state.get("beast_roster_updated_at"))
+
+    def test_auto_beast_roster_daily_cap_uses_cached_roster(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state = {
+            "beast_roster_auto_query_date": today,
+            "beast_roster_auto_query_count": 2,
+            "next_beast_status_check_time": "",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "天鹏", "status": "休息中", "power": 500, "exp": 12, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        async def fail_send(*args, **kwargs):
+            raise AssertionError(".我的灵兽 should not be sent after daily cap")
+
+        actor.send_and_wait_feedback = fail_send
+
+        self.assertTrue(asyncio.run(actor.update_beast_cache()))
+        self.assertEqual(actor.state["beast_roster_auto_query_count"], 2)
+        self.assertEqual(actor.state["last_beast_roster_query_result"], "daily_limit")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_status_check_time"]), 0)
+
+    def test_auto_beast_roster_daily_cap_without_cache_defers(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state = {
+            "beast_roster_auto_query_date": today,
+            "beast_roster_auto_query_count": 2,
+            "next_beast_status_check_time": "",
+            "beasts_cache": [],
+        }
+        actor.save_state = lambda: None
+
+        async def fail_send(*args, **kwargs):
+            raise AssertionError(".我的灵兽 should not be sent after daily cap")
+
+        actor.send_and_wait_feedback = fail_send
+
+        self.assertFalse(asyncio.run(actor.update_beast_cache()))
+        self.assertEqual(actor.state["last_beast_roster_query_result"], "daily_limit")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_status_check_time"]), 0)
+
     def test_beast_candidate_protects_low_stamina_focus_beast(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         cache = [
