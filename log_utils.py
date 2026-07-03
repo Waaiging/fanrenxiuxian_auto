@@ -3824,6 +3824,9 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
         or cmd.startswith(".灵兽休息 ")
         or cmd.startswith(".灵兽互动 ")
         or cmd.startswith(".灵兽巡游 ")
+        or cmd.startswith(".灵兽巡边")
+        or cmd == ".巡边状态"
+        or cmd == ".巡边归来"
     ):
         if hasattr(actor, "record_manual_beast_command_response"):
             processed = bool(actor.record_manual_beast_command_response(cmd, text))

@@ -3037,12 +3037,14 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         if any(k in resp for k in ["巡边归来", "归来", "召回", "返回", "带回", "收获", "获得", "已结束"]):
             self.state["next_beast_border_patrol_time"] = ""
             self.state["beast_border_patrol_name"] = ""
+            self.clear_border_patrol_cache_statuses()
             if name:
                 self.set_best_beast_status(name, "休息中")
             self.save_state()
             return True
         if self.is_border_patrol_status_clear_response(resp):
             self.state["beast_border_patrol_name"] = ""
+            self.clear_border_patrol_cache_statuses()
             self.save_state()
             return True
         return False
@@ -4280,6 +4282,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.preserve_active_beast_statuses_for_roster(beasts)
         self.state["beasts_cache"] = beasts
         self.state["beast_roster_updated_at"] = now_str()
+        self.sync_border_patrol_from_roster(beasts)
         self.update_best_beast_tracking()
         self.should_stop_hunt_by_tenth_beast(beasts)
         self.save_state()
@@ -4296,6 +4299,52 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     beast["full_name"] = patrol_name
                     beast["status"] = "巡边中"
                     break
+
+    def clear_border_patrol_cache_statuses(self, except_name=""):
+        except_name = str(except_name or "").strip()
+        for beast in self.state.get("beasts_cache", []) or []:
+            name = beast.get("full_name", "")
+            if "巡边" not in str(beast.get("status") or ""):
+                continue
+            if except_name and self.beast_name_matches(name, except_name):
+                continue
+            beast["status"] = "休息中"
+
+    def sync_border_patrol_from_roster(self, beasts):
+        """Use .我的灵兽 as a backstop for patrol state when manual commands changed it."""
+        patrols = [b for b in (beasts or []) if "巡边" in str(b.get("status") or "")]
+        if len(patrols) != 1:
+            if not patrols and str(self.state.get("beast_border_patrol_name") or "").strip():
+                next_patrol = self.state.get("next_beast_border_patrol_time", "")
+                if not next_patrol or not is_future(next_patrol):
+                    self.state["beast_border_patrol_name"] = ""
+            return False
+
+        name = patrols[0].get("full_name", "")
+        if not name:
+            return False
+        previous = str(self.state.get("beast_border_patrol_name") or "").strip()
+        if previous and not self.beast_name_matches(previous, name):
+            log.info(f"Beast border patrol roster sync: active changed {previous} -> {name}.")
+        self.state["beast_border_patrol_name"] = name
+        if not self.state.get("beast_border_patrol_mode"):
+            self.state["beast_border_patrol_mode"] = BEAST_BORDER_PATROL_DEFAULT_MODE
+
+        next_patrol = self.state.get("next_beast_border_patrol_time", "")
+        last_patrol = self.state.get("last_beast_border_patrol_time", "")
+        expected = add_seconds_str(last_patrol, BEAST_BORDER_PATROL_CD_SECONDS) if last_patrol else ""
+        if expected and is_future(expected):
+            self.state["next_beast_border_patrol_time"] = expected
+        elif not next_patrol or not is_future(next_patrol):
+            self.state["next_beast_border_patrol_time"] = add_seconds_str(now_str(), 60)
+            wakeup = getattr(self, "beast_wakeup", None)
+            if wakeup:
+                wakeup.set()
+        elif seconds_until(next_patrol) <= 600:
+            wakeup = getattr(self, "beast_wakeup", None)
+            if wakeup:
+                wakeup.set()
+        return True
 
     async def update_beast_cache(self):
         """刷新灵兽缓存（发送.我的灵兽并解析结果）"""

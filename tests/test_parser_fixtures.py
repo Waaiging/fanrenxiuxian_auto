@@ -6371,6 +6371,37 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(by_name["保龄球"]["status"], "巡边中")
         self.assertEqual(actor.state["beast_border_patrol_name"], "保龄球")
 
+    def test_roster_refresh_syncs_active_border_patrol_as_due_backstop(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "",
+            "next_beast_border_patrol_time": "",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(minutes=90)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.save_state = lambda: None
+        text = """
+**@TitanCreeper**** 的灵兽伙伴们：**
+
+**- 谛听** (巡边中)
+  - **种类**: 二阶噬魂兽
+  - **品阶**: 2阶, **等级**: 22
+  - **经验**: 2166 / 2200
+  - **战力**: 304
+  - **灵性**: 忠诚: 100 | 体力: 61
+  - **传闻**: 【谛听】受命沿慕兰边境执行夜嗅敌营。
+**- 风希** (休息中)
+  - **种类**: 一阶风雀
+  - **品阶**: 1阶, **等级**: 9
+  - **经验**: 644 / 900
+  - **战力**: 29
+  - **灵性**: 忠诚: 56 | 体力: 100
+"""
+
+        self.assertTrue(actor.record_beast_roster_response(text, source="fixture"))
+        self.assertEqual(actor.state["beast_border_patrol_name"], "谛听")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 0)
+        self.assertLessEqual(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 65)
+
     def test_border_patrol_active_sends_return_before_new_patrol(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
@@ -6417,6 +6448,23 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_name"], "")
         self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
+
+    def test_border_patrol_return_response_clears_stale_patrol_statuses(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "谛听",
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(minutes=75)).strftime("%Y-%m-%d %H:%M:%S"),
+            "beasts_cache": [
+                {"full_name": "谛听", "species": "二阶噬魂兽", "status": "巡边中", "power": 304, "exp": 2166, "stamina": 61},
+                {"full_name": "风希", "species": "一阶风雀", "status": "巡边中", "power": 29, "exp": 644, "stamina": 76},
+            ],
+        }
+        actor.save_state = lambda: None
+
+        self.assertTrue(actor.record_beast_border_patrol_return_response("**【巡边归来 · 夜嗅敌营】**\n获得灵石 **+104**"))
+        self.assertEqual(actor.state["beast_border_patrol_name"], "")
+        self.assertEqual(actor.state["beasts_cache"][0]["status"], "休息中")
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "休息中")
 
     def test_border_patrol_unknown_response_uses_conservative_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
