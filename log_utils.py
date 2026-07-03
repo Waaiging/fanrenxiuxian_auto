@@ -2278,6 +2278,64 @@ def notify_pause_control_changed(actor):
             pass
 
 
+def actor_log_rate_allowed(actor, key, interval_seconds=300):
+    now = time.monotonic()
+    limits = getattr(actor, "_rate_limited_log_times", None)
+    if not isinstance(limits, dict):
+        limits = {}
+        try:
+            setattr(actor, "_rate_limited_log_times", limits)
+        except Exception:
+            return True
+    last = limits.get(key, 0)
+    if now - last < max(1, int(interval_seconds)):
+        return False
+    limits[key] = now
+    return True
+
+
+def watchdog_diagnostics(actor):
+    parts = [
+        f"current_identity={getattr(actor, 'current_identity', '')!r}",
+        f"main_confirmed={getattr(actor, '_main_confirmed', None)!r}",
+        f"paused={bool(getattr(getattr(actor, 'pause_event', None), 'is_set', lambda: True)() is False)}",
+    ]
+    atomic_label = getattr(actor, "_common_atomic_label", "") or ""
+    if atomic_label:
+        parts.append(f"common_atomic={atomic_label!r}")
+    active_atomic = getattr(actor, "active_atomic_task", None)
+    if active_atomic is not None:
+        try:
+            task_name = active_atomic.get_name()
+        except Exception:
+            task_name = str(id(active_atomic))
+        parts.append(f"active_atomic_task={task_name}")
+    tasks = []
+    try:
+        current = asyncio.current_task()
+        for task in asyncio.all_tasks():
+            if task is current or task.done():
+                continue
+            coro = getattr(task, "get_coro", lambda: None)()
+            coro_name = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
+            stack = task.get_stack(limit=1)
+            if stack:
+                frame = stack[-1]
+                location = f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}:{frame.f_code.co_name}"
+            else:
+                location = coro_name or "no_stack"
+            text = f"{task.get_name()}:{location}"
+            if any(k in text for k in ["send", "feedback", "concubine", "fishing", "avatar", "beast", "heart"]):
+                tasks.append(text)
+            if len(tasks) >= 8:
+                break
+    except Exception:
+        tasks = []
+    if tasks:
+        parts.append("tasks=" + " | ".join(tasks))
+    return "; ".join(parts)
+
+
 async def handle_pause_control_command(actor, msg, text, sender=None, logger=None, label="脚本"):
     """Handle account pause/resume commands from authorized senders."""
     stripped = str(text or "").strip()
@@ -2286,7 +2344,8 @@ async def handle_pause_control_command(actor, msg, text, sender=None, logger=Non
     if sender is not None and is_game_bot_sender(actor, sender):
         return False
     if not pause_control_chat_matches(actor, msg):
-        if logger:
+        rate_key = f"pause_control_chat:{stripped}:{getattr(msg, 'chat_id', None)}:{getattr(msg, 'sender_id', None)}"
+        if logger and actor_log_rate_allowed(actor, rate_key):
             logger.warning(
                 "Pause control ignored: chat mismatch text=%r chat_id=%r target_chat_id=%r sender_id=%r",
                 stripped,
@@ -2296,7 +2355,8 @@ async def handle_pause_control_command(actor, msg, text, sender=None, logger=Non
             )
         return False
     if not sender_is_pause_admin(actor, msg):
-        if logger:
+        rate_key = f"pause_control_unauthorized:{stripped}:{getattr(msg, 'chat_id', None)}:{getattr(msg, 'sender_id', None)}"
+        if logger and actor_log_rate_allowed(actor, rate_key):
             logger.warning(
                 "Pause control ignored: unauthorized sender text=%r sender_id=%r chat_id=%r pause_admins=%r",
                 stripped,

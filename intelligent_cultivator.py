@@ -128,6 +128,7 @@ from log_utils import (
     remember_script_sent_message, # 记录脚本已发送的消息
     schedule_command_auto_delete, # 安排命令自动删除
     send_text_alert,           # 发送文本告警
+    watchdog_diagnostics,      # watchdog 重启前诊断摘要
     is_edited_message_for_current_account, # 判定消息是否针对当前账号的编辑
     feedback_response_conflicts, # 判定回复文本是否属于其他指令家族
     feedback_response_matches_command, # 判定回复文本是否正向匹配该指令
@@ -2199,7 +2200,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                         lock_started_at = time.monotonic()
                     held_for = time.monotonic() - lock_started_at
                     if held_for >= 10 * 60:
-                        log.critical(f"Main watchdog: avatar_send_lock held for {held_for:.0f}s; restarting process.")
+                        log.critical(
+                            f"Main watchdog: avatar_send_lock held for {held_for:.0f}s; "
+                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                        )
                         self.save_state()
                         os.execv(sys.executable, [sys.executable, *sys.argv])
                 else:

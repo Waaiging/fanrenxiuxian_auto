@@ -79,7 +79,7 @@ from log_utils import (
     record_message_event,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
-    schedule_command_auto_delete, send_text_alert, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
+    schedule_command_auto_delete, send_text_alert, watchdog_diagnostics, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
     feedback_response_conflicts,
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
@@ -2066,7 +2066,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                         lock_started_at = time.monotonic()
                     held_for = time.monotonic() - lock_started_at
                     if held_for >= 10 * 60:
-                        log.critical(f"Xiaohao watchdog: avatar_send_lock held for {held_for:.0f}s; restarting process.")
+                        log.critical(
+                            f"Xiaohao watchdog: avatar_send_lock held for {held_for:.0f}s; "
+                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                        )
                         self.save_state()
                         os.execv(sys.executable, [sys.executable, *sys.argv])
                 else:
