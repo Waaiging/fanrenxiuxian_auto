@@ -794,6 +794,65 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn("\\+", summary)
         self.assertNotIn("激战得胜", summary)
 
+    def test_daily_reward_summary_markdown_for_xiaohao(self):
+        actor = DummyAvatarCommon()
+        actor.account_key = "xiaohao"
+        actor.avatars = ["问心子"]
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "问心子",
+            "command": ".探寻裂缝",
+            "clean": (
+                "【激战得胜】经过一番苦战，你成功斩杀了时空异兽！"
+                "你从其残骸中，获得了【法则碎片·空间】x1、【四级妖丹】x5，"
+                "以及一件至宝：【太虚仙露】！"
+            ),
+            "rewards": {},
+            "final": True,
+        }]
+
+        summary = actor.build_daily_reward_summary_text(today, markdown=True)
+
+        self.assertIn("*统计日期：", summary)
+        self.assertIn("`账号：小号`", summary)
+        self.assertIn("*全账号收益*", summary)
+        self.assertIn("*问心子｜1 次（成功 1）*", summary)
+        self.assertIn("• `.探寻裂缝`", summary)
+        self.assertIn("四级妖丹 \\+5", summary)
+        self.assertIn("法则碎片·空间 \\+1", summary)
+        self.assertNotIn("激战得胜", summary)
+
+    def test_daily_reward_summary_send_uses_markdown_v2(self):
+        actor = DummyAvatarCommon()
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "主魂",
+            "command": ".元婴闭关",
+            "clean": "【元婴闭关结算】元婴闭关结束，获得修为 +2000。",
+            "rewards": {"修为": 2000},
+            "final": True,
+        }]
+        captured = {}
+
+        async def fake_alert(actor_arg, title, text, logger=None, parse_mode=None):
+            captured["title"] = title
+            captured["text"] = text
+            captured["parse_mode"] = parse_mode
+            return True
+
+        with patch.object(common_command_features, "send_text_alert", fake_alert):
+            sent = asyncio.run(actor.send_daily_reward_summary_for_date(today))
+
+        self.assertTrue(sent)
+        self.assertEqual(captured["title"], "周期收益日报")
+        self.assertEqual(captured["parse_mode"], "MarkdownV2")
+        self.assertIn("*全账号收益*", captured["text"])
+        self.assertIn("修为 +2000", captured["text"])
+
     def test_daily_reward_ignores_rift_intermediate_edit(self):
         actor = DummyAvatarCommon()
         actor.command_avatar_map = {4200: "缘生子"}

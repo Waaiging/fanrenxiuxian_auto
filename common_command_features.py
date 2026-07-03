@@ -809,17 +809,81 @@ class CommonCommandMixin:
             return any(k in clean for k in ("探渊", "万兽渊", "获得", "收获", "带回", "战利品", "奖励"))
         return bool(self.parse_reward_items_from_text(clean))
 
-    def summarize_reward_items(self, rewards):
+    def daily_reward_sorted_reward_items(self, rewards, priority=False):
+        if not rewards:
+            return []
+        if not priority:
+            return sorted(rewards)
+
+        priority_names = {
+            "修为": 0,
+            "灵石": 1,
+            "宗门贡献": 2,
+            "贡献": 3,
+            "神识": 4,
+            "气血": 5,
+            "煞气": 6,
+            "道韵": 7,
+            "感悟": 8,
+            "经验": 9,
+            "星辰精华": 10,
+            "精华": 11,
+        }
+
+        def sort_key(name):
+            text = str(name or "")
+            if text in priority_names:
+                return (priority_names[text], text)
+            if text.startswith("法则碎片"):
+                return (20, text)
+            if text.endswith("妖丹"):
+                return (30, text)
+            return (100, text)
+
+        return sorted(rewards, key=sort_key)
+
+    def summarize_reward_items(self, rewards, limit=None, priority=False):
         if not rewards:
             return ""
+        names = self.daily_reward_sorted_reward_items(rewards, priority=priority)
+        hidden = 0
+        if limit and len(names) > limit:
+            hidden = len(names) - limit
+            names = names[:limit]
         parts = []
-        for name in sorted(rewards):
+        for name in names:
             value = int(rewards.get(name, 0) or 0)
             if value > 0:
                 parts.append(f"{name} +{value}")
             else:
                 parts.append(f"{name} {value}")
+        if hidden:
+            parts.append(f"等 {hidden} 项")
         return "、".join(parts)
+
+    def daily_reward_merge_rewards(self, target, rewards):
+        if not isinstance(rewards, dict):
+            return target
+        for name, value in rewards.items():
+            target[name] = int(target.get(name, 0) or 0) + int(value or 0)
+        return target
+
+    def daily_reward_outcome_summary_text(self, outcomes, unparsed=0):
+        parts = []
+        if outcomes:
+            preferred = [name for name in ("成功", "失败") if name in outcomes]
+            preferred += [name for name in sorted(outcomes) if name not in preferred]
+            parts.extend(f"{name} {outcomes[name]}" for name in preferred)
+        if unparsed:
+            parts.append(f"未解析 {unparsed}")
+        return " / ".join(parts)
+
+    def daily_reward_bucket_outcome_text(self, bucket, include_unparsed=False):
+        outcome_text = self.daily_reward_outcome_summary_text(
+            bucket.get("outcomes") or {},
+            bucket.get("unparsed", 0) if include_unparsed else 0,
+        )
+        return f"（{outcome_text}）" if outcome_text else ""
 
     def daily_reward_plain_command_label(self, command):
         return str(command or "未知指令").split()[0] or "未知指令"
@@ -997,7 +1061,79 @@ class CommonCommandMixin:
             final=True,
         )
 
-    def build_daily_reward_summary_text(self, summary_date):
+    def build_daily_reward_summary_markdown_text(self, summary_date, grouped):
+        overall = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
+        identity_order = ["主魂"] + [name for name in getattr(self, "avatars", []) if name != "主魂"]
+        identity_order += [name for name in grouped if name not in identity_order]
+        identity_totals = {}
+
+        for identity in identity_order:
+            commands = grouped.get(identity)
+            if not commands:
+                continue
+            identity_total = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
+            for bucket in commands.values():
+                identity_total["count"] += int(bucket.get("count", 0) or 0)
+                identity_total["unparsed"] += int(bucket.get("unparsed", 0) or 0)
+                self.daily_reward_merge_rewards(identity_total["rewards"], bucket.get("rewards") or {})
+                for name, count in (bucket.get("outcomes") or {}).items():
+                    identity_total["outcomes"][name] = int(identity_total["outcomes"].get(name, 0) or 0) + int(count or 0)
+
+            overall["count"] += identity_total["count"]
+            overall["unparsed"] += identity_total["unparsed"]
+            self.daily_reward_merge_rewards(overall["rewards"], identity_total["rewards"])
+            for name, count in identity_total["outcomes"].items():
+                overall["outcomes"][name] = int(overall["outcomes"].get(name, 0) or 0) + int(count or 0)
+            identity_totals[identity] = identity_total
+
+        overall_outcome = self.daily_reward_outcome_summary_text(overall["outcomes"], overall["unparsed"])
+        lines = [
+            self.telegram_markdown_v2_bold(f"统计日期：{summary_date}"),
+            self.telegram_markdown_v2_code(f"账号：{self.daily_reward_account_label()}"),
+            self.telegram_markdown_v2_code(
+                f"总览：{overall['count']} 次"
+                + (f"（{overall_outcome}）" if overall_outcome else "")
+            ),
+            "",
+            self.telegram_markdown_v2_bold("全账号收益"),
+        ]
+        total_rewards = self.summarize_reward_items(overall["rewards"], limit=10, priority=True)
+        lines.append(self.telegram_markdown_v2_code(total_rewards or "暂无可解析收益"))
+
+        for identity in identity_order:
+            commands = grouped.get(identity)
+            if not commands:
+                continue
+            total = identity_totals.get(identity) or {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
+            header = f"{identity}｜{total['count']} 次"
+            outcome = self.daily_reward_outcome_summary_text(total.get("outcomes") or {}, total.get("unparsed", 0))
+            if outcome:
+                header += f"（{outcome}）"
+            lines.append("")
+            lines.append(self.telegram_markdown_v2_bold(header))
+            identity_rewards = self.summarize_reward_items(total.get("rewards") or {}, limit=8, priority=True)
+            lines.append(self.telegram_markdown_v2_code(f"合计：{identity_rewards or '暂无可解析收益'}"))
+            for command in sorted(commands):
+                bucket = commands[command]
+                outcome_text = self.daily_reward_bucket_outcome_text(bucket)
+                command_label = self.daily_reward_plain_command_label(command)
+                lines.append(
+                    "• "
+                    + self.telegram_markdown_v2_code(command_label)
+                    + self.telegram_markdown_v2_escape(f"：{bucket['count']} 次{outcome_text}")
+                )
+                reward_text = self.summarize_reward_items(bucket["rewards"], limit=8, priority=True)
+                if reward_text:
+                    if bucket["unparsed"]:
+                        reward_text += f"；未解析 {bucket['unparsed']} 次"
+                    lines.append("  " + self.telegram_markdown_v2_escape(f"收益：{reward_text}"))
+                else:
+                    lines.append("  " + self.telegram_markdown_v2_escape("收益：未解析"))
+                    for sample in bucket["samples"]:
+                        lines.append("  " + self.telegram_markdown_v2_escape(f"摘录：{sample}"))
+        return "\n".join(lines)
+
+    def build_daily_reward_summary_text(self, summary_date, markdown=False):
         events = [
             event for event in self.state.get("daily_reward_events", [])
             if event.get("date") == summary_date
@@ -1051,6 +1187,9 @@ class CommonCommandMixin:
         if not grouped:
             return ""
 
+        if markdown:
+            return self.build_daily_reward_summary_markdown_text(summary_date, grouped)
+
         lines = [
             f"统计日期：{summary_date}",
             f"账号：{self.daily_reward_account_label()}",
@@ -1069,12 +1208,7 @@ class CommonCommandMixin:
                 detail = reward_text if reward_text else "收益未解析"
                 if bucket["unparsed"] and reward_text:
                     detail += f"；未解析 {bucket['unparsed']} 次"
-                outcome_text = ""
-                outcomes = bucket.get("outcomes") or {}
-                if outcomes:
-                    preferred = [name for name in ("成功", "失败") if name in outcomes]
-                    preferred += [name for name in sorted(outcomes) if name not in preferred]
-                    outcome_text = "（" + " / ".join(f"{name} {outcomes[name]}" for name in preferred) + "）"
+                outcome_text = self.daily_reward_bucket_outcome_text(bucket)
                 lines.append(
                     f"- {self.daily_reward_plain_command_label(command)}："
                     f"{bucket['count']} 次{outcome_text}；{detail}"
@@ -1088,13 +1222,13 @@ class CommonCommandMixin:
         self.ensure_common_command_state()
         if self.state.get("daily_reward_last_sent_date") == summary_date:
             return False
-        text = self.build_daily_reward_summary_text(summary_date)
+        text = self.build_daily_reward_summary_text(summary_date, markdown=True)
         self.state["daily_reward_last_sent_date"] = summary_date
         self.save_state()
         if not text:
             return False
         log = self.common_command_logger()
-        sent = await send_text_alert(self, "周期收益日报", text, log)
+        sent = await send_text_alert(self, "周期收益日报", text, log, parse_mode="MarkdownV2")
         if sent:
             log.info(f"Daily reward summary sent for {summary_date}.")
         else:
