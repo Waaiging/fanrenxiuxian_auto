@@ -3151,11 +3151,20 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 return True
         patrol_failed_names = []
         recall_failed_names = []
+        recall_retry_seconds = []
         last_response = ""
 
         def remember_failed(target_list, name):
             if name and not any(self.beast_name_matches(name, failed) for failed in target_list):
                 target_list.append(name)
+
+        def remember_recall_retry(seconds):
+            try:
+                seconds = int(seconds or 0)
+            except Exception:
+                seconds = 0
+            if seconds > 0:
+                recall_retry_seconds.append(seconds)
 
         while True:
             beast = self.select_beast_for_border_patrol(
@@ -3168,11 +3177,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     exclude_names=recall_failed_names,
                 )
                 if not recall_beast:
+                    retry = min(recall_retry_seconds) + 5 if recall_retry_seconds else 1800
+                    retry = max(60, retry)
                     log.info(
                         "Beast border patrol skipped: no resting or recallable beast candidate "
-                        f"after stamina fallbacks. Last response: {last_response[:80]}"
+                        f"after stamina fallbacks; retry in {retry}s. Last response: {last_response[:80]}"
                     )
-                    self.schedule_beast_action_retry("next_beast_border_patrol_time", 1800)
+                    self.schedule_beast_action_retry("next_beast_border_patrol_time", retry)
                     return False
                 recall_name = recall_beast.get("full_name", "")
                 log.info(f"Beast border patrol: no resting candidate; recalling highest-stamina beast {recall_name}.")
@@ -3186,12 +3197,40 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     if self.is_existing_border_patrol_response(rest_resp):
                         status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
                         return self.record_beast_border_patrol_status_response(status_resp)
+                    guard_wait = self.recent_command_guard_wait(f".灵兽休息 {recall_name}", max_age_seconds=30)
+                    if guard_wait > 0:
+                        remember_failed(recall_failed_names, recall_name)
+                        remember_recall_retry(guard_wait)
+                        log.info(
+                            f"Beast border patrol: recall for {recall_name} blocked by command guard "
+                            f"for {guard_wait}s; trying another recall candidate."
+                        )
+                        await asyncio.sleep(3)
+                        continue
+                    if self.handle_no_such_beast_response(recall_name, rest_resp, "border patrol recall"):
+                        remember_failed(recall_failed_names, recall_name)
+                        await asyncio.sleep(3)
+                        continue
                     injury_cd = self.record_beast_injury_from_response(recall_name, rest_resp, source="border patrol recall")
-                    retry = injury_cd if injury_cd > 0 else 1800
-                    self.schedule_beast_action_retry("next_beast_border_patrol_time", retry)
-                    if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
+                    if injury_cd >= 0:
+                        remember_failed(recall_failed_names, recall_name)
+                        remember_recall_retry(injury_cd)
+                        log.info(f"Beast border patrol: {recall_name} recall blocked by injury; trying fallback candidate.")
+                        await asyncio.sleep(3)
+                        continue
+                    if self.is_beast_pastured_response(rest_resp, recall_name) or self.is_pastured_status(rest_status):
+                        wait = self.parse_wait_time(rest_resp)
+                        remember_recall_retry(wait)
+                        self.set_best_beast_status(recall_name, "放养中")
+                        remember_failed(recall_failed_names, recall_name)
+                        log.info(f"Beast border patrol: {recall_name} is still pastured after recall; trying fallback candidate.")
+                        await asyncio.sleep(3)
+                        continue
+                    remember_failed(recall_failed_names, recall_name)
+                    if rest_resp and not self.is_fake_beast_status_response(rest_resp):
                         notify_unrecognized_response(self, f".灵兽休息 {recall_name}", rest_resp, log, "巡边前召回")
-                    return False
+                    await asyncio.sleep(3)
+                    continue
             beast_name = beast.get("full_name", "")
             command = f".灵兽巡边 {beast_name} {mode}"
             resp = await self.send_and_wait_feedback(command, timeout=60, max_retries=1)

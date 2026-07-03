@@ -6506,6 +6506,83 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertEqual(actor.state["beasts_cache"][2]["status"], "巡边中")
 
+    def test_border_patrol_recall_guard_tries_next_candidate(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "放养中", "power": 195, "exp": 652, "stamina": 97},
+                {"full_name": "谛听", "species": "二阶噬魂兽", "status": "放养中", "power": 304, "exp": 2166, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽休息 猴哥":
+                actor._last_command_guard_block = {
+                    "key": ".灵兽休息 猴哥",
+                    "wait": 805,
+                    "blocked_until": time.monotonic() + 805,
+                    "reason": "command_guard",
+                    "at": time.monotonic(),
+                }
+                return ""
+            if command == ".灵兽休息 谛听":
+                return "已将灵兽【谛听】召回休息。"
+            if command == ".灵兽巡边 谛听 袭营":
+                return "灵兽【谛听】领命前往边境巡行，执行【袭营】。"
+            return ""
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+
+        self.assertEqual(
+            sent,
+            [".灵兽休息 猴哥", ".灵兽休息 谛听", ".灵兽巡边 谛听 袭营"],
+        )
+        self.assertEqual(actor.state["beast_border_patrol_name"], "谛听")
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
+
+    def test_border_patrol_all_recall_guards_use_shortest_retry(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "放养中", "power": 195, "exp": 652, "stamina": 97},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            actor._last_command_guard_block = {
+                "key": ".灵兽休息 猴哥",
+                "wait": 805,
+                "blocked_until": time.monotonic() + 805,
+                "reason": "command_guard",
+                "at": time.monotonic(),
+            }
+            return ""
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertFalse(asyncio.run(actor.run_beast_border_patrol()))
+
+        self.assertEqual(sent, [".灵兽休息 猴哥"])
+        retry = common_seconds_until(actor.state["next_beast_border_patrol_time"])
+        self.assertGreaterEqual(retry, 780)
+        self.assertLess(retry, 830)
+
     def test_border_patrol_existing_runner_queries_status_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
