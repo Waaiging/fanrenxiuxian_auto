@@ -885,6 +885,12 @@ class CommonCommandMixin:
         )
         return f"（{outcome_text}）" if outcome_text else ""
 
+    def daily_reward_empty_reward_label(self, bucket):
+        outcomes = bucket.get("outcomes") or {}
+        if outcomes.get("失败") and not any(name != "失败" for name in outcomes):
+            return "无收益"
+        return "未解析"
+
     def daily_reward_plain_command_label(self, command):
         return str(command or "未知指令").split()[0] or "未知指令"
 
@@ -1086,7 +1092,7 @@ class CommonCommandMixin:
                 overall["outcomes"][name] = int(overall["outcomes"].get(name, 0) or 0) + int(count or 0)
             identity_totals[identity] = identity_total
 
-        overall_outcome = self.daily_reward_outcome_summary_text(overall["outcomes"], overall["unparsed"])
+        overall_outcome = self.daily_reward_outcome_summary_text(overall["outcomes"])
         lines = [
             self.telegram_markdown_v2_bold(f"统计日期：{summary_date}"),
             self.telegram_markdown_v2_code(f"账号：{self.daily_reward_account_label()}"),
@@ -1106,7 +1112,7 @@ class CommonCommandMixin:
                 continue
             total = identity_totals.get(identity) or {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
             header = f"{identity}｜{total['count']} 次"
-            outcome = self.daily_reward_outcome_summary_text(total.get("outcomes") or {}, total.get("unparsed", 0))
+            outcome = self.daily_reward_outcome_summary_text(total.get("outcomes") or {})
             if outcome:
                 header += f"（{outcome}）"
             lines.append("")
@@ -1128,7 +1134,7 @@ class CommonCommandMixin:
                         reward_text += f"；未解析 {bucket['unparsed']} 次"
                     lines.append("  " + self.telegram_markdown_v2_escape(f"收益：{reward_text}"))
                 else:
-                    lines.append("  " + self.telegram_markdown_v2_escape("收益：未解析"))
+                    lines.append("  " + self.telegram_markdown_v2_escape(f"收益：{self.daily_reward_empty_reward_label(bucket)}"))
                     for sample in bucket["samples"]:
                         lines.append("  " + self.telegram_markdown_v2_escape(f"摘录：{sample}"))
         return "\n".join(lines)

@@ -811,6 +811,14 @@ class ParserFixtureTests(unittest.TestCase):
             ),
             "rewards": {},
             "final": True,
+        }, {
+            "date": today,
+            "time": "13:00:00",
+            "identity": "缘生子",
+            "command": ".探寻裂缝",
+            "clean": "【大凶·虚空噬体】肉身化为齑粉，神魂遭受重创，已陷入 6小时 的【虚弱期】！",
+            "rewards": {},
+            "final": True,
         }]
 
         summary = actor.build_daily_reward_summary_text(today, markdown=True)
@@ -819,9 +827,12 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn("`账号：小号`", summary)
         self.assertIn("*全账号收益*", summary)
         self.assertIn("*问心子｜1 次（成功 1）*", summary)
+        self.assertIn("*缘生子｜1 次（失败 1）*", summary)
         self.assertIn("• `.探寻裂缝`", summary)
         self.assertIn("四级妖丹 \\+5", summary)
         self.assertIn("法则碎片·空间 \\+1", summary)
+        self.assertIn("收益：无收益", summary)
+        self.assertNotIn("失败 1 / 未解析", summary)
         self.assertNotIn("激战得胜", summary)
 
     def test_daily_reward_summary_send_uses_markdown_v2(self):
