@@ -43,6 +43,7 @@ from log_utils import (
     is_yuanying_rebirth_block_response,
     is_yuanying_rebirth_success_response,
     notify_unrecognized_response,
+    record_daily_reward_event_log,
     send_text_alert,
     text_targets_current_account,
     text_username_mentions,
@@ -574,6 +575,7 @@ class CommonCommandMixin:
             ".收集精华",
             ".探渊",
             ".灵兽探渊",
+            ".问道",
         }
 
     def daily_reward_account_label(self):
@@ -595,6 +597,7 @@ class CommonCommandMixin:
             ".灵兽探渊",
             ".元婴闭关",
             ".元婴出窍",
+            ".问道",
         }
 
     def daily_reward_parse_text_for_command(self, command, text):
@@ -766,8 +769,17 @@ class CommonCommandMixin:
         root = str(command or "").split()[0] if command else ""
         clean = self.daily_reward_parse_text_for_command(root or command, text)
         rewards = rewards if isinstance(rewards, dict) else {}
+        if root == ".问道":
+            if any(k in clean for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
+                return "失败"
+            if any(k in clean for k in ["冷却", "后再", "尚需", "剩余", "请在"]):
+                return ""
+            if rewards or self.is_ask_dao_response(clean):
+                return "成功"
         if root == ".野外历练":
             cultivation = int(rewards.get("修为", 0) or 0)
+            if any(marker in clean for marker in ("改命脱险", "改命回天", "未损修为")):
+                return "脱险"
             failure_markers = (
                 "失败", "失利", "负伤而归", "一时判断失误", "修为折损",
                 "修为倒退", "扣除修为", "损失修为", "消耗修为",
@@ -807,6 +819,10 @@ class CommonCommandMixin:
             ))
         if root in {".探渊", ".灵兽探渊"}:
             return any(k in clean for k in ("探渊", "万兽渊", "获得", "收获", "带回", "战利品", "奖励"))
+        if root == ".问道":
+            if any(k in clean for k in ("冷却", "后再", "尚需", "剩余", "请在")):
+                return False
+            return self.is_ask_dao_response(clean)
         return bool(self.parse_reward_items_from_text(clean))
 
     def daily_reward_sorted_reward_items(self, rewards, priority=False):
@@ -817,9 +833,11 @@ class CommonCommandMixin:
 
         priority_names = {
             "修为": 0,
-            "灵石": 1,
+            "天机": 1,
+            "天机值": 1,
             "宗门贡献": 2,
-            "贡献": 3,
+            "贡献": 2,
+            "灵石": 3,
             "神识": 4,
             "气血": 5,
             "煞气": 6,
@@ -894,6 +912,173 @@ class CommonCommandMixin:
     def daily_reward_plain_command_label(self, command):
         return str(command or "未知指令").split()[0] or "未知指令"
 
+    def daily_reward_context_reward_items(self, command, text):
+        """Parse useful destiny-side gains that should be shown in compact daily details."""
+        clean = self.clean_reward_text(text)
+        if not clean:
+            return {}
+        rewards = {}
+
+        def add(name, amount):
+            try:
+                value = int(str(amount).replace(",", ""))
+            except Exception:
+                return
+            if value:
+                rewards[name] = int(rewards.get(name, 0) or 0) + value
+
+        command_root = str(command or "").split()[0] if command else ""
+        if command_root == ".问道":
+            if "大道感悟" in clean or "获得感悟" in clean:
+                add("感悟", 1)
+            elif "道韵" in clean and not re.search(r"道韵\s*\+?\s*\d", clean):
+                add("道韵", 1)
+
+        context_lines = []
+        for line in re.split(r"[\n\r]+", clean):
+            if any(marker in line for marker in ("推命命中", "司命演算", "天机值")):
+                context_lines.append(line)
+        context = "\n".join(context_lines)
+        if not context:
+            return rewards
+        for amount in re.findall(r"天机值\s*\+?\s*([+-]?\d[\d,]*)", context):
+            add("天机", amount)
+        for _name, amount in re.findall(r"(宗门贡献|贡献)\s*\+?\s*([+-]?\d[\d,]*)", context):
+            add("贡献", amount)
+        return rewards
+
+    def daily_reward_command_short_label(self, command):
+        root = str(command or "").split()[0] if command else ""
+        return {
+            ".野外历练": "历练",
+            ".探寻裂缝": "裂缝",
+            ".元婴出窍": "出窍",
+            ".元婴闭关": "闭关",
+            ".探渊": "探渊",
+            ".灵兽探渊": "探渊",
+            ".登天阶": "登阶",
+            ".收集精华": "精华",
+            ".问道": "问道",
+        }.get(root, root.lstrip(".") or "未知")
+
+    def daily_reward_command_counts_compact_text(self, command_counts):
+        if not command_counts:
+            return ""
+        ordered = ["历练", "裂缝", "出窍", "闭关", "探渊", "问道", "登阶", "精华"]
+        normalized = {}
+        for command, count in command_counts.items():
+            label = self.daily_reward_command_short_label(command)
+            normalized[label] = int(normalized.get(label, 0) or 0) + int(count or 0)
+        labels = [label for label in ordered if label in normalized]
+        labels.extend(sorted(label for label in normalized if label not in labels))
+        return "｜".join(f"{label}{normalized[label]}" for label in labels)
+
+    def daily_reward_display_reward_name(self, name):
+        text = str(name or "").strip()
+        if text == "宗门贡献":
+            return "贡献"
+        if text == "天机值":
+            return "天机"
+        return text
+
+    def daily_reward_format_number(self, value):
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            return str(value or 0)
+
+    def daily_reward_compact_reward_item(self, name, value):
+        display = self.daily_reward_display_reward_name(name)
+        try:
+            amount = int(value or 0)
+        except Exception:
+            return ""
+        if not display or amount == 0:
+            return ""
+        plus_names = {
+            "修为", "天机", "贡献", "神识", "气血", "煞气",
+            "道韵", "感悟", "经验", "星辰精华", "精华",
+        }
+        if amount < 0:
+            return f"{display}{self.daily_reward_format_number(amount)}"
+        if display in plus_names:
+            return f"{display}+{self.daily_reward_format_number(amount)}"
+        return f"{display}x{self.daily_reward_format_number(amount)}"
+
+    def summarize_reward_items_compact(self, rewards, limit=None, priority=True):
+        if not rewards:
+            return ""
+        normalized = {}
+        for name, value in rewards.items():
+            display = self.daily_reward_display_reward_name(name)
+            if not display:
+                continue
+            normalized[display] = int(normalized.get(display, 0) or 0) + int(value or 0)
+        names = self.daily_reward_sorted_reward_items(normalized, priority=priority)
+        hidden = 0
+        if limit and len(names) > limit:
+            hidden = len(names) - limit
+            names = names[:limit]
+        parts = []
+        for name in names:
+            item = self.daily_reward_compact_reward_item(name, normalized.get(name, 0))
+            if item:
+                parts.append(item)
+        if hidden:
+            parts.append(f"等{hidden}项")
+        return "｜".join(parts)
+
+    def daily_reward_outcome_counts_compact_text(self, outcomes, unparsed=0, always=False):
+        outcomes = outcomes or {}
+        parts = []
+        for name in ("成功", "脱险", "失败"):
+            count = int(outcomes.get(name, 0) or 0)
+            if always or count:
+                parts.append(f"{name}: {count}")
+        for name in sorted(outcomes):
+            if name not in {"成功", "脱险", "失败"}:
+                parts.append(f"{name}: {int(outcomes.get(name, 0) or 0)}")
+        if unparsed:
+            parts.append(f"未解析: {int(unparsed)}")
+        return "｜".join(parts)
+
+    def daily_reward_event_time_label(self, event_time):
+        match = re.search(r"(\d{2}):(\d{2})", str(event_time or ""))
+        return f"{match.group(1)}:{match.group(2)}" if match else "--:--"
+
+    def daily_reward_event_outcome_label(self, event):
+        outcome = event.get("outcome") or ""
+        clean = event.get("clean") or event.get("excerpt") or ""
+        command = event.get("command") or ""
+        root = str(command or "").split()[0]
+        if outcome == "脱险":
+            return "~改命脱险" if "改命" in clean else "~脱险"
+        short_label = self.daily_reward_command_short_label(command)
+        if outcome == "失败":
+            return f"✗{short_label}"
+        if root == ".野外历练":
+            if "灵机" in clean:
+                return "✓灵机"
+            if any(k in clean for k in ("妖兽遭遇", "斗法", "伏诛", "胜算")):
+                return "✓胜"
+            return "✓历练"
+        if root in {
+            ".探寻裂缝", ".元婴出窍", ".元婴闭关",
+            ".探渊", ".灵兽探渊", ".问道", ".登天阶", ".收集精华",
+        }:
+            return f"✓{short_label}"
+        return f"✓{short_label}" if outcome == "成功" else "?"
+
+    def daily_reward_event_detail_text(self, event):
+        rewards = event.get("rewards") or {}
+        reward_text = self.summarize_reward_items_compact(rewards, limit=10, priority=True)
+        if not reward_text:
+            reward_text = "无收益" if event.get("outcome") == "失败" else "未解析"
+        return (
+            f"{self.daily_reward_event_time_label(event.get('time'))} "
+            f"{self.daily_reward_event_outcome_label(event)}｜{reward_text}"
+        )
+
     def telegram_markdown_v2_escape(self, text):
         return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text or ""))
 
@@ -934,6 +1119,10 @@ class CommonCommandMixin:
 
         reward_clean = self.daily_reward_parse_text_for_command(root or command, clean)
         rewards = self.parse_reward_items_from_text(reward_clean)
+        self.daily_reward_merge_rewards(
+            rewards,
+            self.daily_reward_context_reward_items(root or command, clean),
+        )
         final = bool(final or self.daily_reward_is_final_settlement_text(root or command, clean))
         outcome = outcome or self.daily_reward_outcome_from_text(root or command, clean, rewards)
         if not final and not rewards:
@@ -963,6 +1152,7 @@ class CommonCommandMixin:
                     "final": final,
                     "outcome": outcome,
                 })
+                record_daily_reward_event_log(self, old, logger=self.common_command_logger())
                 self.save_state()
                 return True
 
@@ -979,7 +1169,7 @@ class CommonCommandMixin:
         excerpt = re.sub(r"\s+", " ", clean)
         if len(excerpt) > 180:
             excerpt = excerpt[:180] + "..."
-        events.append({
+        event_entry = {
             "date": event_date,
             "time": event_time,
             "identity": identity,
@@ -992,7 +1182,9 @@ class CommonCommandMixin:
             "message_key": message_key,
             "final": final,
             "outcome": outcome,
-        })
+        }
+        events.append(event_entry)
+        record_daily_reward_event_log(self, event_entry, logger=self.common_command_logger())
 
         cutoff = (now - timedelta(days=4)).strftime("%Y-%m-%d")
         self.state["daily_reward_events"] = [
@@ -1020,6 +1212,8 @@ class CommonCommandMixin:
             return ".探寻裂缝"
         if any(k in clean for k in ("探渊", "万兽渊")):
             return ".探渊"
+        if any(k in clean for k in ("问道", "悟道", "论道", "道韵", "大道感悟")):
+            return ".问道"
         return ""
 
     def daily_reward_identity_from_message(self, msg, text):
@@ -1068,7 +1262,7 @@ class CommonCommandMixin:
         )
 
     def build_daily_reward_summary_markdown_text(self, summary_date, grouped):
-        overall = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
+        overall = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}, "events": [], "command_counts": {}}
         identity_order = ["主魂"] + [name for name in getattr(self, "avatars", []) if name != "主魂"]
         identity_order += [name for name in grouped if name not in identity_order]
         identity_totals = {}
@@ -1077,66 +1271,66 @@ class CommonCommandMixin:
             commands = grouped.get(identity)
             if not commands:
                 continue
-            identity_total = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
-            for bucket in commands.values():
+            identity_total = {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}, "events": [], "command_counts": {}}
+            for command, bucket in commands.items():
                 identity_total["count"] += int(bucket.get("count", 0) or 0)
                 identity_total["unparsed"] += int(bucket.get("unparsed", 0) or 0)
+                identity_total["command_counts"][command] = int(identity_total["command_counts"].get(command, 0) or 0) + int(bucket.get("count", 0) or 0)
                 self.daily_reward_merge_rewards(identity_total["rewards"], bucket.get("rewards") or {})
                 for name, count in (bucket.get("outcomes") or {}).items():
                     identity_total["outcomes"][name] = int(identity_total["outcomes"].get(name, 0) or 0) + int(count or 0)
+                identity_total["events"].extend(bucket.get("events") or [])
 
             overall["count"] += identity_total["count"]
             overall["unparsed"] += identity_total["unparsed"]
             self.daily_reward_merge_rewards(overall["rewards"], identity_total["rewards"])
             for name, count in identity_total["outcomes"].items():
                 overall["outcomes"][name] = int(overall["outcomes"].get(name, 0) or 0) + int(count or 0)
+            overall["events"].extend(identity_total["events"])
+            for command, count in identity_total["command_counts"].items():
+                overall["command_counts"][command] = int(overall["command_counts"].get(command, 0) or 0) + int(count or 0)
             identity_totals[identity] = identity_total
 
-        overall_outcome = self.daily_reward_outcome_summary_text(overall["outcomes"])
+        overall_commands = self.daily_reward_command_counts_compact_text(overall.get("command_counts") or {})
+        overall_text = (
+            f"有效{overall['count']}｜结算{overall['count']}"
+            + (f"｜{overall_commands}" if overall_commands else "")
+            + (f"｜{self.daily_reward_outcome_counts_compact_text(overall['outcomes'], overall['unparsed'], always=True)}")
+            + (f"｜{self.summarize_reward_items_compact(overall['rewards'], limit=12, priority=True)}" if overall["rewards"] else "")
+        )
         lines = [
-            self.telegram_markdown_v2_bold(f"统计日期：{summary_date}"),
-            self.telegram_markdown_v2_code(f"账号：{self.daily_reward_account_label()}"),
-            self.telegram_markdown_v2_code(
-                f"总览：{overall['count']} 次"
-                + (f"（{overall_outcome}）" if overall_outcome else "")
-            ),
+            self.telegram_markdown_v2_bold("周期收益日报"),
+            self.telegram_markdown_v2_escape(f"统计日期：{summary_date}"),
+            self.telegram_markdown_v2_escape(f"账号：{self.daily_reward_account_label()}"),
+            self.telegram_markdown_v2_escape(f"总计：{overall_text}"),
             "",
-            self.telegram_markdown_v2_bold("全账号收益"),
+            self.telegram_markdown_v2_bold("账号明细:"),
         ]
-        total_rewards = self.summarize_reward_items(overall["rewards"], limit=10, priority=True)
-        lines.append(self.telegram_markdown_v2_code(total_rewards or "暂无可解析收益"))
 
         for identity in identity_order:
             commands = grouped.get(identity)
             if not commands:
                 continue
             total = identity_totals.get(identity) or {"count": 0, "rewards": {}, "unparsed": 0, "outcomes": {}}
-            header = f"{identity}｜{total['count']} 次"
-            outcome = self.daily_reward_outcome_summary_text(total.get("outcomes") or {})
-            if outcome:
-                header += f"（{outcome}）"
-            lines.append("")
-            lines.append(self.telegram_markdown_v2_bold(header))
-            identity_rewards = self.summarize_reward_items(total.get("rewards") or {}, limit=8, priority=True)
-            lines.append(self.telegram_markdown_v2_code(f"合计：{identity_rewards or '暂无可解析收益'}"))
-            for command in sorted(commands):
-                bucket = commands[command]
-                outcome_text = self.daily_reward_bucket_outcome_text(bucket)
-                command_label = self.daily_reward_plain_command_label(command)
-                lines.append(
-                    "• "
-                    + self.telegram_markdown_v2_code(command_label)
-                    + self.telegram_markdown_v2_escape(f"：{bucket['count']} 次{outcome_text}")
-                )
-                reward_text = self.summarize_reward_items(bucket["rewards"], limit=8, priority=True)
-                if reward_text:
-                    if bucket["unparsed"]:
-                        reward_text += f"；未解析 {bucket['unparsed']} 次"
-                    lines.append("  " + self.telegram_markdown_v2_escape(f"收益：{reward_text}"))
-                else:
-                    lines.append("  " + self.telegram_markdown_v2_escape(f"收益：{self.daily_reward_empty_reward_label(bucket)}"))
-                    for sample in bucket["samples"]:
-                        lines.append("  " + self.telegram_markdown_v2_escape(f"摘录：{sample}"))
+            identity_text = (
+                f"有效{total['count']}｜结算{total['count']}"
+                + (f"｜{self.daily_reward_command_counts_compact_text(total.get('command_counts') or {})}" if total.get("command_counts") else "")
+                + f"｜{self.daily_reward_outcome_counts_compact_text(total.get('outcomes') or {}, total.get('unparsed', 0), always=True)}"
+            )
+            identity_rewards = self.summarize_reward_items_compact(total.get("rewards") or {}, limit=10, priority=True)
+            if identity_rewards:
+                identity_text += f"｜{identity_rewards}"
+            lines.append(
+                "\\- "
+                + self.telegram_markdown_v2_bold(identity)
+                + self.telegram_markdown_v2_escape(f": {identity_text}")
+            )
+            events = sorted(
+                total.get("events") or [],
+                key=lambda item: str(item.get("time") or ""),
+            )
+            for event in events:
+                lines.append("  \\- " + self.telegram_markdown_v2_escape(self.daily_reward_event_detail_text(event)))
         return "\n".join(lines)
 
     def build_daily_reward_summary_text(self, summary_date, markdown=False):
@@ -1166,6 +1360,7 @@ class CommonCommandMixin:
                 "unparsed": 0,
                 "samples": [],
                 "outcomes": {},
+                "events": [],
             })
             bucket["count"] += 1
             rewards = {}
@@ -1178,6 +1373,13 @@ class CommonCommandMixin:
                 rewards = dict(event.get("rewards") or {})
                 if command_root == ".野外历练":
                     rewards.pop("宗门贡献", None)
+            if markdown:
+                if command_root == ".野外历练":
+                    rewards.pop("宗门贡献", None)
+                    rewards.pop("贡献", None)
+                for name, value in self.daily_reward_context_reward_items(command, raw_text).items():
+                    if int(rewards.get(name, 0) or 0) == 0:
+                        rewards[name] = int(value or 0)
             outcome = self.daily_reward_outcome_from_text(command, raw_text, rewards) if raw_text else ""
             outcome = outcome or event.get("outcome") or ""
             if outcome:
@@ -1186,9 +1388,20 @@ class CommonCommandMixin:
                 for name, value in rewards.items():
                     bucket["rewards"][name] = int(bucket["rewards"].get(name, 0) or 0) + int(value or 0)
             else:
-                bucket["unparsed"] += 1
+                if outcome != "失败":
+                    bucket["unparsed"] += 1
                 if event.get("excerpt") and len(bucket["samples"]) < 2:
                     bucket["samples"].append(event.get("excerpt"))
+            bucket["events"].append({
+                "time": event.get("time", ""),
+                "identity": identity,
+                "command": command,
+                "rewards": dict(rewards),
+                "outcome": outcome,
+                "excerpt": event.get("excerpt", ""),
+                "clean": raw_text,
+                "final": bool(event.get("final") or rewards),
+            })
 
         if not grouped:
             return ""
@@ -3013,6 +3226,7 @@ class CommonCommandMixin:
             return True
 
         if self.is_ask_dao_response(resp):
+            self.record_daily_reward_event("主魂", plan.command, resp, source=source, final=True)
             self.state[last_key] = now
             self.state[next_key] = add_seconds_str(now, self.ask_dao_cd_seconds())
             self.state["last_ask_dao_error"] = ""

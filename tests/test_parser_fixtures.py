@@ -823,16 +823,15 @@ class ParserFixtureTests(unittest.TestCase):
 
         summary = actor.build_daily_reward_summary_text(today, markdown=True)
 
-        self.assertIn("*统计日期：", summary)
-        self.assertIn("`账号：小号`", summary)
-        self.assertIn("*全账号收益*", summary)
-        self.assertIn("*问心子｜1 次（成功 1）*", summary)
-        self.assertIn("*缘生子｜1 次（失败 1）*", summary)
-        self.assertIn("• `.探寻裂缝`", summary)
-        self.assertIn("四级妖丹 \\+5", summary)
-        self.assertIn("法则碎片·空间 \\+1", summary)
-        self.assertIn("收益：无收益", summary)
-        self.assertNotIn("失败 1 / 未解析", summary)
+        self.assertIn("*周期收益日报*", summary)
+        self.assertIn("统计日期：", summary)
+        self.assertIn("账号：小号", summary)
+        self.assertIn("*账号明细:*", summary)
+        self.assertIn("\\- *问心子*: 有效1｜结算1｜裂缝1｜成功: 1｜脱险: 0｜失败: 0", summary)
+        self.assertIn("\\- *缘生子*: 有效1｜结算1｜裂缝1｜成功: 0｜脱险: 0｜失败: 1", summary)
+        self.assertIn("✓裂缝｜法则碎片·空间x1｜四级妖丹x5｜太虚仙露x1", summary)
+        self.assertIn("✗裂缝｜无收益", summary)
+        self.assertNotIn("未解析", summary)
         self.assertNotIn("激战得胜", summary)
 
     def test_daily_reward_summary_send_uses_markdown_v2(self):
@@ -861,8 +860,8 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(sent)
         self.assertEqual(captured["title"], "周期收益日报")
         self.assertEqual(captured["parse_mode"], "MarkdownV2")
-        self.assertIn("*全账号收益*", captured["text"])
-        self.assertIn("修为 +2000", captured["text"])
+        self.assertIn("*账号明细:*", captured["text"])
+        self.assertIn("修为\\+2,000", captured["text"])
 
     def test_daily_reward_ignores_rift_intermediate_edit(self):
         actor = DummyAvatarCommon()
@@ -978,7 +977,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rescue_rewards, {"三级妖丹": 1})
         self.assertEqual(chance_rewards, {"修为": 45000, "四级妖丹": 1})
         self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", beast_text, beast_rewards), "成功")
-        self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", rescue_text, rescue_rewards), "失败")
+        self.assertEqual(actor.daily_reward_outcome_from_text(".野外历练 深入", rescue_text, rescue_rewards), "脱险")
         self.assertNotIn("宗门贡献", beast_rewards)
         self.assertNotIn("贪狼", beast_rewards)
 
@@ -1786,9 +1785,18 @@ class ParserFixtureTests(unittest.TestCase):
     def test_common_ask_dao_response_records_success_and_cooldown(self):
         actor = DummyCommon()
 
-        self.assertTrue(actor.record_ask_dao_response("你于元婴宗问道参悟，获得大道感悟。"))
+        with patch.object(common_command_features, "record_daily_reward_event_log", lambda *args, **kwargs: True):
+            self.assertTrue(actor.record_ask_dao_response("你于元婴宗问道参悟，获得大道感悟。"))
         self.assertTrue(actor.state["last_ask_dao_time"])
         self.assertGreater(common_seconds_until(actor.state["next_ask_dao_time"]), 11 * 3600)
+        events = actor.state.get("daily_reward_events") or []
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["command"], ".问道")
+        self.assertEqual(events[0]["identity"], "主魂")
+        self.assertEqual(events[0]["rewards"].get("感悟"), 1)
+        summary = actor.build_daily_reward_summary_text(datetime.now().strftime("%Y-%m-%d"), markdown=True)
+        self.assertIn("问道1", summary)
+        self.assertIn("✓问道｜感悟\\+1", summary)
 
         self.assertTrue(actor.record_ask_dao_response("问道尚在冷却，请在 10分钟 后再试。"))
         self.assertLessEqual(common_seconds_until(actor.state["next_ask_dao_time"]), 10 * 60)
@@ -5617,6 +5625,69 @@ class ParserFixtureTests(unittest.TestCase):
         finally:
             dashboard_server.CONFIG_DIR = old_config_dir
             dashboard_server.COMMAND_RECORD_CACHE.clear()
+
+    def test_dashboard_daily_reward_log_filters_by_date_identity_and_command(self):
+        old_config_dir = dashboard_server.CONFIG_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                dashboard_server.CONFIG_DIR = tmp
+                db_path = os.path.join(tmp, dashboard_server.MESSAGE_EVENTS_DB_FILE)
+                conn = sqlite3.connect(db_path)
+                try:
+                    dashboard_server.ensure_daily_reward_events_schema(conn)
+                    rows = [
+                        ("main", "main-ask", "2026-07-03", "09:00:00", "主魂", ".问道", "成功", {"感悟": 1}, "问道参悟成功"),
+                        ("xiaohao", "xiao-abyss", "2026-07-03", "10:00:00", "缘生子", ".探渊", "成功", {"三级妖丹": 2}, "灵兽探渊归来"),
+                        ("main", "main-rift", "2026-07-03", "11:00:00", "无咎子", ".探寻裂缝", "成功", {"法则碎片·火": 1}, "探寻成功"),
+                        ("xiaohao", "old-abyss", "2026-07-02", "10:00:00", "缘生子", ".探渊", "成功", {"三级妖丹": 9}, "昨日探渊"),
+                    ]
+                    for account, key, date_text, time_text, identity, command, outcome, rewards, excerpt in rows:
+                        conn.execute(
+                            """
+                            INSERT INTO daily_reward_events (
+                                account, event_key, event_date, event_time, identity, command,
+                                source, outcome, final, rewards_json, reward_summary, excerpt,
+                                clean, text_hash, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '', ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                account,
+                                key,
+                                date_text,
+                                time_text,
+                                identity,
+                                command,
+                                command,
+                                outcome,
+                                json.dumps(rewards, ensure_ascii=False),
+                                excerpt,
+                                excerpt,
+                                key,
+                                f"{date_text} {time_text}",
+                                f"{date_text} {time_text}",
+                            ),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                payload = dashboard_server.build_daily_reward_log(
+                    date="2026-07-03",
+                    identity="缘生子",
+                    command=".探渊",
+                )
+
+                self.assertEqual(payload["error"], "")
+                self.assertEqual(len(payload["rows"]), 1)
+                self.assertEqual(payload["rows"][0]["account"], "xiaohao")
+                self.assertEqual(payload["rows"][0]["identity"], "缘生子")
+                self.assertEqual(payload["rows"][0]["command"], ".探渊")
+                self.assertEqual(payload["summary"]["reward_summary"], "三级妖丹x2")
+                self.assertIn(".问道", payload["filters"]["commands"])
+                self.assertIn(".探渊", payload["filters"]["commands"])
+        finally:
+            dashboard_server.CONFIG_DIR = old_config_dir
+            dashboard_server.DAILY_REWARD_ENDPOINT_CACHE.clear()
 
     def test_cultivation_profile_from_spirit_root_reply(self):
         text = """

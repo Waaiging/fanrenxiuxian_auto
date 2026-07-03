@@ -109,6 +109,8 @@ COMMAND_RECORD_CACHE = {}                # 指令发送记录缓存
 COMMAND_RECORD_LOCK = threading.Lock()   # 指令发送记录锁
 COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令发送记录接口短缓存
 COMMAND_RECORD_ENDPOINT_LOCK = threading.Lock()
+DAILY_REWARD_ENDPOINT_CACHE = {}         # 周期收益日志接口短缓存
+DAILY_REWARD_ENDPOINT_LOCK = threading.Lock()
 MESSAGE_HEALTH_CACHE = {}                # 消息采集健康缓存
 MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
 RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存，构建成本较高所以单独限时缓存
@@ -123,6 +125,7 @@ MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
 STATUS_CACHE_SECONDS = 10
 LOG_PAGE_CACHE_SECONDS = 5
 COMMAND_RECORD_ENDPOINT_CACHE_SECONDS = 180
+DAILY_REWARD_ENDPOINT_CACHE_SECONDS = 30
 MESSAGE_HEALTH_CACHE_SECONDS = 30
 RESOURCE_STATS_CACHE_SECONDS = 900
 RESOURCE_STATS_MAX_ROWS = 400
@@ -2258,6 +2261,236 @@ def build_all_command_records():
 
 
 # =====================================================================
+# 周期收益日志
+# =====================================================================
+
+def ensure_daily_reward_events_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_reward_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account TEXT NOT NULL,
+            event_key TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            identity TEXT NOT NULL,
+            command TEXT NOT NULL,
+            source TEXT,
+            outcome TEXT,
+            final INTEGER NOT NULL DEFAULT 0,
+            rewards_json TEXT,
+            reward_summary TEXT,
+            excerpt TEXT,
+            clean TEXT,
+            text_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(account, event_key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_account_date ON daily_reward_events(account, event_date, event_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_identity ON daily_reward_events(account, identity, event_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_command ON daily_reward_events(account, command, event_date)")
+
+
+def compact_reward_summary_from_json(rewards):
+    if not isinstance(rewards, dict) or not rewards:
+        return ""
+    priority = {
+        "修为": 0, "天机": 1, "天机值": 1, "宗门贡献": 2, "贡献": 2,
+        "灵石": 3, "神识": 4, "气血": 5, "煞气": 6, "道韵": 7,
+        "感悟": 8, "经验": 9, "星辰精华": 10, "精华": 11,
+    }
+    plus_names = set(priority)
+
+    def display_name(name):
+        if name == "宗门贡献":
+            return "贡献"
+        if name == "天机值":
+            return "天机"
+        return str(name or "")
+
+    def sort_key(item):
+        name, _value = item
+        shown = display_name(name)
+        return (priority.get(shown, 100), shown)
+
+    parts = []
+    for name, value in sorted(rewards.items(), key=sort_key):
+        try:
+            amount = int(value or 0)
+        except Exception:
+            continue
+        if not amount:
+            continue
+        shown = display_name(name)
+        number = f"{amount:,}"
+        if amount < 0:
+            parts.append(f"{shown}{number}")
+        elif shown in plus_names:
+            parts.append(f"{shown}+{number}")
+        else:
+            parts.append(f"{shown}x{number}")
+    return "｜".join(parts)
+
+
+def build_daily_reward_log(date="", account="", identity="", command="", limit=300):
+    path = message_events_db_path()
+    query_date = str(date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    account = str(account or "").strip()
+    identity = str(identity or "").strip()
+    command = str(command or "").strip()
+    try:
+        limit = max(1, min(int(limit or 300), 1000))
+    except Exception:
+        limit = 300
+
+    payload = {
+        "date": query_date,
+        "account": account,
+        "identity": identity,
+        "command": command,
+        "rows": [],
+        "filters": {"accounts": [], "identities": [], "commands": []},
+        "summary": {"count": 0, "outcomes": {}, "rewards": {}, "updated_at": datetime.now().strftime(TIME_FORMAT)},
+        "error": "",
+    }
+    if account and account not in WINDOW_MAP:
+        payload["error"] = "未知账号"
+        return payload
+
+    conn = None
+    try:
+        conn = sqlite3.connect(path, timeout=2)
+        conn.row_factory = sqlite3.Row
+        ensure_daily_reward_events_schema(conn)
+        conn.commit()
+
+        filter_where = ["event_date=?"]
+        filter_args = [query_date]
+        if account:
+            filter_where.append("account=?")
+            filter_args.append(account)
+        filter_sql = " AND ".join(filter_where)
+        account_rows = conn.execute(
+            f"""
+            SELECT DISTINCT account
+            FROM daily_reward_events
+            WHERE {filter_sql}
+            ORDER BY account
+            """,
+            filter_args,
+        ).fetchall()
+        identity_rows = conn.execute(
+            f"""
+            SELECT DISTINCT account, identity
+            FROM daily_reward_events
+            WHERE {filter_sql}
+            ORDER BY account, CASE WHEN identity='主魂' THEN 0 ELSE 1 END, identity
+            """,
+            filter_args,
+        ).fetchall()
+        command_rows = conn.execute(
+            f"""
+            SELECT DISTINCT command
+            FROM daily_reward_events
+            WHERE {filter_sql}
+            ORDER BY command
+            """,
+            filter_args,
+        ).fetchall()
+        payload["filters"] = {
+            "accounts": [
+                {"account": row["account"], "name": ACCOUNT_DISPLAY_NAMES.get(row["account"], row["account"])}
+                for row in account_rows
+            ],
+            "identities": [
+                {
+                    "account": row["account"],
+                    "account_name": ACCOUNT_DISPLAY_NAMES.get(row["account"], row["account"]),
+                    "identity": row["identity"] or "主魂",
+                }
+                for row in identity_rows
+            ],
+            "commands": [row["command"] for row in command_rows],
+        }
+
+        where = ["event_date=?"]
+        args = [query_date]
+        if account:
+            where.append("account=?")
+            args.append(account)
+        if identity:
+            where.append("identity=?")
+            args.append(identity)
+        if command:
+            where.append("command=?")
+            args.append(command)
+        sql = " AND ".join(where)
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM daily_reward_events
+            WHERE {sql}
+            ORDER BY event_time DESC, id DESC
+            LIMIT ?
+            """,
+            args + [limit],
+        ).fetchall()
+    except Exception as exc:
+        payload["error"] = f"读取周期收益日志失败: {exc}"
+        rows = []
+    finally:
+        if conn is not None:
+            conn.close()
+
+    summary_rewards = {}
+    outcomes = {}
+    result_rows = []
+    for item in rows:
+        try:
+            rewards = json.loads(item["rewards_json"] or "{}")
+            if not isinstance(rewards, dict):
+                rewards = {}
+        except Exception:
+            rewards = {}
+        for name, value in rewards.items():
+            try:
+                summary_rewards[name] = int(summary_rewards.get(name, 0) or 0) + int(value or 0)
+            except Exception:
+                continue
+        outcome = str(item["outcome"] or "")
+        if outcome:
+            outcomes[outcome] = int(outcomes.get(outcome, 0) or 0) + 1
+        result_rows.append({
+            "id": item["id"],
+            "account": item["account"],
+            "account_name": ACCOUNT_DISPLAY_NAMES.get(item["account"], item["account"]),
+            "date": item["event_date"],
+            "time": item["event_time"],
+            "identity": item["identity"] or "主魂",
+            "username": command_record_username(item["account"], item["identity"] or "主魂"),
+            "command": item["command"],
+            "source": item["source"] or "",
+            "outcome": outcome,
+            "final": bool(item["final"]),
+            "rewards": rewards,
+            "reward_summary": compact_reward_summary_from_json(rewards) or item["reward_summary"] or "",
+            "excerpt": item["excerpt"] or "",
+        })
+    payload["rows"] = result_rows
+    payload["summary"] = {
+        "count": len(result_rows),
+        "outcomes": outcomes,
+        "rewards": summary_rewards,
+        "reward_summary": compact_reward_summary_from_json(summary_rewards),
+        "updated_at": datetime.now().strftime(TIME_FORMAT),
+    }
+    return payload
+
+
+# =====================================================================
 # 消息采集健康
 # =====================================================================
 
@@ -3656,6 +3889,39 @@ def command_records(username: str = Depends(authenticate)):
         payload = build_all_command_records()
         COMMAND_RECORD_ENDPOINT_CACHE["at"] = now_ts
         COMMAND_RECORD_ENDPOINT_CACHE["data"] = payload
+        return payload
+
+@app.get("/api/daily-rewards")
+def daily_rewards(date: str = "", account: str = "", identity: str = "", command: str = "",
+                  limit: int = 300, username: str = Depends(authenticate)):
+    """获取周期收益结构化日志，支持按日期、账号、身份、指令筛选。"""
+    try:
+        safe_limit = max(1, min(int(limit or 300), 1000))
+    except Exception:
+        safe_limit = 300
+    cache_key = json.dumps({
+        "date": str(date or "").strip(),
+        "account": str(account or "").strip(),
+        "identity": str(identity or "").strip(),
+        "command": str(command or "").strip(),
+        "limit": safe_limit,
+    }, sort_keys=True, ensure_ascii=False)
+    now_ts = time.time()
+    with DAILY_REWARD_ENDPOINT_LOCK:
+        cached = DAILY_REWARD_ENDPOINT_CACHE.get(cache_key)
+        if cached and now_ts - float(cached.get("at") or 0) < DAILY_REWARD_ENDPOINT_CACHE_SECONDS:
+            return cached.get("data")
+        payload = build_daily_reward_log(
+            date=date,
+            account=account,
+            identity=identity,
+            command=command,
+            limit=safe_limit,
+        )
+        DAILY_REWARD_ENDPOINT_CACHE[cache_key] = {"at": now_ts, "data": payload}
+        if len(DAILY_REWARD_ENDPOINT_CACHE) > 24:
+            oldest_key = min(DAILY_REWARD_ENDPOINT_CACHE, key=lambda key: DAILY_REWARD_ENDPOINT_CACHE[key].get("at", 0))
+            DAILY_REWARD_ENDPOINT_CACHE.pop(oldest_key, None)
         return payload
 
 @app.get("/api/logs/{name}")

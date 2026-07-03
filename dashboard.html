@@ -239,6 +239,19 @@
         .identity-record-title { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 800; padding: 0.65rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
         .identity-record-row { --identity-color: #93c5fd; --identity-rgb: 147,197,253; display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(8rem, auto) minmax(4.5rem, auto); gap: 0.6rem; align-items: center; padding: 0.55rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); border-left: 3px solid rgba(var(--identity-rgb),0.65); font-size: 0.78rem; background: rgba(var(--identity-rgb),0.035); }
         .identity-record-row:first-of-type { border-top: 0; }
+        .reward-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 16px; overflow: hidden; }
+        .reward-tools { display: grid; grid-template-columns: minmax(9rem, 11rem) minmax(9rem, 12rem) minmax(9rem, 13rem) minmax(10rem, 14rem) auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .reward-refresh { border: 1px solid rgba(0,210,255,0.38); background: rgba(0,210,255,0.1); color: var(--accent-color); border-radius: 8px; padding: 0.48rem 0.72rem; font-size: 0.76rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
+        .reward-refresh:hover { background: rgba(0,210,255,0.18); }
+        .reward-table-wrap { max-height: 420px; overflow: auto; }
+        .reward-table { min-width: 1180px; }
+        .reward-outcome { display: inline-flex; align-items: center; justify-content: center; min-width: 3.6rem; border-radius: 999px; padding: 0.16rem 0.46rem; font-size: 0.7rem; font-weight: 900; white-space: nowrap; }
+        .reward-outcome.success { background: rgba(16,185,129,0.16); color: #34d399; }
+        .reward-outcome.escape { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .reward-outcome.failure { background: rgba(239,68,68,0.18); color: #fca5a5; }
+        .reward-outcome.unknown { background: rgba(100,116,139,0.16); color: #cbd5e1; }
+        .reward-summary-text { color: #d1fae5; font-family: 'JetBrains Mono', monospace; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+        .reward-excerpt { color: var(--text-secondary); white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 
         .controls { margin-top: auto; padding-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
         .btn { flex: 1 1 5.5rem; padding: 0.5rem; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
@@ -307,6 +320,7 @@
             .command-modal-header { padding: 0.85rem; }
             .command-modal-body { padding: 0.85rem; }
             .record-tools { grid-template-columns: 1fr; align-items: stretch; }
+            .reward-tools { grid-template-columns: 1fr; align-items: stretch; }
             .record-summary { text-align: left; }
         }
         
@@ -497,6 +511,40 @@
                 <div class="record-empty">加载中...</div>
             </div>
         </section>
+        <section class="reward-record-section">
+            <div class="record-header">
+                <div class="record-title">周期收益日志</div>
+                <div class="record-summary" id="daily-reward-summary">加载中...</div>
+            </div>
+            <div class="reward-tools">
+                <label class="record-field">
+                    日期
+                    <input id="daily-reward-date-input" class="record-input" type="date" onchange="changeDailyRewardFilters()">
+                </label>
+                <label class="record-field">
+                    脚本
+                    <select id="daily-reward-account-select" class="record-select" onchange="changeDailyRewardFilters()">
+                        <option value="">全部脚本</option>
+                    </select>
+                </label>
+                <label class="record-field">
+                    身份
+                    <select id="daily-reward-identity-select" class="record-select" onchange="changeDailyRewardFilters()">
+                        <option value="">全部身份</option>
+                    </select>
+                </label>
+                <label class="record-field">
+                    指令
+                    <select id="daily-reward-command-select" class="record-select" onchange="changeDailyRewardFilters()">
+                        <option value="">全部指令</option>
+                    </select>
+                </label>
+                <button class="reward-refresh" type="button" onclick="updateDailyRewardLog(true)">刷新</button>
+            </div>
+            <div class="reward-table-wrap" id="daily-reward-content">
+                <div class="record-empty">加载中...</div>
+            </div>
+        </section>
         <div class="log-section">
             <div class="log-header">
                 <div class="log-tab active" onclick="switchLog(event, 'main')">主号日志</div>
@@ -546,12 +594,14 @@
         const POLL_INTERVALS = {
             status: 15000,
             logs: 10000,
-            commandRecords: 60000
+            commandRecords: 60000,
+            dailyRewards: 60000
         };
         const pollBusy = {
             status: false,
             logs: false,
-            commandRecords: false
+            commandRecords: false,
+            dailyRewards: false
         };
         let logState = {
             lines: [],
@@ -568,6 +618,11 @@
         let commandRecordRows = [];
         let commandRecordUpdatedAt = '';
         let commandRecordAccountNames = {};
+        let dailyRewardRows = [];
+        let dailyRewardFilters = {accounts: [], identities: [], commands: []};
+        let dailyRewardSummary = {count: 0, outcomes: {}, reward_summary: '', updated_at: ''};
+        let dailyRewardAccountNames = {};
+        let dailyRewardUpdatedAt = '';
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
@@ -1735,6 +1790,223 @@
             }
         }
 
+        function dashboardToday() {
+            const now = new Date();
+            return [
+                now.getFullYear(),
+                String(now.getMonth() + 1).padStart(2, '0'),
+                String(now.getDate()).padStart(2, '0')
+            ].join('-');
+        }
+
+        function selectedDailyRewardDate() {
+            const input = document.getElementById('daily-reward-date-input');
+            if (!input) return dashboardToday();
+            if (!input.value) input.value = dashboardToday();
+            return input.value;
+        }
+
+        function dailyRewardOutcomeSummary(outcomes) {
+            const source = outcomes || {};
+            const parts = [];
+            for (const name of ['成功', '脱险', '失败']) {
+                const count = Number(source[name] || 0);
+                if (count) parts.push(`${name}${count}`);
+            }
+            for (const name of Object.keys(source).sort()) {
+                if (['成功', '脱险', '失败'].includes(name)) continue;
+                const count = Number(source[name] || 0);
+                if (count) parts.push(`${name}${count}`);
+            }
+            return parts.join('｜');
+        }
+
+        function dailyRewardOutcomeClass(outcome) {
+            if (outcome === '成功') return 'success';
+            if (outcome === '脱险') return 'escape';
+            if (outcome === '失败') return 'failure';
+            return 'unknown';
+        }
+
+        function dailyRewardSelectedAccount() {
+            return document.getElementById('daily-reward-account-select')?.value || '';
+        }
+
+        function dailyRewardSelectedIdentity() {
+            return document.getElementById('daily-reward-identity-select')?.value || '';
+        }
+
+        function dailyRewardSelectedCommand() {
+            return document.getElementById('daily-reward-command-select')?.value || '';
+        }
+
+        function updateDailyRewardFilterOptions() {
+            const accountSelect = document.getElementById('daily-reward-account-select');
+            const identitySelect = document.getElementById('daily-reward-identity-select');
+            const commandSelect = document.getElementById('daily-reward-command-select');
+            if (!accountSelect || !identitySelect || !commandSelect) return;
+
+            const oldAccount = accountSelect.value;
+            const oldIdentity = identitySelect.value;
+            const oldCommand = commandSelect.value;
+            const accounts = Array.isArray(dailyRewardFilters.accounts) ? dailyRewardFilters.accounts : [];
+            dailyRewardAccountNames = {};
+            for (const item of accounts) {
+                dailyRewardAccountNames[item.account] = item.name || item.account;
+            }
+            if (oldAccount && !dailyRewardAccountNames[oldAccount]) {
+                dailyRewardAccountNames[oldAccount] = commandRecordAccountNames[oldAccount] || oldAccount;
+            }
+            const accountOptions = accounts.map(item => (
+                `<option value="${escapeHtml(item.account)}">${escapeHtml(item.name || item.account)}</option>`
+            )).join('');
+            accountSelect.innerHTML = '<option value="">全部脚本</option>' + accountOptions;
+            if (oldAccount && !accounts.some(item => item.account === oldAccount)) {
+                accountSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(oldAccount)}">${escapeHtml(dailyRewardAccountNames[oldAccount] || oldAccount)}</option>`);
+            }
+            accountSelect.value = oldAccount;
+
+            const selectedAccount = accountSelect.value;
+            const identityRows = (Array.isArray(dailyRewardFilters.identities) ? dailyRewardFilters.identities : [])
+                .filter(item => !selectedAccount || item.account === selectedAccount);
+            const identityMap = new Map();
+            for (const item of identityRows) {
+                const identity = item.identity || '主魂';
+                if (!identityMap.has(identity)) {
+                    identityMap.set(identity, {identity, accounts: [], firstAccount: item.account || ''});
+                }
+                identityMap.get(identity).accounts.push(item.account_name || dailyRewardAccountNames[item.account] || item.account || '');
+            }
+            const identityOptions = [...identityMap.values()].sort((a, b) => (
+                a.identity === '主魂' ? -1 : b.identity === '主魂' ? 1 : a.identity.localeCompare(b.identity, 'zh-Hans-CN')
+            ));
+            identitySelect.innerHTML = '<option value="">全部身份</option>' + identityOptions.map(item => {
+                const accountNames = [...new Set(item.accounts.filter(Boolean))];
+                const label = selectedAccount
+                    ? item.identity
+                    : (accountNames.length > 1 ? `${item.identity} · ${accountNames.length}脚本` : `${accountNames[0] || ''} · ${item.identity}`);
+                return `<option value="${escapeHtml(item.identity)}" style="${identityOptionStyle(item.firstAccount, item.identity)}">${escapeHtml(label)}</option>`;
+            }).join('');
+            if (oldIdentity && !identityOptions.some(item => item.identity === oldIdentity)) {
+                identitySelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(oldIdentity)}">${escapeHtml(oldIdentity)}</option>`);
+            }
+            identitySelect.value = oldIdentity;
+
+            const commands = Array.isArray(dailyRewardFilters.commands) ? dailyRewardFilters.commands : [];
+            commandSelect.innerHTML = '<option value="">全部指令</option>' + commands.map(command => (
+                `<option value="${escapeHtml(command)}">${escapeHtml(command)}</option>`
+            )).join('');
+            if (oldCommand && !commands.includes(oldCommand)) {
+                commandSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(oldCommand)}">${escapeHtml(oldCommand)}</option>`);
+            }
+            commandSelect.value = oldCommand;
+        }
+
+        function renderDailyRewardLog() {
+            const box = document.getElementById('daily-reward-content');
+            const summary = document.getElementById('daily-reward-summary');
+            if (!box || !summary) return;
+            const date = selectedDailyRewardDate();
+            const rows = Array.isArray(dailyRewardRows) ? dailyRewardRows : [];
+            const outcomeText = dailyRewardOutcomeSummary(dailyRewardSummary.outcomes || {});
+            const rewardText = dailyRewardSummary.reward_summary || '';
+            const summaryParts = [
+                dailyRewardUpdatedAt ? `更新 ${dailyRewardUpdatedAt}` : '未更新',
+                `${date} · ${rows.length} 条`
+            ];
+            if (outcomeText) summaryParts.push(outcomeText);
+            if (rewardText) summaryParts.push(rewardText);
+            summary.textContent = summaryParts.join(' · ');
+            if (!rows.length) {
+                box.innerHTML = '<div class="record-empty">没有符合筛选条件的收益记录。</div>';
+                return;
+            }
+            box.innerHTML = `
+                <table class="record-table reward-table">
+                    <colgroup>
+                        <col style="width: 8.5rem">
+                        <col style="width: 7.5rem">
+                        <col style="width: 8.5rem">
+                        <col style="width: 10rem">
+                        <col style="width: 5.5rem">
+                        <col style="width: 22rem">
+                        <col style="width: 36rem">
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>脚本</th>
+                            <th>身份</th>
+                            <th>指令</th>
+                            <th>结果</th>
+                            <th>收益</th>
+                            <th>摘录</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(row => {
+                            const identity = row.identity || '主魂';
+                            const rewardSummary = row.reward_summary || (row.outcome === '失败' ? '无收益' : '未解析');
+                            const outcome = row.outcome || '未定';
+                            return `
+                                <tr style="${identityColorStyle(row.account, identity)}">
+                                    <td class="record-time" title="${escapeHtml((row.date || '') + ' ' + (row.time || ''))}">${escapeHtml(recordDateText(`${row.date || ''} ${row.time || ''}`.trim()))}</td>
+                                    <td><div class="record-account">${escapeHtml(row.account_name || row.account || '')}</div></td>
+                                    <td>
+                                        <div class="record-identity">${escapeHtml(identity)}</div>
+                                        ${row.username ? `<div class="record-username">${escapeHtml(row.username)}</div>` : ''}
+                                    </td>
+                                    <td><div class="record-command" title="${escapeHtml(row.command || '')}">${escapeHtml(row.command || '')}</div></td>
+                                    <td><span class="reward-outcome ${dailyRewardOutcomeClass(row.outcome)}">${escapeHtml(outcome)}</span></td>
+                                    <td><div class="reward-summary-text">${escapeHtml(rewardSummary)}</div></td>
+                                    <td><div class="reward-excerpt" title="${escapeHtml(row.excerpt || '')}">${escapeHtml(row.excerpt || '')}</div></td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        async function updateDailyRewardLog(force = false) {
+            if (!force && (document.hidden || pollBusy.dailyRewards)) return;
+            if (force && pollBusy.dailyRewards) return;
+            pollBusy.dailyRewards = true;
+            try {
+                const params = new URLSearchParams();
+                params.set('date', selectedDailyRewardDate());
+                const account = dailyRewardSelectedAccount();
+                const identity = dailyRewardSelectedIdentity();
+                const command = dailyRewardSelectedCommand();
+                if (account) params.set('account', account);
+                if (identity) params.set('identity', identity);
+                if (command) params.set('command', command);
+                params.set('limit', '500');
+                const r = await fetch(apiUrl(`/api/daily-rewards?${params.toString()}`), {cache: 'no-store'});
+                const data = await r.json();
+                dailyRewardRows = data.rows || [];
+                dailyRewardFilters = data.filters || {accounts: [], identities: [], commands: []};
+                dailyRewardSummary = data.summary || {count: 0, outcomes: {}, reward_summary: '', updated_at: ''};
+                dailyRewardUpdatedAt = dailyRewardSummary.updated_at || data.updated_at || '';
+                updateDailyRewardFilterOptions();
+                renderDailyRewardLog();
+                if (data.error) {
+                    const summary = document.getElementById('daily-reward-summary');
+                    if (summary) summary.textContent = data.error;
+                }
+            } catch (e) {
+                console.error('Daily reward log update failed:', e);
+                const summary = document.getElementById('daily-reward-summary');
+                if (summary) summary.textContent = '收益日志加载失败';
+            } finally {
+                pollBusy.dailyRewards = false;
+            }
+        }
+
+        function changeDailyRewardFilters() {
+            updateDailyRewardLog(true);
+        }
+
         async function submitCustomCommand(event, panelKey) {
             event.preventDefault();
             const data = window.commandPanelDataMap?.[panelKey];
@@ -2434,6 +2706,7 @@
         setInterval(updateStatus, POLL_INTERVALS.status);
         setInterval(updateLogs, POLL_INTERVALS.logs);
         setInterval(updateCommandRecords, POLL_INTERVALS.commandRecords);
+        setInterval(updateDailyRewardLog, POLL_INTERVALS.dailyRewards);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
         });
@@ -2445,10 +2718,13 @@
             if (document.hidden) return;
             updateStatus();
             updateCommandRecords();
+            updateDailyRewardLog(true);
             updateLogs(true);
         });
+        selectedDailyRewardDate();
         updateStatus();
         updateCommandRecords();
+        updateDailyRewardLog();
         updateLogKindButtons();
         loadLogTags(currentLogAccount);
         updateLogs();

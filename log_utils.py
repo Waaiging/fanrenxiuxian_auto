@@ -2731,6 +2731,30 @@ def _message_db_connect():
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_reward_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    event_date TEXT NOT NULL,
+                    event_time TEXT NOT NULL,
+                    identity TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    source TEXT,
+                    outcome TEXT,
+                    final INTEGER NOT NULL DEFAULT 0,
+                    rewards_json TEXT,
+                    reward_summary TEXT,
+                    excerpt TEXT,
+                    clean TEXT,
+                    text_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(account, event_key)
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_msg ON message_events(account, chat_id, msg_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_reply ON message_events(account, chat_id, reply_to_msg_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_created ON message_events(account, created_at)")
@@ -2738,6 +2762,9 @@ def _message_db_connect():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_status ON command_ledger(account, status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_account_date ON daily_reward_events(account, event_date, event_time)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_identity ON daily_reward_events(account, identity, event_date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_command ON daily_reward_events(account, command, event_date)")
             conn.commit()
             _MESSAGE_EVENTS_SCHEMA_READY = True
         yield conn
@@ -2841,6 +2868,88 @@ def record_message_event(
     except Exception as exc:
         target_logger = logger or logging.getLogger(actor.__class__.__name__)
         target_logger.debug(f"message event persist skipped: {exc}")
+        return False
+
+
+def record_daily_reward_event_log(actor, event, logger=None):
+    """Persist a parsed daily reward event for dashboard filtering."""
+    if not isinstance(event, dict):
+        return False
+    account = actor_account_key(actor) or actor.__class__.__name__
+    event_date = str(event.get("date") or "").strip()
+    event_time = str(event.get("time") or "").strip()
+    identity = str(event.get("identity") or "主魂").strip() or "主魂"
+    command = str(event.get("command") or "").strip() or "未知指令"
+    clean = str(event.get("clean") or event.get("excerpt") or "")
+    if not event_date or not event_time or not clean:
+        return False
+    event_key = str(event.get("message_key") or event.get("sig") or "").strip()
+    if not event_key:
+        event_key = hashlib.sha1(
+            f"{event_date}|{identity}|{command}|{clean[:1200]}".encode("utf-8", errors="ignore")
+        ).hexdigest()
+    rewards = event.get("rewards") if isinstance(event.get("rewards"), dict) else {}
+    try:
+        rewards_json = json.dumps(rewards, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        rewards_json = "{}"
+    reward_parts = []
+    for name, value in sorted((rewards or {}).items()):
+        try:
+            amount = int(value or 0)
+        except Exception:
+            continue
+        if amount:
+            reward_parts.append(f"{name} {amount:+d}")
+    reward_summary = "、".join(reward_parts)
+    now = datetime.now().strftime(TIME_FORMAT)
+    try:
+        with _message_db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_reward_events (
+                    account, event_key, event_date, event_time, identity, command,
+                    source, outcome, final, rewards_json, reward_summary, excerpt,
+                    clean, text_hash, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, event_key) DO UPDATE SET
+                    event_date=excluded.event_date,
+                    event_time=excluded.event_time,
+                    identity=excluded.identity,
+                    command=excluded.command,
+                    source=excluded.source,
+                    outcome=excluded.outcome,
+                    final=excluded.final,
+                    rewards_json=excluded.rewards_json,
+                    reward_summary=excluded.reward_summary,
+                    excerpt=excluded.excerpt,
+                    clean=excluded.clean,
+                    text_hash=excluded.text_hash,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    account,
+                    event_key,
+                    event_date,
+                    event_time,
+                    identity,
+                    command,
+                    str(event.get("source") or ""),
+                    str(event.get("outcome") or ""),
+                    1 if event.get("final") else 0,
+                    rewards_json,
+                    reward_summary,
+                    str(event.get("excerpt") or "")[:500],
+                    clean,
+                    _message_text_hash(clean),
+                    now,
+                    now,
+                ),
+            )
+        return True
+    except Exception as exc:
+        target_logger = logger or logging.getLogger(actor.__class__.__name__)
+        target_logger.debug(f"daily reward event persist skipped: {exc}")
         return False
 
 
