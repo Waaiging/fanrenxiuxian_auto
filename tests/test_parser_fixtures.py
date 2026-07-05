@@ -6833,6 +6833,48 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.repair_overdue_beast_border_patrol_schedule())
         self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
 
+    def test_repair_overdue_border_patrol_clears_stale_past_next_time(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "保龄球",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(minutes=100)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": (datetime.now() - timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.save_state = lambda: None
+        actor.beast_wakeup = asyncio.Event()
+
+        self.assertTrue(actor.repair_overdue_beast_border_patrol_schedule())
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
+        self.assertTrue(actor.beast_wakeup.is_set())
+
+    def test_xiaohao_watchdog_detects_stale_fishing_due(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        due_at = (datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.avatars = ["问心子"]
+        actor.get_fishing_state = lambda identity: {"active": identity == "问心子", "active_due_at": due_at}
+
+        stale = actor._stale_fishing_active_identities()
+
+        self.assertEqual(stale[0][:2], ("问心子", due_at))
+        self.assertGreaterEqual(stale[0][2], 60)
+
+    def test_xiaohao_watchdog_detects_stale_scheduler_due_item(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.field_training_command = ".野外历练 谨慎"
+        actor.state = {
+            "is_paused": False,
+            "identity_pauses": {},
+            "next_yuanying_out_time": (datetime.now() - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.main_soul_pause_seconds = lambda: 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        stale = actor.stale_scheduler_due_items()
+
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0][0], "next_yuanying_out_time")
+
     def test_border_patrol_return_response_clears_due_without_extra_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

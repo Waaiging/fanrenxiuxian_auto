@@ -161,6 +161,8 @@ STATE_FILE = os.path.join(CONFIG_DIR, 'state_xiaohao.json')
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_SCHEDULER_SLEEP_SECONDS = 300
+SCHEDULER_STALE_DUE_SECONDS = 45 * 60
+SCHEDULER_STALE_STARTUP_GRACE_SECONDS = 10 * 60
 HUNT_CD_SECONDS = 6 * 3600                     # 寻觅灵兽 CD 6 小时
 HUNT_FULL_RETRY_SECONDS = 10 * 60              # 灵兽袋满重试 10 分钟
 HUNT_FAIL_RETRY_SECONDS = 60 * 60              # 寻觅失败重试 1 小时
@@ -360,6 +362,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # startup: check is_paused to restore paused state
         self.active_atomic_task = None       # 整体任务独占锁持有任务
+        self.scheduler_tasks = {}            # 关键后台循环名 -> asyncio.Task，供 watchdog 发现意外退出
         self.formation_assist_in_progress = False
         self._avatar_loop_count = 0          # 活跃化身循环计数（阻止主循环自动切回主魂）
         # 止/启管理员名单（只有这些人发"止"才生效）
@@ -2060,14 +2063,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             due_at = str(state.get("active_due_at") or "").strip()
             if not state.get("active") or not due_at or is_future(due_at):
                 continue
-            overdue = seconds_until(due_at)
-            if overdue <= -abs(int(overdue_seconds)):
-                stale.append((identity, due_at, int(abs(overdue))))
+            overdue = int((datetime.now() - str_to_dt(due_at)).total_seconds())
+            if overdue >= abs(int(overdue_seconds)):
+                stale.append((identity, due_at, overdue))
         return stale
 
     async def run_health_watchdog_loop(self):
         await self.startup_done.wait()
         lock_started_at = None
+        stale_due_watch_started_at = time.monotonic()
         while getattr(self, "is_running", True):
             try:
                 stale_fishing = self._stale_fishing_active_identities()
@@ -2079,6 +2083,27 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     log.critical(f"Xiaohao watchdog: stale fishing active detected: {detail}; restarting process.")
                     self.save_state()
                     os.execv(sys.executable, [sys.executable, *sys.argv])
+
+                dead_tasks = self.dead_scheduler_tasks()
+                if dead_tasks:
+                    detail = ", ".join(dead_tasks)
+                    log.critical(f"Xiaohao watchdog: scheduler task stopped ({detail}); restarting process.")
+                    self.save_state()
+                    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+                if time.monotonic() - stale_due_watch_started_at >= SCHEDULER_STALE_STARTUP_GRACE_SECONDS:
+                    stale_due = self.stale_scheduler_due_items()
+                    if stale_due:
+                        detail = ", ".join(
+                            f"{key}/{command} due {due_at} ({overdue}s overdue)"
+                            for key, command, due_at, overdue in stale_due
+                        )
+                        log.critical(
+                            f"Xiaohao watchdog: scheduler due item stale: {detail}; "
+                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                        )
+                        self.save_state()
+                        os.execv(sys.executable, [sys.executable, *sys.argv])
 
                 if self.avatar_send_lock.locked():
                     if lock_started_at is None:
@@ -2152,6 +2177,64 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             sleep_func=scheduler_sleep_seconds,
             pause_label="Treasure touch loop",
         )
+
+    def create_scheduler_task(self, name, coro_factory):
+        """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
+        task = asyncio.create_task(coro_factory(), name=name)
+        self.scheduler_tasks[name] = task
+
+        def _on_done(done_task, task_name=name):
+            if not getattr(self, "is_running", True) or done_task.cancelled():
+                return
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                log.critical(
+                    f"Scheduler task [{task_name}] exited with exception: {exc}",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            else:
+                log.critical(f"Scheduler task [{task_name}] exited unexpectedly without exception.")
+
+        task.add_done_callback(_on_done)
+        return task
+
+    def dead_scheduler_tasks(self):
+        dead = []
+        for name, task in list(getattr(self, "scheduler_tasks", {}) or {}).items():
+            if task.done():
+                dead.append(name)
+        return dead
+
+    def stale_scheduler_due_items(self, overdue_seconds=SCHEDULER_STALE_DUE_SECONDS):
+        """找出已到期很久却仍未推进的关键调度项。"""
+        if self.state.get("is_paused") or self.main_soul_pause_seconds() > 0:
+            return []
+        specs = (
+            ("next_field_training_time", self.field_training_command, "主魂"),
+            ("next_yuanying_out_time", ".元婴出窍", "主魂"),
+            ("next_rift_search_time", ".探寻裂缝", "主魂"),
+            ("next_beast_interaction_time", BEAST_INTERACTION_COMMAND, "主魂"),
+            ("next_beast_cruise_time", BEAST_CRUISE_COMMAND, "主魂"),
+            ("next_beast_border_patrol_time", ".灵兽巡边", "主魂"),
+        )
+        stale = []
+        now = datetime.now()
+        for key, command, identity in specs:
+            if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
+                continue
+            value = str(self.state.get(key) or "").strip()
+            if not value or is_future(value):
+                continue
+            try:
+                overdue = int((now - str_to_dt(value)).total_seconds())
+            except Exception:
+                continue
+            if overdue >= int(overdue_seconds):
+                stale.append((key, command, value, overdue))
+        return stale
 
     async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
         """检测到元婴虚弱期：只暂停触发身份，其他身份继续执行。"""
@@ -2922,20 +3005,28 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     # ---- 灵兽：巡边 ----
 
     def repair_overdue_beast_border_patrol_schedule(self):
-        """巡边已到归来时间时，不允许其他灵兽状态把巡边唤醒时间推到未来。"""
+        """巡边已到归来时间时，清掉旧唤醒时间并立刻推动归来检查。"""
         name = str(self.state.get("beast_border_patrol_name") or "").strip()
         last_patrol = self.state.get("last_beast_border_patrol_time", "")
         next_patrol = self.state.get("next_beast_border_patrol_time", "")
-        if not name or not last_patrol or not next_patrol or not is_future(next_patrol):
+        if not name or not last_patrol:
             return False
         due_at = str_to_dt(last_patrol) + timedelta(seconds=BEAST_BORDER_PATROL_CD_SECONDS)
         if due_at > datetime.now():
             return False
         self.state["next_beast_border_patrol_time"] = ""
         self.save_state()
+        wakeup = getattr(self, "beast_wakeup", None)
+        if wakeup:
+            wakeup.set()
+        delayed_note = (
+            f" but next patrol had been delayed until {next_patrol}"
+            if next_patrol and is_future(next_patrol)
+            else f"; stale next patrol was {next_patrol or '<empty>'}"
+        )
         log.warning(
-            f"Beast border patrol schedule repaired: {name} was due at {dt_to_str(due_at)}, "
-            f"but next patrol had been delayed until {next_patrol}; clearing it for immediate return."
+            f"Beast border patrol schedule repaired: {name} was due at {dt_to_str(due_at)}"
+            f"{delayed_note}; clearing it for immediate return."
         )
         return True
 
@@ -7281,36 +7372,36 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         asyncio.create_task(self.run_health_watchdog_loop())
 
         # 启动所有定时任务
-        asyncio.create_task(self.run_daily_tasks())
-        asyncio.create_task(self.run_beast_hunt_timer())
-        asyncio.create_task(self.run_beast_action_timer())
-        asyncio.create_task(self.run_meditation_timer())
-        asyncio.create_task(self.run_concubine_loop())
-        asyncio.create_task(self.run_field_training_loop())
-        asyncio.create_task(self.run_sect_war_loop())
-        asyncio.create_task(self.run_custom_command_loop())
-        asyncio.create_task(self.run_daily_reward_summary_loop(initial_delay=40))
-        asyncio.create_task(self.run_treasure_touch_loop())
-        asyncio.create_task(self.run_yuanying_out_loop())
-        asyncio.create_task(self.run_rift_search_loop())
-        asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
-        asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
-        asyncio.create_task(self.run_star_gazing_loop())
+        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())
+        self.create_scheduler_task("beast_hunt", lambda: self.run_beast_hunt_timer())
+        self.create_scheduler_task("beast_action", lambda: self.run_beast_action_timer())
+        self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
+        self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
+        self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
+        self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
+        self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
+        self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
+        self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
+        self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
+        self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
+        self.create_scheduler_task("fishing_主魂", lambda: self.run_fishing_loop("主魂", initial_delay=20))
+        self.create_scheduler_task("fishing_auto", lambda: self.run_fishing_auto_loop(initial_delay=25))
+        self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
 
         # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
         for avatar in self.avatars:
-            asyncio.create_task(self.run_avatar_meditation_loop(avatar, initial_delay=0))
-            asyncio.create_task(self.run_avatar_field_training_loop(avatar, initial_delay=0))
-            asyncio.create_task(self.run_avatar_tower_loop(avatar, initial_delay=0))
-            asyncio.create_task(self.run_fishing_loop(avatar, initial_delay=30))
+            self.create_scheduler_task(f"avatar_meditation_{avatar}", lambda avatar=avatar: self.run_avatar_meditation_loop(avatar, initial_delay=0))
+            self.create_scheduler_task(f"avatar_field_training_{avatar}", lambda avatar=avatar: self.run_avatar_field_training_loop(avatar, initial_delay=0))
+            self.create_scheduler_task(f"avatar_tower_{avatar}", lambda avatar=avatar: self.run_avatar_tower_loop(avatar, initial_delay=0))
+            self.create_scheduler_task(f"fishing_{avatar}", lambda avatar=avatar: self.run_fishing_loop(avatar, initial_delay=30))
             if avatar in AVATAR_YUANYING_RIFT_AVATARS:
-                asyncio.create_task(self.run_avatar_yuanying_rift_loop(avatar, initial_delay=0))
+                self.create_scheduler_task(f"avatar_yuanying_rift_{avatar}", lambda avatar=avatar: self.run_avatar_yuanying_rift_loop(avatar, initial_delay=0))
             # 所有分身都启动此循环，内含对星宫指令的身份判定，问心子借此执行入梦和心劫
-            asyncio.create_task(self.run_avatar_star_palace_loop(avatar, initial_delay=0))
+            self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
-                asyncio.create_task(self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
+                self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
             if avatar == "问心子":
-                asyncio.create_task(self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
+                self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")
 
         while self.is_running:
