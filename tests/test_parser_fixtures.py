@@ -8274,6 +8274,130 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreaterEqual(lock_until, started + timedelta(hours=47, minutes=59))
         self.assertLessEqual(lock_until, datetime.now() + timedelta(hours=48, seconds=5))
 
+    def test_spirit_tree_harvest_respects_irrigation_dashboard_pause(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.state = {
+            "spirit_tree_status": "成熟采摘期",
+            "spirit_tree_mature_until": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_spirit_tree_irrigation_time": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "spirit_tree_harvest_pending": True,
+            "spirit_tree_harvested_in_mature_period": False,
+            "spirit_tree_harvest_attempted_in_mature_period": False,
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+        actor.active_atomic_task = None
+        actor.dashboard_command_paused = lambda command, identity="": command == ".灵树灌溉"
+        sent = []
+
+        async def fake_send(identity, command, *args, **kwargs):
+            sent.append((identity, command, kwargs))
+            return "should not send"
+
+        async def run_case():
+            actor.startup_done = asyncio.Event()
+            actor.startup_done.set()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.send_and_wait_feedback_identity = fake_send
+            await actor.execute_spirit_tree_harvest_once("fixture", identity="主魂")
+
+        asyncio.run(run_case())
+
+        self.assertEqual(sent, [])
+        self.assertFalse(actor.state["spirit_tree_harvest_pending"])
+        self.assertFalse(actor.state.get("spirit_tree_harvest_attempted_in_mature_period", False))
+
+    def test_spirit_tree_mature_does_not_schedule_harvest_when_irrigation_paused(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.state = {
+            "spirit_tree_status": "灌溉期",
+            "spirit_tree_harvest_pending": False,
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": command == ".灵树灌溉"
+        scheduled = []
+        actor.schedule_spirit_tree_harvest_once = lambda reason="mature", identity="主魂": scheduled.append((identity, reason))
+
+        matched = actor.maybe_record_spirit_tree_passive_message(
+            None,
+            "灵果已完全成熟，采摘期开启，将持续 **24小时**。",
+            source="fixture",
+            identity="主魂",
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual(scheduled, [])
+        self.assertFalse(actor.state["spirit_tree_harvest_pending"])
+
+    def test_spirit_tree_harvest_skips_non_luoyun_identity(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.identity_sect_names = {"主魂": "凌霄宫"}
+        actor.state = {
+            "spirit_tree_status": "成熟采摘期",
+            "spirit_tree_mature_until": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_spirit_tree_irrigation_time": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "spirit_tree_harvest_pending": True,
+            "spirit_tree_harvested_in_mature_period": False,
+            "spirit_tree_harvest_attempted_in_mature_period": False,
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+        actor.active_atomic_task = None
+        actor.dashboard_command_paused = lambda command, identity="": False
+        sent = []
+
+        async def fake_send(identity, command, *args, **kwargs):
+            sent.append((identity, command, kwargs))
+            return "should not send"
+
+        async def run_case():
+            actor.startup_done = asyncio.Event()
+            actor.startup_done.set()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.send_and_wait_feedback_identity = fake_send
+            await actor.execute_spirit_tree_harvest_once("fixture", identity="主魂")
+
+        asyncio.run(run_case())
+
+        self.assertEqual(sent, [])
+        self.assertFalse(actor.state["spirit_tree_harvest_pending"])
+        self.assertFalse(actor.state.get("spirit_tree_harvest_attempted_in_mature_period", False))
+
+    def test_spirit_tree_mature_does_not_schedule_harvest_for_non_luoyun_identity(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.identity_sect_names = {"主魂": "凌霄宫"}
+        actor.state = {
+            "spirit_tree_status": "灌溉期",
+            "spirit_tree_harvest_pending": False,
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
+        scheduled = []
+        actor.schedule_spirit_tree_harvest_once = lambda reason="mature", identity="主魂": scheduled.append((identity, reason))
+
+        matched = actor.maybe_record_spirit_tree_passive_message(
+            None,
+            "灵果已完全成熟，采摘期开启，将持续 **24小时**。",
+            source="fixture",
+            identity="主魂",
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual(scheduled, [])
+        self.assertFalse(actor.state["spirit_tree_harvest_pending"])
+
     def test_spirit_tree_expired_harvest_lock_does_not_block_future_mature_periods(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]
@@ -8325,6 +8449,27 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertTrue(actor.record_spirit_tree_harvest_response(
             "你未曾为灵树灌溉分毫，无功不受禄。",
+            identity="主魂",
+        ))
+        self.assertEqual(actor.state["spirit_tree_status"], "灌溉期")
+        self.assertFalse(actor.state["spirit_tree_harvest_pending"])
+
+    def test_spirit_tree_harvest_non_sect_reply_is_known_reject(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {}
+        actor.state = {
+            "spirit_tree_status": "成熟采摘期",
+            "spirit_tree_mature_until": (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_spirit_tree_irrigation_time": "",
+            "spirit_tree_irrigation_times": {},
+            "spirit_tree_harvest_pending": True,
+            "avatars": {"缘生子": {}},
+        }
+        actor.save_state = lambda: None
+
+        self.assertTrue(actor.record_spirit_tree_harvest_response(
+            "非本宗弟子，不得靠近灵眼之树。",
             identity="主魂",
         ))
         self.assertEqual(actor.state["spirit_tree_status"], "灌溉期")

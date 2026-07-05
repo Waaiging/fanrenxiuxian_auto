@@ -195,6 +195,7 @@ SPIRIT_TREE_IRRIGATION_COMMAND = ".灵树灌溉"
 SPIRIT_TREE_STATUS_COMMAND = ".灵树状态"
 SPIRIT_TREE_HARVEST_COMMAND = ".采摘灵果"
 SPIRIT_TREE_GUARD_COMMAND = ".协同守山"
+SPIRIT_TREE_SECT_NAME = "落云宗"
 SPIRIT_TREE_IRRIGATION_STATUS = "灌溉期"
 SPIRIT_TREE_MATURE_STATUS = "成熟采摘期"
 SPIRIT_TREE_MATURE_SECONDS = 24 * 3600
@@ -2965,6 +2966,21 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
     def spirit_tree_harvest_locked(self, identity=SPIRIT_TREE_AVATAR):
         return bool(self.spirit_tree_harvest_lock_until(identity))
 
+    def spirit_tree_harvest_block_reason(self, identity=SPIRIT_TREE_AVATAR):
+        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
+        sect = self.identity_sect_name(identity)
+        if sect and sect != SPIRIT_TREE_SECT_NAME:
+            return f"{identity} belongs to {sect}, not {SPIRIT_TREE_SECT_NAME}"
+        if self.dashboard_command_paused(SPIRIT_TREE_HARVEST_COMMAND, identity):
+            return f"{SPIRIT_TREE_HARVEST_COMMAND} paused by dashboard"
+        if self.dashboard_command_paused(SPIRIT_TREE_IRRIGATION_COMMAND, identity):
+            return f"{SPIRIT_TREE_IRRIGATION_COMMAND} paused by dashboard"
+        return ""
+
+    def spirit_tree_harvest_auto_paused(self, identity=SPIRIT_TREE_AVATAR):
+        """Treat harvest as part of spirit-tree automation when dashboard-paused."""
+        return bool(self.spirit_tree_harvest_block_reason(identity))
+
     def record_spirit_tree_harvest_attempt(self, identity=SPIRIT_TREE_AVATAR, source=""):
         identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
         a_state = self.spirit_tree_state_for_identity(identity)
@@ -3042,10 +3058,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             or a_state.get("spirit_tree_harvest_attempted_in_mature_period")
             or no_irrigation_only
             or self.spirit_tree_harvest_locked(identity)
+            or self.spirit_tree_harvest_auto_paused(identity)
         )
         a_state["spirit_tree_harvest_pending"] = needs_harvest
         self.save_state()
         log.info(f"[{identity}] spirit tree status -> {SPIRIT_TREE_MATURE_STATUS} until {mature_until} ({source}).")
+        if not needs_harvest:
+            block_reason = self.spirit_tree_harvest_block_reason(identity)
+            if block_reason:
+                log.info(f"[{identity}] spirit tree harvest skipped: {block_reason}.")
         return needs_harvest
 
     def record_spirit_tree_invasion_state(self, text, msg=None, source="", identity=SPIRIT_TREE_AVATAR):
@@ -3079,7 +3100,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             return True
         if any(k in clean for k in [
             "尚未成熟", "还未成熟", "未成熟", "采摘期未开启", "尚未进入采摘期",
-            "未曾为灵树灌溉", "无功不受禄",
+            "未曾为灵树灌溉", "无功不受禄", "非本宗弟子", "不得靠近灵眼之树",
         ]):
             existing_irrigation = self.get_spirit_tree_irrigation_time(identity)
             a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
@@ -3195,6 +3216,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
     def schedule_spirit_tree_harvest_once(self, reason="mature", identity=SPIRIT_TREE_AVATAR):
         identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
+        block_reason = self.spirit_tree_harvest_block_reason(identity)
+        if block_reason:
+            state = self.spirit_tree_state_for_identity(identity)
+            state["spirit_tree_harvest_pending"] = False
+            self.save_state()
+            log.info(f"[{identity}] spirit tree harvest schedule skipped: {block_reason} ({reason}).")
+            return
         locked_until = self.spirit_tree_harvest_lock_until(identity)
         if locked_until:
             log.info(f"[{identity}] spirit tree harvest schedule skipped: locked until {locked_until} ({reason}).")
@@ -3409,6 +3437,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         await self.pause_event.wait()
         async with AtomicTaskContext(self, f"SpiritTreeHarvest-{identity}"):
             a_state = self.normalize_spirit_tree_state(identity)
+            block_reason = self.spirit_tree_harvest_block_reason(identity)
+            if block_reason:
+                a_state["spirit_tree_harvest_pending"] = False
+                self.save_state()
+                log.info(f"[{identity}] spirit tree harvest skipped: {block_reason} ({reason}).")
+                return
             mature_until = a_state.get("spirit_tree_mature_until", "")
             if a_state.get("spirit_tree_status") != SPIRIT_TREE_MATURE_STATUS or not (mature_until and is_future(mature_until)):
                 return
@@ -3419,6 +3453,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 self.save_state()
                 return
             if a_state.get("spirit_tree_harvested_in_mature_period") or a_state.get("spirit_tree_harvest_attempted_in_mature_period"):
+                return
+            if not command_send_precheck(self, SPIRIT_TREE_HARVEST_COMMAND, log, identity=identity):
+                log.info(f"[{identity}] spirit tree harvest skipped: command is not sendable now.")
                 return
             self.record_spirit_tree_harvest_attempt(identity, reason)
             log.info(f"[{identity}] spirit tree mature detected ({reason}); sending {SPIRIT_TREE_HARVEST_COMMAND} once.")
