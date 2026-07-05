@@ -108,6 +108,7 @@ from log_utils import (
     match_pending_feedback_by_message_id,      # 按消息 ID 匹配编辑反馈
     match_pending_feedback_by_reply,           # 按 reply_to 匹配机器人反馈
     log_mention_if_needed,      # 记录被 @ 的消息
+    is_boss_monitor_alert_text, # 判断是否属于主号统一处理的 BOSS/监测提醒
     notify_unrecognized_response,             # 上报无法识别的机器人回复
     periodic_log_prune,         # 定期裁剪日志文件，防止无限膨胀
     prune_log_file,             # 工具函数：裁剪日志到指定行数
@@ -758,6 +759,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
     def should_send_keyword_alert(self, msg, text):
         """判断是否应发送 BOSS / 关键词告警。"""
         if not text:
+            return False
+        if is_boss_monitor_alert_text(text):
             return False
         lower_text = text.lower()
         if not any(k in lower_text for k in self.keywords):

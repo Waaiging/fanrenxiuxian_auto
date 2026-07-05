@@ -135,6 +135,13 @@ ANTI_BOT_KEYWORDS = [
     "挂机傀儡", "死株", "死牢",
 ]
 
+# 这些全局监测事件由主号的 BOSS 通道统一提醒；副号/小号关键词提醒跳过，
+# 避免同一条机器人消息同时出现“关键词提醒”和“BOSS提醒”。
+BOSS_MONITOR_ALERT_KEYWORDS = [
+    "玄骨上人", "极阴祖师", "玄骨考校",
+    "天机异象", "天机考验", "洞府传音",
+]
+
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
@@ -422,6 +429,11 @@ def is_game_bot_sender(actor, sender):
 def is_anti_bot_challenge_text(text):
     """检测文本是否包含反机器人挑战关键词"""
     return bool(text and any(k in text for k in ANTI_BOT_KEYWORDS))
+
+
+def is_boss_monitor_alert_text(text):
+    """检测是否属于全局 BOSS/监测提醒事件。"""
+    return bool(text and any(k in str(text or "") for k in BOSS_MONITOR_ALERT_KEYWORDS))
 
 
 def account_aliases(actor):

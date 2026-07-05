@@ -73,6 +73,7 @@ from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
     is_deep_meditation_ongoing_response, is_deep_meditation_settlement_response, is_game_bot_sender,
+    is_boss_monitor_alert_text,
     is_yuanying_out_settlement_response,
     is_not_deep_meditation_response, log_edited_message_if_needed, log_incoming_message,
     log_manual_outgoing_if_needed, log_mention_if_needed, mentions_self, notify_unrecognized_response,
@@ -5010,6 +5011,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def should_send_keyword_alert(self, msg, text):
         """判断是否应发送关键词告警"""
         if not text: return False
+        if is_boss_monitor_alert_text(text): return False
         lower_text = text.lower()
         return any(k in lower_text for k in self.keywords) and (mentions_self(self, msg, text) or any(f"@{u}" in lower_text or f"【{u}】" in lower_text for u in self.notify_users))
 

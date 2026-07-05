@@ -1210,6 +1210,21 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.sent, [("缘生子", ".探寻裂缝")])
 
+    def test_sub_and_xiaohao_keyword_alerts_skip_global_boss_events(self):
+        msg = SimpleNamespace(out=False, sender_id=123, mentioned=False, entities=[])
+        boss_text = "【天机异象·玄骨考校】 @TitanCreeper 的答案完全正确。"
+        normal_text = "【秘境传音】 @TitanCreeper 附近出现异常波动。"
+
+        for cls in (SubCultivator, CultivatorXiaoHao):
+            with self.subTest(cls=cls.__name__):
+                actor = cls.__new__(cls)
+                actor.my_info = None
+                actor.keywords = ["天机异象", "玄骨上人", "秘境传音"]
+                actor.notify_users = ["titancreeper"]
+
+                self.assertFalse(actor.should_send_keyword_alert(msg, boss_text))
+                self.assertTrue(actor.should_send_keyword_alert(msg, normal_text))
+
     def test_common_avatar_tower_send_records_done_on_usable_response(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):
