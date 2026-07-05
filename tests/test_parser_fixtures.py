@@ -6875,6 +6875,12 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(len(stale), 1)
         self.assertEqual(stale[0][0], "next_yuanying_out_time")
 
+    def test_xiaohao_dead_scheduler_tasks_ignores_bad_registry_type(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor._scheduler_task_registry = []
+
+        self.assertEqual(actor.dead_scheduler_tasks(), [])
+
     def test_border_patrol_return_response_clears_due_without_extra_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

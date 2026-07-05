@@ -362,7 +362,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # startup: check is_paused to restore paused state
         self.active_atomic_task = None       # 整体任务独占锁持有任务
-        self.scheduler_tasks = {}            # 关键后台循环名 -> asyncio.Task，供 watchdog 发现意外退出
+        self._scheduler_task_registry = {}   # 关键后台循环名 -> asyncio.Task，供 watchdog 发现意外退出
         self.formation_assist_in_progress = False
         self._avatar_loop_count = 0          # 活跃化身循环计数（阻止主循环自动切回主魂）
         # 止/启管理员名单（只有这些人发"止"才生效）
@@ -2181,7 +2181,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def create_scheduler_task(self, name, coro_factory):
         """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
         task = asyncio.create_task(coro_factory(), name=name)
-        self.scheduler_tasks[name] = task
+        registry = getattr(self, "_scheduler_task_registry", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._scheduler_task_registry = registry
+        registry[name] = task
 
         def _on_done(done_task, task_name=name):
             if not getattr(self, "is_running", True) or done_task.cancelled():
@@ -2203,7 +2207,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
 
     def dead_scheduler_tasks(self):
         dead = []
-        for name, task in list(getattr(self, "scheduler_tasks", {}) or {}).items():
+        registry = getattr(self, "_scheduler_task_registry", None)
+        if not isinstance(registry, dict):
+            return dead
+        for name, task in list(registry.items()):
             if task.done():
                 dead.append(name)
         return dead
