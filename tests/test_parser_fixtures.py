@@ -1871,7 +1871,7 @@ class ParserFixtureTests(unittest.TestCase):
             0,
         )
 
-    def test_fishing_overdue_switch_guard_raises_rod_before_switch(self):
+    def test_fishing_overdue_switch_guard_is_disabled(self):
         class DummyFishing(FishingMixin):
             def __init__(self):
                 self.state = {"fishing": {}}
@@ -1903,10 +1903,9 @@ class ParserFixtureTests(unittest.TestCase):
 
         fishing = actor.get_fishing_state("主魂")
         self.assertEqual(wait, 0)
-        self.assertEqual(actor.commands, [".提竿"])
-        self.assertFalse(fishing["active"])
-        self.assertEqual(fishing["today_count"], 4)
-        self.assertEqual(fishing["last_status"], "caught")
+        self.assertEqual(actor.commands, [])
+        self.assertTrue(fishing["active"])
+        self.assertEqual(fishing["today_count"], 3)
 
     def test_fishing_yields_to_overdue_same_identity_command(self):
         class DummyFishing(FishingMixin):
@@ -2161,20 +2160,14 @@ class ParserFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             controls_path = os.path.join(tmpdir, "command_controls.json")
             with patch.object(fishing_features, "COMMAND_CONTROL_FILE", controls_path):
-                self.assertTrue(asyncio.run(
+                self.assertFalse(asyncio.run(
                     actor.maybe_handle_fishing_control_message(msg, "钓鱼 灵虫饵")
                 ))
-                with open(controls_path, "r", encoding="utf-8") as f:
-                    controls = json.load(f)
-                self.assertTrue(actor.fishing_command_is_enabled("主魂"))
+                self.assertFalse(os.path.exists(controls_path))
 
         fishing = actor.get_fishing_state("主魂")
-        self.assertEqual(fishing["preferred_bait"], "灵虫饵")
-        self.assertEqual(fishing["last_status"], "enabled")
-        identity_controls = controls["xiaohao"]["主魂"]
-        self.assertFalse(identity_controls[".钓鱼 灵虫饵"]["disabled"])
-        self.assertTrue(identity_controls[".钓鱼 灵米饵"]["disabled"])
-        self.assertGreaterEqual(actor.saved, 1)
+        self.assertNotEqual(fishing.get("preferred_bait"), "灵虫饵")
+        self.assertEqual(actor.saved, 0)
 
     def test_fishing_preferred_bait_drives_buy_and_start(self):
         class DummyFishing(FishingMixin):
@@ -2916,25 +2909,13 @@ class ParserFixtureTests(unittest.TestCase):
                     json.dump(state, f, ensure_ascii=False)
 
             with patch.object(dashboard_server, "CONFIG_DIR", tmpdir):
-                result = asyncio.run(dashboard_server.set_fishing_auto_holder(
-                    {"account": "xiaohao", "identity": "缘生子"},
-                    username="fixture",
-                ))
-                with open(os.path.join(tmpdir, "fishing_auto_global.json"), "r", encoding="utf-8") as f:
-                    global_state = json.load(f)
-                with open(os.path.join(tmpdir, "state_xiaohao.json"), "r", encoding="utf-8") as f:
-                    xiaohao_state = json.load(f)
-                with open(os.path.join(tmpdir, "state_main.json"), "r", encoding="utf-8") as f:
-                    main_state = json.load(f)
+                with self.assertRaises(Exception) as raised:
+                    asyncio.run(dashboard_server.set_fishing_auto_holder(
+                        {"account": "xiaohao", "identity": "缘生子"},
+                        username="fixture",
+                    ))
 
-        self.assertTrue(result["success"])
-        self.assertEqual(result["label"], "小号[缘生子]")
-        self.assertEqual(global_state["rod_holder"]["account"], "xiaohao")
-        self.assertEqual(global_state["rod_holder"]["identity"], "缘生子")
-        self.assertEqual(global_state["active"]["key"], "xiaohao|缘生子")
-        self.assertTrue(xiaohao_state["avatars"]["缘生子"]["fishing"]["rod_owned"])
-        self.assertFalse(xiaohao_state["fishing"]["rod_owned"])
-        self.assertFalse(main_state["fishing"]["rod_owned"])
+        self.assertEqual(getattr(raised.exception, "status_code", None), 410)
 
     def test_fishing_auto_chat_control_writes_single_global_switch(self):
         class DummyFishing(FishingMixin):
@@ -3543,7 +3524,7 @@ class ParserFixtureTests(unittest.TestCase):
             default_disabled=True,
         ))
 
-    def test_dashboard_fishing_row_uses_preferred_bait(self):
+    def test_dashboard_hides_fishing_command_rows(self):
         today = datetime.now().strftime("%Y-%m-%d")
         state = {
             "fishing": {
@@ -3554,14 +3535,12 @@ class ParserFixtureTests(unittest.TestCase):
                 "last_status": "enabled",
             }
         }
-        row = next(
-            command
+        commands = {
+            command.get("command")
             for panel in build_command_panels("main", state)
             for command in panel.get("commands", [])
-            if command.get("label") == "钓鱼"
-        )
-        self.assertEqual(row["command"], ".钓鱼 灵虫饵")
-        self.assertIn("饵料 灵虫饵", row["detail"])
+        }
+        self.assertFalse(any(str(command or "").startswith(".钓鱼") for command in commands))
 
     def test_dashboard_fishing_auto_summary_allows_bait_selection(self):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -3624,7 +3603,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(summary["rod_holder"], "主号[主魂]")
         self.assertIn("主号[主魂] 钓鱼中", summary["status"])
 
-    def test_fishing_stale_daily_count_resets_for_dashboard(self):
+    def test_fishing_stale_daily_count_has_no_dashboard_row_when_disabled(self):
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         state = {
@@ -3642,16 +3621,13 @@ class ParserFixtureTests(unittest.TestCase):
             }
         }
 
-        row = next(
-            command
+        commands = {
+            command.get("command")
             for panel in build_command_panels("main", state)
             for command in panel.get("commands", [])
-            if command.get("command") == ".钓鱼 灵米饵"
-        )
+        }
 
-        self.assertIn("今日 0/5", row["detail"])
-        self.assertNotIn("米糠小窝", row["detail"])
-        self.assertNotEqual(row["status"], "今日已满")
+        self.assertNotIn(".钓鱼 灵米饵", commands)
 
     def test_fishing_stale_daily_count_does_not_auto_pause_or_notify(self):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -6872,7 +6848,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
         self.assertTrue(actor.beast_wakeup.is_set())
 
-    def test_xiaohao_watchdog_detects_stale_fishing_due(self):
+    def test_xiaohao_watchdog_ignores_stale_fishing_due_when_disabled(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         due_at = (datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
         actor.avatars = ["问心子"]
@@ -6880,8 +6856,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         stale = actor._stale_fishing_active_identities()
 
-        self.assertEqual(stale[0][:2], ("问心子", due_at))
-        self.assertGreaterEqual(stale[0][2], 60)
+        self.assertEqual(stale, [])
 
     def test_xiaohao_watchdog_detects_stale_scheduler_due_item(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -6906,7 +6881,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.dead_scheduler_tasks(), [])
 
-    def test_main_and_sub_watchdog_detect_stale_fishing_due(self):
+    def test_main_and_sub_watchdog_ignore_stale_fishing_due_when_disabled(self):
         for cls in (Cultivator, SubCultivator):
             with self.subTest(cls=cls.__name__):
                 actor = cls.__new__(cls)
@@ -6919,8 +6894,7 @@ class ParserFixtureTests(unittest.TestCase):
 
                 stale = actor._stale_fishing_active_identities()
 
-                self.assertEqual(stale[0][:2], ("测试化身", due_at))
-                self.assertGreaterEqual(stale[0][2], 60)
+                self.assertEqual(stale, [])
 
     def test_main_and_sub_dead_scheduler_tasks_ignore_bad_registry_type(self):
         for cls in (Cultivator, SubCultivator):

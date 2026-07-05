@@ -2133,6 +2133,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         )
 
     def _stale_fishing_active_identities(self, overdue_seconds=60):
+        return []
         stale = []
         for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
             try:
@@ -7581,8 +7582,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
-        self.create_scheduler_task("fishing_主魂", lambda: self.run_fishing_loop("主魂", initial_delay=20))
-        self.create_scheduler_task("fishing_auto", lambda: self.run_fishing_auto_loop(initial_delay=25))
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
 
         # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
@@ -7590,7 +7589,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.create_scheduler_task(f"avatar_meditation_{avatar}", lambda avatar=avatar: self.run_avatar_meditation_loop(avatar, initial_delay=0))
             self.create_scheduler_task(f"avatar_field_training_{avatar}", lambda avatar=avatar: self.run_avatar_field_training_loop(avatar, initial_delay=0))
             self.create_scheduler_task(f"avatar_tower_{avatar}", lambda avatar=avatar: self.run_avatar_tower_loop(avatar, initial_delay=0))
-            self.create_scheduler_task(f"fishing_{avatar}", lambda avatar=avatar: self.run_fishing_loop(avatar, initial_delay=30))
             if avatar in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar}", lambda avatar=avatar: self.run_avatar_yuanying_rift_loop(avatar, initial_delay=0))
             # 所有分身都启动此循环，内含对星宫指令的身份判定，问心子借此执行入梦和心劫

@@ -6,12 +6,11 @@ FishingMixin 继承使用。读代码时可以按下面顺序看：
   1. 顶部常量：鱼饵、每日上限、跨账号接力、青竹钓竿转移规则。
   2. parse_* 函数：只负责把机器人回复解析成结构化结果，不发送指令。
   3. FishingMixin.get_fishing_state：统一维护每个身份的 fishing state。
-  4. FishingMixin 中的 *_tick / *_round / *_auto* 方法：真正的调度和发送流程。
+  4. FishingMixin 中的 *_tick / *_round / *_auto* 方法：历史调度和发送流程。
 
 设计原则：
   - 钓鱼状态必须按“账号 + 身份”隔离，避免主魂/化身互相覆盖。
-  - 身份切换前如果当前身份有未提竿的鱼，先等或提竿，再切换。
-  - 全自动钓鱼通过 fishing_auto_global.json 在三个脚本之间接力，避免单账号刷屏。
+  - 自动钓鱼已停用：保留解析和历史状态，脚本不再自动发送 .钓鱼/.提竿/.鱼篓。
 """
 import asyncio
 import json
@@ -39,6 +38,7 @@ from log_utils import (
 
 
 FISHING_BAIT = "灵米饵"
+FISHING_AUTOMATION_ENABLED = False
 FISHING_MASTER_COMMAND = f".钓鱼 {FISHING_BAIT}"
 FISHING_LEGACY_MASTER_COMMANDS = (".钓鱼 灵虫饵",)
 FISHING_CONTROL_BAITS = ("凡饵", "灵虫饵", "灵米饵", "妖血饵")
@@ -1190,6 +1190,8 @@ class FishingMixin:
         return True
 
     async def maybe_handle_fishing_control_message(self, msg, text, sender=None):
+        if not FISHING_AUTOMATION_ENABLED:
+            return False
         if sender is not None and is_game_bot_sender(self, sender):
             return False
         auto_bait = parse_fishing_auto_control_text(text)
@@ -1577,6 +1579,8 @@ class FishingMixin:
         is still the fishing identity; the raw send path intentionally avoids
         reacquiring the same lock.
         """
+        if not FISHING_AUTOMATION_ENABLED:
+            return 0
         wait = self.fishing_active_switch_wait(identity, target_identity=target_identity, command=command)
         if wait <= 0:
             return wait
@@ -2877,9 +2881,13 @@ class FishingMixin:
 
     async def run_fishing_auto_loop(self, initial_delay=0):
         await self.startup_done.wait()
+        log = self.fishing_logger()
+        if not FISHING_AUTOMATION_ENABLED:
+            if log:
+                log.info("Fishing auto loop disabled; automatic fishing commands will not be sent.")
+            return
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
-        log = self.fishing_logger()
         while getattr(self, "is_running", True):
             try:
                 await self.pause_event.wait()
@@ -2904,9 +2912,13 @@ class FishingMixin:
 
     async def run_fishing_loop(self, identity="主魂", initial_delay=0):
         await self.startup_done.wait()
+        log = self.fishing_logger()
+        if not FISHING_AUTOMATION_ENABLED:
+            if log:
+                log.info(f"Fishing loop [{identity}] disabled; automatic fishing commands will not be sent.")
+            return
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
-        log = self.fishing_logger()
         while getattr(self, "is_running", True):
             try:
                 await self.pause_event.wait()

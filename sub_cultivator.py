@@ -3025,6 +3025,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             await asyncio.sleep(1)
 
     def _stale_fishing_active_identities(self, overdue_seconds=60):
+        return []
         stale = []
         for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
             try:
@@ -6269,8 +6270,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         self.create_scheduler_task("ask_dao", lambda: self.run_ask_dao_loop())           # 元婴宗问道
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())     # 元婴出窍
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())      # 探寻裂缝
-        self.create_scheduler_task("fishing_主魂", lambda: self.run_fishing_loop("主魂", initial_delay=20))
-        self.create_scheduler_task("fishing_auto", lambda: self.run_fishing_auto_loop(initial_delay=25))
         if self.main_star_palace_enabled:
             self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())   # 抚摸法宝
         # 化身闭关修炼循环（深度闭关模式，各化身错开启动避免冲突）
@@ -6278,7 +6277,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             self.create_scheduler_task(f"avatar_loop_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_loop(avatar_name, initial_delay=i * 10))
             self.create_scheduler_task(f"avatar_field_training_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_field_training_loop(avatar_name, initial_delay=i * 10))
             self.create_scheduler_task(f"avatar_tower_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
-            self.create_scheduler_task(f"fishing_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_fishing_loop(avatar_name, initial_delay=30 + i * 10))
             if avatar_name in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_yuanying_rift_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:

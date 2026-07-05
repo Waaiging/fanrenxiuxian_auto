@@ -47,11 +47,13 @@ from command_modules import (
 )
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
+    FISHING_AUTOMATION_ENABLED,
     FISHING_AUTO_CONTROL_COMMAND,
     FISHING_AUTO_CONTROL_ACCOUNTS,
     FISHING_AUTO_CONTROL_COMMANDS,
     FISHING_BAIT,
     FISHING_CONTROL_BAITS,
+    FISHING_CONTROL_COMMANDS,
     FISHING_DAILY_LIMIT,
     fishing_auto_bait_from_entry,
     fishing_auto_bait_for_state,
@@ -1492,7 +1494,6 @@ def main_soul_panel(account, state):
             time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="天阶"),
         ])
         rows.extend(meditation_commands(state))
-        rows.append(fishing_command(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -1510,7 +1511,6 @@ def main_soul_panel(account, state):
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
-        rows.append(fishing_command(state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "xiaohao":
@@ -1526,7 +1526,6 @@ def main_soul_panel(account, state):
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
-        rows.append(fishing_command(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
@@ -1559,7 +1558,6 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     root_state = root_state or {}
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
-    rows.append(fishing_command(state))
     if name == YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
     if name == "无咎子":
@@ -1633,7 +1631,6 @@ def star_avatar_commands(name, state):
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
-    rows.append(fishing_command(state))
     rows.extend(meditation_commands(state, include_force_exit=True))
     rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
     if name in SUB_STAR_PALACE_AVATARS:
@@ -1664,7 +1661,6 @@ def xiaohao_avatar_commands(name, state):
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             taiyi_guide_command(state),
         ])
-    rows.append(fishing_command(state))
     if name == "问心子":
         rows.extend([
             time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="天阶"),
@@ -3863,7 +3859,7 @@ def status(username: str = Depends(authenticate)):
                 "accounts": result,
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "runtime": dashboard_runtime_info(runtime_accounts),
-                "fishing_auto": fishing_auto_dashboard_summary(states),
+                "fishing_auto": None if not FISHING_AUTOMATION_ENABLED else fishing_auto_dashboard_summary(states),
             }
             STATUS_CACHE["at"] = now_ts
             STATUS_CACHE["data"] = payload
@@ -3991,6 +3987,13 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         return {"success": False, "msg": "未知账号"}
     if not command or not control_key:
         return {"success": False, "msg": "指令为空"}
+    if not FISHING_AUTOMATION_ENABLED and (
+        command in FISHING_AUTO_CONTROL_COMMANDS
+        or command in FISHING_CONTROL_COMMANDS
+        or control_key in FISHING_AUTO_CONTROL_COMMANDS
+        or control_key in FISHING_CONTROL_COMMANDS
+    ):
+        return {"success": False, "msg": "自动钓鱼已停用"}
 
     with COMMAND_CONTROL_LOCK:
         data = load_command_controls()
@@ -4070,6 +4073,8 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
 @app.post("/api/fishing-auto-bait")
 async def set_fishing_auto_bait(payload: dict = Body(...), username: str = Depends(authenticate)):
     """Update the global auto-fishing bait without changing the enabled/paused switch."""
+    if not FISHING_AUTOMATION_ENABLED:
+        raise HTTPException(status_code=410, detail="自动钓鱼已停用")
     bait = str(payload.get("bait") or "").strip()
     if bait not in FISHING_CONTROL_BAITS:
         return {"success": False, "msg": "未知鱼饵"}
@@ -4107,6 +4112,8 @@ async def set_fishing_auto_bait(payload: dict = Body(...), username: str = Depen
 @app.post("/api/fishing-auto-holder")
 async def set_fishing_auto_holder(payload: dict = Body(...), username: str = Depends(authenticate)):
     """Manually correct the global auto-fishing rod holder."""
+    if not FISHING_AUTOMATION_ENABLED:
+        raise HTTPException(status_code=410, detail="自动钓鱼已停用")
     account = str(payload.get("account") or "").strip()
     identity = str(payload.get("identity") or "主魂").strip() or "主魂"
     if account not in FISHING_AUTO_CONTROL_ACCOUNTS:

@@ -2189,6 +2189,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         )
 
     def _stale_fishing_active_identities(self, overdue_seconds=60):
+        return []
         stale = []
         for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
             try:
@@ -5032,8 +5033,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
 
         # 侍妾神通循环（继承自 ConcubineMixin）
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
-        self.create_scheduler_task("fishing_主魂", lambda: self.run_fishing_loop("主魂", initial_delay=20))
-        self.create_scheduler_task("fishing_auto", lambda: self.run_fishing_auto_loop(initial_delay=25))
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
@@ -5048,7 +5047,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         self.create_scheduler_task("avatar_field_training", lambda: self.run_avatar_field_training_loop())
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
         for i, avatar_name in enumerate(self.avatars):
-            self.create_scheduler_task(f"fishing_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_fishing_loop(avatar_name, initial_delay=30 + i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
         if YINLUO_IDENTITY in self.avatars:
