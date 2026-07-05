@@ -16,12 +16,12 @@
   10. 关键词提醒 —— 监听群聊关键词发送通知
 
 区分于星宫脚本 (sub_cultivator.py)：
-- 没有星宫独有的观星/改进星移功能
+- 仅素心子保留星宫观星/改换星移/牵引星辰；缘生子已改走太一门引道
 - 增加了完整的灵兽培养放养探渊偷菜体系
 - 使用 beast_lock 而非 cmd_lock 管理灵兽操作
 
 【阅读导览】
-- 常量区：灵兽优先级、巡边/放养/探渊冷却、星宫化身观星窗口。
+- 常量区：灵兽优先级、巡边/放养/探渊冷却、星宫观星窗口与太一门引道冷却。
 - CultivatorXiaoHao.__init__：小号主魂与三个化身的身份、宗门、锁和状态。
 - 灵兽相关方法：搜索 “Beast” 或 “border patrol”，是小号最主要的业务逻辑。
 - send_and_wait_feedback / send_and_wait_feedback_identity：所有指令发送和身份切换入口。
@@ -115,20 +115,24 @@ STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒�
 STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59               # 即时模式活跃窗口为 59 秒
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
-STAR_GAZING_ROTATING_AVATARS = ["素心子", "缘生子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
+STAR_GAZING_ROTATING_AVATARS = ["素心子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
 STAR_ATTRACTION_TARGET = "天雷星"
 STAR_ATTRACTION_COMMAND = f".牵引星辰 {STAR_ATTRACTION_TARGET}"
 STAR_ATTRACTION_COOLDOWN_SECONDS = 36 * 3600
 STAR_PRE_APPEASE_LEAD_SECONDS = 60
 STAR_STATUS_RETRY_SECONDS = 10 * 60
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
-STAR_ATTRACTION_AVATARS = {"素心子", "缘生子"}
+STAR_ATTRACTION_AVATARS = {"素心子"}
 FORMATION_TARGET_INITIATORS = {
     "crayonxxin": "副号-厚土",
     "lvdoumiao": "副号-缘生子",
     "ding303": "副号-寻真子",
 }
-FORMATION_ASSIST_AVATARS = ["素心子", "缘生子"]
+FORMATION_ASSIST_AVATARS = ["素心子"]
+TAIYI_GUIDE_AVATAR = "缘生子"
+TAIYI_GUIDE_COMMAND = ".引道 水"
+TAIYI_GUIDE_CD_SECONDS = 12 * 3600
+TAIYI_GUIDE_RETRY_SECONDS = 10 * 60
 STAR_GAZING_FORBIDDEN_KEYWORDS = (
     "非星宫弟子",
     "并非星宫弟子",
@@ -335,7 +339,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "主魂": "万灵宗",
             "问心子": "凌霄宫",
             "素心子": "星宫",
-            "缘生子": "星宫",
+            "缘生子": "太一门",
         }
         self.field_training_command = ".野外历练 谨慎"
         self.notified_alert_ids = set()
@@ -400,6 +404,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self._main_confirmed = (self._current_identity == "主魂")  # 启动时若上次为主魂则默认确认，否则强制对齐
         self._switch_lock = asyncio.Lock()  # 防止多个任务同时发送 .切换 主魂
         self.ensure_avatar_states()
+        self.migrate_yuanshengzi_taiyi_state()
         self.clear_stale_meditation_state()
 
     def get_identity_from_msg(self, msg):
@@ -547,6 +552,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "star_attraction_retry_time": "",
             "star_attraction_force_exit_tried": False,
             "star_target": STAR_ATTRACTION_TARGET,
+            "last_taiyi_guide_time": "",
+            "next_taiyi_guide_time": "",
+            "last_taiyi_guide_response": "",
             "next_dream_map_time": "",
             "next_heart_trial_time": "",
             "next_divination_time": "",
@@ -578,6 +586,70 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                     self.state["avatars"][name]["nickname"] = nicknames.get(name, "")
                     changed = True
         if changed:
+            self.save_state()
+
+    def migrate_yuanshengzi_taiyi_state(self):
+        """缘生子改入太一门后，清理旧星宫排程，避免重启后误发星宫指令。"""
+        avatar = TAIYI_GUIDE_AVATAR
+        avatars = self.state.get("avatars") if isinstance(self.state, dict) else {}
+        avatar_state = avatars.get(avatar) if isinstance(avatars, dict) else None
+        if not isinstance(avatar_state, dict):
+            return
+        changed = False
+        star_keys = (
+            "next_star_attraction_time",
+            "last_star_attraction_time",
+            "next_star_appease_time",
+            "last_star_appease_time",
+            "star_pre_collect_appeased_for",
+            "next_star_collect_time",
+            "last_star_collect_time",
+            "next_star_check_time",
+            "last_star_observatory_time",
+            "star_observatory_summary",
+            "star_observatory_needs_refresh",
+            "star_attraction_retry_time",
+            "star_attraction_force_exit_tried",
+            "next_star_gazing_time",
+            "pending_star_gazing_target_time",
+            "pending_star_gazing_date",
+            "pending_star_shift_target_time",
+            "next_formation_time",
+            "next_formation_retry_time",
+            "formation_active_until",
+        )
+        defaults = {
+            "star_observatory_needs_refresh": False,
+            "star_attraction_force_exit_tried": False,
+        }
+        for key in star_keys:
+            if key in avatar_state and avatar_state.get(key) not in ("", False, None):
+                avatar_state[key] = defaults.get(key, "")
+                changed = True
+        root_avatar_keys = (
+            "star_gazing_assigned_avatar",
+            "star_gazing_claimed_avatar",
+        )
+        root_owned_by_avatar = any(self.state.get(key) == avatar for key in root_avatar_keys)
+        for key in root_avatar_keys:
+            if self.state.get(key) == avatar:
+                self.state[key] = ""
+                changed = True
+        root_time_keys = (
+            "pending_star_gazing_manifest_time",
+            "pending_star_gazing_target_time",
+            "pending_star_shift_target_time",
+            "star_gazing_claimed_manifest_time",
+            "star_gazing_claimed_reply_msg_id",
+        )
+        if root_owned_by_avatar:
+            root_time_keys = root_time_keys + ("next_star_gazing_time",)
+            for key in root_time_keys:
+                if self.state.get(key):
+                    self.state[key] = ""
+                    changed = True
+        if changed:
+            log.info(f"Startup migration: cleared old Star Palace schedule for {avatar}; Taiyi guide remains active.")
             self.save_state()
 
     def clear_stale_meditation_state(self):
@@ -945,6 +1017,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         # 11. 星宫分身：观星台 / 牵引 / 安抚 / 收集。脚本和手动回复都走这里对账。
         if avatar in STAR_ATTRACTION_AVATARS:
             self.record_avatar_star_response_from_text(avatar, text, source="passive star sync")
+
+        # 12. 太一门：缘生子引道，手动/脚本回执都同步冷却。
+        if avatar == TAIYI_GUIDE_AVATAR and ("引道" in text or "太一门" in text):
+            self.record_avatar_taiyi_guide_response(avatar, text, source="passive taiyi sync")
 
     def update_completed_weeks_from_text(self, text, source="Cloud stairs"):
         if not text:
@@ -1449,6 +1525,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             "next_treasure_touch_time",
             "next_yuanying_out_time",
             "next_rift_search_time",
+            "next_taiyi_guide_time",
             "next_switch_allowed_time",
         ]
         
@@ -1460,6 +1537,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 and identity in getattr(self, "avatars", [])
                 and identity not in AVATAR_YUANYING_RIFT_AVATARS
             ):
+                continue
+            if k == "next_taiyi_guide_time" and identity != TAIYI_GUIDE_AVATAR:
                 continue
             if k in ("next_heart_time", "heart_platform_time", "next_heart_platform_time"):
                 today = datetime.now().strftime("%Y-%m-%d")
@@ -2241,6 +2320,26 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 continue
             if overdue >= int(overdue_seconds):
                 stale.append((key, command, value, overdue))
+        avatar_specs = (
+            (TAIYI_GUIDE_AVATAR, "next_taiyi_guide_time", TAIYI_GUIDE_COMMAND),
+        )
+        for identity, key, command in avatar_specs:
+            if identity not in (getattr(self, "avatars", []) or []):
+                continue
+            if self.identity_pause_seconds(identity) > 0:
+                continue
+            if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
+                continue
+            avatar_state = self.get_avatar_state(identity)
+            value = str(avatar_state.get(key) or "").strip()
+            if not value or is_future(value):
+                continue
+            try:
+                overdue = int((now - str_to_dt(value)).total_seconds())
+            except Exception:
+                continue
+            if overdue >= int(overdue_seconds):
+                stale.append((f"{identity}.{key}", command, value, overdue))
         return stale
 
     async def stop_for_rift_weakness(self, response, identity="主魂", msg=None):
@@ -6196,6 +6295,98 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
     def response_text(self, resp):
         return self.common_response_text(resp)
 
+    def record_avatar_taiyi_guide_response(self, avatar, resp, source=TAIYI_GUIDE_COMMAND):
+        """记录太一门引道回执；成功按 12 小时冷却，冷却提示按回执时间排程。"""
+        text = self.response_text(resp)
+        now = now_str()
+        updates = {
+            "last_taiyi_guide_response": (text or "")[:500],
+        }
+        clean = str(text or "").replace("**", "")
+
+        if not clean:
+            updates["next_taiyi_guide_time"] = add_seconds_str(now, TAIYI_GUIDE_RETRY_SECONDS)
+            self.update_avatar_states(avatar, updates)
+            log.warning(f"Avatar [{avatar}] Taiyi guide: no response; retry in {TAIYI_GUIDE_RETRY_SECONDS}s.")
+            return "empty"
+
+        cd = self.parse_wait_time(clean)
+        cooldown_keywords = ("冷却", "后再", "还需", "尚需", "间隔", "稍后", "请在")
+        if cd > 0 and any(keyword in clean for keyword in cooldown_keywords):
+            updates["next_taiyi_guide_time"] = add_seconds_str(now, cd + 60)
+            self.update_avatar_states(avatar, updates)
+            log.info(f"Avatar [{avatar}] Taiyi guide: cooldown {cd}s from {source}.")
+            return "cooldown"
+
+        blocked_keywords = (
+            "非太一门",
+            "不是太一门",
+            "并非太一门",
+            "不属于太一门",
+            "无法引道",
+            "不能引道",
+            "修为不足",
+        )
+        if any(keyword in clean for keyword in blocked_keywords):
+            updates["next_taiyi_guide_time"] = add_seconds_str(now, 3600)
+            self.update_avatar_states(avatar, updates)
+            notify_unrecognized_response(self, TAIYI_GUIDE_COMMAND, text, log, f"太一门引道/{avatar}/{source}")
+            log.warning(f"Avatar [{avatar}] Taiyi guide blocked; retry in 1h.")
+            return "blocked"
+
+        updates.update({
+            "last_taiyi_guide_time": now,
+            "next_taiyi_guide_time": add_seconds_str(now, TAIYI_GUIDE_CD_SECONDS),
+        })
+        self.update_avatar_states(avatar, updates)
+        log.info(f"Avatar [{avatar}] Taiyi guide recorded; next at {updates['next_taiyi_guide_time']}.")
+        return "success"
+
+    async def run_avatar_taiyi_guide_loop(self, avatar, initial_delay=0):
+        """太一门缘生子专属引道循环：.引道 水，12 小时冷却。"""
+        await self.startup_done.wait()
+        self._avatar_loop_count += 1
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self.is_running:
+            try:
+                pause_left = self.identity_pause_seconds(avatar)
+                if pause_left > 0:
+                    await asyncio.sleep(scheduler_sleep_seconds(pause_left, minimum=60))
+                    continue
+                state = self.get_avatar_state(avatar)
+                next_time = state.get("next_taiyi_guide_time", "")
+                if next_time and is_future(next_time):
+                    await asyncio.sleep(scheduler_sleep_seconds(min(seconds_until(next_time), 1800), minimum=30))
+                    continue
+                if self.dashboard_command_paused(TAIYI_GUIDE_COMMAND, avatar):
+                    await asyncio.sleep(scheduler_sleep_seconds(600))
+                    continue
+
+                async with AtomicTaskContext(self, f"TaiyiGuide-{avatar}"):
+                    state = self.get_avatar_state(avatar)
+                    next_time = state.get("next_taiyi_guide_time", "")
+                    if next_time and is_future(next_time):
+                        continue
+                    resp = await self.send_and_wait_feedback_identity(
+                        avatar,
+                        TAIYI_GUIDE_COMMAND,
+                        timeout=60,
+                        max_retries=1,
+                        force_identity_check=True,
+                    )
+                    self.record_avatar_taiyi_guide_response(avatar, resp)
+
+                state = self.get_avatar_state(avatar)
+                next_time = state.get("next_taiyi_guide_time", "")
+                sleep_for = min(seconds_until(next_time), 1800) if next_time and is_future(next_time) else 600
+                await asyncio.sleep(scheduler_sleep_seconds(sleep_for, minimum=30))
+            except Exception as e:
+                log.error(f"Avatar [{avatar}] Taiyi guide loop error: {e}", exc_info=True)
+                self.set_avatar_state(avatar, "next_taiyi_guide_time", add_seconds_str(now_str(), TAIYI_GUIDE_RETRY_SECONDS))
+                await asyncio.sleep(scheduler_sleep_seconds(60))
+
     def recent_command_guard_wait(self, command="", max_age_seconds=15):
         return self.common_recent_command_guard_wait(command, max_age_seconds=max_age_seconds)
 
@@ -7185,7 +7376,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 await self.record_avatar_deep_meditation_start(avatar, self.response_text(deep_resp))
 
     async def run_avatar_star_palace_loop(self, avatar, initial_delay=0):
-        """化身专属星宫循环（仅限素心子、缘生子）"""
+        """化身日常循环：点卯、侍妾链与心劫；星辰牵引由独立循环处理。"""
         await self.startup_done.wait()  # 新增：等待启动对账完成，杜绝死锁
         self._avatar_loop_count += 1
         if initial_delay > 0:
@@ -7213,7 +7404,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 forced_exit = False  # 初始化：用于异常时判断是否需要恢复深度闭关
                 log.info(f"DEBUG: run_avatar_star_palace_loop iteration for {avatar}")
                 state = self.get_avatar_state(avatar)
-                is_star_palace = avatar in ["素心子", "缘生子"]
 
                 # --- 宗门点卯（每日一次，07:30 后） ---
                 await self._avatar_daily_checkin(avatar)
@@ -7234,7 +7424,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
                 )
 
             except Exception as e:
-                log.error(f"Error in avatar {avatar} star palace loop: {e}", exc_info=True)
+                log.error(f"Error in avatar {avatar} daily avatar loop: {e}", exc_info=True)
                 # M3: 如果已强行出关但异常中断，恢复深度闭关避免化身空转
                 if forced_exit:
                     try:
@@ -7407,6 +7597,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
             self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
+            if avatar == TAIYI_GUIDE_AVATAR:
+                self.create_scheduler_task(f"avatar_taiyi_guide_{avatar}", lambda avatar=avatar: self.run_avatar_taiyi_guide_loop(avatar, initial_delay=0))
             if avatar == "问心子":
                 self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")

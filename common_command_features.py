@@ -141,6 +141,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_star_collect_time": ".收集精华",
     "next_star_attraction_time": ".牵引星辰 天雷星",
     "star_attraction_retry_time": ".牵引星辰 天雷星",
+    "next_taiyi_guide_time": ".引道 水",
     "next_steal_time": ".灵兽偷菜",
     "next_beast_status_check_time": ".我的灵兽",
     "next_abyss_time": ".探渊 <灵兽>",

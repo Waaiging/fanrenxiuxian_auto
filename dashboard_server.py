@@ -262,7 +262,7 @@ ACCOUNT_LOG_TAGS = {
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", SUB_TREASURE_TOUCH_COMMAND,
         YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
-        ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰",
+        ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰", ".引道",
         ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         OTHER_LOG_TAG,
     ],
@@ -1318,6 +1318,20 @@ def xiaohao_star_attraction_commands(state):
     ]
 
 
+def taiyi_guide_command(state):
+    return time_command(
+        state,
+        "next_taiyi_guide_time",
+        ".引道 水",
+        "引道 水",
+        waiting="12小时冷却",
+        ready="可引道",
+        missing="可引道",
+        detail=clean_custom_text(state.get("last_taiyi_guide_response") or "", 80),
+        group="太一门",
+    )
+
+
 def spirit_tree_irrigation_time_for_identity(state, identity="主魂"):
     times = state.get("spirit_tree_irrigation_times")
     if isinstance(times, dict):
@@ -1648,6 +1662,7 @@ def xiaohao_avatar_commands(name, state):
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            taiyi_guide_command(state),
         ])
     rows.append(fishing_command(state))
     if name == "问心子":
@@ -1657,7 +1672,7 @@ def xiaohao_avatar_commands(name, state):
             manual_command(".天阶状态", "天阶状态", "查询天阶状态", "天阶"),
             time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="天阶"),
         ])
-    else:
+    elif name == "素心子":
         rows.extend([
             time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
         ])

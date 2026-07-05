@@ -1507,7 +1507,7 @@ class ParserFixtureTests(unittest.TestCase):
             "主魂": "万灵宗",
             "问心子": "凌霄宫",
             "素心子": "星宫",
-            "缘生子": "星宫",
+            "缘生子": "太一门",
         }
         sent = []
 
@@ -1518,7 +1518,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor.send_and_wait_feedback_identity = fake_identity_send
         identities = actor.huanglong_identities_for_sect("星宫")
 
-        self.assertEqual(identities, ["素心子", "缘生子"])
+        self.assertEqual(identities, ["素心子"])
+        self.assertEqual(actor.huanglong_identities_for_sect("太一门"), ["缘生子"])
         self.assertTrue(asyncio.run(actor.maybe_signup_huanglong_identities_now(
             "星宫",
             identities,
@@ -1534,11 +1535,10 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual([(item[0], item[1]) for item in sent], [
             ("素心子", ".报名黄龙山"),
-            ("缘生子", ".报名黄龙山"),
         ])
         self.assertTrue(all(item[2]["force_identity_check"] for item in sent))
         self.assertTrue(actor.huanglong_signup_record_matches("2026-07-02", "星宫", "素心子"))
-        self.assertTrue(actor.huanglong_signup_record_matches("2026-07-02", "星宫", "缘生子"))
+        self.assertFalse(actor.huanglong_signup_record_matches("2026-07-02", "星宫", "缘生子"))
 
     def test_common_avatar_star_observatory_parser_extracts_remaining(self):
         actor = DummyAvatarCommon()
@@ -1619,6 +1619,31 @@ class ParserFixtureTests(unittest.TestCase):
         wait = actor.common_next_avatar_star_wait_seconds("缘生子")
         self.assertGreater(wait, 0)
         self.assertLessEqual(wait, 120)
+
+    def test_xiaohao_taiyi_guide_response_records_success_and_cooldown(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.avatars = ["缘生子"]
+        actor.state = {"avatars": {"缘生子": {}}}
+        actor.save_state = lambda: None
+
+        result = actor.record_avatar_taiyi_guide_response(
+            "缘生子",
+            "太一门引道成功，水行道韵流转。",
+        )
+        state = actor.get_avatar_state("缘生子")
+
+        self.assertEqual(result, "success")
+        self.assertGreater(common_seconds_until(state["next_taiyi_guide_time"]), 11 * 3600)
+
+        result = actor.record_avatar_taiyi_guide_response(
+            "缘生子",
+            "引道冷却中，请在 **3小时** 后再来引道。",
+        )
+        state = actor.get_avatar_state("缘生子")
+
+        self.assertEqual(result, "cooldown")
+        self.assertGreater(common_seconds_until(state["next_taiyi_guide_time"]), 2 * 3600)
+        self.assertLess(common_seconds_until(state["next_taiyi_guide_time"]), 4 * 3600)
 
     def test_common_avatar_yuanying_rift_wait_seconds(self):
         actor = DummyAvatarCommon()
@@ -5132,10 +5157,10 @@ class ParserFixtureTests(unittest.TestCase):
         handled, state, scheduled = asyncio.run(run_case())
         self.assertTrue(handled)
         self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-01")
-        self.assertEqual(state["star_gazing_claimed_avatar"], "缘生子")
+        self.assertEqual(state["star_gazing_claimed_avatar"], "素心子")
         self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-02 00:00:00")
         self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][0][0], "缘生子")
+        self.assertEqual(scheduled[0][0][0], "素心子")
         self.assertEqual(scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"), "2026-07-02 00:00:00")
         self.assertEqual(scheduled[0][1]["gazing_date"], "2026-07-01")
 
@@ -9930,6 +9955,12 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertIn(".元婴出窍", commands)
         self.assertIn(".探寻裂缝", commands)
+        self.assertIn(".引道 水", commands)
+        self.assertNotIn(".助阵", commands)
+        self.assertNotIn(".观星台", commands)
+        self.assertNotIn(".观星", commands)
+        self.assertNotIn(".改换星移 @TitanCreeper", commands)
+        self.assertFalse(any(str(command or "").startswith(".牵引星辰") for command in commands))
 
     def test_dashboard_xiaohao_hunt_stopped_is_not_actionable_due(self):
         panels = build_command_panels("xiaohao", {
