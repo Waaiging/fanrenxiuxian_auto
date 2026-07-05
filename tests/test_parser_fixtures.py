@@ -6881,6 +6881,64 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.dead_scheduler_tasks(), [])
 
+    def test_main_and_sub_watchdog_detect_stale_fishing_due(self):
+        for cls in (Cultivator, SubCultivator):
+            with self.subTest(cls=cls.__name__):
+                actor = cls.__new__(cls)
+                due_at = (datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+                actor.avatars = ["测试化身"]
+                actor.get_fishing_state = lambda identity, due_at=due_at: {
+                    "active": identity == "测试化身",
+                    "active_due_at": due_at,
+                }
+
+                stale = actor._stale_fishing_active_identities()
+
+                self.assertEqual(stale[0][:2], ("测试化身", due_at))
+                self.assertGreaterEqual(stale[0][2], 60)
+
+    def test_main_and_sub_dead_scheduler_tasks_ignore_bad_registry_type(self):
+        for cls in (Cultivator, SubCultivator):
+            with self.subTest(cls=cls.__name__):
+                actor = cls.__new__(cls)
+                actor._scheduler_task_registry = []
+
+                self.assertEqual(actor.dead_scheduler_tasks(), [])
+
+    def test_main_watchdog_detects_stale_scheduler_due_item(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "is_paused": False,
+            "identity_pauses": {},
+            "next_yuanying_out_time": (datetime.now() - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        stale = actor.stale_scheduler_due_items()
+
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0][0], "next_yuanying_out_time")
+
+    def test_sub_watchdog_detects_stale_scheduler_due_item(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.main_star_palace_enabled = False
+        actor.field_training_command = ".野外历练 谨慎"
+        actor.state = {
+            "is_paused": False,
+            "identity_pauses": {},
+            "next_ask_dao_time": (datetime.now() - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        stale = actor.stale_scheduler_due_items()
+
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0][0], "next_ask_dao_time")
+
     def test_border_patrol_return_response_clears_due_without_extra_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {

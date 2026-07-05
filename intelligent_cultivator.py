@@ -164,6 +164,8 @@ STATE_FILE = os.path.join(CONFIG_DIR, 'state_main.json') # 主号状态持久化
 # 标准时间格式，用于所有 state 中的时间字符串
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_SCHEDULER_SLEEP_SECONDS = 300
+SCHEDULER_STALE_DUE_SECONDS = 45 * 60
+SCHEDULER_STALE_STARTUP_GRACE_SECONDS = 10 * 60
 SWITCH_COMMAND_LEAD_SECONDS = 3
 
 # 各项活动的冷却时间（秒），这些值来自游戏设定
@@ -536,6 +538,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]  # 要监控的用户
         self.keywords = [k.lower() for k in self.mc.get('keywords', [])]          # 要监控的关键词
         self.active_atomic_task = None             # 整体任务独占锁持有任务
+        self._scheduler_task_registry = {}         # 关键后台循环名 -> asyncio.Task，供 watchdog 发现意外退出
         self.pending_formation_invite_msg = None   # 待回复的阵法邀请消息（化身助阵用）
         self.formation_assist_in_progress = False  # 实时助阵并发保护
         self._spirit_tree_harvest_tasks = {}       # 身份级灵树成熟后的一次性采摘任务
@@ -2195,14 +2198,80 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
             due_at = str(state.get("active_due_at") or "").strip()
             if not state.get("active") or not due_at or is_future(due_at):
                 continue
-            overdue = seconds_until(due_at)
-            if overdue <= -abs(int(overdue_seconds)):
-                stale.append((identity, due_at, int(abs(overdue))))
+            overdue = int((datetime.now() - str_to_dt(due_at)).total_seconds())
+            if overdue >= abs(int(overdue_seconds)):
+                stale.append((identity, due_at, overdue))
+        return stale
+
+    def create_scheduler_task(self, name, coro_factory):
+        """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
+        task = asyncio.create_task(coro_factory(), name=name)
+        registry = getattr(self, "_scheduler_task_registry", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._scheduler_task_registry = registry
+        registry[name] = task
+
+        def _on_done(done_task, task_name=name):
+            if not getattr(self, "is_running", True) or done_task.cancelled():
+                return
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                log.critical(
+                    f"Scheduler task [{task_name}] exited with exception: {exc}",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            else:
+                log.critical(f"Scheduler task [{task_name}] exited unexpectedly without exception.")
+
+        task.add_done_callback(_on_done)
+        return task
+
+    def dead_scheduler_tasks(self):
+        dead = []
+        registry = getattr(self, "_scheduler_task_registry", None)
+        if not isinstance(registry, dict):
+            return dead
+        for name, task in list(registry.items()):
+            if task.done():
+                dead.append(name)
+        return dead
+
+    def stale_scheduler_due_items(self, overdue_seconds=SCHEDULER_STALE_DUE_SECONDS):
+        """找出已到期很久却仍未推进的关键主号调度项。"""
+        if self.state.get("is_paused") or self.identity_pause_seconds("主魂") > 0:
+            return []
+        field_command = getattr(self, "field_training_command", ".野外历练 谨慎")
+        specs = [
+            ("next_field_training_time", field_command, "主魂"),
+            ("next_yuanying_out_time", ".元婴出窍", "主魂"),
+            ("next_rift_search_time", ".探寻裂缝", "主魂"),
+            ("next_treasure_touch_time", TREASURE_TOUCH_COMMAND, "主魂"),
+            ("next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "主魂"),
+        ]
+        stale = []
+        now = datetime.now()
+        for key, command, identity in specs:
+            if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
+                continue
+            value = str(self.state.get(key) or "").strip()
+            if not value or is_future(value):
+                continue
+            try:
+                overdue = int((now - str_to_dt(value)).total_seconds())
+            except Exception:
+                continue
+            if overdue >= int(overdue_seconds):
+                stale.append((key, command, value, overdue))
         return stale
 
     async def run_health_watchdog_loop(self):
         await self.startup_done.wait()
         lock_started_at = None
+        stale_due_watch_started_at = time.monotonic()
         while getattr(self, "is_running", True):
             try:
                 stale_fishing = self._stale_fishing_active_identities()
@@ -2214,6 +2283,27 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                     log.critical(f"Main watchdog: stale fishing active detected: {detail}; restarting process.")
                     self.save_state()
                     os.execv(sys.executable, [sys.executable, *sys.argv])
+
+                dead_tasks = self.dead_scheduler_tasks()
+                if dead_tasks:
+                    detail = ", ".join(dead_tasks)
+                    log.critical(f"Main watchdog: scheduler task stopped ({detail}); restarting process.")
+                    self.save_state()
+                    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+                if time.monotonic() - stale_due_watch_started_at >= SCHEDULER_STALE_STARTUP_GRACE_SECONDS:
+                    stale_due = self.stale_scheduler_due_items()
+                    if stale_due:
+                        detail = ", ".join(
+                            f"{key}/{command} due {due_at} ({overdue}s overdue)"
+                            for key, command, due_at, overdue in stale_due
+                        )
+                        log.critical(
+                            f"Main watchdog: scheduler due item stale: {detail}; "
+                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                        )
+                        self.save_state()
+                        os.execv(sys.executable, [sys.executable, *sys.argv])
 
                 if self.avatar_send_lock.locked():
                     if lock_started_at is None:
@@ -4919,50 +5009,50 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
         # 每个循环都是独立的 asyncio.Task，通过 startup_done.wait() 等待同步完成
 
         # 每日任务循环（闯塔、点卯、传功）
-        asyncio.create_task(self.run_daily_tasks())
+        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())
 
         if self.lingxiao_enabled:
             # 云阶问心循环（凌霄宫）
-            asyncio.create_task(self.run_cloud_stairs_loop())
+            self.create_scheduler_task("cloud_stairs", lambda: self.run_cloud_stairs_loop())
             # 九天罡风循环（独立于登天阶循环）
-            asyncio.create_task(self.run_nine_heaven_wind_loop())
+            self.create_scheduler_task("nine_heaven_wind", lambda: self.run_nine_heaven_wind_loop())
         else:
             log.info("Lingxiao cloud stairs / wind loops disabled for current sect.")
 
         # 元婴期能力循环（出窍+归窍）
-        asyncio.create_task(self.run_yuanying_out_loop())
-        asyncio.create_task(self.run_rift_search_loop())
+        self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
+        self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
 
         # 抚摸法宝循环
-        asyncio.create_task(self.run_treasure_touch_loop())
-        asyncio.create_task(self.run_nurture_spirit_loop())
+        self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
+        self.create_scheduler_task("nurture_spirit", lambda: self.run_nurture_spirit_loop())
 
         # 闭关循环（内部会检查深度闭关状态）
-        asyncio.create_task(self.run_meditation_timer())
+        self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
 
         # 侍妾神通循环（继承自 ConcubineMixin）
-        asyncio.create_task(self.run_concubine_loop())
-        asyncio.create_task(self.run_fishing_loop("主魂", initial_delay=20))
-        asyncio.create_task(self.run_fishing_auto_loop(initial_delay=25))
+        self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
+        self.create_scheduler_task("fishing_主魂", lambda: self.run_fishing_loop("主魂", initial_delay=20))
+        self.create_scheduler_task("fishing_auto", lambda: self.run_fishing_auto_loop(initial_delay=25))
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
-        asyncio.create_task(self.run_field_training_loop())
-        asyncio.create_task(self.run_sect_war_loop())
-        asyncio.create_task(self.run_custom_command_loop())
-        asyncio.create_task(self.run_daily_reward_summary_loop(initial_delay=40))
+        self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
+        self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
+        self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
+        self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         if not self.lingxiao_enabled:
-            asyncio.create_task(self.run_main_spirit_tree_loop())
+            self.create_scheduler_task("main_spirit_tree", lambda: self.run_main_spirit_tree_loop())
 
         # ---- 化身系统 ----
-        asyncio.create_task(self.run_all_avatars_sequential())
-        asyncio.create_task(self.run_avatar_field_training_loop())
-        asyncio.create_task(self.run_star_gazing_loop())
+        self.create_scheduler_task("all_avatars_sequential", lambda: self.run_all_avatars_sequential())
+        self.create_scheduler_task("avatar_field_training", lambda: self.run_avatar_field_training_loop())
+        self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
         for i, avatar_name in enumerate(self.avatars):
-            asyncio.create_task(self.run_fishing_loop(avatar_name, initial_delay=30 + i * 10))
+            self.create_scheduler_task(f"fishing_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_fishing_loop(avatar_name, initial_delay=30 + i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:
-                asyncio.create_task(self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
+                self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
         if YINLUO_IDENTITY in self.avatars:
-            asyncio.create_task(self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
+            self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
 
 
         # ---- 保持主循环运行 ----
