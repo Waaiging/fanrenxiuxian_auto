@@ -1155,6 +1155,61 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("缘生子", 12 * 3600, require_meditation_ready=True)))
         self.assertEqual(actor.sent, [])
 
+    def test_tianxing_avatar_rift_sends_destiny_prefix_before_search(self):
+        class DummyTianxingRift(DummyCommon):
+            avatars = ["无咎子"]
+
+            def __init__(self):
+                super().__init__()
+                self.state = {"avatars": {"无咎子": {}}}
+                self.identity_sect_names = {"无咎子": "天星宗"}
+                self.sent = []
+
+            def get_avatar_state(self, identity):
+                return self.state.setdefault("avatars", {}).setdefault(identity, {})
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                if command == ".探寻裂缝":
+                    return "你运转全身法力，撕开一道漆黑的空间裂缝，将元婴送入其中探寻机缘。"
+                return "司命演算完成。"
+
+        async def fake_sleep(_seconds):
+            return None
+
+        actor = DummyTianxingRift()
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
+
+        self.assertEqual(actor.sent, [("无咎子", ".改命 探索"), ("无咎子", ".探寻裂缝")])
+        self.assertTrue(actor.get_avatar_state("无咎子")["next_rift_search_time"])
+
+    def test_non_tianxing_avatar_rift_does_not_send_destiny_prefix(self):
+        class DummyStarRift(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.identity_sect_names = {"缘生子": "星宫"}
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                return "你运转全身法力，撕开一道漆黑的空间裂缝，将元婴送入其中探寻机缘。"
+
+        async def fake_sleep(_seconds):
+            raise AssertionError("non-Tianxing rift should not sleep for prefix")
+
+        actor = DummyStarRift()
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.common_avatar_rift_search_check("缘生子", 12 * 3600)))
+
+        self.assertEqual(actor.sent, [("缘生子", ".探寻裂缝")])
+
     def test_common_avatar_tower_send_records_done_on_usable_response(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):

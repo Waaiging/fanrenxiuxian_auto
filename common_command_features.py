@@ -2538,6 +2538,25 @@ class CommonCommandMixin:
             "force_identity_check": plan.force_identity_check,
             "return_response_msg": plan.return_response_msg,
         }
+        if plan.command == ".探寻裂缝" and self.identity_sect_name(identity) == "天星宗":
+            log = self.common_command_logger()
+            prefix = ".改命 探索"
+            log.info(f"Tianxing rift prefix [{identity}]: sending {prefix} before {plan.command}.")
+            if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+                await self.send_and_wait_feedback_identity(
+                    identity,
+                    prefix,
+                    timeout=60,
+                    max_retries=0,
+                    force_identity_check=True,
+                )
+            else:
+                await self.send_and_wait_feedback(
+                    prefix,
+                    timeout=60,
+                    max_retries=0,
+                )
+            await asyncio.sleep(3)
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
             return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
         return await self.send_and_wait_feedback(plan.command, **kwargs)
