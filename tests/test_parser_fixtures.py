@@ -1236,15 +1236,23 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
+                if command == common_command_features.AVATAR_TOWER_SUPPORT_COMMAND:
+                    return "支援慕兰奇袭成功，获得灵石x100。"
                 return "你成功通关试炼古塔第 7 层。"
 
         actor = DummyTowerAvatar()
         today = "2026-06-25"
 
         self.assertTrue(asyncio.run(actor.common_avatar_tower_send("缘生子", today=today)))
-        self.assertEqual(actor.sent[0][0], "缘生子")
-        self.assertEqual(actor.sent[0][1], ".闯塔")
-        self.assertEqual(actor.get_avatar_state("缘生子")["last_tower_date"], today)
+        self.assertEqual(
+            [(identity, command) for identity, command, _kwargs in actor.sent],
+            [("缘生子", ".闯塔"), ("缘生子", common_command_features.AVATAR_TOWER_SUPPORT_COMMAND)],
+        )
+        state = actor.get_avatar_state("缘生子")
+        self.assertEqual(state["last_tower_date"], today)
+        self.assertEqual(state["last_mulan_support_date"], today)
+        self.assertIn("支援慕兰", state["last_mulan_support_response"])
+        self.assertEqual(actor.sent[1][2]["max_retries"], 0)
 
     def test_common_avatar_tower_send_can_require_meditation_ready(self):
         class DummyTowerAvatar(DummyAvatarCommon):

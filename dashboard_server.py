@@ -63,6 +63,7 @@ from fishing_features import (
     fishing_dashboard_command,
     fishing_dashboard_state,
 )
+from common_command_features import AVATAR_TOWER_SUPPORT_COMMAND
 from soul_curse_features import (
     SOUL_CURSE_ACCEPT_COMMAND,
     SOUL_CURSE_IDENTIFY_COMMAND,
@@ -709,6 +710,20 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
         if value:
             return command_row(command, label, "今日未执行", "ready", remaining="待执行", at=value, detail=detail, group=group, schedule_type="daily", next_seconds=0)
     return command_row(command, label, "今日未执行", "ready", remaining="待执行", detail=detail, group=group, schedule_type="daily", next_seconds=0)
+
+
+def avatar_tower_support_command(state):
+    detail = str(state.get("last_mulan_support_error") or state.get("last_mulan_support_response") or "")
+    if len(detail) > 80:
+        detail = detail[:80] + "..."
+    return daily_done_command(
+        state,
+        AVATAR_TOWER_SUPPORT_COMMAND,
+        "支援慕兰",
+        date_key="last_mulan_support_date",
+        detail=detail,
+        group="每日",
+    )
 
 
 def watch_command(command, label=None, detail="同步/记录回复", group=""):
@@ -1701,6 +1716,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     else:
         rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
+    rows.append(avatar_tower_support_command(state))
     if name == "缘生子":
         tree_state = root_state or state
         rows.extend([
@@ -1755,6 +1771,7 @@ def star_avatar_commands(name, state):
         ])
     rows.extend(meditation_commands(state, include_force_exit=True))
     rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
+    rows.append(avatar_tower_support_command(state))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
@@ -1775,6 +1792,7 @@ def xiaohao_avatar_commands(name, state):
     rows.extend([
         time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
         daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
+        avatar_tower_support_command(state),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
     if name == "缘生子":

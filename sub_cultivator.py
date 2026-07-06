@@ -639,6 +639,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             "meditation_restart_mode": "",
             "next_meditation_retry_time": "", # 闭关异常/冷却后的重试时间
             "last_tower_date": "",         # 闯塔：记录最后闯塔日期
+            "last_mulan_support_date": "", # 支援慕兰：记录最后跟随闯塔执行日期
+            "last_mulan_support_time": "",
+            "next_mulan_support_time": "",
+            "last_mulan_support_response": "",
+            "last_mulan_support_error": "",
             "next_dream_map_time": "",     # 入梦寻图：下次可用时间
             "next_heart_trial_time": "",   # 共历心劫：下次可用时间
             "next_divination_time": "",    # 天机代卜：下次可用时间

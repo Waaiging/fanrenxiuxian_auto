@@ -92,6 +92,8 @@ SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
 HUANGLONG_REPORT_TITLE = "黄龙山轮值军报"
 HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
+AVATAR_TOWER_SUPPORT_COMMAND = ".支援慕兰 奇袭"
+AVATAR_TOWER_SUPPORT_RETRY_SECONDS = 10 * 60
 TIME_CRITICAL_COMMAND_PREFIXES = (
     ".灵树灌溉",
     ".协同守山",
@@ -121,6 +123,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_divination_time": ".天机代卜",
     "next_concubine_voyage_time": ".侍妾远航 冒险",
     "next_tower_time": ".闯塔",
+    "next_mulan_support_time": AVATAR_TOWER_SUPPORT_COMMAND,
     "next_stairs_time": ".登天阶",
     "next_heart_platform_time": ".问心台",
     "nine_heaven_wind_cd_time": ".引九天罡风",
@@ -571,6 +574,7 @@ class CommonCommandMixin:
             ".探渊",
             ".灵兽探渊",
             ".问道",
+            ".支援慕兰",
         }
 
     def daily_reward_account_label(self):
@@ -1060,6 +1064,7 @@ class CommonCommandMixin:
         if root in {
             ".探寻裂缝", ".元婴出窍", ".元婴闭关",
             ".探渊", ".灵兽探渊", ".问道", ".登天阶", ".收集精华",
+            ".支援慕兰",
         }:
             return f"✓{short_label}"
         return f"✓{short_label}" if outcome == "成功" else "?"
@@ -3686,6 +3691,99 @@ class CommonCommandMixin:
             return False
         return True
 
+    def record_avatar_tower_support_response(self, avatar, text, today=None):
+        """Record the follow-up .支援慕兰 奇袭 result for an avatar tower run."""
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        now = now_str()
+        clean = str(text or "").strip()
+        updates = {
+            "last_mulan_support_time": now,
+            "last_mulan_support_response": clean[:500],
+        }
+        log = self.common_command_logger()
+
+        if not clean:
+            updates.update({
+                "next_mulan_support_time": add_seconds_str(now, AVATAR_TOWER_SUPPORT_RETRY_SECONDS),
+                "last_mulan_support_error": "no response",
+            })
+            self.update_avatar_states(avatar, updates)
+            log.warning(
+                f"Avatar [{avatar}] tower support: no usable response; "
+                f"recorded retry hint at {updates['next_mulan_support_time']}."
+            )
+            return False
+
+        cd = self.parse_wait_time(clean) if hasattr(self, "parse_wait_time") else -1
+        cooldown_words = ["冷却", "后再", "尚需", "剩余", "请在", "还需", "稍后"]
+        if any(k in clean for k in cooldown_words):
+            retry_seconds = cd if cd and cd > 0 else AVATAR_TOWER_SUPPORT_RETRY_SECONDS
+            updates.update({
+                "next_mulan_support_time": add_seconds_str(now, retry_seconds),
+                "last_mulan_support_error": clean[:200],
+            })
+            self.update_avatar_states(avatar, updates)
+            log.info(
+                f"Avatar [{avatar}] tower support cooling/unavailable; "
+                f"next hint at {updates['next_mulan_support_time']}."
+            )
+            return False
+
+        unavailable_words = ["无法", "不能", "条件不足", "修为不足", "未加入", "不在"]
+        if any(k in clean for k in unavailable_words):
+            updates.update({
+                "next_mulan_support_time": add_seconds_str(now, 60 * 60),
+                "last_mulan_support_error": clean[:200],
+            })
+            self.update_avatar_states(avatar, updates)
+            log.info(
+                f"Avatar [{avatar}] tower support unavailable; "
+                f"next hint at {updates['next_mulan_support_time']}."
+            )
+            return False
+
+        updates.update({
+            "last_mulan_support_date": today,
+            "next_mulan_support_time": "",
+            "last_mulan_support_error": "",
+        })
+        self.update_avatar_states(avatar, updates)
+        if hasattr(self, "record_daily_reward_event"):
+            self.record_daily_reward_event(
+                avatar,
+                AVATAR_TOWER_SUPPORT_COMMAND,
+                clean,
+                source=AVATAR_TOWER_SUPPORT_COMMAND,
+            )
+        log.info(f"Avatar [{avatar}] tower support recorded for {today}.")
+        return True
+
+    async def maybe_run_avatar_tower_support(self, avatar, today=None, timeout=60):
+        """Send .支援慕兰 奇袭 once after a successful avatar tower attempt."""
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        a_state = self.get_avatar_state(avatar)
+        log = self.common_command_logger()
+        if a_state.get("last_mulan_support_date") == today:
+            log.info(f"Avatar [{avatar}] tower support skipped: already recorded for {today}.")
+            return False
+        if (
+            hasattr(self, "dashboard_command_paused")
+            and self.dashboard_command_paused(AVATAR_TOWER_SUPPORT_COMMAND, avatar)
+        ):
+            log.info(f"Avatar [{avatar}] tower support skipped: dashboard command paused.")
+            return False
+
+        resp = await self.send_and_wait_feedback_identity(
+            avatar,
+            AVATAR_TOWER_SUPPORT_COMMAND,
+            timeout=timeout,
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
+        resp_text = self.timed_command_response_text(resp)
+        return self.record_avatar_tower_support_response(avatar, resp_text, today=today)
+
     async def common_avatar_tower_send(
         self,
         avatar,
@@ -3737,6 +3835,10 @@ class CommonCommandMixin:
 
         self.set_avatar_state(avatar, "last_tower_date", today)
         log.info(f"Avatar [{avatar}] tower completed for {today}.")
+        try:
+            await self.maybe_run_avatar_tower_support(avatar, today=today)
+        except Exception as exc:
+            log.error(f"Avatar [{avatar}] tower support error after tower: {exc}", exc_info=True)
         return True
 
     async def common_avatar_tower_tick(
