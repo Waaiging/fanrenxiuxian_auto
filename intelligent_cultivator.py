@@ -95,6 +95,7 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 from fishing_features import FishingMixin
+from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from yinluo_features import YinluoMixin, YINLUO_IDENTITY
 from log_utils import (
@@ -399,7 +400,7 @@ class AtomicTaskContext:
 # 主类：Cultivator
 # =====================================================================
 
-class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
+class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """
     凌霄宫修仙主控类。
     继承自:
@@ -5088,6 +5089,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
         if YINLUO_IDENTITY in self.avatars:
             self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
+        self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
 
 
         # ---- 保持主循环运行 ----

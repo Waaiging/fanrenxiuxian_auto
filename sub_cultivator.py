@@ -84,6 +84,7 @@ from concubine_features import ConcubineMixin, concubine_default_state
 #   侍妾功能混入类：提供侍妾召回/安置/每日问安等方法的默认状态和基础实现
 
 from fishing_features import FishingMixin
+from soul_curse_features import SoulCurseMixin
 from yinluo_features import YinluoMixin, YINLUO_IDENTITY
 
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
@@ -411,7 +412,7 @@ class AtomicTaskContext:
 # 继承自 CommonCommandMixin（通用指令方法）、ConcubineMixin（侍妾管理方法）和 YinluoMixin（阴罗宗）
 # ============================================================
 
-class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin):
+class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """星宫副号修仙脚本主类，管理所有自动循环与事件响应。"""
 
     yuanying_main_command = YUANYING_RETREAT_COMMAND
@@ -6286,6 +6287,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
         if YINLUO_IDENTITY in self.avatars:
             self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
+        self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
 
         log.info("All Sub-Account loops started.")
         # 主线程保持存活

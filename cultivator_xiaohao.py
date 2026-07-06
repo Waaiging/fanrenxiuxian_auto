@@ -68,6 +68,7 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, concubine_default_state
 from fishing_features import FishingMixin
+from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
@@ -316,7 +317,7 @@ class AtomicTaskContext:
 # CultivatorXiaoHao 主类
 # =====================================================================
 
-class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
+class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
     """
     万灵宗小号脚本主类。
     继承 CommonCommandMixin（通用指令）和 ConcubineMixin（侍妾功能）。
@@ -7585,6 +7586,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin):
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
+        self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=100, sleep_func=scheduler_sleep_seconds))
 
         # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
         for avatar in self.avatars:

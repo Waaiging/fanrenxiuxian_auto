@@ -63,6 +63,16 @@ from fishing_features import (
     fishing_dashboard_command,
     fishing_dashboard_state,
 )
+from soul_curse_features import (
+    SOUL_CURSE_ACCEPT_COMMAND,
+    SOUL_CURSE_IDENTIFY_COMMAND,
+    SOUL_CURSE_INFER_COMMAND,
+    SOUL_CURSE_PROTECT_COMMAND,
+    SOUL_CURSE_PUBLISH_COMMAND,
+    SOUL_CURSE_STRIP_COMMAND,
+    SOUL_CURSE_SUPPRESS_COMMAND,
+    SOUL_CURSE_VISIT_COMMAND,
+)
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
@@ -1257,6 +1267,117 @@ def yinluo_commands(state):
     return rows
 
 
+def soul_curse_publisher_commands(state):
+    curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
+    if not isinstance(curse, dict):
+        curse = {}
+    detail = clean_custom_text(curse.get("last_detail") or "", 120)
+    commission_id = str(curse.get("commission_id") or "").strip()
+    target = str(curse.get("commission_target") or "").strip()
+    commission_detail = " · ".join(part for part in [f"委托 {commission_id}" if commission_id else "", target, detail] if part)
+    return [
+        daily_done_command(
+            curse,
+            SOUL_CURSE_VISIT_COMMAND,
+            "探望南宫婉",
+            date_key="last_visit_date",
+            detail=detail,
+            group="南宫婉",
+        ),
+        time_command(
+            curse,
+            "next_chain_time",
+            SOUL_CURSE_INFER_COMMAND,
+            "封魂咒推演",
+            waiting="8小时冷却",
+            ready="可推演",
+            missing="可推演",
+            detail=detail,
+            group="南宫婉",
+        ),
+        time_command(
+            curse,
+            "next_protect_time",
+            SOUL_CURSE_PROTECT_COMMAND,
+            "护持神魂",
+            waiting="8小时冷却",
+            ready="链路内执行",
+            missing="链路内执行",
+            detail=detail,
+            group="南宫婉",
+        ),
+        time_command(
+            curse,
+            "next_action_at",
+            SOUL_CURSE_PUBLISH_COMMAND,
+            "解咒委托",
+            waiting="等待下一步",
+            ready="可检查",
+            missing="可检查",
+            detail=commission_detail,
+            group="南宫婉",
+        ),
+    ]
+
+
+def soul_curse_assist_commands(state):
+    assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
+    if not isinstance(assist, dict):
+        assist = {}
+    commission_id = str(assist.get("commission_id") or "").strip()
+    target = str(assist.get("target_username") or "").strip()
+    detail = clean_custom_text(assist.get("last_detail") or "", 120)
+    base_detail = " · ".join(part for part in [f"委托 {commission_id}" if commission_id else "", target, detail] if part)
+    accept_command = f"{SOUL_CURSE_ACCEPT_COMMAND} <ID>"
+    target_suffix = target or "<@委托用户>"
+    return [
+        time_command(
+            assist,
+            "next_action_at",
+            accept_command,
+            "接取解咒委托",
+            waiting="等待处理",
+            ready="待委托",
+            missing="待委托",
+            detail=base_detail,
+            group="阴罗宗",
+        ),
+        time_command(
+            assist,
+            "next_identify_time",
+            f"{SOUL_CURSE_IDENTIFY_COMMAND} {target_suffix}",
+            "辨认咒纹",
+            waiting="4小时冷却",
+            ready="可辨认",
+            missing="可辨认",
+            detail=base_detail,
+            group="阴罗宗",
+        ),
+        time_command(
+            assist,
+            "next_suppress_time",
+            f"{SOUL_CURSE_SUPPRESS_COMMAND} {target_suffix}",
+            "借幡镇魂",
+            waiting="6小时冷却",
+            ready="可镇魂",
+            missing="可镇魂",
+            detail=base_detail,
+            group="阴罗宗",
+        ),
+        time_command(
+            assist,
+            "next_strip_time",
+            f"{SOUL_CURSE_STRIP_COMMAND} {target_suffix}",
+            "剥离咒源",
+            waiting="8小时冷却",
+            ready="可剥离",
+            missing="可剥离",
+            detail=base_detail,
+            group="阴罗宗",
+        ),
+    ]
+
+
 def deep_meditation_command(state, command=".深度闭关", label="深度闭关", group="闭关"):
     raw = state.get("deep_meditation_end_time", "")
     target = parse_state_time(raw)
@@ -1490,6 +1611,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
+        rows.extend(soul_curse_publisher_commands(state))
         rows.extend(sect_war_commands(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
@@ -1523,6 +1645,9 @@ def main_soul_panel(account, state):
         rows.extend(meditation_commands(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
+        ])
+        rows.extend(soul_curse_publisher_commands(state))
+        rows.extend([
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
             (
                 command_row(
@@ -1555,6 +1680,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
     if name == YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
+        rows.extend(soul_curse_assist_commands(state))
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
@@ -1621,6 +1747,7 @@ def star_avatar_commands(name, state):
     rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     if name == YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
+        rows.extend(soul_curse_assist_commands(state))
     if name == "缘生子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),

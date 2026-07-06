@@ -1,0 +1,854 @@
+"""
+【封魂咒 / 解咒委托自动化】
+
+主号主魂和小号主魂负责南宫婉、封魂咒推演、护持神魂和发布解咒委托；
+阴罗宗缘生子负责接取委托并执行辨认、借幡、剥离三步。
+小号发布的委托由副号缘生子接取，因此这里用共享 JSON 交接委托 ID。
+"""
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import random
+import re
+from datetime import datetime, timedelta
+
+from common_command_features import add_seconds_str, dt_to_str, is_future, now_str, seconds_until
+from yinluo_features import YINLUO_IDENTITY
+
+
+SOUL_CURSE_VISIT_COMMAND = ".探望南宫婉"
+SOUL_CURSE_INFER_COMMAND = ".推演封魂咒"
+SOUL_CURSE_PROTECT_COMMAND = ".护持神魂"
+SOUL_CURSE_PUBLISH_COMMAND = ".发布解咒委托 1"
+SOUL_CURSE_ACCEPT_COMMAND = ".接取解咒委托"
+SOUL_CURSE_IDENTIFY_COMMAND = ".辨认咒纹"
+SOUL_CURSE_SUPPRESS_COMMAND = ".借幡镇魂"
+SOUL_CURSE_STRIP_COMMAND = ".剥离咒源"
+
+SOUL_CURSE_CHAIN_SECONDS = 8 * 3600
+SOUL_CURSE_VISIT_HOUR = 9
+SOUL_CURSE_RETRY_SECONDS = 10 * 60
+SOUL_CURSE_UNKNOWN_RETRY_SECONDS = 30 * 60
+SOUL_CURSE_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul_curse_commissions.json")
+
+SOUL_CURSE_PUBLISHERS = {
+    "main": {
+        "owner_account": "main",
+        "target_username": "@Weeguu",
+        "assistant_account": "main",
+        "assistant_identity": YINLUO_IDENTITY,
+        "visit_minute": 0,
+        "shared": False,
+    },
+    "xiaohao": {
+        "owner_account": "xiaohao",
+        "target_username": "@TitanCreeper",
+        "assistant_account": "sub",
+        "assistant_identity": YINLUO_IDENTITY,
+        "visit_minute": 6,
+        "shared": True,
+    },
+}
+
+SOUL_CURSE_ASSISTANTS = {
+    "main": {
+        "owner_account": "main",
+        "target_username": "@Weeguu",
+        "assistant_identity": YINLUO_IDENTITY,
+    },
+    "sub": {
+        "owner_account": "xiaohao",
+        "target_username": "@TitanCreeper",
+        "assistant_identity": YINLUO_IDENTITY,
+    },
+}
+
+
+def _strip_markdown(text):
+    return str(text or "").replace("**", "").replace("`", "")
+
+
+def _parse_duration_seconds(text):
+    total = 0
+    matched = False
+    for pattern, factor in (
+        (r"(\d+)\s*天", 86400),
+        (r"(\d+)\s*(?:小时|时)", 3600),
+        (r"(\d+)\s*(?:分钟|分)", 60),
+        (r"(\d+)\s*秒", 1),
+    ):
+        for match in re.finditer(pattern, str(text or "")):
+            total += int(match.group(1)) * factor
+            matched = True
+    return total if matched else 0
+
+
+def _parse_remaining_seconds(text):
+    clean = str(text or "")
+    match = re.search(r"请在\s*([^后]+?)\s*后", clean)
+    if match:
+        remaining = _parse_duration_seconds(match.group(1))
+        if remaining > 0:
+            return remaining
+    return _parse_duration_seconds(clean)
+
+
+def _today():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _target_username(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if text.startswith("@") else f"@{text}"
+
+
+def _next_visit_time(done_today=False, minute=0, now=None):
+    now = now or datetime.now()
+    target = now.replace(hour=SOUL_CURSE_VISIT_HOUR, minute=int(minute or 0), second=0, microsecond=0)
+    if done_today or now >= target:
+        target = target + timedelta(days=1)
+    return dt_to_str(target)
+
+
+def soul_curse_publisher_default_state():
+    return {
+        "last_visit_date": "",
+        "next_visit_time": "",
+        "last_infer_time": "",
+        "next_infer_time": "",
+        "last_protect_time": "",
+        "next_protect_time": "",
+        "last_chain_time": "",
+        "next_chain_time": "",
+        "chain_stage": "",
+        "commission_id": "",
+        "commission_status": "",
+        "commission_target": "",
+        "commission_updated_at": "",
+        "last_status": "init",
+        "last_detail": "",
+        "last_response": "",
+        "next_action_at": "",
+    }
+
+
+def soul_curse_assist_default_state():
+    return {
+        "owner_account": "",
+        "target_username": "",
+        "commission_id": "",
+        "accepted_commission_id": "",
+        "identify_commission_id": "",
+        "suppress_commission_id": "",
+        "strip_commission_id": "",
+        "last_accept_time": "",
+        "last_identify_time": "",
+        "next_identify_time": "",
+        "last_suppress_time": "",
+        "next_suppress_time": "",
+        "last_strip_time": "",
+        "next_strip_time": "",
+        "status": "init",
+        "last_detail": "",
+        "last_response": "",
+        "next_action_at": "",
+        "updated_at": "",
+    }
+
+
+def parse_soul_curse_visit(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if "今日已探望过南宫婉" in clean or ("南宫婉" in clean and "频繁惊扰" in clean):
+        return {"matched": True, "status": "done", "cooldown_seconds": cd}
+    if "探望南宫婉" in clean:
+        if cd > 0 and any(k in clean for k in ("请在", "后再", "尚需", "冷却")):
+            return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+        return {"matched": True, "status": "success", "cooldown_seconds": 24 * 3600}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def parse_soul_curse_infer(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if "封魂咒" in clean and cd > 0 and any(k in clean for k in ("请在", "后再", "冷却", "变化极慢")):
+        return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+    if "推演封魂咒" in clean or ("封魂咒" in clean and any(k in clean for k in ("咒源", "魂封", "推演"))):
+        return {"matched": True, "status": "success", "cooldown_seconds": SOUL_CURSE_CHAIN_SECONDS}
+    if any(k in clean for k in ("无法推演", "条件不足", "修为不足")):
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def parse_soul_curse_protect(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if "神魂护持" in clean and cd > 0 and any(k in clean for k in ("请在", "后再", "冷却", "不可过密")):
+        return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+    if "护持神魂" in clean or ("神魂" in clean and any(k in clean for k in ("魂封", "月魄", "护持"))):
+        return {"matched": True, "status": "success", "cooldown_seconds": SOUL_CURSE_CHAIN_SECONDS}
+    if any(k in clean for k in ("无法护持", "条件不足", "修为不足")):
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def parse_soul_curse_publish(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "commission_id": "", "cooldown_seconds": 0}
+    commission_id = ""
+    for pattern in (
+        r"委托\s*ID[:：]\s*(\d+)",
+        r"进行中的解咒委托\s*[（(]\s*ID[:：]\s*(\d+)",
+        r"\bID[:：]\s*(\d+)",
+    ):
+        match = re.search(pattern, clean, flags=re.I)
+        if match:
+            commission_id = match.group(1)
+            break
+    if "解咒委托已发布" in clean and commission_id:
+        return {"matched": True, "status": "success", "commission_id": commission_id, "cooldown_seconds": 0}
+    if "已有进行中的解咒委托" in clean and commission_id:
+        return {"matched": True, "status": "existing", "commission_id": commission_id, "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if cd > 0 and any(k in clean for k in ("冷却", "请在", "后再")):
+        return {"matched": True, "status": "cooldown", "commission_id": "", "cooldown_seconds": cd}
+    if any(k in clean for k in ("灵石不足", "不可发布", "无法发布", "条件不足")):
+        return {"matched": True, "status": "blocked", "commission_id": "", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "commission_id": commission_id, "cooldown_seconds": 0}
+
+
+def parse_soul_curse_accept(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    if "咒契协定已成" in clean or ("已接取" in clean and "解咒委托" in clean):
+        return {"matched": True, "status": "success", "cooldown_seconds": 0}
+    if "该委托不存在" in clean or "已被他人接取" in clean:
+        return {"matched": True, "status": "gone", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    if "只有阴罗宗弟子" in clean or "不可接取" in clean or "无法接取" in clean:
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    cd = _parse_remaining_seconds(clean)
+    if cd > 0 and any(k in clean for k in ("冷却", "请在", "后再")):
+        return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def parse_soul_curse_action(text, action):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if cd > 0 and any(k in clean for k in ("冷却", "请在", "后再试", "后再")):
+        return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+    if "没有有效的咒契协定" in clean or "需先由对方发布委托" in clean:
+        return {"matched": True, "status": "no_contract", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    if "咒源尚未辨明" in clean or "推进到 50" in clean:
+        return {"matched": True, "status": "source_not_ready", "cooldown_seconds": 4 * 3600}
+    if action == "identify" and ("阴罗辨咒" in clean or "辨认咒纹" in clean):
+        return {"matched": True, "status": "success", "cooldown_seconds": 4 * 3600}
+    if action == "suppress" and "借幡镇魂" in clean:
+        return {"matched": True, "status": "success", "cooldown_seconds": 6 * 3600}
+    if action == "strip" and ("剥离咒源成功" in clean or ("剥离咒源" in clean and "获得" in clean)):
+        return {"matched": True, "status": "success", "cooldown_seconds": 8 * 3600}
+    if any(k in clean for k in ("条件不足", "修为不足", "无法")):
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def read_soul_curse_shared_state():
+    try:
+        with open(SOUL_CURSE_SHARED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def write_soul_curse_shared_state(data):
+    os.makedirs(os.path.dirname(SOUL_CURSE_SHARED_FILE), exist_ok=True)
+    temp = f"{SOUL_CURSE_SHARED_FILE}.{os.getpid()}.tmp"
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data if isinstance(data, dict) else {}, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(temp, SOUL_CURSE_SHARED_FILE)
+
+
+def upsert_soul_curse_shared_commission(owner_account, updates):
+    data = read_soul_curse_shared_state()
+    key = str(owner_account or "").strip()
+    if not key:
+        return {}
+    item = data.get(key, {}) if isinstance(data.get(key), dict) else {}
+    item.update(updates or {})
+    item["owner_account"] = key
+    item["updated_at"] = now_str()
+    data[key] = item
+    write_soul_curse_shared_state(data)
+    return item
+
+
+@contextlib.asynccontextmanager
+async def _null_async_context():
+    yield
+
+
+class SoulCurseMixin:
+    def soul_curse_logger(self):
+        if hasattr(self, "common_command_logger"):
+            try:
+                return self.common_command_logger()
+            except Exception:
+                pass
+        return getattr(self, "log", None) or logging.getLogger(self.__class__.__name__)
+
+    def soul_curse_response_text(self, response):
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response
+        return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+    def soul_curse_account_key(self):
+        return str(getattr(self, "account_key", "") or "").strip()
+
+    def soul_curse_publisher_profile(self):
+        return SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
+
+    def soul_curse_assistant_profile(self):
+        return SOUL_CURSE_ASSISTANTS.get(self.soul_curse_account_key())
+
+    def get_soul_curse_state(self):
+        state = self.state.setdefault("soul_curse", {})
+        defaults = soul_curse_publisher_default_state()
+        for key, value in defaults.items():
+            state.setdefault(key, value)
+        return state
+
+    def get_soul_curse_assist_state(self, identity=YINLUO_IDENTITY):
+        target = self.get_avatar_state(identity) if identity != "主魂" and hasattr(self, "get_avatar_state") else self.state
+        state = target.setdefault("soul_curse_assist", {})
+        defaults = soul_curse_assist_default_state()
+        for key, value in defaults.items():
+            state.setdefault(key, value)
+        return state
+
+    def soul_curse_atomic_task(self, label):
+        if hasattr(self, "common_atomic_task"):
+            return self.common_atomic_task(label)
+        return _null_async_context()
+
+    def soul_curse_set_publisher_status(self, status, detail="", next_seconds=None, response=""):
+        state = self.get_soul_curse_state()
+        state["last_status"] = status
+        state["last_detail"] = str(detail or "")[:300]
+        if response:
+            state["last_response"] = str(response or "")[:700]
+        if next_seconds is not None:
+            state["next_action_at"] = add_seconds_str(now_str(), max(0, int(next_seconds)))
+        state["commission_updated_at"] = now_str()
+        self.save_state()
+
+    def soul_curse_set_assist_status(self, identity, status, detail="", next_seconds=None, response=""):
+        state = self.get_soul_curse_assist_state(identity)
+        state["status"] = status
+        state["last_detail"] = str(detail or "")[:300]
+        state["updated_at"] = now_str()
+        if response:
+            state["last_response"] = str(response or "")[:700]
+        if next_seconds is not None:
+            state["next_action_at"] = add_seconds_str(now_str(), max(0, int(next_seconds)))
+        self.save_state()
+
+    def soul_curse_command_paused(self, command, identity="主魂"):
+        if hasattr(self, "dashboard_command_paused"):
+            return bool(self.dashboard_command_paused(command, identity))
+        return False
+
+    async def soul_curse_send_main(self, command, timeout=60):
+        return await self.send_and_wait_feedback(
+            command,
+            timeout=timeout,
+            max_retries=0,
+            suppress_no_response_alert=True,
+        )
+
+    async def soul_curse_send_identity(self, identity, command, timeout=60):
+        return await self.send_and_wait_feedback_identity(
+            identity,
+            command,
+            timeout=timeout,
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
+
+    def record_soul_curse_visit_response(self, text, profile=None):
+        profile = profile or self.soul_curse_publisher_profile() or {}
+        parsed = parse_soul_curse_visit(text)
+        state = self.get_soul_curse_state()
+        minute = int(profile.get("visit_minute") or 0)
+        if parsed.get("status") in {"success", "done"}:
+            state["last_visit_date"] = _today()
+            state["next_visit_time"] = _next_visit_time(done_today=True, minute=minute)
+            self.soul_curse_set_publisher_status(parsed.get("status"), "南宫婉探望已记录", None, text)
+            return True
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_visit_time"] = add_seconds_str(now_str(), wait)
+            self.soul_curse_set_publisher_status("visit_cooldown", f"探望冷却 {wait}秒", wait, text)
+            return True
+        if not text:
+            state["next_visit_time"] = add_seconds_str(now_str(), SOUL_CURSE_RETRY_SECONDS)
+            self.soul_curse_set_publisher_status("visit_no_response", "探望无回执，稍后重试", SOUL_CURSE_RETRY_SECONDS)
+            return False
+        state["next_visit_time"] = add_seconds_str(now_str(), SOUL_CURSE_UNKNOWN_RETRY_SECONDS)
+        self.soul_curse_set_publisher_status("visit_unknown", "探望回执未识别", SOUL_CURSE_UNKNOWN_RETRY_SECONDS, text)
+        return False
+
+    def record_soul_curse_infer_response(self, text):
+        parsed = parse_soul_curse_infer(text)
+        state = self.get_soul_curse_state()
+        now = now_str()
+        if parsed.get("status") == "success":
+            state["last_infer_time"] = now
+            state["next_infer_time"] = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
+            state["chain_stage"] = "protect"
+            state["next_action_at"] = ""
+            self.soul_curse_set_publisher_status("infer_success", "封魂咒推演完成，准备护持神魂", 3, text)
+            return "success"
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_infer_time"] = add_seconds_str(now, wait)
+            state["chain_stage"] = "infer"
+            self.soul_curse_set_publisher_status("infer_cooldown", f"推演冷却 {wait}秒", wait, text)
+            return "cooldown"
+        if parsed.get("status") == "blocked":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["chain_stage"] = "infer"
+            self.soul_curse_set_publisher_status("infer_blocked", "推演暂不可用", wait, text)
+            return "blocked"
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        state["chain_stage"] = "infer"
+        self.soul_curse_set_publisher_status("infer_unknown", "推演回执未识别" if text else "推演无回执", wait, text)
+        return "unknown"
+
+    def record_soul_curse_protect_response(self, text):
+        parsed = parse_soul_curse_protect(text)
+        state = self.get_soul_curse_state()
+        now = now_str()
+        if parsed.get("status") == "success":
+            state["last_protect_time"] = now
+            state["next_protect_time"] = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
+            state["chain_stage"] = "publish"
+            state["next_action_at"] = ""
+            self.soul_curse_set_publisher_status("protect_success", "护持神魂完成，准备发布委托", 3, text)
+            return "success"
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_protect_time"] = add_seconds_str(now, wait)
+            state["chain_stage"] = "protect"
+            self.soul_curse_set_publisher_status("protect_cooldown", f"护持冷却 {wait}秒", wait, text)
+            return "cooldown"
+        if parsed.get("status") == "blocked":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["chain_stage"] = "protect"
+            self.soul_curse_set_publisher_status("protect_blocked", "护持暂不可用", wait, text)
+            return "blocked"
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        state["chain_stage"] = "protect"
+        self.soul_curse_set_publisher_status("protect_unknown", "护持回执未识别" if text else "护持无回执", wait, text)
+        return "unknown"
+
+    def record_soul_curse_publish_response(self, text, profile=None):
+        profile = profile or self.soul_curse_publisher_profile() or {}
+        parsed = parse_soul_curse_publish(text)
+        state = self.get_soul_curse_state()
+        now = now_str()
+        if parsed.get("status") in {"success", "existing"} and parsed.get("commission_id"):
+            commission_id = str(parsed.get("commission_id"))
+            target = _target_username(profile.get("target_username"))
+            state["commission_id"] = commission_id
+            state["commission_target"] = target
+            state["commission_status"] = parsed.get("status")
+            state["chain_stage"] = ""
+            state["last_chain_time"] = now
+            state["next_chain_time"] = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
+            state["next_action_at"] = state["next_chain_time"]
+            detail = f"解咒委托 ID {commission_id}，目标 {target}"
+            if profile.get("shared"):
+                upsert_soul_curse_shared_commission(profile.get("owner_account"), {
+                    "commission_id": commission_id,
+                    "target_username": target,
+                    "assistant_account": profile.get("assistant_account"),
+                    "assistant_identity": profile.get("assistant_identity") or YINLUO_IDENTITY,
+                    "status": "pending_accept",
+                    "published_at": now,
+                    "last_detail": detail,
+                })
+            self.soul_curse_set_publisher_status(f"publish_{parsed.get('status')}", detail, None, text)
+            return "success"
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["chain_stage"] = "publish"
+            self.soul_curse_set_publisher_status("publish_cooldown", f"发布委托冷却 {wait}秒", wait, text)
+            return "cooldown"
+        if parsed.get("status") == "blocked":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["chain_stage"] = "publish"
+            self.soul_curse_set_publisher_status("publish_blocked", "发布委托暂不可用", wait, text)
+            return "blocked"
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        state["chain_stage"] = "publish"
+        self.soul_curse_set_publisher_status("publish_unknown", "发布委托回执未识别" if text else "发布委托无回执", wait, text)
+        return "unknown"
+
+    def record_soul_curse_accept_response(self, identity, commission_id, text, profile=None):
+        profile = profile or self.soul_curse_assistant_profile() or {}
+        parsed = parse_soul_curse_accept(text)
+        state = self.get_soul_curse_assist_state(identity)
+        state["owner_account"] = profile.get("owner_account", state.get("owner_account", ""))
+        state["target_username"] = _target_username(profile.get("target_username") or state.get("target_username"))
+        state["commission_id"] = str(commission_id or state.get("commission_id") or "")
+        if parsed.get("status") == "success":
+            state["accepted_commission_id"] = state["commission_id"]
+            state["last_accept_time"] = now_str()
+            self.soul_curse_set_assist_status(identity, "accepted", f"已接取委托 {state['commission_id']}", 3, text)
+            return "success"
+        if parsed.get("status") in {"gone", "blocked", "cooldown"}:
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            self.soul_curse_set_assist_status(identity, f"accept_{parsed.get('status')}", f"接取委托 {state['commission_id']} 失败", wait, text)
+            return parsed.get("status")
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        self.soul_curse_set_assist_status(identity, "accept_unknown", "接取委托回执未识别" if text else "接取委托无回执", wait, text)
+        return "unknown"
+
+    def record_soul_curse_action_response(self, identity, action, text, commission_id="", profile=None):
+        profile = profile or self.soul_curse_assistant_profile() or {}
+        parsed = parse_soul_curse_action(text, action)
+        state = self.get_soul_curse_assist_state(identity)
+        commission_id = str(commission_id or state.get("commission_id") or "")
+        state["commission_id"] = commission_id
+        state["owner_account"] = profile.get("owner_account", state.get("owner_account", ""))
+        state["target_username"] = _target_username(profile.get("target_username") or state.get("target_username"))
+        key_map = {
+            "identify": ("last_identify_time", "next_identify_time", "identify_commission_id", "辨认咒纹"),
+            "suppress": ("last_suppress_time", "next_suppress_time", "suppress_commission_id", "借幡镇魂"),
+            "strip": ("last_strip_time", "next_strip_time", "strip_commission_id", "剥离咒源"),
+        }
+        last_key, next_key, id_key, label = key_map[action]
+        now = now_str()
+        if parsed.get("status") == "success":
+            state[last_key] = now
+            state[next_key] = add_seconds_str(now, int(parsed.get("cooldown_seconds") or SOUL_CURSE_CHAIN_SECONDS))
+            state[id_key] = commission_id
+            status = "completed" if action == "strip" else f"{action}_success"
+            self.soul_curse_set_assist_status(identity, status, f"{label}完成，委托 {commission_id}", 3, text)
+            return "success"
+        if parsed.get("status") in {"cooldown", "source_not_ready", "no_contract", "blocked"}:
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state[next_key] = add_seconds_str(now, wait)
+            self.soul_curse_set_assist_status(identity, f"{action}_{parsed.get('status')}", f"{label}暂不可用，{wait}秒后再试", wait, text)
+            return parsed.get("status")
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        self.soul_curse_set_assist_status(identity, f"{action}_unknown", f"{label}回执未识别" if text else f"{label}无回执", wait, text)
+        return "unknown"
+
+    async def soul_curse_maybe_visit(self, profile):
+        state = self.get_soul_curse_state()
+        if state.get("last_visit_date") == _today():
+            state["next_visit_time"] = _next_visit_time(done_today=True, minute=profile.get("visit_minute", 0))
+            self.save_state()
+            return seconds_until(state["next_visit_time"])
+        if self.soul_curse_command_paused(SOUL_CURSE_VISIT_COMMAND, "主魂"):
+            return 300
+        next_visit = state.get("next_visit_time", "")
+        if next_visit and is_future(next_visit):
+            return seconds_until(next_visit)
+        now = datetime.now()
+        target = now.replace(
+            hour=SOUL_CURSE_VISIT_HOUR,
+            minute=int(profile.get("visit_minute") or 0),
+            second=0,
+            microsecond=0,
+        )
+        if now < target:
+            state["next_visit_time"] = dt_to_str(target)
+            self.save_state()
+            return seconds_until(state["next_visit_time"])
+        async with self.soul_curse_atomic_task("SoulCurseVisit"):
+            resp = await self.soul_curse_send_main(SOUL_CURSE_VISIT_COMMAND, timeout=60)
+            self.record_soul_curse_visit_response(self.soul_curse_response_text(resp), profile)
+        return 5
+
+    async def soul_curse_run_publisher_chain(self, profile):
+        state = self.get_soul_curse_state()
+        if is_future(state.get("next_action_at", "")):
+            return seconds_until(state.get("next_action_at", ""))
+        if state.get("chain_stage", "") in {"", "done"} and is_future(state.get("next_chain_time", "")):
+            return seconds_until(state.get("next_chain_time", ""))
+        if self.identity_pause_seconds("主魂") > 0:
+            return 300
+
+        async with self.soul_curse_atomic_task("SoulCurseChain"):
+            stage = state.get("chain_stage") or "infer"
+            if stage == "infer":
+                if is_future(state.get("next_infer_time", "")):
+                    return seconds_until(state.get("next_infer_time", ""))
+                if self.soul_curse_command_paused(SOUL_CURSE_INFER_COMMAND, "主魂"):
+                    return 300
+                resp = await self.soul_curse_send_main(SOUL_CURSE_INFER_COMMAND, timeout=70)
+                if self.record_soul_curse_infer_response(self.soul_curse_response_text(resp)) != "success":
+                    return 5
+                await asyncio.sleep(3)
+                state = self.get_soul_curse_state()
+
+            if state.get("chain_stage") == "protect":
+                if is_future(state.get("next_protect_time", "")):
+                    return seconds_until(state.get("next_protect_time", ""))
+                if self.soul_curse_command_paused(SOUL_CURSE_PROTECT_COMMAND, "主魂"):
+                    return 300
+                resp = await self.soul_curse_send_main(SOUL_CURSE_PROTECT_COMMAND, timeout=70)
+                if self.record_soul_curse_protect_response(self.soul_curse_response_text(resp)) != "success":
+                    return 5
+                await asyncio.sleep(3)
+                state = self.get_soul_curse_state()
+
+            if state.get("chain_stage") == "publish":
+                if self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, "主魂"):
+                    return 300
+                resp = await self.soul_curse_send_main(SOUL_CURSE_PUBLISH_COMMAND, timeout=70)
+                if self.record_soul_curse_publish_response(self.soul_curse_response_text(resp), profile) != "success":
+                    return 5
+                state = self.get_soul_curse_state()
+                if not profile.get("shared") and state.get("commission_id"):
+                    commission = {
+                        "owner_account": profile.get("owner_account"),
+                        "commission_id": state.get("commission_id"),
+                        "target_username": profile.get("target_username"),
+                        "assistant_identity": profile.get("assistant_identity") or YINLUO_IDENTITY,
+                    }
+                    await self.soul_curse_process_assist_commission(commission, source="local")
+        return 5
+
+    async def soul_curse_process_assist_commission(self, commission, source="shared"):
+        if not isinstance(commission, dict):
+            return 600
+        identity = commission.get("assistant_identity") or YINLUO_IDENTITY
+        if identity not in getattr(self, "avatars", []):
+            return 3600
+        commission_id = str(commission.get("commission_id") or "").strip()
+        if not commission_id:
+            return 600
+        profile = {
+            "owner_account": commission.get("owner_account") or "",
+            "target_username": _target_username(commission.get("target_username") or ""),
+            "assistant_identity": identity,
+        }
+        state = self.get_soul_curse_assist_state(identity)
+        if is_future(state.get("next_action_at", "")):
+            return seconds_until(state.get("next_action_at", ""))
+        if self.identity_pause_seconds(identity) > 0:
+            return 300
+
+        async with self.soul_curse_atomic_task(f"SoulCurseAssist-{identity}"):
+            state = self.get_soul_curse_assist_state(identity)
+            state["owner_account"] = profile.get("owner_account")
+            state["target_username"] = profile.get("target_username")
+            state["commission_id"] = commission_id
+            self.save_state()
+
+            if state.get("accepted_commission_id") != commission_id:
+                command = f"{SOUL_CURSE_ACCEPT_COMMAND} {commission_id}"
+                if self.soul_curse_command_paused(command, identity):
+                    return 300
+                resp = await self.soul_curse_send_identity(identity, command, timeout=70)
+                result = self.record_soul_curse_accept_response(identity, commission_id, self.soul_curse_response_text(resp), profile)
+                if result != "success":
+                    self.soul_curse_update_shared_from_assist(profile, result)
+                    return 5
+                self.soul_curse_update_shared_from_assist(profile, "accepted")
+                await asyncio.sleep(3)
+
+            target = _target_username(profile.get("target_username"))
+            for action, base_command, id_key, next_key in (
+                ("identify", SOUL_CURSE_IDENTIFY_COMMAND, "identify_commission_id", "next_identify_time"),
+                ("suppress", SOUL_CURSE_SUPPRESS_COMMAND, "suppress_commission_id", "next_suppress_time"),
+                ("strip", SOUL_CURSE_STRIP_COMMAND, "strip_commission_id", "next_strip_time"),
+            ):
+                state = self.get_soul_curse_assist_state(identity)
+                if state.get(id_key) == commission_id:
+                    continue
+                if is_future(state.get(next_key, "")):
+                    return seconds_until(state.get(next_key, ""))
+                command = f"{base_command} {target}"
+                if self.soul_curse_command_paused(command, identity):
+                    return 300
+                resp = await self.soul_curse_send_identity(identity, command, timeout=80)
+                result = self.record_soul_curse_action_response(identity, action, self.soul_curse_response_text(resp), commission_id, profile)
+                self.soul_curse_update_shared_from_assist(profile, "completed" if action == "strip" and result == "success" else result)
+                if result != "success":
+                    return 5
+                await asyncio.sleep(3)
+        return 5
+
+    def soul_curse_update_shared_from_assist(self, profile, status):
+        owner = profile.get("owner_account")
+        if owner != "xiaohao":
+            return
+        identity = profile.get("assistant_identity") or YINLUO_IDENTITY
+        state = self.get_soul_curse_assist_state(identity)
+        upsert_soul_curse_shared_commission(owner, {
+            "commission_id": state.get("commission_id", ""),
+            "target_username": state.get("target_username", ""),
+            "assistant_account": self.soul_curse_account_key(),
+            "assistant_identity": identity,
+            "status": status,
+            "last_detail": state.get("last_detail", ""),
+            "next_action_at": state.get("next_action_at", ""),
+        })
+
+    def soul_curse_sync_shared_publisher_status(self, profile):
+        if not profile.get("shared"):
+            return
+        owner = profile.get("owner_account")
+        item = read_soul_curse_shared_state().get(owner, {})
+        if not isinstance(item, dict):
+            return
+        state = self.get_soul_curse_state()
+        if not item.get("commission_id") or str(item.get("commission_id")) != str(state.get("commission_id") or ""):
+            return
+        status = str(item.get("status") or "")
+        if not status or status == state.get("commission_status"):
+            return
+        state["commission_status"] = status
+        state["commission_updated_at"] = item.get("updated_at") or now_str()
+        if status in {"gone", "no_contract", "blocked"}:
+            retry_at = add_seconds_str(now_str(), SOUL_CURSE_UNKNOWN_RETRY_SECONDS)
+            state["next_chain_time"] = retry_at
+            state["next_action_at"] = retry_at
+            state["chain_stage"] = "publish"
+        self.save_state()
+
+    async def soul_curse_shared_assist_tick(self, profile):
+        owner = profile.get("owner_account")
+        item = read_soul_curse_shared_state().get(owner, {})
+        if not isinstance(item, dict) or not item.get("commission_id"):
+            return 600
+        status = str(item.get("status") or "")
+        if status in {"completed", "gone", "blocked", "no_contract"}:
+            return 600
+        if item.get("assistant_account") and item.get("assistant_account") != self.soul_curse_account_key():
+            return 600
+        item.setdefault("owner_account", owner)
+        item.setdefault("target_username", profile.get("target_username"))
+        item.setdefault("assistant_identity", profile.get("assistant_identity") or YINLUO_IDENTITY)
+        return await self.soul_curse_process_assist_commission(item, source="shared")
+
+    async def soul_curse_tick(self):
+        waits = [600]
+        assistant = self.soul_curse_assistant_profile()
+        publisher = self.soul_curse_publisher_profile()
+
+        if assistant and self.soul_curse_account_key() == "sub":
+            wait = await self.soul_curse_shared_assist_tick(assistant)
+            if wait <= 10:
+                return max(5, wait)
+            waits.append(wait)
+
+        if publisher:
+            self.soul_curse_sync_shared_publisher_status(publisher)
+            visit_wait = await self.soul_curse_maybe_visit(publisher)
+            if visit_wait <= 10:
+                return max(5, visit_wait)
+            waits.append(visit_wait)
+
+            state = self.get_soul_curse_state()
+            if not publisher.get("shared") and state.get("commission_id") and state.get("commission_status") in {"success", "existing"}:
+                assist_state = self.get_soul_curse_assist_state(publisher.get("assistant_identity") or YINLUO_IDENTITY)
+                if assist_state.get("strip_commission_id") != state.get("commission_id"):
+                    wait = await self.soul_curse_process_assist_commission({
+                        "owner_account": publisher.get("owner_account"),
+                        "commission_id": state.get("commission_id"),
+                        "target_username": publisher.get("target_username"),
+                        "assistant_identity": publisher.get("assistant_identity") or YINLUO_IDENTITY,
+                    }, source="local")
+                    if wait <= 10:
+                        return max(5, wait)
+                    waits.append(wait)
+
+            chain_wait = await self.soul_curse_run_publisher_chain(publisher)
+            if chain_wait <= 10:
+                return max(5, chain_wait)
+            waits.append(chain_wait)
+
+        return max(30, min(int(min(waits or [600])), 3600))
+
+    async def run_soul_curse_loop(self, initial_delay=0, sleep_func=None):
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+        log = self.soul_curse_logger()
+        while getattr(self, "is_running", True):
+            try:
+                await self.pause_event.wait()
+                wait_seconds = await self.soul_curse_tick()
+                log.info(f"Soul curse loop sleeping {int(wait_seconds)}s.")
+                if hasattr(self, "common_scheduler_sleep_seconds"):
+                    sleep_seconds = self.common_scheduler_sleep_seconds(
+                        wait_seconds + random.randint(5, 30),
+                        minimum=30,
+                        sleep_func=sleep_func,
+                    )
+                else:
+                    sleep_seconds = max(30, min(int(wait_seconds), 600))
+                await asyncio.sleep(sleep_seconds)
+            except Exception as exc:
+                log.error(f"Soul curse loop error: {exc}", exc_info=True)
+                await asyncio.sleep(SOUL_CURSE_RETRY_SECONDS)
+
+    def record_soul_curse_manual_response(self, command, text, identity="主魂"):
+        cmd = str(command or "").strip()
+        identity = str(identity or "主魂").strip() or "主魂"
+        publisher = self.soul_curse_publisher_profile()
+        assistant = self.soul_curse_assistant_profile()
+        if cmd == SOUL_CURSE_VISIT_COMMAND and identity == "主魂" and publisher:
+            return self.record_soul_curse_visit_response(text, publisher)
+        if cmd == SOUL_CURSE_INFER_COMMAND and identity == "主魂" and publisher:
+            return self.record_soul_curse_infer_response(text) in {"success", "cooldown", "blocked"}
+        if cmd == SOUL_CURSE_PROTECT_COMMAND and identity == "主魂" and publisher:
+            return self.record_soul_curse_protect_response(text) in {"success", "cooldown", "blocked"}
+        if cmd.startswith(".发布解咒委托") and identity == "主魂" and publisher:
+            return self.record_soul_curse_publish_response(text, publisher) in {"success", "cooldown", "blocked"}
+
+        if identity == YINLUO_IDENTITY and assistant:
+            commission_id = ""
+            match = re.search(r"\.接取解咒委托\s+(\d+)", cmd)
+            if match:
+                commission_id = match.group(1)
+                return self.record_soul_curse_accept_response(identity, commission_id, text, assistant) in {"success", "gone", "blocked", "cooldown"}
+            state = self.get_soul_curse_assist_state(identity)
+            commission_id = state.get("commission_id", "")
+            action = ""
+            if cmd.startswith(SOUL_CURSE_IDENTIFY_COMMAND):
+                action = "identify"
+            elif cmd.startswith(SOUL_CURSE_SUPPRESS_COMMAND):
+                action = "suppress"
+            elif cmd.startswith(SOUL_CURSE_STRIP_COMMAND):
+                action = "strip"
+            if action:
+                return self.record_soul_curse_action_response(identity, action, text, commission_id, assistant) in {
+                    "success", "cooldown", "source_not_ready", "no_contract", "blocked",
+                }
+        return False

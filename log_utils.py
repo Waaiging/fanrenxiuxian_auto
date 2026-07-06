@@ -107,6 +107,10 @@ PARAM_COMMAND_ROOTS = {
     ".灵兽休息",
     ".囚禁魂魄",
     ".安抚幡灵",
+    ".接取解咒委托",
+    ".辨认咒纹",
+    ".借幡镇魂",
+    ".剥离咒源",
 }
 _COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
 
@@ -4052,6 +4056,18 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     elif cmd == ".问道":
         if hasattr(actor, "record_ask_dao_response"):
             processed = bool(actor.record_ask_dao_response(text, source="manual .问道"))
+    elif (
+        cmd == ".探望南宫婉"
+        or cmd == ".推演封魂咒"
+        or cmd == ".护持神魂"
+        or cmd.startswith(".发布解咒委托")
+        or cmd.startswith(".接取解咒委托")
+        or cmd.startswith(".辨认咒纹")
+        or cmd.startswith(".借幡镇魂")
+        or cmd.startswith(".剥离咒源")
+    ):
+        if hasattr(actor, "record_soul_curse_manual_response"):
+            processed = bool(actor.record_soul_curse_manual_response(cmd, text, identity=identity))
     elif cmd == ".我的侍妾":
         processed = _manual_record_concubine_status_reply(actor, text, identity)
     elif cmd == ".入梦寻图":
