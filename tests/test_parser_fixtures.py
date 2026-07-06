@@ -9617,7 +9617,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["avatars"]["缘生子"]["yuanying_out_active"])
         self.assertGreater(common_seconds_until(actor.state["avatars"]["缘生子"]["next_rift_search_time"]), 11 * 3600)
 
-    def test_manual_star_reply_uses_avatar_identity(self):
+    def test_manual_miniapp_star_reply_is_ignored(self):
         actor = SubCultivator.__new__(SubCultivator)
         actor.avatars = ["厚土"]
         actor.avatar_nicknames = {"厚土": ""}
@@ -9638,8 +9638,8 @@ class ParserFixtureTests(unittest.TestCase):
             "你成功安抚了引星盘中的狂暴星力。",
         ))
 
-        self.assertTrue(processed)
-        self.assertTrue(actor.state["avatars"]["厚土"]["last_star_appease_time"])
+        self.assertFalse(processed)
+        self.assertEqual(actor.state["avatars"]["厚土"]["last_star_appease_time"], "")
         self.assertNotIn("last_calm_time", actor.state)
 
     def test_xiaohao_avatar_yuanying_and_rift_do_not_overwrite_main_state(self):
@@ -10150,6 +10150,31 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn(".观星", commands)
         self.assertNotIn(".改换星移 @TitanCreeper", commands)
         self.assertFalse(any(str(command or "").startswith(".牵引星辰") for command in commands))
+
+    def test_dashboard_hides_miniapp_star_palace_commands(self):
+        miniapp_commands = {".观星台", ".安抚星辰", ".收集精华"}
+        cases = [
+            ("main", "素缘子"),
+            ("sub", "厚土"),
+            ("sub", "寻真子"),
+            ("xiaohao", "素心子"),
+        ]
+
+        for account, identity in cases:
+            with self.subTest(account=account, identity=identity):
+                panels = build_command_panels(account, {"avatars": {identity: {}}})
+                panel = next(row for row in panels if row.get("identity") == identity)
+                commands = {row.get("command") for row in panel.get("commands", [])}
+
+                self.assertTrue(miniapp_commands.isdisjoint(commands))
+                self.assertFalse(any(str(command or "").startswith(".牵引星辰") for command in commands))
+
+    def test_miniapp_star_palace_commands_disabled_by_local_policy(self):
+        actor = SimpleNamespace(current_identity="厚土")
+        for command in (".观星台", ".安抚星辰", ".收集精华", ".牵引星辰 天雷星"):
+            with self.subTest(command=command):
+                self.assertFalse(log_utils.command_send_precheck(actor, command))
+                self.assertFalse(log_utils.command_send_allowed(actor, command))
 
     def test_dashboard_xiaohao_hunt_stopped_is_not_actionable_due(self):
         panels = build_command_panels("xiaohao", {

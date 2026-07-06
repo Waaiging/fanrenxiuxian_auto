@@ -166,8 +166,8 @@ STAR_ATTRACTION_COOLDOWN_SECONDS = 36 * 3600       # 牵引冷却 36 小时（�
 STAR_PRE_APPEASE_LEAD_SECONDS = 60                 # 收集前 1 分钟安抚
 STAR_STATUS_RETRY_SECONDS = 10 * 60                # 观星台异常时 10 分钟后复查
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60          # 强行出关后仍修为不足，1 小时后重试
-STAR_ATTRACTION_AVATARS = {"厚土", "寻真子"}  # 副号参与牵引循环的星宫化身
-AVATAR_FORMATION_AVATARS = STAR_ATTRACTION_AVATARS  # 已转入阴罗宗的缘生子不再启阵/助阵
+STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 miniapp，脚本不再发送
+AVATAR_FORMATION_AVATARS = {"厚土", "寻真子"}  # 阵法仍保留；已转入阴罗宗的缘生子不再启阵/助阵
 
 # -- 星辰安抚 --
 STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机器人每 6 小时可安抚一次）

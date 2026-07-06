@@ -1311,13 +1311,8 @@ def xiaohao_star_pull_command(state):
 
 
 def xiaohao_star_attraction_commands(state):
-    detail = state.get("star_observatory_summary", "")
-    return [
-        time_command(state, "next_star_check_time", ".观星台", "观星台", waiting="待对账", ready="需对账", missing="需初始化", detail=detail, group="星辰"),
-        time_command(state, "next_star_appease_time", ".安抚星辰", "安抚星辰", waiting="待安抚", ready="可安抚", missing="未排程", detail="到期前1分钟", group="星辰"),
-        time_command(state, "next_star_collect_time", ".收集精华", "收集精华", waiting="凝聚中", ready="可收集", missing="未排程", detail=detail, group="星辰"),
-        xiaohao_star_pull_command(state),
-    ]
+    # 观星台/安抚/收集/牵引已迁入 miniapp，Dashboard 不再展示聊天指令入口。
+    return []
 
 
 def taiyi_guide_command(state):

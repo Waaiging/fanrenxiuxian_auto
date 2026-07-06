@@ -41,7 +41,14 @@ LOG_RETENTION_HOURS = 7 * 24               # 日志保留 7 天
 COMMAND_AUTO_DELETE_SECONDS = 120           # 指令发送后 2 分钟自动删除
 CLEAR_HISTORY_OLDER_THAN_MINUTES = 35       # 清屏：只删除 35 分钟以前的点号指令
 MAX_COMMAND_RETRIES = 3                     # 最大重试次数
-DISABLED_AUTO_COMMANDS = {".召回侍妾"}      # 禁用的自动指令（防止误操作）
+DISABLED_AUTO_COMMANDS = {
+    ".召回侍妾",
+    # 星宫观星台相关入口已迁入 miniapp，聊天指令不再生效，自动脚本一律不发送。
+    ".观星台",
+    ".安抚星辰",
+    ".收集精华",
+    ".牵引星辰",
+}                                           # 禁用的自动指令（防止误操作）
 COMMAND_CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command_controls.json")
 MESSAGE_EVENTS_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "message_events.sqlite3")
 USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
@@ -1760,6 +1767,13 @@ def command_root(command):
     return text.split()[0]
 
 
+def disabled_by_local_policy(command):
+    """Return True when an auto command is disabled regardless of dashboard state."""
+    key = str(command or "").strip()
+    root = command_root(key)
+    return bool(key and (key in DISABLED_AUTO_COMMANDS or root in DISABLED_AUTO_COMMANDS))
+
+
 def command_control_key(command):
     """标准化 dashboard 指令开关 key。"""
     text = re.sub(r"\s+", " ", str(command or "").strip())
@@ -1875,7 +1889,7 @@ def command_send_precheck(actor, command, logger=None, identity=None,
     key = str(command or "").strip()
     if not key:
         return True
-    if key in DISABLED_AUTO_COMMANDS:
+    if disabled_by_local_policy(key):
         if logger:
             logger.info(f"Command [{key}] is disabled by local policy; skipping pre-switch.")
         remember_command_guard_block(actor, key, 0, reason="disabled")
@@ -1985,7 +1999,7 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
     key = str(command or "").strip()
     if not key:
         return True
-    if key in DISABLED_AUTO_COMMANDS:
+    if disabled_by_local_policy(key):
         if logger:
             logger.info(f"Command [{key}] is disabled by local policy; skipping send.")
         remember_command_guard_block(actor, key, 0, reason="disabled")
