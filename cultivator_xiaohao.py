@@ -3144,6 +3144,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         )
         return True
 
+    def wake_overdue_beast_border_patrol(self, reason=""):
+        """巡边冷却已过但被重试时间压住时，清掉重试并让主循环立刻尝试。"""
+        if str(self.state.get("beast_border_patrol_name") or "").strip():
+            return False
+        last_patrol = self.state.get("last_beast_border_patrol_time", "")
+        if last_patrol and is_future(add_seconds_str(last_patrol, BEAST_BORDER_PATROL_CD_SECONDS)):
+            return False
+        next_patrol = self.state.get("next_beast_border_patrol_time", "")
+        if not next_patrol or not is_future(next_patrol):
+            return False
+        log.info(
+            f"Beast border patrol wakeup: cooldown elapsed; clearing retry {next_patrol}"
+            f"{f' after {reason}' if reason else ''}."
+        )
+        self.state["next_beast_border_patrol_time"] = ""
+        return True
+
     def normalize_beast_border_patrol_mode(self, mode=""):
         mode = str(mode or "").strip()
         return mode if mode in BEAST_BORDER_PATROL_MODES else BEAST_BORDER_PATROL_DEFAULT_MODE
@@ -3780,6 +3797,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             self.clear_pasture_pending()
             self.state["next_pasture_time"] = add_seconds_str(now_str(), PASTURE_RETURN_DELAY_SECONDS)
         else: self.state["next_pasture_time"] = add_seconds_str(now_str(), 600)
+        self.wake_overdue_beast_border_patrol("pasture return")
         self.save_state()
         self.beast_wakeup.set()
         return True
@@ -4643,6 +4661,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             self.clear_pasture_pending()
             self.state["last_pasture_return_time"] = now_str()
             self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+            self.wake_overdue_beast_border_patrol(f"pasture return roster sync {source or 'reply'}")
             self.record_beast_roster_response_metadata(text, source, "pasture_return")
             self.save_state()
             log.info(f"Beast roster sync skipped by pasture-return settlement ({source or 'unknown'}); cache preserved.")
@@ -6760,7 +6779,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
     async def run_beast_action_timer(self):
         """
         灵兽行动主循环。
-        按优先级执行：探渊(6h) → 偷菜(4h) → 一键放养(4h) → 灵兽互动(90min) → 灵兽巡边(75min) → 灵兽巡游(120min)。
+        按优先级执行：探渊(6h) → 偷菜(4h) → 灵兽巡边(75min) → 一键放养(4h) → 灵兽互动(90min) → 灵兽巡游(120min)。
         探渊首选六翼；偷菜首选麻花藤；首选灵兽受伤、忙碌或体力不足时按候选补位。
         六翼体力低于50时仍优先放养保护，不参与偷菜/巡边/巡游/探渊。
         """
@@ -6832,7 +6851,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 cache = list(self.state.get("beasts_cache", []))
                 if due_any:
                     focus_low = self.focus_beast_low_stamina(cache)
-                    if focus_low and need_pasture:
+                    if focus_low and need_pasture and not need_patrol:
                         log.info(f"Beast focus protection: {BEAST_FOCUS_NAME} stamina below {BEAST_FOCUS_PROTECT_STAMINA}; pasture first.")
                         await self.execute_focus_low_stamina_pasture(cache)
                         need_pasture = False
@@ -6849,6 +6868,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             log.warning("Beast action due but cache is empty; scheduling abyss/steal retry.")
                             if need_abyss: await self.execute_abyss_with_fallback()
                             if need_steal: self.set_next_steal_not_before(add_seconds_str(now_str(), 1800)); self.save_state()
+                    if need_patrol:
+                        async with AtomicTaskContext(self, "BeastBorderPatrol"):
+                            log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
+                            await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
+                            self.save_state()
+                        await asyncio.sleep(3)
                     if need_pasture:
                         focus_after_abyss_attempt = self.focus_pasture_after_abyss_due()
                         best_name_for_pasture = self.state.get("best_beast_name", "")
@@ -6883,12 +6908,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             log.info(f"Beast interaction due: sending {interaction_command} (status={focus_status or '未知'}).")
                             i_resp = await self.send_and_wait_feedback(interaction_command, timeout=60, max_retries=1)
                             self.record_beast_interaction_response(i_resp, interaction_command)
-                            self.save_state()
-                        await asyncio.sleep(3)
-                    if need_patrol:
-                        async with AtomicTaskContext(self, "BeastBorderPatrol"):
-                            log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
-                            await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
                             self.save_state()
                         await asyncio.sleep(3)
                     if need_cruise:

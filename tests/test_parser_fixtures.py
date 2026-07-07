@@ -6945,6 +6945,109 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
 
+    def test_pasture_return_wakes_overdue_border_patrol_retry(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S"),
+            "pasture_pending_count": 1,
+            "pasture_returned_count": 0,
+            "pasture_pending_since": (datetime.now() - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S"),
+            "beasts_cache": [
+                {"full_name": "谛听", "species": "二阶噬魂兽", "status": "放养中", "power": 304, "exp": 2166, "stamina": 61},
+            ],
+        }
+        actor._pasture_return_seen_counts = {}
+        actor.save_state = lambda: None
+        actor.is_pasture_return_message = lambda text: True
+        actor.text_targets_self = lambda msg, text: True
+        actor.parse_pasture_return_count = lambda text: 1
+        actor.mark_pastured_beasts_returned = lambda text: 1
+        actor.mark_all_pastured_beasts_returned = lambda: 0
+
+        class DummyEvent:
+            message = SimpleNamespace(text="谛听放养归来。", id=9901)
+
+            async def get_sender(self):
+                return None
+
+        async def run_case():
+            actor.beast_wakeup = asyncio.Event()
+            return await actor.handle_pasture_return_event(DummyEvent())
+
+        self.assertTrue(asyncio.run(run_case()))
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
+
+    def test_beast_action_timer_prioritizes_border_patrol_before_pasture(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        future = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "last_abyss_time": now_str(),
+            "next_abyss_time": future,
+            "last_steal_time": now_str(),
+            "next_steal_time": future,
+            "last_pasture_time": (datetime.now() - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_pasture_time": (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "last_beast_interaction_time": now_str(),
+            "next_beast_interaction_time": future,
+            "last_beast_cruise_time": now_str(),
+            "next_beast_cruise_time": future,
+            "beast_border_patrol_name": "",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(minutes=80)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": "",
+            "beasts_cache": [
+                {"full_name": "谛听", "species": "二阶噬魂兽", "status": "休息中", "power": 304, "exp": 2166, "stamina": 61},
+            ],
+        }
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽巡边 谛听 袭营":
+                return "灵兽【谛听】领命前往边境巡行，执行【袭营】。"
+            if command == ".一键放养":
+                return "灵兽放养失败：没有休息中灵兽。"
+            return ""
+
+        async def false_pause(*args, **kwargs):
+            return False
+
+        async def focus_ready():
+            return True
+
+        async def stop_after_sleep(sleep_for):
+            actor.is_running = False
+
+        async def run_once():
+            actor.startup_done = asyncio.Event()
+            actor.startup_done.set()
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.beast_lock = asyncio.Lock()
+            actor.beast_wakeup = asyncio.Event()
+            actor.is_running = True
+            actor.sleep_if_main_soul_paused = false_pause
+            actor.send_and_wait_feedback = fake_send
+            actor.ensure_focus_beast_ready_for_pasture = focus_ready
+            actor.sleep_beast_action = stop_after_sleep
+            await actor.run_beast_action_timer()
+
+        old_sleep = cultivator_xiaohao.asyncio.sleep
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        cultivator_xiaohao.asyncio.sleep = fake_sleep
+        try:
+            asyncio.run(run_once())
+        finally:
+            cultivator_xiaohao.asyncio.sleep = old_sleep
+
+        self.assertGreaterEqual(len(sent), 1)
+        self.assertEqual(sent[0], ".灵兽巡边 谛听 袭营")
+
     def test_pastured_beast_defer_does_not_delay_border_patrol(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         next_patrol = (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
