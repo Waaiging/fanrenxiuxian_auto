@@ -319,14 +319,49 @@ class YinluoMixin:
             "next_summon_shadow_time",
         ):
             value = state.get(key, "")
-            if value:
-                waits.append(seconds_until(value) if is_future(value) else 0)
+            if value and is_future(value):
+                waits.append(seconds_until(value))
         for slot in (state.get("slots") or {}).values():
             due_at = slot.get("due_at") if isinstance(slot, dict) else ""
-            if due_at:
-                waits.append(seconds_until(due_at) if is_future(due_at) else 0)
+            if due_at and is_future(due_at):
+                waits.append(seconds_until(due_at))
         waits = [w for w in waits if w is not None and w >= 0]
         return min(waits) if waits else default_seconds
+
+    def yinluo_refining_slots_due(self, identity):
+        slots = self.get_yinluo_state(identity).get("slots") or {}
+        due = []
+        for slot, item in slots.items():
+            if not isinstance(item, dict) or item.get("status") != "炼化中":
+                continue
+            due_at = item.get("due_at") or ""
+            if due_at and not is_future(due_at):
+                due.append(int(slot))
+        return sorted(due)
+
+    def yinluo_schedule_next_action(self, identity):
+        state = self.get_yinluo_state(identity)
+        candidates = []
+        for key in (
+            "next_daily_sacrifice_time",
+            "next_blood_wash_time",
+            "next_summon_shadow_time",
+        ):
+            value = state.get(key, "")
+            if value and is_future(value):
+                candidates.append((seconds_until(value), value))
+        for slot in (state.get("slots") or {}).values():
+            if not isinstance(slot, dict) or slot.get("status") != "炼化中":
+                continue
+            due_at = slot.get("due_at") or ""
+            if due_at and is_future(due_at):
+                candidates.append((seconds_until(due_at), due_at))
+
+        next_action = min(candidates, key=lambda item: item[0])[1] if candidates else ""
+        if state.get("next_action_at", "") != next_action:
+            state["next_action_at"] = next_action
+            self.save_state()
+        return seconds_until(next_action) if next_action and is_future(next_action) else None
 
     def yinluo_impending_wait(self, identity):
         try:
@@ -607,7 +642,7 @@ class YinluoMixin:
             return 60
 
         impending = self.yinluo_impending_wait(identity)
-        if 0 <= impending <= YINLUO_IMPENDING_GUARD_SECONDS:
+        if 0 < impending <= YINLUO_IMPENDING_GUARD_SECONDS:
             wait = max(10, min(int(impending) + 10, 120))
             self.yinluo_set_status(identity, "yielding", f"让路给 {impending:.0f}秒内到期的其他指令", wait)
             return wait
@@ -623,6 +658,12 @@ class YinluoMixin:
                 state = self.get_yinluo_state(identity)
                 state["imprison_sync_pending"] = False
                 self.save_state()
+            return 5
+
+        due_slots = self.yinluo_refining_slots_due(identity)
+        if due_slots:
+            self.yinluo_set_status(identity, "sync_due_slot", f"{due_slots[0]}号槽炼化到点，重新同步阴罗幡")
+            await self.yinluo_sync_banner(identity)
             return 5
 
         if self.yinluo_completed_slots(identity):
@@ -650,7 +691,9 @@ class YinluoMixin:
             await self.yinluo_blood_wash(identity)
             return 5
 
-        return max(30, min(int(self.yinluo_wait_from_state(identity, YINLUO_SYNC_SECONDS)), 3600))
+        scheduled_wait = self.yinluo_schedule_next_action(identity)
+        wait = scheduled_wait if scheduled_wait is not None else self.yinluo_wait_from_state(identity, YINLUO_SYNC_SECONDS)
+        return max(30, min(int(wait), 3600))
 
     async def run_yinluo_loop(self, identity=YINLUO_IDENTITY, initial_delay=0):
         await self.startup_done.wait()

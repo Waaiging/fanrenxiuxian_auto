@@ -4110,6 +4110,128 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.sent, [])
         self.assertGreaterEqual(wait, 3000)
 
+    def test_yinluo_impending_zero_does_not_starve_due_action(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_daily_sacrifice_date": "2026-01-01",
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": add_seconds_str(now_str(), 3600),
+                    "reserves": {},
+                    "slots": {},
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return 0
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                if command == ".每日献祭":
+                    return DummyMessage(701, text="煞气池增加了 **500** 点。")
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        self.assertEqual(actor.sent, [".每日献祭"])
+        self.assertEqual(actor.get_yinluo_state("缘生子")["last_status"], "sacrificed")
+
+    def test_yinluo_expired_refining_slot_syncs_banner(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": add_seconds_str(now_str(), 3600),
+                    "reserves": {},
+                    "slots": {
+                        "1": {
+                            "status": "炼化中",
+                            "soul": YINLUO_SOUL,
+                            "remaining_seconds": 0,
+                            "remaining_text": "",
+                            "due_at": add_seconds_str(now_str(), -60),
+                        }
+                    },
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                if command == YINLUO_MASTER_COMMAND:
+                    return DummyMessage(
+                        702,
+                        text=(
+                            "**【缘生子的阴罗幡】**\n\n"
+                            "**煞气池**: 1800 / 25000 (7%)\n"
+                            "**幡魂总炼化**: 2 缕\n\n"
+                            "**魂魄储备**:\n"
+                            " - 凶兽戾魄: 0 缕\n\n"
+                            "**炼化槽:**\n"
+                            "**1号槽**: [精华已成] - 凶兽戾魄\n"
+                        ),
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        self.assertEqual(actor.sent, [YINLUO_MASTER_COMMAND])
+        self.assertEqual(actor.get_yinluo_state("缘生子")["slots"][1]["status"], "精华已成")
+
+    def test_yinluo_stale_next_action_is_recomputed_to_future_trigger(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_status": "yielding",
+                    "next_action_at": add_seconds_str(now_str(), -300),
+                    "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": add_seconds_str(now_str(), 7200),
+                    "reserves": {},
+                    "slots": {
+                        "1": {
+                            "status": "炼化中",
+                            "soul": YINLUO_SOUL,
+                            "remaining_seconds": 0,
+                            "remaining_text": "",
+                            "due_at": add_seconds_str(now_str(), 1800),
+                        }
+                    },
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        wait = asyncio.run(actor.yinluo_tick("缘生子"))
+        yinluo_state = actor.get_yinluo_state("缘生子")
+
+        self.assertEqual(actor.sent, [])
+        self.assertGreaterEqual(wait, 1700)
+        self.assertLessEqual(wait, 1900)
+        self.assertGreaterEqual(common_seconds_until(yinluo_state["next_action_at"]), 1700)
+        self.assertLessEqual(common_seconds_until(yinluo_state["next_action_at"]), 1900)
+
     def test_yinluo_appease_clears_exhausted_slot_state(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
