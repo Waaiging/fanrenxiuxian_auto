@@ -1721,6 +1721,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            if not await wait_for_bot_activity_before_send(self, message, log):
+                return None
             should_yield = False
             wait_sec_to_sleep = 0
             switched_this_iteration = False
@@ -1783,6 +1785,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             timeout=5 if high_priority_identity_command else 30,
                             max_retries=0 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
+                            skip_bot_activity_wait=True,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         log.info(f"[DEBUG-IDENTITY] [{identity}] switch response: {resp_str[:120]!r}")
@@ -1845,7 +1848,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
 
                 if not should_yield:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] sending cmd: {message!r}")
-                    resp = await self._send_and_wait_feedback_raw(message, timeout=timeout, max_retries=max_retries, **kwargs)
+                    resp = await self._send_and_wait_feedback_raw(
+                        message, timeout=timeout, max_retries=max_retries, skip_bot_activity_wait=True, **kwargs
+                    )
                     resp_preview = (getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else "")[:80]
                     log.info(f"[DEBUG-IDENTITY] [{identity}] cmd response: {resp_preview!r}")
 
@@ -1894,6 +1899,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             while True:
                 should_yield = False
                 wait_sec_to_sleep = 0
+                if not await wait_for_bot_activity_before_send(self, ".切换 主魂", log):
+                    return
                 async with self.avatar_send_lock:
                     if self.should_wait_for_atomic_task():
                         should_yield = True
@@ -1912,7 +1919,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         try:
                             # ⚠️ 必须用 _send_and_wait_feedback_raw，因为外层已持有 avatar_send_lock
                             # 用 send_and_wait_feedback 会再次获取同一把锁 → 死锁
-                            resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=10, max_retries=0)
+                            resp = await self._send_and_wait_feedback_raw(
+                                ".切换 主魂", timeout=10, max_retries=0, skip_bot_activity_wait=True
+                            )
                             resp_str = str(resp) if resp else ""
                             if any(k in resp_str for k in ["成功", "已切换", "主魂", "当前操控"]):
                                 log.info(f"switch_back_to_main: confirmed ({self.current_identity} -> 主魂).")
@@ -1992,6 +2001,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            if not await wait_for_bot_activity_before_send(self, message, log):
+                return None
             should_yield = False
             wait_sec_to_sleep = 0
             switched_this_iteration = False
@@ -2044,7 +2055,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             return None
 
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command)")
-                        switch_resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=30, max_retries=2)
+                        switch_resp = await self._send_and_wait_feedback_raw(
+                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True
+                        )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         
                         if not resp_str and self.apply_switch_guard_backoff(".切换 主魂"):
@@ -2103,6 +2116,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         reply_to=reply_to, return_msg=return_msg, return_response_msg=return_response_msg,
                         delete_after=delete_after,
                         suppress_no_response_alert=suppress_no_response_alert,
+                        skip_bot_activity_wait=True,
                     )
                     # 主魂境界由 maybe_record_avatar_passive_states 统一更新（有归属校验，防污染）
                     return resp
@@ -2110,7 +2124,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             if should_yield:
                 await asyncio.sleep(wait_sec_to_sleep)
 
-    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False):
+    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False, skip_bot_activity_wait=False):
         """内部发送方法（不获取 avatar_send_lock，已被外部调用方持有）"""
         try:
             return await send_and_wait_feedback_common(
@@ -2118,6 +2132,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 reply_to=reply_to, return_msg=return_msg, return_response_msg=return_response_msg,
                 delete_after=delete_after, return_msg_role="sent",
                 suppress_no_response_alert=suppress_no_response_alert,
+                skip_bot_activity_wait=skip_bot_activity_wait,
             )
         except Exception as e:
             log.error(f"_send_and_wait_feedback_raw [{message[:40]}] crashed: {e}")

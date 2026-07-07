@@ -1320,7 +1320,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                                           reply_to=None, return_msg=False,
                                           return_sent=False, delete_after=True,
                                           return_response_msg=False,
-                                          suppress_no_response_alert=False):
+                                          suppress_no_response_alert=False,
+                                          skip_bot_activity_wait=False):
         """内部发送方法（不获取 avatar_send_lock，已被外部调用方持有）"""
         try:
             return await send_and_wait_feedback_common(
@@ -1335,7 +1336,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 delete_after=delete_after,
                 return_response_msg=return_response_msg,
                 return_msg_role="response",
-                suppress_no_response_alert=suppress_no_response_alert
+                suppress_no_response_alert=suppress_no_response_alert,
+                skip_bot_activity_wait=skip_bot_activity_wait,
             )
         except Exception as e:
             log.error(f"_send_and_wait_feedback_raw [{message[:40]}] crashed: {e}")
@@ -1393,6 +1395,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            if not await wait_for_bot_activity_before_send(self, message, log):
+                return None
             should_yield = False
             wait_sec_to_sleep = 0
             switched_this_iteration = False
@@ -1434,7 +1438,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
                     if not should_yield:
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command: {message})")
-                        switch_resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=30, max_retries=2)
+                        switch_resp = await self._send_and_wait_feedback_raw(
+                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True
+                        )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         passively_confirmed = self.current_identity == "主魂"
                         if passively_confirmed:
@@ -1482,6 +1488,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         delete_after=delete_after,
                         return_response_msg=return_response_msg,
                         suppress_no_response_alert=suppress_no_response_alert,
+                        skip_bot_activity_wait=True,
                     )
 
             if should_yield:
@@ -1575,6 +1582,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            if not await wait_for_bot_activity_before_send(self, message, log):
+                return None
             should_yield = False
             wait_sec_to_sleep = 0
             switched_this_iteration = False
@@ -1629,6 +1638,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                             timeout=5 if high_priority_identity_command else 30,
                             max_retries=0 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
+                            skip_bot_activity_wait=True,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         log.info(f"[DEBUG-IDENTITY] [{identity}] switch response: {resp_str[:120]!r}")
@@ -1680,7 +1690,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 if not should_yield:
                     # 等待反馈
                     log.info(f"[DEBUG-IDENTITY] [{identity}] sending cmd: {message!r}")
-                    resp = await self._send_and_wait_feedback_raw(message, timeout=timeout, max_retries=max_retries, **kwargs)
+                    resp = await self._send_and_wait_feedback_raw(
+                        message, timeout=timeout, max_retries=max_retries, skip_bot_activity_wait=True, **kwargs
+                    )
                     resp_preview = (getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else "")[:80]
                     log.info(f"[DEBUG-IDENTITY] [{identity}] cmd response: {resp_preview!r}")
 
@@ -1735,8 +1747,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                     )
                     return
             try:
+                if not await wait_for_bot_activity_before_send(self, ".切换 主魂", log):
+                    return
                 async with self.avatar_send_lock:
-                    resp = await self._send_and_wait_feedback_raw(".切换 主魂", timeout=20, max_retries=0)
+                    resp = await self._send_and_wait_feedback_raw(
+                        ".切换 主魂", timeout=20, max_retries=0, skip_bot_activity_wait=True
+                    )
                     resp_str = str(resp) if resp else ""
                     if any(k in resp_str for k in ["成功", "已切换", "主魂", "当前操控"]):
                         log.info(f"switch_back_to_main: confirmed ({self.current_identity} -> 主魂).")

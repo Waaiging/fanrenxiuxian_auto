@@ -26,6 +26,7 @@ cultivation_stats_cache.json
 command_controls.json
 dashboard_commands.json
 soul_curse_commissions.json
+bot_activity_shared.json
 star_gazing_events.jsonl
 star_gazing_events.lock
 

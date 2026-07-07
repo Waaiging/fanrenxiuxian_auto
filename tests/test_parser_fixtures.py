@@ -5793,6 +5793,7 @@ class ParserFixtureTests(unittest.TestCase):
             actor.pause_event = asyncio.Event()
             actor.pause_event.set()
             actor.active_atomic_task = None
+            actor._last_game_bot_activity_ts = time.monotonic()
             actor.dashboard_command_paused = lambda *args, **kwargs: False
             actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
             actor.check_and_record_switch_ban = lambda *args, **kwargs: False
@@ -7821,6 +7822,43 @@ class ParserFixtureTests(unittest.TestCase):
             self.assertFalse(asyncio.run(
                 log_utils.wait_for_bot_activity_before_send(actor, ".切换 缘生子")
             ))
+
+    def test_wait_for_bot_activity_uses_shared_cross_script_status(self):
+        class FakeClient:
+            def is_connected(self):
+                return True
+
+            async def get_messages(self, chat_id, limit=40):
+                return []
+
+        actor = SimpleNamespace(
+            client=FakeClient(),
+            target_chat_id=-100,
+            is_running=True,
+            state_file="state_main.json",
+            _last_game_bot_activity_ts=None,
+            _bot_unhealthy_until=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            with open(shared_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "accounts": {
+                        "sub": {
+                            "wall": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "wall_epoch": time.time(),
+                            "bot_username": "hantianz_bot",
+                        }
+                    }
+                }, f, ensure_ascii=False)
+
+            with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                self.assertTrue(asyncio.run(
+                    log_utils.wait_for_bot_activity_before_send(actor, ".野外历练")
+                ))
+
+        self.assertIsNotNone(actor._last_game_bot_activity_ts)
 
     def test_meditation_feedback_rejects_other_identity_summary_for_main(self):
         actor = Cultivator.__new__(Cultivator)
@@ -9973,6 +10011,50 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(block.get("reason"), "dashboard_disabled")
         self.assertEqual(block.get("identity"), "寻真子")
 
+    def test_sub_identity_waits_for_bot_activity_before_avatar_lock(self):
+        async def run_case():
+            actor = SubCultivator.__new__(SubCultivator)
+            actor.avatars = ["寻真子"]
+            actor._current_identity = "厚土"
+            actor._main_confirmed = False
+            actor.state = {"current_identity": "厚土", "avatars": {"寻真子": {}}}
+            actor.state_file = "state_sub.json"
+            actor.config = {}
+            actor.client = None
+            actor.my_info = SimpleNamespace(first_name="SubFixture")
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.save_state = lambda: None
+            actor.should_wait_for_atomic_task = lambda *args, **kwargs: False
+            actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+            actor.time_critical_identity_command = lambda command: False
+            raw_calls = []
+            wait_calls = []
+
+            async def fail_raw(command, *args, **kwargs):
+                raw_calls.append(command)
+                raise AssertionError(f"should not send raw command: {command}")
+
+            async def fake_wait(actor_arg, command, logger=None, *args, **kwargs):
+                wait_calls.append((command, actor_arg.avatar_send_lock.locked()))
+                self.assertFalse(actor_arg.avatar_send_lock.locked())
+                return False
+
+            actor._send_and_wait_feedback_raw = fail_raw
+            with patch.object(sub_cultivator, "command_send_precheck", lambda *args, **kwargs: True):
+                with patch.object(sub_cultivator, "wait_for_bot_activity_before_send", fake_wait):
+                    result = await actor.send_and_wait_feedback_identity("寻真子", ".野外历练")
+
+            return result, wait_calls, raw_calls, actor.avatar_send_lock.locked()
+
+        result, wait_calls, raw_calls, lock_held = asyncio.run(run_case())
+
+        self.assertIsNone(result)
+        self.assertEqual(wait_calls, [(".野外历练", False)])
+        self.assertEqual(raw_calls, [])
+        self.assertFalse(lock_held)
+
     def test_spirit_tree_guard_command_guard_is_response_scoped(self):
         actor = SimpleNamespace(
             current_identity="主魂",
@@ -10818,6 +10900,7 @@ class ParserFixtureTests(unittest.TestCase):
             actor.avatar_send_lock = asyncio.Lock()
             actor.pause_event = asyncio.Event()
             actor.pause_event.set()
+            actor._last_game_bot_activity_ts = time.monotonic()
             actor.save_state = lambda: None
             actor.should_wait_for_atomic_task = lambda *args, **kwargs: False
             actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)

@@ -51,6 +51,7 @@ DISABLED_AUTO_COMMANDS = {
 }                                           # 禁用的自动指令（防止误操作）
 COMMAND_CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command_controls.json")
 MESSAGE_EVENTS_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "message_events.sqlite3")
+BOT_ACTIVITY_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_activity_shared.json")
 USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 
 # 命令守卫参数
@@ -124,6 +125,7 @@ BOT_ACTIVITY_LOG_INTERVAL_SECONDS = 60      # 等待日志间隔
 BOT_ACTIVITY_ALERT_INTERVAL_SECONDS = 10 * 60  # 失联告警间隔
 BOT_ACTIVITY_HISTORY_SCAN_INTERVAL_SECONDS = 30  # 历史消息扫描间隔
 BOT_ACTIVITY_HISTORY_SCAN_LIMIT = 40        # 扫描最近 40 条消息
+BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS = 5 * 60  # 跨脚本对账日志限流
 CLIENT_DISCONNECT_ABORT_SECONDS = 2 * 60    # 本地 Telegram 客户端断线超过 2 分钟就释放发送锁
 
 # 游戏机器人账号列表
@@ -1286,12 +1288,108 @@ async def handle_anti_bot_challenge(actor, msg, text, sender, logger=None, title
 # 5. 机器人活跃度检测
 # =====================================================================
 
+def _shared_bot_activity_account(actor):
+    account = actor_account_key(actor)
+    if account:
+        return account
+    info = getattr(actor, "my_info", None)
+    return (
+        getattr(info, "username", None)
+        or getattr(info, "first_name", None)
+        or actor.__class__.__name__
+    )
+
+
+def _read_shared_bot_activity():
+    try:
+        with open(BOT_ACTIVITY_SHARED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _write_shared_bot_activity(data):
+    tmp = f"{BOT_ACTIVITY_SHARED_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, BOT_ACTIVITY_SHARED_FILE)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def record_shared_game_bot_activity(actor, sender=None):
+    account = str(_shared_bot_activity_account(actor) or "").strip()
+    if not account:
+        return
+    now_wall = datetime.now()
+    username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
+    data = _read_shared_bot_activity()
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict):
+        accounts = {}
+    accounts[account] = {
+        "wall": now_wall.strftime(TIME_FORMAT),
+        "wall_epoch": time.time(),
+        "bot_username": username,
+        "pid": os.getpid(),
+    }
+    data["accounts"] = accounts
+    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+    _write_shared_bot_activity(data)
+
+
+def shared_bot_activity_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECONDS):
+    data = _read_shared_bot_activity()
+    accounts = data.get("accounts") if isinstance(data, dict) else {}
+    if not isinstance(accounts, dict):
+        accounts = {}
+    now_epoch = time.time()
+    own = str(_shared_bot_activity_account(actor) or "").strip()
+    recent = {}
+    stale = {}
+    for account, entry in accounts.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            age = max(0, now_epoch - float(entry.get("wall_epoch", 0) or 0))
+        except Exception:
+            continue
+        item = dict(entry)
+        item["age_seconds"] = age
+        if age <= stale_seconds:
+            recent[account] = item
+        else:
+            stale[account] = item
+    recent_others = {k: v for k, v in recent.items() if k != own}
+    return {
+        "own": own,
+        "recent": recent,
+        "recent_others": recent_others,
+        "stale": stale,
+        "accounts": accounts,
+    }
+
+
+def mark_bot_activity_from_shared(actor):
+    setattr(actor, "_last_game_bot_activity_ts", time.monotonic())
+    setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
+
+
 def record_game_bot_activity(actor, sender=None, logger=None):
     """记录游戏机器人有活动"""
     now = time.monotonic()
     setattr(actor, "_last_game_bot_activity_ts", now)
     setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
     setattr(actor, "_bot_no_response_times", [])
+    record_shared_game_bot_activity(actor, sender)
     if getattr(actor, "_bot_unhealthy_until", 0):
         setattr(actor, "_bot_unhealthy_until", 0)
         if logger:
@@ -1398,6 +1496,7 @@ def record_bot_response(actor):
     setattr(actor, "_last_game_bot_activity_ts", time.monotonic())
     setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
     setattr(actor, "_bot_no_response_times", [])
+    record_shared_game_bot_activity(actor)
     if getattr(actor, "_bot_unhealthy_until", 0):
         setattr(actor, "_bot_unhealthy_until", 0)
 
@@ -1437,6 +1536,29 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                 record_bot_response(actor)
             return True
 
+        shared_status = shared_bot_activity_status(actor, stale_seconds)
+        if shared_status["recent"]:
+            mark_bot_activity_from_shared(actor)
+            now = time.monotonic()
+            last_shared_log = getattr(actor, "_bot_activity_shared_log_last", 0) or 0
+            if logger and now - last_shared_log >= BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS:
+                recent_accounts = ", ".join(
+                    f"{account}({int(info.get('age_seconds', 0))}s)"
+                    for account, info in sorted(shared_status["recent"].items())
+                )
+                if shared_status["recent_others"]:
+                    logger.info(
+                        f"Bot activity cross-check: other script(s) recently saw the bot: "
+                        f"{recent_accounts}; proceeding before [{key}]."
+                    )
+                else:
+                    logger.info(
+                        f"Bot activity cross-check: this account has recent shared bot activity: "
+                        f"{recent_accounts}; proceeding before [{key}]."
+                    )
+                setattr(actor, "_bot_activity_shared_log_last", now)
+            return True
+
         age = bot_activity_age(actor)
         now = time.monotonic()
         last_log = getattr(actor, "_bot_activity_wait_log_last", 0) or 0
@@ -1445,6 +1567,22 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                 logger.info(f"Waiting for bot activity before [{key}]...")
             else:
                 logger.info(f"Waiting for bot activity [{int(age)}s stale] before [{key}]...")
+            shared_accounts = shared_status.get("accounts") or {}
+            if shared_accounts:
+                account_ages = []
+                for account, entry in sorted(shared_accounts.items()):
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        account_age = int(max(0, time.time() - float(entry.get("wall_epoch", 0) or 0)))
+                    except Exception:
+                        continue
+                    account_ages.append(f"{account}:{account_age}s")
+                if account_ages:
+                    logger.info(
+                        "Bot activity cross-check: no script has recent bot activity "
+                        f"(stale: {', '.join(account_ages)})."
+                    )
             setattr(actor, "_bot_activity_wait_log_last", now)
 
         if age is not None and age > BOT_ACTIVITY_ALERT_INTERVAL_SECONDS:
@@ -1459,11 +1597,20 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                     or getattr(info, "username", None)
                     or actor.__class__.__name__
                 )
+                if shared_status["recent_others"]:
+                    verdict = "其他脚本刚记录到机器人活动，疑似当前脚本/账号本地异常。"
+                elif shared_status["recent"]:
+                    verdict = "当前账号共享记录仍较新，疑似当前进程本地等待异常。"
+                elif shared_status.get("accounts"):
+                    verdict = "所有脚本共享记录均无近期机器人活动，疑似机器人维护或全局失联。"
+                else:
+                    verdict = "暂无跨脚本共享记录，正在继续等待机器人恢复。"
                 alert_text = (
                     "【机器人失联提醒】\\n"
                     f"账号：{account}\\n"
                     f"尝试发送指令：{key}\\n"
-                    f"已等待 {int(age // 60)} 分钟，仍在等待..."
+                    f"已等待 {int(age // 60)} 分钟，仍在等待...\\n"
+                    f"对账判断：{verdict}"
                 )
                 if logger:
                     logger.warning(alert_text)

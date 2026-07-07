@@ -256,6 +256,7 @@ async def send_and_wait_feedback_common(
     return_response_msg=False,
     return_msg_role="sent",
     suppress_no_response_alert=False,
+    skip_bot_activity_wait=False,
 ):
     """
     发送指令并等待机器人回复的核心函数。
@@ -308,11 +309,15 @@ async def send_and_wait_feedback_common(
             try:
                 if pause_event is not None:
                     await pause_event.wait()
-                # 等待游戏机器人活跃后再发送
-                logger.info(f"[DEBUG-FEEDBACK] [{message}] waiting for bot activity...")
-                if not await wait_for_bot_activity_before_send(actor, message, logger):
-                    logger.warning(f"[DEBUG-FEEDBACK] [{message}] bot activity check FAILED (bot dead?)")
-                    break
+                # 等待游戏机器人活跃后再发送；身份发送管线会在拿 avatar_send_lock 前预检，
+                # 锁内调用用 skip_bot_activity_wait 避免维护期间长时间持锁。
+                if not skip_bot_activity_wait:
+                    logger.info(f"[DEBUG-FEEDBACK] [{message}] waiting for bot activity...")
+                    if not await wait_for_bot_activity_before_send(actor, message, logger):
+                        logger.warning(f"[DEBUG-FEEDBACK] [{message}] bot activity check FAILED (bot dead?)")
+                        break
+                else:
+                    logger.info(f"[DEBUG-FEEDBACK] [{message}] bot activity prechecked, skipping lock-held wait")
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] bot active, checking guard...")
                 # 检查指令守卫（过快的发送会被阻止）
                 if not command_send_allowed(actor, message, logger):
