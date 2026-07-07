@@ -593,6 +593,11 @@ class CommonCommandMixin:
             "xiaohao": "小号",
         }.get(key, key or self.__class__.__name__)
 
+    def daily_reward_summary_push_enabled(self):
+        """Telegram push is opt-in; the Dashboard/event log remains the primary viewer."""
+        config = getattr(self, "config", {}) or {}
+        return bool(config.get("daily_reward_summary_push", False))
+
     def clean_reward_text(self, text):
         return re.sub(r"[ \t]+", " ", str(text or "").replace("**", "").replace("`", "")).strip()
 
@@ -1455,6 +1460,9 @@ class CommonCommandMixin:
         if not text:
             return False
         log = self.common_command_logger()
+        if not self.daily_reward_summary_push_enabled():
+            log.info(f"Daily reward summary push disabled for {summary_date}; retained in event log/dashboard.")
+            return False
         sent = await send_text_alert(self, "周期收益日报", text, log, parse_mode="MarkdownV2")
         if sent:
             log.info(f"Daily reward summary sent for {summary_date}.")

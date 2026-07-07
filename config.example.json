@@ -33,5 +33,6 @@
   },
   "notify_bot": "waaiging_bot",
   "notify_target": "8219248252",
-  "notify_bot_token": "YOUR_TELEGRAM_BOT_TOKEN"
+  "notify_bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "daily_reward_summary_push": false
 }

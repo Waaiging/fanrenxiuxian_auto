@@ -830,8 +830,31 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn("未解析", summary)
         self.assertNotIn("激战得胜", summary)
 
-    def test_daily_reward_summary_send_uses_markdown_v2(self):
+    def test_daily_reward_summary_send_skips_push_by_default(self):
         actor = DummyAvatarCommon()
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state["daily_reward_events"] = [{
+            "date": today,
+            "time": "12:00:00",
+            "identity": "主魂",
+            "command": ".元婴闭关",
+            "clean": "【元婴闭关结算】元婴闭关结束，获得修为 +2000。",
+            "rewards": {"修为": 2000},
+            "final": True,
+        }]
+
+        async def fake_alert(*args, **kwargs):
+            raise AssertionError("daily reward summary should not push by default")
+
+        with patch.object(common_command_features, "send_text_alert", fake_alert):
+            sent = asyncio.run(actor.send_daily_reward_summary_for_date(today))
+
+        self.assertFalse(sent)
+        self.assertEqual(actor.state["daily_reward_last_sent_date"], today)
+
+    def test_daily_reward_summary_send_uses_markdown_v2_when_enabled(self):
+        actor = DummyAvatarCommon()
+        actor.config = {"daily_reward_summary_push": True}
         today = datetime.now().strftime("%Y-%m-%d")
         actor.state["daily_reward_events"] = [{
             "date": today,
