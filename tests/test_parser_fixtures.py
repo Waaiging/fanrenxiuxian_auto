@@ -5341,6 +5341,69 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state["avatars"]["素心子"]["pending_star_gazing_target_time"], "")
         self.assertEqual(xiaohao_scheduled, [("素心子", 7311, manifest_key, "2026-06-23")])
 
+    def test_main_passive_star_gazing_rejects_other_account_reply_target(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 7, 5, 59, 2)
+                return value.replace(tzinfo=tz) if tz else value
+
+        manifest_key = "2026-07-07 06:00:00"
+        send_key = "2026-07-07 05:59:00"
+        other_text = """
+**【星盘显化】**
+@hajiimiii 闭目凝神，推演天机...星盘之上，天机已然显现！
+
+**下一次天道演化将是**: **【Good - 星辰异象】**
+**当前天命所归**: **@Tianyi**
+
+你有 **5分钟** 时间，可以尝试回复此消息并使用 `.改换星移 @新目标` 来扭转此人天命！
+"""
+
+        async def run_case():
+            actor = Cultivator.__new__(Cultivator)
+            actor.avatars = ["素缘子"]
+            actor.avatar_nicknames = {"素缘子": ""}
+            actor.avatar_usernames = {"OldEinstein": "素缘子"}
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.star_gazing_task = None
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_shift(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.avatar_schedule_star_shift = fake_shift
+            actor.state = {
+                "pending_star_gazing_date": "2026-07-07",
+                "pending_star_gazing_target_time": send_key,
+                "pending_star_gazing_scheduled_time": send_key,
+                "pending_star_gazing_manifest_time": manifest_key,
+                "pending_star_gazing_fate_type": "Good - 星辰异象",
+                "star_gazing_claimed_manifest_time": manifest_key,
+                "star_gazing_claimed_avatar": "素缘子",
+                "next_star_gazing_time": send_key,
+                "avatars": {"素缘子": {}},
+            }
+            with patch.object(intelligent_cultivator, "datetime", FixedDatetime):
+                handled = await actor.maybe_handle_star_gazing_opportunity(
+                    DummyMessage(11561018, text=other_text, reply_to_msg_id=11561015),
+                    other_text,
+                    SimpleNamespace(username="hantianzzzzzz_bot"),
+                )
+                await asyncio.sleep(0)
+            return handled, actor.state, scheduled
+
+        handled, state, scheduled = asyncio.run(run_case())
+
+        self.assertTrue(handled)
+        self.assertEqual(state["avatars"]["素缘子"].get("last_gazing_date", ""), "")
+        self.assertEqual(state["pending_star_gazing_target_time"], send_key)
+        self.assertEqual(scheduled, [])
+        probe = DummyCommon()
+        probe.avatar_usernames = {"OldEinstein": "素缘子"}
+        self.assertEqual(probe.common_star_gazing_observer_identity("@OldEinstein 闭目凝神"), "素缘子")
+
     def test_sub_bad_manifest_cancels_same_round_pending_star_gazing(self):
         class FixedDatetime(datetime):
             @classmethod

@@ -2051,27 +2051,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         msg_id = getattr(msg, "id", 0)
         if not msg_id:
             return 0
-
-        observer = self.star_gazing_observer_identity(text)
-        if observer and observer != avatar:
-            log.info(
-                f"Star gazing [{avatar}]: ignoring passive result msg {msg_id}; "
-                f"observer belongs to {observer}."
-            )
-            return 0
-
-        command = str(tracked_command_text_for_reply(self, msg) or "").strip()
-        identity = tracked_command_identity_for_reply(self, msg) or ""
-        if command:
-            if command == ".观星" and (not identity or identity == avatar):
-                return msg_id
-            log.info(
-                f"Star gazing [{avatar}]: ignoring passive result msg {msg_id}; "
-                f"reply target is [{identity or 'unknown'}] {command!r}."
-            )
-            return 0
-
-        if observer == avatar:
+        if self.common_star_gazing_response_matches_identity(msg, text, avatar, logger=log):
             return msg_id
 
         log.info(
@@ -2219,6 +2199,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         f"{idx}/{STAR_GAZING_SHIFT_REPEAT_COUNT} scheduled at {dt_to_str(send_dt)}."
                     )
                     continue
+                if not self.common_star_gazing_reply_target_matches_identity(reply_msg_id, "主魂", logger=log):
+                    self.clear_pending_star_shift()
+                    self.save_state()
+                    return
                 if not self.common_mark_star_shift_attempt(
                     "主魂",
                     today,
@@ -2295,6 +2279,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 return
 
             command = f".改换星移 {STAR_GAZING_SHIFT_TARGET}"
+            if not self.common_star_gazing_reply_target_matches_identity(reply_msg_id, avatar, logger=log):
+                return
             if not self.common_mark_star_shift_attempt(
                 avatar,
                 today,
@@ -2426,7 +2412,16 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                     )
                     # 不要在这里设置 last_gazing_date，否则今天直接报废
                     self.clear_pending_star_gazing_schedule()
-                    self.save_state()
+                self.save_state()
+                return
+
+            resp_text = (resp_msg.text or "")
+            who = avatar or "主魂"
+            if not self.common_star_gazing_response_matches_identity(resp_msg, resp_text, who, logger=log):
+                log.info(
+                    f"Star gazing [{who}]: .观星 response msg {getattr(resp_msg, 'id', None)} "
+                    "does not belong to this identity; keeping today's chance available."
+                )
                 return
 
             # 有回复才算作今日已观星
@@ -2455,7 +2450,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 self.save_state()
 
             # 如果结果是 Good，触发改换星移
-            resp_text = (resp_msg.text or "")
             if self.star_gazing_good_opportunity(resp_text):
                 if immediate_shift:
                     # ---- 当前窗口活跃：计算发送 .改换星移 的准确时间 ----
@@ -2501,6 +2495,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         return
                     
                     who = avatar or "主魂"
+                    if not self.common_star_gazing_reply_target_matches_identity(resp_msg.id, who, logger=log):
+                        return
                     if not self.common_mark_star_shift_attempt(
                         who,
                         today,

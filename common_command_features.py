@@ -25,10 +25,12 @@ import logging
 import os
 import random
 import re
+import sqlite3
 import time
 from datetime import datetime, timedelta
 
 from log_utils import (
+    MESSAGE_EVENTS_DB_FILE,
     actor_account_key,
     avatar_marker_identity_from_text,
     dashboard_command_disabled,
@@ -39,6 +41,7 @@ from log_utils import (
     is_game_bot_sender,
     is_not_deep_meditation_response,
     is_reply_to_untracked_message,
+    meaningful_reply_to_msg_id,
     is_yuanying_out_settlement_response,
     is_yuanying_rebirth_block_response,
     is_yuanying_rebirth_success_response,
@@ -4359,11 +4362,134 @@ class CommonCommandMixin:
                 return uname
         return ""
 
+    def common_normalize_username(self, value):
+        value = str(value or "").lower().strip()
+        value = value.replace("**", "").replace("`", "")
+        value = value.strip("@ \t\r\n【】[]（）()：:,，。.!！")
+        return re.sub(r"\s+", "", value)
+
     def common_star_gazing_observer_identity(self, text):
         match = re.search(r"@([A-Za-z0-9_]+)\s+闭目凝神", text or "")
         if not match:
             return ""
-        return (getattr(self, "avatar_usernames", {}) or {}).get(match.group(1).lower(), "")
+        username = self.common_normalize_username(match.group(1))
+        for configured, identity in (getattr(self, "avatar_usernames", {}) or {}).items():
+            if self.common_normalize_username(configured) == username:
+                return identity or ""
+        return ""
+
+    def common_remember_star_gazing_response_identity(self, msg_id, identity):
+        try:
+            msg_id = int(msg_id or 0)
+        except Exception:
+            msg_id = 0
+        if not msg_id:
+            return
+        cache = getattr(self, "_star_gazing_response_identities", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_star_gazing_response_identities", cache)
+        cache[msg_id] = str(identity or "").strip() or "主魂"
+        if len(cache) > 120:
+            for old_id in list(cache.keys())[:-60]:
+                cache.pop(old_id, None)
+
+    def common_star_gazing_response_matches_identity(self, msg, text, identity, logger=None):
+        """Return True only when a .观星 result belongs to the expected identity."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        text = str(text or "")
+        msg_id = getattr(msg, "id", 0)
+        marker = avatar_marker_identity_from_text(text)
+        if marker and marker != identity:
+            if logger:
+                logger.info(
+                    f"Star gazing [{identity}]: rejected response msg {msg_id}; "
+                    f"avatar marker is {marker}."
+                )
+            return False
+
+        replied_id = meaningful_reply_to_msg_id(self, msg)
+        if replied_id:
+            command = str(tracked_command_text_for_reply(self, msg) or "").strip()
+            reply_identity = tracked_command_identity_for_reply(self, msg) or ""
+            if command == ".观星" and (not reply_identity or reply_identity == identity):
+                self.common_remember_star_gazing_response_identity(msg_id, identity)
+                return True
+            if logger:
+                logger.info(
+                    f"Star gazing [{identity}]: rejected response msg {msg_id}; "
+                    f"reply target is [{reply_identity or 'unknown'}] {command or 'untracked'}."
+                )
+            return False
+
+        observer = self.common_star_gazing_observer_identity(text)
+        if observer:
+            if observer == identity:
+                self.common_remember_star_gazing_response_identity(msg_id, identity)
+                return True
+            if logger:
+                logger.info(
+                    f"Star gazing [{identity}]: rejected response msg {msg_id}; "
+                    f"observer belongs to {observer}."
+                )
+            return False
+
+        mentions = {self.common_normalize_username(v) for v in text_username_mentions(text)}
+        mentions = {v for v in mentions if v}
+        known = identity_plain_usernames(self, identity)
+        if mentions and known and not (mentions & known):
+            if logger:
+                logger.info(
+                    f"Star gazing [{identity}]: rejected response msg {msg_id}; "
+                    "mentions do not include this identity."
+                )
+            return False
+        return True
+
+    def common_star_gazing_reply_target_matches_identity(self, reply_msg_id, identity, logger=None):
+        """Validate that a stored .改换星移 reply target is this identity's .观星 response."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        try:
+            reply_msg_id = int(reply_msg_id or 0)
+        except Exception:
+            reply_msg_id = 0
+        if not reply_msg_id:
+            return False
+
+        cache = getattr(self, "_star_gazing_response_identities", None)
+        if isinstance(cache, dict) and cache.get(reply_msg_id) == identity:
+            return True
+
+        try:
+            conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=2)
+            with conn:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM command_ledger
+                    WHERE account=?
+                      AND response_msg_id=?
+                      AND command='.观星'
+                      AND identity=?
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (actor_account_key(self), reply_msg_id, identity),
+                ).fetchone()
+        except Exception as exc:
+            if logger:
+                logger.debug(f"Star gazing [{identity}]: reply target ledger check skipped: {exc}")
+            row = None
+
+        if row:
+            self.common_remember_star_gazing_response_identity(reply_msg_id, identity)
+            return True
+        if logger:
+            logger.warning(
+                f"Star gazing [{identity}]: blocked .改换星移 reply target {reply_msg_id}; "
+                "not recorded as this identity's .观星 response."
+            )
+        return False
 
     def common_star_gazing_schedule_plan(self, now, manifest_dt, command_lead_seconds=60):
         """Return (.观星 send time, immediate_shift flag, consumed gazing date)."""

@@ -5584,27 +5584,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         msg_id = getattr(msg, "id", 0)
         if not msg_id:
             return 0
-
-        observer = self.star_gazing_observer_identity(text)
-        if observer and observer != avatar:
-            log.info(
-                f"Avatar {avatar} Star gazing: ignoring passive result msg {msg_id}; "
-                f"observer belongs to {observer}."
-            )
-            return 0
-
-        command = str(tracked_command_text_for_reply(self, msg) or "").strip()
-        identity = tracked_command_identity_for_reply(self, msg) or ""
-        if command:
-            if command == ".观星" and (not identity or identity == avatar):
-                return msg_id
-            log.info(
-                f"Avatar {avatar} Star gazing: ignoring passive result msg {msg_id}; "
-                f"reply target is [{identity or 'unknown'}] {command!r}."
-            )
-            return 0
-
-        if observer == avatar:
+        if self.common_star_gazing_response_matches_identity(msg, text, avatar, logger=log):
             return msg_id
 
         log.info(
@@ -5765,6 +5745,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 return
 
             command = f".改换星移 @{STAR_SHIFT_TARGET}"
+            if not self.common_star_gazing_reply_target_matches_identity(reply_msg_id, avatar, logger=log):
+                return
             if not self.common_mark_star_shift_attempt(
                 avatar,
                 today,
@@ -5837,6 +5819,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 return
 
             resp_text = (resp_msg.text or "")
+            if not self.common_star_gazing_response_matches_identity(resp_msg, resp_text, avatar, logger=log):
+                log.info(
+                    f"Avatar {avatar} Star gazing: .观星 response msg {getattr(resp_msg, 'id', None)} "
+                    "does not belong to this identity; keeping today's chance available."
+                )
+                return
+
             if self.is_star_gazing_forbidden_response(resp_text):
                 log.info(
                     f"Avatar {avatar} Star gazing: bot says current identity is not a Star Palace disciple; "
@@ -5920,6 +5909,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         log.error(f"Avatar {avatar}: username mapping not found in immediate mode; skipping shift.")
                         return
                     command = f".改换星移 @{STAR_SHIFT_TARGET}"
+                    if not self.common_star_gazing_reply_target_matches_identity(resp_msg.id, avatar, logger=log):
+                        return
                     if not self.common_mark_star_shift_attempt(
                         avatar,
                         today,
