@@ -3871,6 +3871,9 @@ def _manual_record_concubine_status_reply(actor, text, identity):
         clean = str(text or "").replace("**", "")
         if hasattr(actor, "concubine_status_matches_identity") and not actor.concubine_status_matches_identity(clean, identity):
             return False
+        target_updated = False
+        if hasattr(actor, "record_target_concubine_status_text"):
+            target_updated = bool(actor.record_target_concubine_status_text(identity, clean, source="manual_status"))
         updated = False
         labels = {
             "入梦寻图冷却": ("next_dream_map_time", 8 * 3600),
@@ -3906,9 +3909,12 @@ def _manual_record_concubine_status_reply(actor, text, identity):
                 updated = True
         if updated:
             _manual_set_identity_state(actor, identity, "last_concubine_status_time", _manual_sync_now_str())
-        return updated
+        return updated or target_updated
     if hasattr(actor, "parse_concubine_status"):
-        return bool(actor.parse_concubine_status(text))
+        target_updated = False
+        if hasattr(actor, "record_target_concubine_status_text"):
+            target_updated = bool(actor.record_target_concubine_status_text(identity or "主魂", text, source="manual_status"))
+        return bool(actor.parse_concubine_status(text)) or target_updated
     return False
 
 
@@ -4076,6 +4082,12 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_soul_curse_manual_response(cmd, text, identity=identity))
     elif cmd == ".我的侍妾":
         processed = _manual_record_concubine_status_reply(actor, text, identity)
+    elif cmd == ".红尘寻缘":
+        if hasattr(actor, "record_concubine_search_response"):
+            processed = bool(actor.record_concubine_search_response(text, identity=identity, source="manual"))
+    elif cmd == ".遣散侍妾":
+        if hasattr(actor, "record_concubine_dismiss_response"):
+            processed = bool(actor.record_concubine_dismiss_response(text, identity=identity, source="manual"))
     elif cmd == ".入梦寻图":
         processed = _manual_record_concubine_task_reply(actor, "dream", text, identity)
     elif cmd in {".共历心劫", ".坠魔心劫"}:

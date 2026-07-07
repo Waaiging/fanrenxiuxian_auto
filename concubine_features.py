@@ -39,6 +39,24 @@ CONCUBINE_VOYAGE_CD_SECONDS = 12 * 3600
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "heart_trial", "voyage")
 CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream", "heart_trial")
+TARGET_CONCUBINE_NAME = "南宫婉"
+CONCUBINE_SEARCH_COMMAND = ".红尘寻缘"
+CONCUBINE_DISMISS_COMMAND = ".遣散侍妾"
+CONCUBINE_SEARCH_CD_SECONDS = 2 * 3600
+CONCUBINE_SEARCH_RETRY_SECONDS = 10 * 60
+TARGET_CONCUBINE_IDENTITIES = {
+    "main": {"主魂", "无咎子"},
+}
+TARGET_CONCUBINE_STATE_DEFAULTS = {
+    "target_concubine_name": "",
+    "target_concubine_found": False,
+    "next_concubine_search_time": "",
+    "last_concubine_search_time": "",
+    "last_concubine_search_result": "",
+    "last_concubine_dismiss_time": "",
+    "last_concubine_dismissed_name": "",
+    "last_concubine_search_error": "",
+}
 DEFAULT_CONCUBINE_NAMES = {
     "main": {
         "主魂": {"慕沛灵"},
@@ -176,6 +194,7 @@ def concubine_default_state():
         "last_concubine_name_time": "",
         "last_concubine_status_mismatch": "",
         "last_concubine_status_mismatch_time": "",
+        **TARGET_CONCUBINE_STATE_DEFAULTS,
     }
 
 
@@ -514,6 +533,7 @@ class ConcubineMixin:
         clean = str(text or "").replace("**", "")
         for pattern in (
             r"你的(?:道心侍妾|红尘道侣)\s*[：:]\s*【([^】]+)】",
+            r"名为\s*【([^】]+)】",
             r"侍妾\s*【([^】]+)】",
             r"道侣\s*【([^】]+)】",
         ):
@@ -614,8 +634,96 @@ class ConcubineMixin:
         state["last_concubine_name_time"] = now_str()
         state["last_concubine_status_mismatch"] = ""
         state["last_concubine_status_mismatch_time"] = ""
+        self.update_target_concubine_state_from_name(identity, name, source="name_sync")
         self.save_state()
         return name
+
+    def target_concubine_name(self, identity="主魂"):
+        identity = identity or "主魂"
+        account = actor_account_key(self)
+        if identity in TARGET_CONCUBINE_IDENTITIES.get(account, set()):
+            return TARGET_CONCUBINE_NAME
+        return ""
+
+    def target_concubine_identities(self):
+        account = actor_account_key(self)
+        configured = TARGET_CONCUBINE_IDENTITIES.get(account, set())
+        identities = []
+        for identity in ["主魂", *list(getattr(self, "avatars", []) or [])]:
+            if identity in configured:
+                identities.append(identity)
+        return identities
+
+    def target_concubine_enabled(self, identity="主魂"):
+        return bool(self.target_concubine_name(identity))
+
+    def ensure_target_concubine_state(self, identity="主魂"):
+        state = self._concubine_state_container(identity or "主魂")
+        changed = False
+        for key, value in TARGET_CONCUBINE_STATE_DEFAULTS.items():
+            if key not in state:
+                state[key] = value
+                changed = True
+        target = self.target_concubine_name(identity)
+        if target and state.get("target_concubine_name") != target:
+            state["target_concubine_name"] = target
+            changed = True
+        if changed and hasattr(self, "save_state"):
+            self.save_state()
+        return state
+
+    def target_concubine_found(self, identity="主魂"):
+        if not self.target_concubine_enabled(identity):
+            return True
+        state = self.ensure_target_concubine_state(identity)
+        target = self.target_concubine_name(identity)
+        return bool(state.get("target_concubine_found") and state.get("concubine_name") == target)
+
+    def update_target_concubine_state_from_name(self, identity="主魂", name="", source=""):
+        if not self.target_concubine_enabled(identity):
+            return False
+        state = self.ensure_target_concubine_state(identity)
+        target = self.target_concubine_name(identity)
+        name = str(name or "").strip()
+        if not name:
+            state["concubine_name"] = ""
+            state["target_concubine_found"] = False
+            state["last_concubine_search_result"] = source or "empty"
+            return True
+        state["concubine_name"] = name
+        state["last_concubine_name_time"] = now_str()
+        state["target_concubine_found"] = (name == target)
+        state["last_concubine_search_result"] = f"{source}:{name}" if source else name
+        if name == target:
+            state["next_concubine_search_time"] = ""
+            state["last_concubine_search_error"] = ""
+            log.info(f"Target concubine [{identity}] found: {target}.")
+        else:
+            log.info(f"Target concubine [{identity}] not matched: got {name}, want {target}.")
+        return True
+
+    def record_target_concubine_status_text(self, identity="主魂", text="", source="status"):
+        if not self.target_concubine_enabled(identity):
+            return False
+        if not self.concubine_status_trusted_for_identity(text, identity):
+            return False
+        clean = str(text or "").replace("**", "")
+        state = self.ensure_target_concubine_state(identity)
+        name = self.extract_concubine_name(clean)
+        if name:
+            changed = self.update_target_concubine_state_from_name(identity, name, source=source)
+            if changed and hasattr(self, "save_state"):
+                self.save_state()
+            return changed
+        if any(k in clean for k in ["还没有侍妾", "尚无侍妾", "没有侍妾", "暂无侍妾"]):
+            state["concubine_name"] = ""
+            state["target_concubine_found"] = False
+            state["last_concubine_search_result"] = f"{source}:none"
+            state["last_concubine_search_error"] = ""
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+        return False
 
     def concubine_status_matches_identity(self, text, identity="主魂"):
         """Reject only explicit identity-marker mismatches; do not validate concubine names."""
@@ -658,6 +766,209 @@ class ConcubineMixin:
         if isinstance(response, str):
             return response
         return str(response) if response else ""
+
+    def _set_concubine_search_backoff(self, identity="主魂", seconds=CONCUBINE_SEARCH_RETRY_SECONDS, reason=""):
+        if not self.target_concubine_enabled(identity):
+            return ""
+        state = self.ensure_target_concubine_state(identity)
+        next_time = add_seconds_str(now_str(), max(0, int(seconds or 0)))
+        state["next_concubine_search_time"] = next_time
+        if reason:
+            state["last_concubine_search_error"] = reason[:160]
+        if hasattr(self, "save_state"):
+            self.save_state()
+        return next_time
+
+    def record_concubine_search_response(self, text, identity="主魂", source=""):
+        """Record .红尘寻缘 result and update target-concubine search state."""
+        if not self.target_concubine_enabled(identity):
+            return False
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        if not self.concubine_status_trusted_for_identity(clean, identity):
+            return False
+
+        state = self.ensure_target_concubine_state(identity)
+        now = now_str()
+        state["last_concubine_search_time"] = now
+        state["last_concubine_search_error"] = ""
+
+        name = self.extract_concubine_name(clean)
+        if name:
+            self.update_target_concubine_state_from_name(identity, name, source=source or CONCUBINE_SEARCH_COMMAND)
+            if name == self.target_concubine_name(identity):
+                state["next_concubine_search_time"] = ""
+            else:
+                state["next_concubine_search_time"] = add_seconds_str(now, CONCUBINE_SEARCH_CD_SECONDS)
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+
+        if any(k in clean for k in ["未能寻得", "没有寻得", "无缘之人", "镜花水月"]):
+            state["concubine_name"] = ""
+            state["target_concubine_found"] = False
+            state["next_concubine_search_time"] = add_seconds_str(now, CONCUBINE_SEARCH_CD_SECONDS)
+            state["last_concubine_search_result"] = source or "no_match"
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+
+        if any(k in clean for k in ["冷却", "后再", "尚未", "神念消耗过剧", "近日奔波"]):
+            cd = parse_duration_seconds(clean)
+            wait = cd + CONCUBINE_GRACE_SECONDS if cd > 0 else CONCUBINE_SEARCH_CD_SECONDS
+            state["next_concubine_search_time"] = add_seconds_str(now, wait)
+            state["target_concubine_found"] = False
+            state["last_concubine_search_result"] = source or "cooldown"
+            state["last_concubine_search_error"] = clean[:160]
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+
+        if any(k in clean for k in ["灵石不足", "修为不足", "无法寻缘", "失败", "错误"]):
+            state["next_concubine_search_time"] = add_seconds_str(now, CONCUBINE_SEARCH_RETRY_SECONDS)
+            state["target_concubine_found"] = False
+            state["last_concubine_search_result"] = source or "failed"
+            state["last_concubine_search_error"] = clean[:160]
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+        return False
+
+    def record_concubine_dismiss_response(self, text, identity="主魂", source=""):
+        """Record .遣散侍妾 result without clearing the red-dust search cooldown."""
+        if not self.target_concubine_enabled(identity):
+            return False
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        if not self.concubine_status_trusted_for_identity(clean, identity):
+            return False
+
+        state = self.ensure_target_concubine_state(identity)
+        dismissed = ""
+        match = re.search(r"你与\s*([^，,\n]+?)\s*缘分已尽", clean)
+        if match:
+            dismissed = match.group(1).strip(" 【】")
+
+        if dismissed or any(k in clean for k in ["缘分已尽", "可以再次", "没有侍妾", "尚无侍妾", "不可遣散"]):
+            if dismissed:
+                state["last_concubine_dismissed_name"] = dismissed
+            state["last_concubine_dismiss_time"] = now_str()
+            if not any(k in clean for k in ["不可遣散", "无法遣散"]):
+                state["concubine_name"] = ""
+                state["target_concubine_found"] = False
+            state["last_concubine_search_result"] = source or CONCUBINE_DISMISS_COMMAND
+            state["last_concubine_search_error"] = "" if dismissed else clean[:160]
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+        return False
+
+    async def _send_target_concubine_command(self, identity, command, **kwargs):
+        """Send a target-concubine command for main soul or avatar."""
+        return await self._send_concubine_identity_command(identity, command, **kwargs)
+
+    async def dismiss_current_concubine_if_needed(self, identity="主魂"):
+        if not self.target_concubine_enabled(identity):
+            return True
+        state = self.ensure_target_concubine_state(identity)
+        target = self.target_concubine_name(identity)
+        current = str(state.get("concubine_name") or "").strip()
+        if not current or current == target:
+            return True
+        if self._concubine_command_paused(CONCUBINE_DISMISS_COMMAND, identity):
+            return False
+        log.info(f"Target concubine [{identity}]: dismissing {current}, looking for {target}.")
+        _, dismiss_text, _ = await self._send_target_concubine_command(
+            identity,
+            CONCUBINE_DISMISS_COMMAND,
+            timeout=60,
+            max_retries=0,
+            delete_after=False,
+        )
+        if not dismiss_text:
+            self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, "dismiss_no_response")
+            return False
+        if not self.record_concubine_dismiss_response(dismiss_text, identity=identity, source="auto_dismiss"):
+            notify_unrecognized_response(self, CONCUBINE_DISMISS_COMMAND, dismiss_text, log, f"寻找南宫婉[{identity}]")
+            self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, dismiss_text[:160])
+            return False
+        state = self.ensure_target_concubine_state(identity)
+        if str(state.get("concubine_name") or "").strip() == current:
+            self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, dismiss_text[:160])
+            return False
+        return True
+
+    async def execute_target_concubine_search(self, identity="主魂"):
+        """Find the configured target concubine by red-dust search, dismissing non-target results."""
+        identity = identity or "主魂"
+        if not self.target_concubine_enabled(identity):
+            return True
+        if hasattr(self, "identity_pause_seconds") and self.identity_pause_seconds(identity) > 0:
+            return False
+
+        state = self.ensure_target_concubine_state(identity)
+        if self.target_concubine_found(identity):
+            return True
+        target = self.target_concubine_name(identity)
+        current = str(state.get("concubine_name") or "").strip()
+        next_time = state.get("next_concubine_search_time", "")
+        if next_time and is_future(next_time) and not (current and current != target):
+            return False
+
+        async with _ConcubineAtomicTask(self, f"TargetConcubine-{identity}"):
+            if self.target_concubine_found(identity):
+                return True
+            state = self.ensure_target_concubine_state(identity)
+            current = str(state.get("concubine_name") or "").strip()
+            next_time = state.get("next_concubine_search_time", "")
+            if next_time and is_future(next_time) and not (current and current != self.target_concubine_name(identity)):
+                return False
+
+            if not self._concubine_command_paused(".我的侍妾", identity):
+                _, status_text, _ = await self._send_target_concubine_command(
+                    identity,
+                    ".我的侍妾",
+                    timeout=60,
+                    max_retries=0,
+                    delete_after=False,
+                )
+                if status_text:
+                    self.record_target_concubine_status_text(identity, status_text, source="target_status")
+                    if self.target_concubine_found(identity):
+                        return True
+
+            if not await self.dismiss_current_concubine_if_needed(identity):
+                return False
+
+            state = self.ensure_target_concubine_state(identity)
+            next_time = state.get("next_concubine_search_time", "")
+            if next_time and is_future(next_time):
+                return False
+            if self._concubine_command_paused(CONCUBINE_SEARCH_COMMAND, identity):
+                return False
+
+            log.info(f"Target concubine [{identity}]: sending {CONCUBINE_SEARCH_COMMAND}.")
+            _, search_text, _ = await self._send_target_concubine_command(
+                identity,
+                CONCUBINE_SEARCH_COMMAND,
+                timeout=90,
+                max_retries=0,
+                delete_after=False,
+            )
+            if not search_text:
+                self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, "search_no_response")
+                return False
+            if not self.record_concubine_search_response(search_text, identity=identity, source="auto_search"):
+                notify_unrecognized_response(self, CONCUBINE_SEARCH_COMMAND, search_text, log, f"寻找南宫婉[{identity}]")
+                self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, search_text[:160])
+                return False
+            if self.target_concubine_found(identity):
+                return True
+            await asyncio.sleep(3)
+            await self.dismiss_current_concubine_if_needed(identity)
+            return False
 
     def mark_concubine_dream_executed(self, identity="主魂"):
         """Remember that this identity just ran .入梦寻图 so 8h voyage can run alongside it."""
@@ -1288,6 +1599,10 @@ class ConcubineMixin:
     async def execute_concubine_chain(self):
         """Main-soul bound flow: return -> divination -> dream -> heart trial -> adventure voyage."""
         self.ensure_concubine_state()
+        if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
+            await self.execute_target_concubine_search("主魂")
+            if not self.target_concubine_found("主魂"):
+                return False
         if not self.align_concubine_chain_cooldowns("主魂"):
             return False
         async with _ConcubineAtomicTask(self, "ConcubineChain-主魂"):
@@ -1327,6 +1642,10 @@ class ConcubineMixin:
     async def execute_avatar_concubine_chain(self, avatar, send_with_cultivation_check=None, heart_trial_executor=None):
         """Avatar bound flow: return -> divination -> dream -> heart trial -> adventure voyage."""
         avatar = avatar or "主魂"
+        if self.target_concubine_enabled(avatar) and not self.target_concubine_found(avatar):
+            await self.execute_target_concubine_search(avatar)
+            if not self.target_concubine_found(avatar):
+                return True
         if not self.align_concubine_chain_cooldowns(avatar):
             return True
         async with _ConcubineAtomicTask(self, f"ConcubineChain-{avatar}"):
@@ -1849,6 +2168,44 @@ class ConcubineMixin:
 
     # ---- 主循环 ----
 
+    async def run_target_concubine_loop(self, initial_delay=0):
+        """主号主魂/无咎子寻找指定侍妾；找到前不跑普通侍妾链。"""
+        await self.startup_done.wait()
+        if initial_delay:
+            await asyncio.sleep(initial_delay)
+        while self.is_running:
+            try:
+                identities = self.target_concubine_identities()
+                if not identities:
+                    await asyncio.sleep(3600)
+                    continue
+                waits = []
+                all_found = True
+                for identity in identities:
+                    await self.pause_event.wait()
+                    if self.target_concubine_found(identity):
+                        continue
+                    all_found = False
+                    await self.execute_target_concubine_search(identity)
+                    state = self.ensure_target_concubine_state(identity)
+                    next_time = state.get("next_concubine_search_time", "")
+                    if next_time and is_future(next_time):
+                        waits.append(seconds_until(next_time))
+                    elif not self.target_concubine_found(identity):
+                        waits.append(CONCUBINE_SEARCH_RETRY_SECONDS)
+                    await asyncio.sleep(3)
+                if all_found:
+                    sleep_for = 600
+                elif waits:
+                    sleep_for = max(60, min(waits) + random.randint(15, 45))
+                else:
+                    sleep_for = 300
+                log.info(f"Target concubine loop complete. Sleep {int(sleep_for)}s.")
+                await asyncio.sleep(sleep_for)
+            except Exception as e:
+                log.error(f"Target concubine loop error: {e}")
+                await asyncio.sleep(300)
+
     async def run_concubine_loop(self):
         """
         侍妾功能主循环。
@@ -1875,6 +2232,11 @@ class ConcubineMixin:
                     if self.concubine_task_enabled(task_key, "主魂")
                     if self.state.get(task["state_key"], "") and is_future(self.state[task["state_key"]])
                 ]
+                if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
+                    target_state = self.ensure_target_concubine_state("主魂")
+                    target_time = target_state.get("next_concubine_search_time", "")
+                    if target_time and is_future(target_time):
+                        waits.append(seconds_until(target_time))
                 sleep_for = max(60, min(waits) + random.randint(15, 45)) if waits else 300
                 log.info(f"Concubine loop complete. Sleep {int(sleep_for)}s.")
                 await asyncio.sleep(sleep_for)

@@ -8354,6 +8354,108 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["concubine_name"], "南宫婉")
         self.assertEqual(actor.state["last_concubine_status_mismatch"], "")
 
+    def test_target_concubine_search_records_wrong_and_dismisses(self):
+        actor = DummyConcubine()
+        actor.avatars = ["无咎子"]
+        actor.state["avatars"] = {"无咎子": {}}
+        actor.get_avatar_state = lambda identity: actor.state.setdefault("avatars", {}).setdefault(identity, {})
+
+        search_text = """
+[Avatar: 无咎子]
+**【红尘偶遇】**
+你在人海中蓦然回首，与一位名为 **【霓裳】** 的女子四目相对，情愫暗生。
+她愿随你共踏仙途，从此成为你的侍妾。快使用 `.我的侍妾` 查看吧！
+"""
+        self.assertTrue(actor.record_concubine_search_response(search_text, identity="无咎子", source="fixture"))
+        state = actor.get_avatar_state("无咎子")
+        self.assertEqual(state["concubine_name"], "霓裳")
+        self.assertFalse(state["target_concubine_found"])
+        self.assertGreater(seconds_until(state["next_concubine_search_time"]), 7100)
+
+        dismiss_text = """
+[Avatar: 无咎子]
+你与 **霓裳** 缘分已尽，从此一别两宽，各自安好。
+你现在可以再次于`.红尘寻缘`了。
+"""
+        self.assertTrue(actor.record_concubine_dismiss_response(dismiss_text, identity="无咎子", source="fixture"))
+        self.assertEqual(state["concubine_name"], "")
+        self.assertEqual(state["last_concubine_dismissed_name"], "霓裳")
+
+    def test_target_concubine_search_records_no_match_cooldown(self):
+        actor = DummyConcubine()
+
+        text = "你踏遍万千红尘，却终是镜花水月，未能寻得有缘之人。"
+
+        self.assertTrue(actor.record_concubine_search_response(text, identity="主魂", source="fixture"))
+        self.assertEqual(actor.state["concubine_name"], "")
+        self.assertFalse(actor.state["target_concubine_found"])
+        self.assertGreater(seconds_until(actor.state["next_concubine_search_time"]), 7100)
+
+    def test_target_concubine_auto_search_dismisses_non_target(self):
+        actor = DummyConcubine()
+        actor.avatars = ["无咎子"]
+        actor.state["avatars"] = {"无咎子": {}}
+        actor.get_avatar_state = lambda identity: actor.state.setdefault("avatars", {}).setdefault(identity, {})
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            if command == ".我的侍妾":
+                return None, "[Avatar: 无咎子]\n你还没有侍妾。", False
+            if command == ".红尘寻缘":
+                return None, (
+                    "[Avatar: 无咎子]\n**【红尘偶遇】**\n"
+                    "你在人海中蓦然回首，与一位名为 **【霓裳】** 的女子四目相对。\n"
+                    "她愿随你共踏仙途，从此成为你的侍妾。"
+                ), False
+            if command == ".遣散侍妾":
+                return None, "[Avatar: 无咎子]\n你与 **霓裳** 缘分已尽，从此一别两宽，各自安好。", False
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertFalse(asyncio.run(actor.execute_target_concubine_search("无咎子")))
+
+        self.assertEqual(sent, [
+            ("无咎子", ".我的侍妾"),
+            ("无咎子", ".红尘寻缘"),
+            ("无咎子", ".遣散侍妾"),
+        ])
+        state = actor.get_avatar_state("无咎子")
+        self.assertEqual(state["concubine_name"], "")
+        self.assertFalse(state["target_concubine_found"])
+        self.assertGreater(seconds_until(state["next_concubine_search_time"]), 7100)
+
+    def test_target_concubine_auto_search_stops_when_nangong_wan_found(self):
+        actor = DummyConcubine()
+        actor.state["target_concubine_name"] = "南宫婉"
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            if command == ".我的侍妾":
+                return None, "你还没有侍妾。", False
+            if command == ".红尘寻缘":
+                return None, (
+                    "**【红尘偶遇】**\n"
+                    "你在人海中蓦然回首，与一位名为 **【南宫婉】** 的女子四目相对。\n"
+                    "她愿随你共踏仙途，从此成为你的侍妾。"
+                ), False
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_target_concubine_search("主魂")))
+
+        self.assertEqual(sent, [("主魂", ".我的侍妾"), ("主魂", ".红尘寻缘")])
+        self.assertEqual(actor.state["concubine_name"], "南宫婉")
+        self.assertTrue(actor.state["target_concubine_found"])
+        self.assertEqual(actor.state["next_concubine_search_time"], "")
+
     def test_main_concubine_name_rejects_avatar_marked_status(self):
         actor = DummyConcubine()
         actor.state["concubine_name"] = "慕沛灵"

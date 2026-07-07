@@ -64,6 +64,7 @@ from fishing_features import (
     fishing_dashboard_state,
 )
 from common_command_features import AVATAR_TOWER_SUPPORT_COMMAND
+from concubine_features import CONCUBINE_DISMISS_COMMAND, CONCUBINE_SEARCH_COMMAND, TARGET_CONCUBINE_NAME
 from soul_curse_features import (
     SOUL_CURSE_ACCEPT_COMMAND,
     SOUL_CURSE_IDENTIFY_COMMAND,
@@ -253,6 +254,7 @@ ACCOUNT_LOG_TAGS = {
         MAIN_TREASURE_TOUCH_COMMAND,
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, WUJIUZI_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
+        CONCUBINE_SEARCH_COMMAND, CONCUBINE_DISMISS_COMMAND,
         ".推命 探索", ".改命 探索",
         OTHER_LOG_TAG,
     ],
@@ -1630,6 +1632,17 @@ def concubine_voyage_detail(state):
     return f"{prefix}{error[:80]}"
 
 
+def target_concubine_detail(state):
+    target = str(state.get("target_concubine_name") or "").strip() or TARGET_CONCUBINE_NAME
+    current = str(state.get("concubine_name") or "").strip()
+    found = bool(state.get("target_concubine_found") and current == target)
+    pieces = [f"目标 {target}"]
+    if current:
+        pieces.append(f"当前 {current}")
+    pieces.append("已找到" if found else "寻找中")
+    return " · ".join(pieces)
+
+
 def concubine_commands(state, include_divination=True, include_voyage=False):
     rows = [
         manual_command(".我的侍妾", "我的侍妾", "查询侍妾/冷却", "侍妾"),
@@ -1644,6 +1657,19 @@ def concubine_commands(state, include_divination=True, include_voyage=False):
         ))
     if include_divination:
         rows.append(time_command(state, "next_divination_time", ".天机代卜", "天机代卜", group="侍妾"))
+    if state.get("target_concubine_name"):
+        rows.append(time_command(
+            state,
+            "next_concubine_search_time",
+            CONCUBINE_SEARCH_COMMAND,
+            "红尘寻缘",
+            waiting="2小时冷却",
+            ready="可寻缘",
+            missing="可寻缘",
+            detail=target_concubine_detail(state),
+            group="南宫婉",
+        ))
+        rows.append(manual_command(CONCUBINE_DISMISS_COMMAND, "遣散侍妾", "非南宫婉时使用", "南宫婉"))
     rows.append(manual_command(".拼图", "拼图", "残图满足时发送", "侍妾"))
     return rows
 

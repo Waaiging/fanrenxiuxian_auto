@@ -131,6 +131,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_heart_trial_time": ".共历心劫",
     "next_divination_time": ".天机代卜",
     "next_concubine_voyage_time": ".侍妾远航 冒险",
+    "next_concubine_search_time": ".红尘寻缘",
     "next_tower_time": ".闯塔",
     "next_mulan_support_time": AVATAR_TOWER_SUPPORT_COMMAND,
     "next_stairs_time": ".登天阶",
