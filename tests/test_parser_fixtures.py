@@ -4312,6 +4312,39 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rows[".囚禁魂魄 <槽位> 凶兽戾魄"]["control_key"], ".囚禁魂魄 *")
         self.assertNotIn(".囚禁魂魄 <槽位> 妖兽精魄", rows)
 
+    def test_dashboard_avatar_tower_waits_until_23_and_support_follows_tower(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 17, 30, 0)
+
+        with patch.object(dashboard_server, "datetime", FixedDatetime):
+            rows = {
+                row["command"]: row
+                for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
+            }
+
+        self.assertEqual(rows[".闯塔"]["status"], "23点后执行")
+        self.assertEqual(rows[".闯塔"]["tone"], "cooldown")
+        self.assertEqual(rows[".支援慕兰 奇袭"]["status"], "随闯塔执行")
+        self.assertEqual(rows[".支援慕兰 奇袭"]["tone"], "cooldown")
+
+        class Fixed23Datetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 23, 5, 0)
+
+        with patch.object(dashboard_server, "datetime", Fixed23Datetime):
+            rows = {
+                row["command"]: row
+                for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
+            }
+
+        self.assertEqual(rows[".闯塔"]["status"], "今日未执行")
+        self.assertEqual(rows[".闯塔"]["tone"], "ready")
+        self.assertEqual(rows[".支援慕兰 奇袭"]["status"], "随闯塔执行")
+        self.assertEqual(rows[".支援慕兰 奇袭"]["tone"], "cooldown")
+
     def test_dashboard_sub_main_yuanying_retreat_active_unknown_is_not_due(self):
         state = {
             "yuanying_out_active": True,

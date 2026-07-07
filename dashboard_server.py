@@ -712,10 +712,47 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
     return command_row(command, label, "今日未执行", "ready", remaining="待执行", detail=detail, group=group, schedule_type="daily", next_seconds=0)
 
 
+def avatar_tower_command(state):
+    today = datetime.now().strftime("%Y-%m-%d")
+    if str(state.get("last_tower_date", "") or "") == today:
+        return command_row(".闯塔", "闯塔", "今日已执行", "done", remaining="今日", at=today, group="每日", schedule_type="daily")
+    now = datetime.now()
+    if now.hour < 23:
+        target = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        next_seconds = max(0, int((target - now).total_seconds()))
+        return command_row(
+            ".闯塔",
+            "闯塔",
+            "23点后执行",
+            "cooldown",
+            format_remaining(next_seconds),
+            target.strftime(TIME_FORMAT),
+            group="每日",
+            schedule_type="daily",
+            next_seconds=next_seconds,
+        )
+    return command_row(".闯塔", "闯塔", "今日未执行", "ready", remaining="待执行", at=str(state.get("last_tower_date", "") or ""), group="每日", schedule_type="daily", next_seconds=0)
+
+
 def avatar_tower_support_command(state):
     detail = str(state.get("last_mulan_support_error") or state.get("last_mulan_support_response") or "")
     if len(detail) > 80:
         detail = detail[:80] + "..."
+    today = datetime.now().strftime("%Y-%m-%d")
+    if str(state.get("last_tower_date", "") or "") != today:
+        tower = avatar_tower_command(state)
+        return command_row(
+            AVATAR_TOWER_SUPPORT_COMMAND,
+            "支援慕兰",
+            "随闯塔执行",
+            "cooldown",
+            tower.get("remaining", ""),
+            tower.get("at", ""),
+            detail=detail,
+            group="每日",
+            schedule_type="daily",
+            next_seconds=tower.get("next_seconds"),
+        )
     return daily_done_command(
         state,
         AVATAR_TOWER_SUPPORT_COMMAND,
@@ -1761,7 +1798,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
         ])
     else:
         rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
-    rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
+    rows.append(avatar_tower_command(state))
     rows.append(avatar_tower_support_command(state))
     if name == "缘生子":
         tree_state = root_state or state
@@ -1816,7 +1853,7 @@ def star_avatar_commands(name, state):
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
     rows.extend(meditation_commands(state, include_force_exit=True))
-    rows.append(daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"))
+    rows.append(avatar_tower_command(state))
     rows.append(avatar_tower_support_command(state))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
@@ -1837,7 +1874,7 @@ def xiaohao_avatar_commands(name, state):
     rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
     rows.extend([
         time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
-        daily_done_command(state, ".闯塔", "闯塔", date_key="last_tower_date", group="每日"),
+        avatar_tower_command(state),
         avatar_tower_support_command(state),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
