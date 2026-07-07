@@ -335,17 +335,13 @@ class ParserFixtureTests(unittest.TestCase):
                         text="**【野外历练 · 灵机暗藏】**\n@foo 采得一份机缘，获得修为 **+157**。",
                     )
 
-                async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
-                    self.sent.append((identity, ".卜筮问天"))
-                    return True
-
             actor = DummyFieldTraining()
             task = asyncio.create_task(actor.common_avatar_field_training_tick("缘生子"))
             await actor.waiting_for_edit.wait()
             self.assertTrue(actor.should_wait_for_atomic_task(".查看闭关"))
             actor.release_edit.set()
             self.assertEqual(await task, 5)
-            self.assertEqual(actor.sent, [("缘生子", ".野外历练"), ("缘生子", ".卜筮问天")])
+            self.assertEqual(actor.sent, [("缘生子", ".野外历练")])
             self.assertFalse(actor.should_wait_for_atomic_task(".查看闭关"))
             self.assertTrue(actor.get_avatar_state("缘生子")["next_field_training_time"])
 
@@ -6106,8 +6102,33 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(log_utils.feedback_response_matches_command(".卜筮问天", text))
         self.assertFalse(log_utils.feedback_response_conflicts(".卜筮问天", text))
         self.assertTrue(log_utils.feedback_response_matches_command(".换取", "天道认可，你已献上祭品，机缘收入囊中。"))
+        actor = DummyCommon()
+        self.assertTrue(actor.is_bushi_wentian_kunwu_offer(text.replace("昆吾通行令", "昆吾令")))
 
-    def test_bushi_wentian_after_field_training_replies_exchange_offer(self):
+    def test_bushi_wentian_daily_for_identity_sends_eight_times(self):
+        actor = DummyCommon()
+        actor.state = {}
+        actor.dashboard_command_paused = lambda command, identity: False
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append((command, kwargs))
+            return SimpleNamespace(id=71000 + len(sent), text="**【卜筮问天】**\n卦象显示今日灵机平稳。")
+
+        actor.send_and_wait_feedback = fake_send
+
+        async def fake_sleep(seconds):
+            return None
+
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
+
+        self.assertEqual(result, "done")
+        self.assertEqual([item[0] for item in sent], [".卜筮问天"] * 8)
+        self.assertEqual(actor.state["bushi_wentian_count"], 8)
+        self.assertTrue(actor.state["bushi_wentian_done_at"])
+
+    def test_bushi_wentian_daily_replies_kunwu_offer_and_stops(self):
         actor = DummyCommon()
         actor.state = {}
         actor.dashboard_command_paused = lambda command, identity: False
@@ -6130,26 +6151,21 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = fake_send
 
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
+        async def fake_sleep(seconds):
+            return None
 
-        self.assertTrue(ok)
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
+
+        self.assertEqual(result, "kunwu_seen")
         self.assertEqual([item[0] for item in sent], [".卜筮问天", ".换取"])
         self.assertTrue(sent[0][1]["return_response_msg"])
         self.assertEqual(sent[1][1]["reply_to"], 71001)
         self.assertEqual(actor.state["bushi_wentian_count"], 1)
         self.assertEqual(actor.state["bushi_wentian_exchange_count"], 1)
+        self.assertTrue(actor.state["bushi_wentian_kunwu_seen"])
         self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
-
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
-
-        self.assertFalse(ok)
-        self.assertEqual([item[0] for item in sent], [".卜筮问天", ".换取"])
+        self.assertTrue(actor.state["bushi_wentian_done_at"])
 
     def test_bushi_wentian_daily_limit_skips_send(self):
         actor = DummyCommon()
@@ -6165,12 +6181,9 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = fake_send
 
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
+        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
 
-        self.assertFalse(ok)
+        self.assertEqual(result, "done")
 
     def test_bushi_wentian_preclaims_final_daily_slot_on_no_response(self):
         actor = DummyCommon()
@@ -6188,21 +6201,15 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = fake_send
 
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
+        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
 
-        self.assertFalse(ok)
+        self.assertEqual(result, "no_response")
         self.assertEqual(sent, [".卜筮问天"])
         self.assertEqual(actor.state["bushi_wentian_count"], 8)
 
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
+        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
 
-        self.assertFalse(ok)
+        self.assertEqual(result, "done")
         self.assertEqual(sent, [".卜筮问天"])
 
     def test_bushi_wentian_existing_exchange_count_stops_today(self):
@@ -6219,13 +6226,30 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = fake_send
 
-        ok = asyncio.run(actor.maybe_run_bushi_wentian_after_field_training(
-            "主魂",
-            "**【野外历练 · 灵机暗藏】**\n本次修为增加 **157** 点。",
-        ))
+        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
 
-        self.assertFalse(ok)
+        self.assertEqual(result, "done")
         self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
+
+    def test_bushi_wentian_start_window_is_near_midnight_only(self):
+        actor = DummyCommon()
+
+        class AtStart(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 0, 3, 30)
+
+        class LateDay(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 18, 0, 0)
+
+        with patch.object(common_command_features, "datetime", AtStart):
+            self.assertTrue(actor.bushi_wentian_start_window_open())
+
+        with patch.object(common_command_features, "datetime", LateDay):
+            self.assertFalse(actor.bushi_wentian_start_window_open())
+            self.assertGreater(actor.bushi_wentian_next_start_seconds(), 5 * 3600)
 
     def test_field_training_initial_reply_does_not_trigger_bushi(self):
         actor = DummyCommon()
@@ -10617,7 +10641,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         asyncio.run(actor._avatar_field_training_check("缘生子"))
 
-        self.assertEqual(sent, [("缘生子", ".野外历练"), ("缘生子", ".卜筮问天")])
+        self.assertEqual(sent, [("缘生子", ".野外历练")])
         self.assertTrue(actor.state["avatars"]["缘生子"]["next_field_training_time"])
 
     def test_main_wujiuzi_field_training_sends_destiny_change_before_deep_training(self):
@@ -10653,7 +10677,6 @@ class ParserFixtureTests(unittest.TestCase):
             ("无咎子", ".推命 探索"),
             ("无咎子", ".改命 探索"),
             ("无咎子", ".野外历练 深入"),
-            ("无咎子", ".卜筮问天"),
         ])
         self.assertTrue(actor.state["avatars"]["无咎子"]["next_field_training_time"])
 

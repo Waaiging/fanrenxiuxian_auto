@@ -5078,6 +5078,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
+        self.create_scheduler_task("bushi_wentian_daily", lambda: self.run_bushi_wentian_daily_loop(initial_delay=30, sleep_func=scheduler_sleep_seconds))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         if not self.lingxiao_enabled:

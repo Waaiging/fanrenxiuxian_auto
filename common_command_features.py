@@ -81,6 +81,11 @@ FIELD_TRAINING_SETTLEMENT_WAIT_SECONDS = 15    # 等待野外历练初始回复�
 BUSHI_WENTIAN_COMMAND = ".卜筮问天"
 BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
 BUSHI_WENTIAN_DAILY_LIMIT = 8
+BUSHI_WENTIAN_START_HOUR = 0
+BUSHI_WENTIAN_START_MINUTE = 3
+BUSHI_WENTIAN_START_CATCHUP_SECONDS = 45 * 60
+BUSHI_WENTIAN_SEND_INTERVAL_SECONDS = 3
+BUSHI_WENTIAN_RETRY_SECONDS = 10 * 60
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 YUANYING_REBIRTH_WAIT_SECONDS = 365 * 24 * 3600   # 探寻裂缝失败后等待手动 .重生 成功
 YUANYING_OUT_CD_SECONDS = 8 * 3600
@@ -241,7 +246,7 @@ def common_command_default_state():
 class _CommonAtomicTask:
     """共享原子任务门闩。
 
-    多步骤链（如野外历练后的卜筮问天、宗门战、化身任务批次）会短暂占用
+    多步骤链（如卜筮问天、宗门战、化身任务批次）会短暂占用
     active_atomic_task，普通发送会等待它释放，避免中途被其他循环切身份。
     """
 
@@ -3351,7 +3356,7 @@ class CommonCommandMixin:
         )
 
     def is_field_training_settlement_response(self, text):
-        """野外历练已结算的回复，可以触发后置卜筮问天。"""
+        """野外历练已结算的回复。"""
         clean = (text or "").replace("**", "")
         if not clean or "野外历练" not in clean:
             return False
@@ -3638,7 +3643,6 @@ class CommonCommandMixin:
                     return 60
 
             self.record_identity_field_training_response(avatar, resp_text, "野外历练")
-            await self.maybe_run_bushi_wentian_after_field_training(avatar, resp_text)
         return 5
 
     async def run_common_avatar_field_training_loop(
@@ -4892,7 +4896,7 @@ class CommonCommandMixin:
     ):
         """
         野外历练先回复“正在行进”，随后编辑为结算。
-        只有等到编辑结算后，才适合发后置的 .卜筮问天。
+        等到编辑结算后再记录收益和刷新冷却，避免把初始回复当成完成结果。
         """
         text = self.field_training_response_text(resp)
         if not self.is_field_training_pending_response(text):
@@ -4922,7 +4926,7 @@ class CommonCommandMixin:
                 return updated
             last_text = updated_text or last_text
 
-        log.warning(f"[{identity}] field training settlement was not edited within {timeout_seconds}s; skipping post-training bushi.")
+        log.warning(f"[{identity}] field training settlement was not edited within {timeout_seconds}s; using initial response.")
         return resp
 
     # ---- 卜筮问天 ----
@@ -4941,16 +4945,22 @@ class CommonCommandMixin:
             state["bushi_wentian_date"] = today
             state["bushi_wentian_count"] = 0
             state["bushi_wentian_exchange_count"] = 0
+            state["bushi_wentian_kunwu_seen"] = False
             state["bushi_wentian_kunwu_exchanged"] = False
+            state["bushi_wentian_started_at"] = ""
+            state["bushi_wentian_done_at"] = ""
             changed = True
         else:
             for key, default in (
                 ("bushi_wentian_count", 0),
                 ("bushi_wentian_exchange_count", 0),
+                ("bushi_wentian_kunwu_seen", False),
                 ("bushi_wentian_kunwu_exchanged", False),
+                ("bushi_wentian_started_at", ""),
+                ("bushi_wentian_done_at", ""),
             ):
                 if key not in state:
-                    if key == "bushi_wentian_kunwu_exchanged":
+                    if key in ("bushi_wentian_kunwu_seen", "bushi_wentian_kunwu_exchanged"):
                         state[key] = int(state.get("bushi_wentian_exchange_count", 0) or 0) > 0
                     else:
                         state[key] = default
@@ -4981,7 +4991,7 @@ class CommonCommandMixin:
 
     def is_bushi_wentian_kunwu_offer(self, text):
         clean = str(text or "").replace("**", "")
-        return self.is_bushi_wentian_exchange_offer(clean) and "昆吾通行令" in clean
+        return self.is_bushi_wentian_exchange_offer(clean) and any(k in clean for k in ("昆吾通行令", "昆吾令"))
 
     def is_bushi_wentian_exchange_success(self, text):
         clean = str(text or "").replace("**", "")
@@ -4999,25 +5009,67 @@ class CommonCommandMixin:
             and any(k in clean for k in ["次数", "上限", "明日", "已用尽"])
         )
 
-    async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
-        """Run .卜筮问天 after a real field-training result, up to the daily limit."""
-        if not self.is_field_training_settlement_response(field_training_text):
-            return False
+    def bushi_wentian_target_time(self, now=None):
+        now = now or datetime.now()
+        return now.replace(
+            hour=BUSHI_WENTIAN_START_HOUR,
+            minute=BUSHI_WENTIAN_START_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+
+    def bushi_wentian_next_start_seconds(self, now=None):
+        now = now or datetime.now()
+        target = self.bushi_wentian_target_time(now)
+        if now >= target:
+            target += timedelta(days=1)
+        return max(0, int((target - now).total_seconds()))
+
+    def bushi_wentian_start_window_open(self, now=None):
+        now = now or datetime.now()
+        target = self.bushi_wentian_target_time(now)
+        return target <= now <= target + timedelta(seconds=BUSHI_WENTIAN_START_CATCHUP_SECONDS)
+
+    def bushi_wentian_identity_started_today(self, identity="主魂"):
+        state = self.ensure_bushi_wentian_state(identity)
+        today = datetime.now().strftime("%Y-%m-%d")
+        return str(state.get("bushi_wentian_started_at") or "").startswith(today)
+
+    def bushi_wentian_identity_done(self, identity="主魂"):
+        state = self.ensure_bushi_wentian_state(identity)
+        return (
+            int(state.get("bushi_wentian_count", 0) or 0) >= BUSHI_WENTIAN_DAILY_LIMIT
+            or bool(state.get("bushi_wentian_kunwu_seen"))
+            or bool(state.get("bushi_wentian_kunwu_exchanged"))
+        )
+
+    def bushi_wentian_identities(self):
+        identities = ["主魂"]
+        for identity in getattr(self, "avatars", []) or []:
+            identity = str(identity or "").strip()
+            if identity and identity not in identities:
+                identities.append(identity)
+        return identities
+
+    async def send_bushi_wentian_once(self, identity="主魂", reason="daily"):
+        """Send one .卜筮问天 and handle possible .换取 reply."""
         identity = str(identity or "").strip() or "主魂"
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
-            return False
+            return "paused"
         state = self.ensure_bushi_wentian_state(identity)
-        if state.get("bushi_wentian_kunwu_exchanged"):
-            return False
+        if self.bushi_wentian_identity_done(identity):
+            return "done"
         current_count = int(state.get("bushi_wentian_count", 0) or 0)
         if current_count >= BUSHI_WENTIAN_DAILY_LIMIT:
-            return False
+            return "done"
+        if not state.get("bushi_wentian_started_at"):
+            state["bushi_wentian_started_at"] = now_str()
         state["bushi_wentian_count"] = min(BUSHI_WENTIAN_DAILY_LIMIT, current_count + 1)
         self.save_state()
 
         log = self.common_command_logger()
         log.info(
-            f"[{identity}] Bushi Wentian after field training: sending {BUSHI_WENTIAN_COMMAND} "
+            f"[{identity}] Bushi Wentian {reason}: sending {BUSHI_WENTIAN_COMMAND} "
             f"({state['bushi_wentian_count']}/{BUSHI_WENTIAN_DAILY_LIMIT})."
         )
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
@@ -5041,22 +5093,29 @@ class CommonCommandMixin:
 
         text = self.bushi_wentian_response_text(resp_msg)
         if not text:
-            return False
+            return "no_response"
 
         state = self.ensure_bushi_wentian_state(identity)
         if self.is_bushi_wentian_daily_limit_response(text):
             state["bushi_wentian_count"] = BUSHI_WENTIAN_DAILY_LIMIT
+            state["bushi_wentian_done_at"] = now_str()
             self.save_state()
-            return False
+            return "done"
 
         is_kunwu_offer = self.is_bushi_wentian_kunwu_offer(text)
+        if is_kunwu_offer:
+            state["bushi_wentian_kunwu_seen"] = True
+            self.save_state()
         if not self.is_bushi_wentian_exchange_offer(text):
-            return True
+            if self.bushi_wentian_identity_done(identity):
+                state["bushi_wentian_done_at"] = now_str()
+                self.save_state()
+            return "sent"
 
         reply_to = getattr(resp_msg, "id", None)
         if not reply_to:
             log.warning(f"[{identity}] Bushi Wentian exchange offer has no message id; cannot reply .换取.")
-            return True
+            return "kunwu_seen" if is_kunwu_offer else "exchange_offer"
 
         log.info(f"[{identity}] Bushi Wentian exchange offer detected; replying {BUSHI_WENTIAN_EXCHANGE_COMMAND}.")
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
@@ -5082,8 +5141,74 @@ class CommonCommandMixin:
         exchange_text = self.bushi_wentian_response_text(exchange_resp)
         if is_kunwu_offer and self.is_bushi_wentian_exchange_success(exchange_text):
             state["bushi_wentian_kunwu_exchanged"] = True
+        if self.bushi_wentian_identity_done(identity):
+            state["bushi_wentian_done_at"] = now_str()
         self.save_state()
-        return True
+        return "kunwu_seen" if is_kunwu_offer else "exchange_offer"
+
+    async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
+        """Deprecated: .卜筮问天 now runs from the daily 00:03 loop."""
+        return False
+
+    async def run_bushi_wentian_daily_for_identity(self, identity="主魂"):
+        identity = str(identity or "").strip() or "主魂"
+        if self.bushi_wentian_identity_done(identity):
+            return "done"
+        if hasattr(self, "identity_pause_seconds") and self.identity_pause_seconds(identity) > 0:
+            return "paused"
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
+            return "paused"
+
+        async with self.common_atomic_task(f"BushiWentian-{identity}"):
+            while not self.bushi_wentian_identity_done(identity):
+                result = await self.send_bushi_wentian_once(identity, reason="daily")
+                if result in {"paused", "no_response"}:
+                    return result
+                if result in {"done", "kunwu_seen"}:
+                    return result
+                if self.bushi_wentian_identity_done(identity):
+                    return "done"
+                await asyncio.sleep(BUSHI_WENTIAN_SEND_INTERVAL_SECONDS)
+        return "done"
+
+    async def run_bushi_wentian_daily_loop(self, initial_delay=0, sleep_func=None):
+        """Run .卜筮问天 independently every day at 00:03 for each identity."""
+        await self.startup_done.wait()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            try:
+                await self.pause_event.wait()
+                now = datetime.now()
+                identities = self.bushi_wentian_identities()
+                window_open = self.bushi_wentian_start_window_open(now)
+                has_partial_today = any(
+                    self.bushi_wentian_identity_started_today(identity)
+                    and not self.bushi_wentian_identity_done(identity)
+                    for identity in identities
+                )
+                if not window_open and not has_partial_today:
+                    wait = self.bushi_wentian_next_start_seconds(now)
+                    log.info(f"Bushi Wentian daily loop sleeping {int(wait)}s until next 00:03 window.")
+                    await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=60, sleep_func=sleep_func))
+                    continue
+
+                progressed = False
+                for identity in identities:
+                    if not window_open and not self.bushi_wentian_identity_started_today(identity):
+                        continue
+                    before = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
+                    result = await self.run_bushi_wentian_daily_for_identity(identity)
+                    after = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
+                    progressed = progressed or after > before or result in {"done", "kunwu_seen", "exchange_offer"}
+                wait = 300 if progressed else BUSHI_WENTIAN_RETRY_SECONDS
+                if all(self.bushi_wentian_identity_done(identity) for identity in identities):
+                    wait = self.bushi_wentian_next_start_seconds(datetime.now())
+                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=60, sleep_func=sleep_func))
+            except Exception as exc:
+                log.error(f"Bushi Wentian daily loop error: {exc}", exc_info=True)
+                await asyncio.sleep(BUSHI_WENTIAN_RETRY_SECONDS)
 
     # ---- 宗门战 — 辅助方法 ----
 
@@ -5624,7 +5749,6 @@ class CommonCommandMixin:
                 resp = await self.wait_for_field_training_settlement(resp, "主魂")
                 resp_text = self.field_training_response_text(resp)
                 self.record_field_training_response(resp_text)
-                await self.maybe_run_bushi_wentian_after_field_training("主魂", resp_text)
             await asyncio.sleep(5)
 
     async def run_sect_war_loop(self):
