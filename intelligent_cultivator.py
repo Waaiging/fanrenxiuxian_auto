@@ -3906,6 +3906,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         await self.pause_event.wait()
         if not await self.wait_while_identity_paused(identity, message):
             return None
+        if not command_send_precheck(self, message, log, identity=identity):
+            return None
 
         yield_attempts = 0
         defer_started_at = None

@@ -9540,6 +9540,64 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(prechecked, [(".协同守山", "缘生子")])
         self.assertEqual(sent, [])
 
+    def test_sub_identity_send_skips_dashboard_disabled_command_before_switch(self):
+        async def run_case():
+            actor = SubCultivator.__new__(SubCultivator)
+            actor.avatars = ["寻真子"]
+            actor._current_identity = "厚土"
+            actor._main_confirmed = False
+            actor.state = {"current_identity": "厚土", "avatars": {"寻真子": {}}}
+            actor.state_file = "state_sub.json"
+            actor.config = {}
+            actor.client = None
+            actor.my_info = SimpleNamespace(first_name="SubFixture")
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.save_state = lambda: None
+            actor.should_wait_for_atomic_task = lambda *args, **kwargs: False
+            actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+            actor.time_critical_identity_command = lambda command: False
+
+            async def fail_raw(command, *args, **kwargs):
+                raise AssertionError(f"should not send raw command: {command}")
+
+            actor._send_and_wait_feedback_raw = fail_raw
+            result = await actor.send_and_wait_feedback_identity(
+                "寻真子",
+                ".启阵",
+                max_retries=0,
+            )
+            return result, actor.current_identity, getattr(actor, "_last_command_guard_block", {})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls_path = os.path.join(tmpdir, "command_controls.json")
+            with open(controls_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "sub": {
+                        "寻真子": {
+                            ".启阵": {
+                                "disabled": True,
+                                "command": ".启阵",
+                            }
+                        }
+                    }
+                }, f, ensure_ascii=False)
+
+            log_utils._COMMAND_CONTROLS_CACHE["mtime"] = None
+            log_utils._COMMAND_CONTROLS_CACHE["data"] = {}
+            try:
+                with patch.object(log_utils, "COMMAND_CONTROL_FILE", controls_path):
+                    result, current_identity, block = asyncio.run(run_case())
+            finally:
+                log_utils._COMMAND_CONTROLS_CACHE["mtime"] = None
+                log_utils._COMMAND_CONTROLS_CACHE["data"] = {}
+
+        self.assertIsNone(result)
+        self.assertEqual(current_identity, "厚土")
+        self.assertEqual(block.get("reason"), "dashboard_disabled")
+        self.assertEqual(block.get("identity"), "寻真子")
+
     def test_spirit_tree_guard_command_guard_is_response_scoped(self):
         actor = SimpleNamespace(
             current_identity="主魂",

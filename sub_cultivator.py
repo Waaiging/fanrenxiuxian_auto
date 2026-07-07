@@ -1560,6 +1560,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
+        if not command_send_precheck(self, message, log, identity=identity):
+            return None
 
         _t0 = time.monotonic()
         log.info(f"[DEBUG-IDENTITY] [{identity}] ENTER send_and_wait_feedback_identity, cmd={message!r}, lock_held={self.avatar_send_lock.locked()}")

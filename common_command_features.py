@@ -36,6 +36,7 @@ from log_utils import (
     dashboard_command_disabled,
     identity_from_single_username_mention,
     identity_plain_usernames,
+    command_send_precheck,
     is_deep_meditation_ongoing_response,
     is_deep_meditation_settlement_response,
     is_game_bot_sender,
@@ -2243,6 +2244,9 @@ class CommonCommandMixin:
         if hasattr(self, "wait_while_identity_paused"):
             if not await self.wait_while_identity_paused(identity, command):
                 return False
+
+        if not command_send_precheck(self, command, log, identity=identity):
+            return False
 
         while hasattr(self, "should_wait_for_atomic_task") and self.should_wait_for_atomic_task(command):
             await asyncio.sleep(0.5)

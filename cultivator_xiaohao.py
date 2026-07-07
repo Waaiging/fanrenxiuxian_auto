@@ -1704,6 +1704,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         await self.pause_event.wait()
         if not await self.wait_while_identity_paused(identity, message):
             return None
+        if not command_send_precheck(self, message, log, identity=identity):
+            return None
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
         force_fresh_identity_confirm = (
