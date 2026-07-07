@@ -87,6 +87,8 @@ BUSHI_WENTIAN_START_MINUTE = 3
 BUSHI_WENTIAN_START_CATCHUP_SECONDS = 45 * 60
 BUSHI_WENTIAN_SEND_INTERVAL_SECONDS = 3
 BUSHI_WENTIAN_RETRY_SECONDS = 10 * 60
+BUSHI_WENTIAN_ACCOUNT_ORDER = ("main", "sub", "xiaohao")
+BUSHI_WENTIAN_IDENTITY_STAGGER_SECONDS = 3 * 60
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 YUANYING_REBIRTH_WAIT_SECONDS = 365 * 24 * 3600   # 探寻裂缝失败后等待手动 .重生 成功
 YUANYING_OUT_CD_SECONDS = 8 * 3600
@@ -5161,26 +5163,75 @@ class CommonCommandMixin:
             and any(k in clean for k in ["次数", "上限", "明日", "已用尽"])
         )
 
-    def bushi_wentian_target_time(self, now=None):
+    def bushi_wentian_account_index(self):
+        key = actor_account_key(self) or str(getattr(self, "account_key", "") or "").strip()
+        try:
+            return BUSHI_WENTIAN_ACCOUNT_ORDER.index(key)
+        except ValueError:
+            return 0
+
+    def bushi_wentian_identity_index(self, identity="主魂"):
+        identity = str(identity or "").strip() or "主魂"
+        identities = self.bushi_wentian_identities()
+        try:
+            return identities.index(identity)
+        except ValueError:
+            return 0
+
+    def bushi_wentian_identity_offset_seconds(self, identity="主魂"):
+        """Return the deterministic cross-account stagger for an identity."""
+        account_count = max(1, len(BUSHI_WENTIAN_ACCOUNT_ORDER))
+        slot_index = self.bushi_wentian_identity_index(identity) * account_count + self.bushi_wentian_account_index()
+        return int(slot_index * BUSHI_WENTIAN_IDENTITY_STAGGER_SECONDS)
+
+    def bushi_wentian_target_time(self, now=None, identity="主魂"):
         now = now or datetime.now()
-        return now.replace(
+        base = now.replace(
             hour=BUSHI_WENTIAN_START_HOUR,
             minute=BUSHI_WENTIAN_START_MINUTE,
             second=0,
             microsecond=0,
         )
+        return base + timedelta(seconds=self.bushi_wentian_identity_offset_seconds(identity))
 
-    def bushi_wentian_next_start_seconds(self, now=None):
+    def bushi_wentian_next_start_seconds(self, now=None, identity="主魂"):
         now = now or datetime.now()
-        target = self.bushi_wentian_target_time(now)
+        target = self.bushi_wentian_target_time(now, identity)
         if now >= target:
             target += timedelta(days=1)
         return max(0, int((target - now).total_seconds()))
 
-    def bushi_wentian_start_window_open(self, now=None):
+    def bushi_wentian_start_window_open(self, now=None, identity="主魂"):
         now = now or datetime.now()
-        target = self.bushi_wentian_target_time(now)
+        target = self.bushi_wentian_target_time(now, identity)
         return target <= now <= target + timedelta(seconds=BUSHI_WENTIAN_START_CATCHUP_SECONDS)
+
+    def bushi_wentian_identity_due(self, identity="主魂", now=None):
+        if self.bushi_wentian_identity_done(identity):
+            return False
+        if self.bushi_wentian_identity_started_today(identity):
+            return True
+        return self.bushi_wentian_start_window_open(now, identity)
+
+    def bushi_wentian_next_due_seconds(self, identities=None, now=None):
+        now = now or datetime.now()
+        identities = identities or self.bushi_wentian_identities()
+        tomorrow_targets = []
+        today_targets = []
+        for identity in identities:
+            target = self.bushi_wentian_target_time(now, identity)
+            if not self.bushi_wentian_identity_done(identity):
+                if self.bushi_wentian_identity_started_today(identity):
+                    return 0
+                if target <= now <= target + timedelta(seconds=BUSHI_WENTIAN_START_CATCHUP_SECONDS):
+                    return 0
+                if now < target:
+                    today_targets.append(target)
+            tomorrow_targets.append(self.bushi_wentian_target_time(now + timedelta(days=1), identity))
+        candidates = today_targets or tomorrow_targets
+        if not candidates:
+            return BUSHI_WENTIAN_RETRY_SECONDS
+        return max(0, int((min(candidates) - now).total_seconds()))
 
     def bushi_wentian_identity_started_today(self, identity="主魂"):
         state = self.ensure_bushi_wentian_state(identity)
@@ -5324,7 +5375,7 @@ class CommonCommandMixin:
         return "done"
 
     async def run_bushi_wentian_daily_loop(self, initial_delay=0, sleep_func=None):
-        """Run .卜筮问天 independently every day at 00:03 for each identity."""
+        """Run .卜筮问天 daily with cross-account identity stagger slots."""
         await self.startup_done.wait()
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
@@ -5334,30 +5385,36 @@ class CommonCommandMixin:
                 await self.pause_event.wait()
                 now = datetime.now()
                 identities = self.bushi_wentian_identities()
-                window_open = self.bushi_wentian_start_window_open(now)
-                has_partial_today = any(
-                    self.bushi_wentian_identity_started_today(identity)
-                    and not self.bushi_wentian_identity_done(identity)
-                    for identity in identities
-                )
-                if not window_open and not has_partial_today:
-                    wait = self.bushi_wentian_next_start_seconds(now)
-                    log.info(f"Bushi Wentian daily loop sleeping {int(wait)}s until next 00:03 window.")
-                    await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=60, sleep_func=sleep_func))
+                due_identities = [
+                    identity for identity in identities
+                    if self.bushi_wentian_identity_due(identity, now)
+                ]
+                if not due_identities:
+                    wait = self.bushi_wentian_next_due_seconds(identities, now)
+                    log.info(
+                        f"Bushi Wentian daily loop sleeping {int(wait)}s until next staggered slot."
+                    )
+                    await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=1, sleep_func=sleep_func))
                     continue
 
                 progressed = False
-                for identity in identities:
-                    if not window_open and not self.bushi_wentian_identity_started_today(identity):
-                        continue
+                for identity in due_identities:
+                    target_time = self.bushi_wentian_target_time(now, identity)
+                    offset = self.bushi_wentian_identity_offset_seconds(identity)
+                    log.info(
+                        f"[{identity}] Bushi Wentian stagger slot due "
+                        f"({dt_to_str(target_time)}, offset {offset}s)."
+                    )
                     before = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
                     result = await self.run_bushi_wentian_daily_for_identity(identity)
                     after = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
                     progressed = progressed or after > before or result in {"done", "kunwu_seen", "exchange_offer"}
-                wait = 300 if progressed else BUSHI_WENTIAN_RETRY_SECONDS
+                wait = self.bushi_wentian_next_due_seconds(identities, datetime.now())
+                if not progressed and wait <= 0:
+                    wait = BUSHI_WENTIAN_RETRY_SECONDS
                 if all(self.bushi_wentian_identity_done(identity) for identity in identities):
-                    wait = self.bushi_wentian_next_start_seconds(datetime.now())
-                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=60, sleep_func=sleep_func))
+                    wait = self.bushi_wentian_next_due_seconds(identities, datetime.now())
+                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=1, sleep_func=sleep_func))
             except Exception as exc:
                 log.error(f"Bushi Wentian daily loop error: {exc}", exc_info=True)
                 await asyncio.sleep(BUSHI_WENTIAN_RETRY_SECONDS)

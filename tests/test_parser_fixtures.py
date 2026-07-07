@@ -6298,6 +6298,57 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(result, "done")
         self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
 
+    def test_bushi_wentian_targets_are_staggered_by_account_and_identity(self):
+        base = datetime(2026, 7, 7, 0, 3, 0)
+
+        main = DummyCommon()
+        main.account_key = "main"
+        main.avatars = ["无咎子", "缘生子"]
+
+        sub = DummyCommon()
+        sub.account_key = "sub"
+        sub.avatars = ["厚土", "寻真子"]
+
+        xiaohao = DummyCommon()
+        xiaohao.account_key = "xiaohao"
+        xiaohao.avatars = ["问心子", "素心子"]
+
+        self.assertEqual(main.bushi_wentian_target_time(base, "主魂"), base)
+        self.assertEqual(sub.bushi_wentian_target_time(base, "主魂"), base + timedelta(minutes=3))
+        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "主魂"), base + timedelta(minutes=6))
+        self.assertEqual(main.bushi_wentian_target_time(base, "无咎子"), base + timedelta(minutes=9))
+        self.assertEqual(sub.bushi_wentian_target_time(base, "厚土"), base + timedelta(minutes=12))
+        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "问心子"), base + timedelta(minutes=15))
+
+    def test_bushi_wentian_due_waits_for_identity_stagger_slot(self):
+        actor = DummyCommon()
+        actor.account_key = "main"
+        actor.avatars = ["无咎子"]
+        actor.state = {
+            "bushi_wentian_date": "2026-07-07",
+            "bushi_wentian_count": 0,
+            "bushi_wentian_exchange_count": 0,
+            "avatars": {"无咎子": {"bushi_wentian_date": "2026-07-07"}},
+        }
+
+        class AtMainSlot(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 0, 3, 30)
+
+        class AtAvatarSlot(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 7, 0, 12, 30)
+
+        with patch.object(common_command_features, "datetime", AtMainSlot):
+            self.assertTrue(actor.bushi_wentian_identity_due("主魂"))
+            self.assertFalse(actor.bushi_wentian_identity_due("无咎子"))
+            self.assertGreater(actor.bushi_wentian_next_due_seconds(["无咎子"]), 8 * 60)
+
+        with patch.object(common_command_features, "datetime", AtAvatarSlot):
+            self.assertTrue(actor.bushi_wentian_identity_due("无咎子"))
+
     def test_bushi_wentian_start_window_is_near_midnight_only(self):
         actor = DummyCommon()
 
