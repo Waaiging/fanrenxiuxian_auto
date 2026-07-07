@@ -20,6 +20,7 @@ from soul_curse_features import (
     parse_soul_curse_protect,
     parse_soul_curse_publish,
 )
+from yinluo_features import YINLUO_CONVERT_COMMAND, parse_yinluo_convert
 
 
 class _NoopAtomic:
@@ -40,6 +41,7 @@ class DummySoulCurseActor(SoulCurseMixin):
         self.main_sent = []
         self.identity_sent = []
         self.saved = 0
+        self.yinluo_states = {}
 
     def save_state(self):
         self.saved += 1
@@ -66,6 +68,28 @@ class DummySoulCurseActor(SoulCurseMixin):
         values = self.identity_responses.get((identity, command), [])
         return values.pop(0) if values else ""
 
+    def get_yinluo_state(self, identity):
+        return self.yinluo_states.setdefault(identity, {"last_status": "", "next_action_at": ""})
+
+    async def yinluo_convert_sha(self, identity):
+        self.identity_sent.append((identity, YINLUO_CONVERT_COMMAND))
+        values = self.identity_responses.get((identity, YINLUO_CONVERT_COMMAND), [])
+        text = values.pop(0) if values else ""
+        parsed = parse_yinluo_convert(text)
+        state = self.get_yinluo_state(identity)
+        if parsed.get("status") == "success":
+            state["last_status"] = "converted"
+            state["next_action_at"] = ""
+            return True
+        if parsed.get("status") == "pending":
+            state["last_status"] = "convert_pending"
+            state["next_action_at"] = soul_curse_features.add_seconds_str(soul_curse_features.now_str(), 60)
+            return True
+        wait = max(60, int(parsed.get("cooldown_seconds") or 3600))
+        state["last_status"] = "convert_failed"
+        state["next_action_at"] = soul_curse_features.add_seconds_str(soul_curse_features.now_str(), wait)
+        return False
+
 
 class SoulCurseParserTests(unittest.TestCase):
     def test_publish_parser_reads_new_and_existing_commission_ids(self):
@@ -87,8 +111,10 @@ class SoulCurseParserTests(unittest.TestCase):
     def test_action_parser_recognizes_failures(self):
         no_contract = parse_soul_curse_action("你与对方没有有效的咒契协定。需先由对方发布委托，再由你接取。", "strip")
         not_ready = parse_soul_curse_action("咒源尚未辨明，需先通过 `.推演封魂咒` 或 `.辨认咒纹` 将咒源推进到 50 以上。", "strip")
+        sha_not_enough = parse_soul_curse_action("煞气不足，无法施展借幡镇魂。", "suppress")
         self.assertEqual(no_contract["status"], "no_contract")
         self.assertEqual(not_ready["status"], "source_not_ready")
+        self.assertEqual(sha_not_enough["status"], "sha_not_enough")
 
 
 class SoulCurseFlowTests(unittest.TestCase):
@@ -122,7 +148,51 @@ class SoulCurseFlowTests(unittest.TestCase):
             ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Weeguu"),
         ])
         self.assertEqual(actor.state["soul_curse"]["commission_id"], "19")
+        self.assertEqual(actor.state["soul_curse"]["commission_status"], "completed")
         self.assertEqual(actor.state["avatars"]["缘生子"]["soul_curse_assist"]["strip_commission_id"], "19")
+        assist = actor.state["avatars"]["缘生子"]["soul_curse_assist"]
+        self.assertEqual(assist["next_identify_time"], assist["next_strip_time"])
+        self.assertEqual(assist["next_suppress_time"], assist["next_strip_time"])
+
+    def test_yinluo_action_replenishes_sha_and_retries_same_step(self):
+        actor = DummySoulCurseActor(
+            "main",
+            identity_responses={
+                ("缘生子", ".接取解咒委托 31"): ["**【咒契协定已成】** 阴罗宗弟子已接取 @Weeguu 的解咒委托。"],
+                ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Weeguu"): ["**【阴罗辨咒】** 咒源 +27。"],
+                ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Weeguu"): [
+                    "煞气不足，无法施展借幡镇魂。",
+                    "**【借幡镇魂】** 魂封 -11，月魄 +1。",
+                ],
+                ("缘生子", YINLUO_CONVERT_COMMAND): ["煞气池增加了 **10000** 点。"],
+                ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Weeguu"): ["**【剥离咒源成功】** 获得【阴罗残咒】x1。"],
+            },
+        )
+        actor.state["soul_curse"] = {
+            "commission_id": "31",
+            "commission_status": "success",
+            "commission_target": "@Weeguu",
+        }
+
+        asyncio.run(actor.soul_curse_process_assist_commission({
+            "owner_account": "main",
+            "commission_id": "31",
+            "target_username": "@Weeguu",
+            "assistant_identity": "缘生子",
+        }, source="local"))
+
+        self.assertEqual(actor.identity_sent, [
+            ("缘生子", ".接取解咒委托 31"),
+            ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Weeguu"),
+            ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Weeguu"),
+            ("缘生子", YINLUO_CONVERT_COMMAND),
+            ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Weeguu"),
+            ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Weeguu"),
+        ])
+        assist = actor.state["avatars"]["缘生子"]["soul_curse_assist"]
+        self.assertEqual(assist["suppress_commission_id"], "31")
+        self.assertEqual(assist["strip_commission_id"], "31")
+        self.assertEqual(actor.state["soul_curse"]["commission_status"], "completed")
 
     def test_xiaohao_publish_writes_shared_commission_for_sub(self):
         actor = DummySoulCurseActor(

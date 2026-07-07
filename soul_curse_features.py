@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, dt_to_str, is_future, now_str, seconds_until
-from yinluo_features import YINLUO_IDENTITY
+from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY
 
 
 SOUL_CURSE_VISIT_COMMAND = ".探望南宫婉"
@@ -145,6 +145,7 @@ def soul_curse_assist_default_state():
         "identify_commission_id": "",
         "suppress_commission_id": "",
         "strip_commission_id": "",
+        "completed_commission_id": "",
         "last_accept_time": "",
         "last_identify_time": "",
         "next_identify_time": "",
@@ -152,6 +153,8 @@ def soul_curse_assist_default_state():
         "next_suppress_time": "",
         "last_strip_time": "",
         "next_strip_time": "",
+        "last_completed_time": "",
+        "next_chain_time": "",
         "status": "init",
         "last_detail": "",
         "last_response": "",
@@ -248,6 +251,8 @@ def parse_soul_curse_action(text, action):
     clean = _strip_markdown(text)
     if not clean:
         return {"matched": False, "status": "", "cooldown_seconds": 0}
+    if "煞气不足" in clean:
+        return {"matched": True, "status": "sha_not_enough", "cooldown_seconds": 0}
     cd = _parse_remaining_seconds(clean)
     if cd > 0 and any(k in clean for k in ("冷却", "请在", "后再试", "后再")):
         return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
@@ -370,6 +375,24 @@ class SoulCurseMixin:
         if next_seconds is not None:
             state["next_action_at"] = add_seconds_str(now_str(), max(0, int(next_seconds)))
         self.save_state()
+
+    def soul_curse_mark_publisher_commission_completed(self, owner_account, commission_id, completed_at=None):
+        publisher = self.soul_curse_publisher_profile()
+        if not publisher or publisher.get("owner_account") != owner_account:
+            return False
+        state = self.get_soul_curse_state()
+        if str(state.get("commission_id") or "") != str(commission_id or ""):
+            return False
+        completed_at = completed_at or now_str()
+        next_ready = add_seconds_str(completed_at, SOUL_CURSE_CHAIN_SECONDS)
+        state["commission_status"] = "completed"
+        state["commission_updated_at"] = completed_at
+        state["last_chain_time"] = completed_at
+        state["next_chain_time"] = next_ready
+        state["next_action_at"] = next_ready
+        state["chain_stage"] = ""
+        self.save_state()
+        return True
 
     def soul_curse_command_paused(self, command, identity="主魂"):
         if hasattr(self, "dashboard_command_paused"):
@@ -551,11 +574,25 @@ class SoulCurseMixin:
         now = now_str()
         if parsed.get("status") == "success":
             state[last_key] = now
-            state[next_key] = add_seconds_str(now, int(parsed.get("cooldown_seconds") or SOUL_CURSE_CHAIN_SECONDS))
             state[id_key] = commission_id
-            status = "completed" if action == "strip" else f"{action}_success"
-            self.soul_curse_set_assist_status(identity, status, f"{label}完成，委托 {commission_id}", 3, text)
+            if action == "strip":
+                next_ready = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
+                state["completed_commission_id"] = commission_id
+                state["last_completed_time"] = now
+                state["next_chain_time"] = next_ready
+                state["next_identify_time"] = next_ready
+                state["next_suppress_time"] = next_ready
+                state["next_strip_time"] = next_ready
+                self.soul_curse_mark_publisher_commission_completed(profile.get("owner_account"), commission_id, now)
+                self.soul_curse_set_assist_status(identity, "completed", f"{label}完成，委托 {commission_id}", SOUL_CURSE_CHAIN_SECONDS, text)
+            else:
+                state[next_key] = add_seconds_str(now, int(parsed.get("cooldown_seconds") or SOUL_CURSE_CHAIN_SECONDS))
+                self.soul_curse_set_assist_status(identity, f"{action}_success", f"{label}完成，委托 {commission_id}", 3, text)
             return "success"
+        if parsed.get("status") == "sha_not_enough":
+            state[next_key] = ""
+            self.soul_curse_set_assist_status(identity, f"{action}_sha_not_enough", f"{label}煞气不足，准备化功为煞", 5, text)
+            return "sha_not_enough"
         if parsed.get("status") in {"cooldown", "source_not_ready", "no_contract", "blocked"}:
             wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
             state[next_key] = add_seconds_str(now, wait)
@@ -564,6 +601,75 @@ class SoulCurseMixin:
         wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
         self.soul_curse_set_assist_status(identity, f"{action}_unknown", f"{label}回执未识别" if text else f"{label}无回执", wait, text)
         return "unknown"
+
+    def soul_curse_yinluo_convert_wait_seconds(self, identity, default_seconds=SOUL_CURSE_UNKNOWN_RETRY_SECONDS):
+        if not hasattr(self, "get_yinluo_state"):
+            return int(default_seconds)
+        try:
+            state = self.get_yinluo_state(identity)
+            due_at = state.get("next_action_at", "")
+            if due_at and is_future(due_at):
+                return max(5, int(seconds_until(due_at)))
+        except Exception:
+            pass
+        return int(default_seconds)
+
+    async def soul_curse_replenish_sha_for_action(self, identity, action, label, response_text):
+        if not hasattr(self, "yinluo_convert_sha"):
+            self.soul_curse_set_assist_status(
+                identity,
+                f"{action}_sha_not_enough",
+                f"{label}煞气不足，但当前脚本没有化功为煞接口",
+                SOUL_CURSE_UNKNOWN_RETRY_SECONDS,
+                response_text,
+            )
+            return False
+
+        try:
+            yinluo_state = self.get_yinluo_state(identity) if hasattr(self, "get_yinluo_state") else {}
+        except Exception:
+            yinluo_state = {}
+        if str(yinluo_state.get("last_status") or "").startswith("convert_") and is_future(yinluo_state.get("next_action_at", "")):
+            wait = self.soul_curse_yinluo_convert_wait_seconds(identity)
+            self.soul_curse_set_assist_status(
+                identity,
+                f"{action}_sha_convert_wait",
+                f"{label}煞气不足，化功为煞仍在冷却/结算中，{wait}秒后重试",
+                wait,
+                response_text,
+            )
+            return False
+
+        if self.soul_curse_command_paused(YINLUO_CONVERT_COMMAND, identity):
+            self.soul_curse_set_assist_status(identity, f"{action}_sha_convert_paused", "化功为煞已暂停", 300, response_text)
+            return False
+
+        self.soul_curse_set_assist_status(identity, f"{action}_sha_converting", f"{label}煞气不足，正在化功为煞", None, response_text)
+        converted = await self.yinluo_convert_sha(identity)
+        try:
+            yinluo_state = self.get_yinluo_state(identity) if hasattr(self, "get_yinluo_state") else {}
+        except Exception:
+            yinluo_state = {}
+        convert_status = str(yinluo_state.get("last_status") or "")
+        if converted and convert_status == "converted":
+            state = self.get_soul_curse_assist_state(identity)
+            state["next_action_at"] = ""
+            state["last_detail"] = f"{label}煞气不足，已化功为煞，立即重试"
+            self.save_state()
+            return True
+
+        wait = self.soul_curse_yinluo_convert_wait_seconds(
+            identity,
+            60 if convert_status == "convert_pending" else SOUL_CURSE_UNKNOWN_RETRY_SECONDS,
+        )
+        self.soul_curse_set_assist_status(
+            identity,
+            f"{action}_{convert_status or 'sha_convert_failed'}",
+            f"{label}煞气不足，化功为煞未完成，{wait}秒后重试",
+            wait,
+            response_text,
+        )
+        return False
 
     async def soul_curse_maybe_visit(self, profile):
         state = self.get_soul_curse_state()
@@ -696,7 +802,28 @@ class SoulCurseMixin:
                 if self.soul_curse_command_paused(command, identity):
                     return 300
                 resp = await self.soul_curse_send_identity(identity, command, timeout=80)
-                result = self.record_soul_curse_action_response(identity, action, self.soul_curse_response_text(resp), commission_id, profile)
+                resp_text = self.soul_curse_response_text(resp)
+                parsed = parse_soul_curse_action(resp_text, action)
+                if parsed.get("status") == "sha_not_enough":
+                    label = {
+                        "identify": "辨认咒纹",
+                        "suppress": "借幡镇魂",
+                        "strip": "剥离咒源",
+                    }[action]
+                    if await self.soul_curse_replenish_sha_for_action(identity, action, label, resp_text):
+                        await asyncio.sleep(3)
+                        resp = await self.soul_curse_send_identity(identity, command, timeout=80)
+                        result = self.record_soul_curse_action_response(
+                            identity,
+                            action,
+                            self.soul_curse_response_text(resp),
+                            commission_id,
+                            profile,
+                        )
+                    else:
+                        result = "sha_not_enough"
+                else:
+                    result = self.record_soul_curse_action_response(identity, action, resp_text, commission_id, profile)
                 self.soul_curse_update_shared_from_assist(profile, "completed" if action == "strip" and result == "success" else result)
                 if result != "success":
                     return 5
@@ -730,10 +857,21 @@ class SoulCurseMixin:
         if not item.get("commission_id") or str(item.get("commission_id")) != str(state.get("commission_id") or ""):
             return
         status = str(item.get("status") or "")
-        if not status or status == state.get("commission_status"):
+        if not status:
+            return
+        if status == state.get("commission_status") and not (
+            status == "completed" and not state.get("last_chain_time")
+        ):
             return
         state["commission_status"] = status
         state["commission_updated_at"] = item.get("updated_at") or now_str()
+        if status == "completed":
+            completed_at = item.get("updated_at") or now_str()
+            next_ready = add_seconds_str(completed_at, SOUL_CURSE_CHAIN_SECONDS)
+            state["last_chain_time"] = completed_at
+            state["next_chain_time"] = next_ready
+            state["next_action_at"] = next_ready
+            state["chain_stage"] = ""
         if status in {"gone", "no_contract", "blocked"}:
             retry_at = add_seconds_str(now_str(), SOUL_CURSE_UNKNOWN_RETRY_SECONDS)
             state["next_chain_time"] = retry_at
@@ -787,6 +925,20 @@ class SoulCurseMixin:
                     if wait <= 10:
                         return max(5, wait)
                     waits.append(wait)
+                    return max(30, min(int(wait), 3600))
+                self.soul_curse_mark_publisher_commission_completed(
+                    publisher.get("owner_account"),
+                    state.get("commission_id"),
+                    assist_state.get("last_completed_time") or assist_state.get("last_strip_time") or now_str(),
+                )
+
+            state = self.get_soul_curse_state()
+            if publisher.get("shared") and state.get("commission_id") and state.get("commission_status") not in {
+                "completed", "gone", "blocked", "no_contract",
+            }:
+                wait = seconds_until(state.get("next_action_at", "")) if is_future(state.get("next_action_at", "")) else 600
+                waits.append(wait)
+                return max(30, min(int(wait), 3600))
 
             chain_wait = await self.soul_curse_run_publisher_chain(publisher)
             if chain_wait <= 10:
@@ -849,6 +1001,6 @@ class SoulCurseMixin:
                 action = "strip"
             if action:
                 return self.record_soul_curse_action_response(identity, action, text, commission_id, assistant) in {
-                    "success", "cooldown", "source_not_ready", "no_contract", "blocked",
+                    "success", "cooldown", "source_not_ready", "no_contract", "blocked", "sha_not_enough",
                 }
         return False
