@@ -618,9 +618,13 @@ class ConcubineMixin:
     def concubine_status_trusted_for_identity(self, text, identity="主魂"):
         """Return whether the status text is safely attributable to identity."""
         identity = identity or "主魂"
+        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", str(text or ""))
+        if not marker:
+            return True
+        marked_identity = marker.group(1).strip()
         if identity == "主魂":
-            return not re.search(r"\[Avatar:\s*[^\]\r\n]+\]", str(text or ""))
-        return f"[Avatar: {identity}]" in str(text or "")
+            return False
+        return marked_identity == identity
 
     def record_concubine_name_from_text(self, identity="主魂", text=""):
         identity = identity or "主魂"

@@ -8563,6 +8563,39 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(state["target_concubine_found"])
         self.assertGreater(seconds_until(state["next_concubine_search_time"]), 7100)
 
+    def test_target_concubine_avatar_unmarked_status_dismisses_before_search(self):
+        actor = DummyConcubine()
+        actor.avatars = ["无咎子"]
+        actor.state["avatars"] = {"无咎子": {}}
+        actor.get_avatar_state = lambda identity: actor.state.setdefault("avatars", {}).setdefault(identity, {})
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            if command == ".我的侍妾":
+                return None, "**你的红尘道侣: 【绿袖】** (状态: 随行中)", False
+            if command == ".遣散侍妾":
+                return None, "你与 **绿袖** 缘分已尽，从此一别两宽，各自安好。", False
+            if command == ".红尘寻缘":
+                return None, "你踏遍万千红尘，却终是镜花水月，未能寻得有缘之人。", False
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertFalse(asyncio.run(actor.execute_target_concubine_search("无咎子")))
+
+        self.assertEqual(sent, [
+            ("无咎子", ".我的侍妾"),
+            ("无咎子", ".遣散侍妾"),
+            ("无咎子", ".红尘寻缘"),
+        ])
+        state = actor.get_avatar_state("无咎子")
+        self.assertEqual(state["concubine_name"], "")
+        self.assertFalse(state["target_concubine_found"])
+        self.assertGreater(seconds_until(state["next_concubine_search_time"]), 7100)
+
     def test_target_concubine_auto_search_dismisses_existing_partner_prompt(self):
         actor = DummyConcubine()
         actor.dashboard_command_paused = lambda command, identity="主魂": False
@@ -8590,6 +8623,38 @@ class ParserFixtureTests(unittest.TestCase):
         ])
         self.assertEqual(actor.state["concubine_name"], "")
         self.assertFalse(actor.state["target_concubine_found"])
+
+    def test_target_concubine_avatar_unmarked_existing_partner_prompt_dismisses(self):
+        actor = DummyConcubine()
+        actor.avatars = ["无咎子"]
+        actor.state["avatars"] = {"无咎子": {}}
+        actor.get_avatar_state = lambda identity: actor.state.setdefault("avatars", {}).setdefault(identity, {})
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            if command == ".我的侍妾":
+                return None, "你还没有侍妾。", False
+            if command == ".红尘寻缘":
+                return None, "你已觅得红颜知己，不可三心二意。若想另寻新欢，请先使用`.遣散侍妾`。", False
+            if command == ".遣散侍妾":
+                return None, "你与 **红颜知己** 缘分已尽，从此一别两宽，各自安好。", False
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertFalse(asyncio.run(actor.execute_target_concubine_search("无咎子")))
+
+        self.assertEqual(sent, [
+            ("无咎子", ".我的侍妾"),
+            ("无咎子", ".红尘寻缘"),
+            ("无咎子", ".遣散侍妾"),
+        ])
+        state = actor.get_avatar_state("无咎子")
+        self.assertEqual(state["concubine_name"], "")
+        self.assertFalse(state["target_concubine_found"])
 
     def test_target_concubine_auto_search_stops_when_nangong_wan_found(self):
         actor = DummyConcubine()
