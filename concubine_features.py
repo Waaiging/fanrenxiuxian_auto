@@ -532,7 +532,7 @@ class ConcubineMixin:
         """Extract the concubine/partner name from a status or voyage response."""
         clean = str(text or "").replace("**", "")
         for pattern in (
-            r"你的(?:道心侍妾|红尘道侣)\s*[：:]\s*【([^】]+)】",
+            r"你的(?:道心侍妾|红尘道侣|红颜知己|红尘知己)\s*[：:]\s*【([^】]+)】",
             r"名为\s*【([^】]+)】",
             r"侍妾\s*【([^】]+)】",
             r"道侣\s*【([^】]+)】",
@@ -801,6 +801,21 @@ class ConcubineMixin:
                 state["next_concubine_search_time"] = ""
             else:
                 state["next_concubine_search_time"] = add_seconds_str(now, CONCUBINE_SEARCH_CD_SECONDS)
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
+
+        compact = clean.replace("`", "").replace(" ", "")
+        if (
+            any(k in clean for k in ["红颜知己", "红尘知己", "三心二意"])
+            and CONCUBINE_DISMISS_COMMAND in compact
+        ):
+            current = str(state.get("concubine_name") or "").strip() or "红颜知己"
+            state["concubine_name"] = current
+            state["target_concubine_found"] = False
+            state["next_concubine_search_time"] = ""
+            state["last_concubine_search_result"] = f"{source or CONCUBINE_SEARCH_COMMAND}:existing_partner"
+            state["last_concubine_search_error"] = clean[:160]
             if hasattr(self, "save_state"):
                 self.save_state()
             return True

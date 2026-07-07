@@ -6314,11 +6314,11 @@ class ParserFixtureTests(unittest.TestCase):
         xiaohao.avatars = ["问心子", "素心子"]
 
         self.assertEqual(main.bushi_wentian_target_time(base, "主魂"), base)
-        self.assertEqual(sub.bushi_wentian_target_time(base, "主魂"), base + timedelta(minutes=3))
-        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "主魂"), base + timedelta(minutes=6))
-        self.assertEqual(main.bushi_wentian_target_time(base, "无咎子"), base + timedelta(minutes=9))
-        self.assertEqual(sub.bushi_wentian_target_time(base, "厚土"), base + timedelta(minutes=12))
-        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "问心子"), base + timedelta(minutes=15))
+        self.assertEqual(sub.bushi_wentian_target_time(base, "主魂"), base + timedelta(hours=1))
+        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "主魂"), base + timedelta(hours=2))
+        self.assertEqual(main.bushi_wentian_target_time(base, "无咎子"), base + timedelta(hours=3))
+        self.assertEqual(sub.bushi_wentian_target_time(base, "厚土"), base + timedelta(hours=4))
+        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "问心子"), base + timedelta(hours=5))
 
     def test_bushi_wentian_due_waits_for_identity_stagger_slot(self):
         actor = DummyCommon()
@@ -6339,12 +6339,12 @@ class ParserFixtureTests(unittest.TestCase):
         class AtAvatarSlot(datetime):
             @classmethod
             def now(cls, tz=None):
-                return cls(2026, 7, 7, 0, 12, 30)
+                return cls(2026, 7, 7, 3, 3, 30)
 
         with patch.object(common_command_features, "datetime", AtMainSlot):
             self.assertTrue(actor.bushi_wentian_identity_due("主魂"))
             self.assertFalse(actor.bushi_wentian_identity_due("无咎子"))
-            self.assertGreater(actor.bushi_wentian_next_due_seconds(["无咎子"]), 8 * 60)
+            self.assertGreater(actor.bushi_wentian_next_due_seconds(["无咎子"]), 2 * 3600)
 
         with patch.object(common_command_features, "datetime", AtAvatarSlot):
             self.assertTrue(actor.bushi_wentian_identity_due("无咎子"))
@@ -8515,6 +8515,17 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(actor.state["target_concubine_found"])
         self.assertGreater(seconds_until(actor.state["next_concubine_search_time"]), 7100)
 
+    def test_target_concubine_search_existing_partner_marks_for_dismissal(self):
+        actor = DummyConcubine()
+
+        text = "你已拥有红颜知己，不可三心二意。若想另寻新欢请先使用 .遣散侍妾。"
+
+        self.assertTrue(actor.record_concubine_search_response(text, identity="主魂", source="fixture"))
+        self.assertEqual(actor.state["concubine_name"], "红颜知己")
+        self.assertFalse(actor.state["target_concubine_found"])
+        self.assertEqual(actor.state["next_concubine_search_time"], "")
+        self.assertIn("existing_partner", actor.state["last_concubine_search_result"])
+
     def test_target_concubine_auto_search_dismisses_non_target(self):
         actor = DummyConcubine()
         actor.avatars = ["无咎子"]
@@ -8551,6 +8562,34 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["concubine_name"], "")
         self.assertFalse(state["target_concubine_found"])
         self.assertGreater(seconds_until(state["next_concubine_search_time"]), 7100)
+
+    def test_target_concubine_auto_search_dismisses_existing_partner_prompt(self):
+        actor = DummyConcubine()
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            if command == ".我的侍妾":
+                return None, "你还没有侍妾。", False
+            if command == ".红尘寻缘":
+                return None, "你已拥有红颜知己，不可三心二意。若想另寻新欢请先使用 `.遣散侍妾`。", False
+            if command == ".遣散侍妾":
+                return None, "你与 **红颜知己** 缘分已尽，从此一别两宽，各自安好。", False
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertFalse(asyncio.run(actor.execute_target_concubine_search("主魂")))
+
+        self.assertEqual(sent, [
+            ("主魂", ".我的侍妾"),
+            ("主魂", ".红尘寻缘"),
+            ("主魂", ".遣散侍妾"),
+        ])
+        self.assertEqual(actor.state["concubine_name"], "")
+        self.assertFalse(actor.state["target_concubine_found"])
 
     def test_target_concubine_auto_search_stops_when_nangong_wan_found(self):
         actor = DummyConcubine()
