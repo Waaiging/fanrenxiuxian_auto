@@ -1290,16 +1290,50 @@ def soul_curse_publisher_commands(state):
     commission_id = str(curse.get("commission_id") or "").strip()
     target = str(curse.get("commission_target") or "").strip()
     commission_detail = " · ".join(part for part in [f"委托 {commission_id}" if commission_id else "", target, detail] if part)
-    return [
-        daily_done_command(
+    chain_target = parse_state_time(curse.get("next_chain_time", ""))
+    chain_locked = (
+        chain_target
+        and chain_target > datetime.now()
+        and str(curse.get("chain_stage") or "") in {"", "done"}
+    )
+    chain_detail = "整条解咒链按最后成功剥离咒源时间冷却"
+
+    if chain_locked:
+        infer_row = time_command(
             curse,
-            SOUL_CURSE_VISIT_COMMAND,
-            "探望南宫婉",
-            date_key="last_visit_date",
-            detail=detail,
+            "next_chain_time",
+            SOUL_CURSE_INFER_COMMAND,
+            "封魂咒推演",
+            waiting="整链冷却",
+            ready="可推演",
+            missing="可推演",
+            detail=chain_detail,
             group="南宫婉",
-        ),
-        time_command(
+        )
+        protect_row = time_command(
+            curse,
+            "next_chain_time",
+            SOUL_CURSE_PROTECT_COMMAND,
+            "护持神魂",
+            waiting="整链冷却",
+            ready="链路内执行",
+            missing="链路内执行",
+            detail=chain_detail,
+            group="南宫婉",
+        )
+        publish_row = time_command(
+            curse,
+            "next_chain_time",
+            SOUL_CURSE_PUBLISH_COMMAND,
+            "解咒委托",
+            waiting="整链冷却",
+            ready="可检查",
+            missing="可检查",
+            detail=commission_detail or chain_detail,
+            group="南宫婉",
+        )
+    else:
+        infer_row = time_command(
             curse,
             "next_chain_time",
             SOUL_CURSE_INFER_COMMAND,
@@ -1309,8 +1343,8 @@ def soul_curse_publisher_commands(state):
             missing="可推演",
             detail=detail,
             group="南宫婉",
-        ),
-        time_command(
+        )
+        protect_row = time_command(
             curse,
             "next_protect_time",
             SOUL_CURSE_PROTECT_COMMAND,
@@ -1320,8 +1354,8 @@ def soul_curse_publisher_commands(state):
             missing="链路内执行",
             detail=detail,
             group="南宫婉",
-        ),
-        time_command(
+        )
+        publish_row = time_command(
             curse,
             "next_action_at",
             SOUL_CURSE_PUBLISH_COMMAND,
@@ -1331,7 +1365,19 @@ def soul_curse_publisher_commands(state):
             missing="可检查",
             detail=commission_detail,
             group="南宫婉",
+        )
+    return [
+        daily_done_command(
+            curse,
+            SOUL_CURSE_VISIT_COMMAND,
+            "探望南宫婉",
+            date_key="last_visit_date",
+            detail=detail,
+            group="南宫婉",
         ),
+        infer_row,
+        protect_row,
+        publish_row,
     ]
 
 

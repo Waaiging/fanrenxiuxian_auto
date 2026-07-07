@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import dashboard_server
 import soul_curse_features
 from soul_curse_features import (
     SOUL_CURSE_ASSISTANTS,
@@ -115,6 +116,28 @@ class SoulCurseParserTests(unittest.TestCase):
         self.assertEqual(no_contract["status"], "no_contract")
         self.assertEqual(not_ready["status"], "source_not_ready")
         self.assertEqual(sha_not_enough["status"], "sha_not_enough")
+
+    def test_dashboard_publisher_rows_use_completed_chain_cooldown(self):
+        chain_ready = soul_curse_features.add_seconds_str(soul_curse_features.now_str(), 8 * 3600)
+        old_single_ready = soul_curse_features.add_seconds_str(soul_curse_features.now_str(), -60)
+        rows = {
+            row["command"]: row
+            for row in dashboard_server.soul_curse_publisher_commands({
+                "soul_curse": {
+                    "chain_stage": "",
+                    "next_chain_time": chain_ready,
+                    "next_protect_time": old_single_ready,
+                    "next_action_at": chain_ready,
+                    "commission_id": "22",
+                    "commission_status": "completed",
+                }
+            })
+        }
+
+        for command in (SOUL_CURSE_INFER_COMMAND, SOUL_CURSE_PROTECT_COMMAND, SOUL_CURSE_PUBLISH_COMMAND):
+            self.assertEqual(rows[command]["tone"], "cooldown")
+            self.assertEqual(rows[command]["status"], "整链冷却")
+            self.assertGreater(rows[command]["next_seconds"], 7 * 3600)
 
 
 class SoulCurseFlowTests(unittest.TestCase):
