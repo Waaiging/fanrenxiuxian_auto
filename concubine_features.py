@@ -44,6 +44,7 @@ CONCUBINE_SEARCH_COMMAND = ".红尘寻缘"
 CONCUBINE_DISMISS_COMMAND = ".遣散侍妾"
 CONCUBINE_SEARCH_CD_SECONDS = 2 * 3600
 CONCUBINE_SEARCH_RETRY_SECONDS = 10 * 60
+CONCUBINE_SEARCH_EDIT_WAIT_SECONDS = 25
 TARGET_CONCUBINE_IDENTITIES = {
     "main": {"主魂", "无咎子"},
 }
@@ -783,6 +784,59 @@ class ConcubineMixin:
             self.save_state()
         return next_time
 
+    def is_concubine_search_pending_response(self, text):
+        clean = str(text or "").replace("**", "").replace("`", "")
+        return "寻缘之旅" in clean and any(k in clean for k in ["开启", "消耗", "红尘俗世"])
+
+    def is_concubine_search_final_response(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean or self.is_concubine_search_pending_response(clean):
+            return False
+        compact = clean.replace("`", "").replace(" ", "")
+        if self.extract_concubine_name(clean):
+            return True
+        if (
+            any(k in clean for k in ["红颜知己", "红尘知己", "三心二意"])
+            and CONCUBINE_DISMISS_COMMAND in compact
+        ):
+            return True
+        return any(k in clean for k in [
+            "未能寻得", "没有寻得", "无缘之人", "镜花水月",
+            "冷却", "后再", "尚未", "神念消耗过剧", "近日奔波",
+            "灵石不足", "修为不足", "无法寻缘", "失败", "错误",
+        ])
+
+    async def wait_for_concubine_search_settlement(self, resp, identity="主魂", timeout_seconds=CONCUBINE_SEARCH_EDIT_WAIT_SECONDS):
+        text = self._concubine_response_text(resp)
+        if not self.is_concubine_search_pending_response(text):
+            return resp
+
+        msg_id = getattr(resp, "id", None)
+        client = getattr(self, "client", None)
+        chat_id = getattr(self, "target_chat_id", None)
+        if not msg_id or not client or chat_id is None:
+            log.warning(f"Target concubine [{identity}]: search pending response has no fetchable message id.")
+            return resp
+
+        deadline = time.monotonic() + max(1, int(timeout_seconds or 0))
+        last_text = text
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.5)
+            try:
+                updated = await client.get_messages(chat_id, ids=msg_id)
+            except Exception as exc:
+                log.warning(f"Target concubine [{identity}]: edited-result fetch failed for {msg_id}: {exc}")
+                return resp
+            updated_text = self._concubine_response_text(updated)
+            if self.is_concubine_search_final_response(updated_text):
+                if updated_text and updated_text != last_text:
+                    log.info(f"Target concubine [{identity}]: edited search result observed for msg {msg_id}.")
+                return updated
+            last_text = updated_text or last_text
+
+        log.warning(f"Target concubine [{identity}]: search result was not edited within {timeout_seconds}s; retry later.")
+        return resp
+
     def record_concubine_search_response(self, text, identity="主魂", source=""):
         """Record .红尘寻缘 result and update target-concubine search state."""
         if not self.target_concubine_enabled(identity):
@@ -797,6 +851,15 @@ class ConcubineMixin:
         now = now_str()
         state["last_concubine_search_time"] = now
         state["last_concubine_search_error"] = ""
+
+        if self.is_concubine_search_pending_response(clean):
+            state["target_concubine_found"] = False
+            state["next_concubine_search_time"] = add_seconds_str(now, CONCUBINE_SEARCH_RETRY_SECONDS)
+            state["last_concubine_search_result"] = source or "pending"
+            state["last_concubine_search_error"] = clean[:160]
+            if hasattr(self, "save_state"):
+                self.save_state()
+            return True
 
         name = self.extract_concubine_name(clean)
         if name:
@@ -952,6 +1015,7 @@ class ConcubineMixin:
                     timeout=60,
                     max_retries=0,
                     delete_after=False,
+                    suppress_no_response_alert=True,
                 )
                 if status_text:
                     self.record_target_concubine_status_text(identity, status_text, source="target_status")
@@ -969,13 +1033,16 @@ class ConcubineMixin:
                 return False
 
             log.info(f"Target concubine [{identity}]: sending {CONCUBINE_SEARCH_COMMAND}.")
-            _, search_text, _ = await self._send_target_concubine_command(
+            search_resp, search_text, _ = await self._send_target_concubine_command(
                 identity,
                 CONCUBINE_SEARCH_COMMAND,
                 timeout=90,
                 max_retries=0,
                 delete_after=False,
+                return_response_msg=True,
             )
+            search_resp = await self.wait_for_concubine_search_settlement(search_resp, identity=identity)
+            search_text = self._concubine_response_text(search_resp) or search_text
             if not search_text:
                 self._set_concubine_search_backoff(identity, CONCUBINE_SEARCH_RETRY_SECONDS, "search_no_response")
                 return False

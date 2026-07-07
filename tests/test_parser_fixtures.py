@@ -8656,6 +8656,51 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["concubine_name"], "")
         self.assertFalse(state["target_concubine_found"])
 
+    def test_target_concubine_search_waits_for_edited_no_match(self):
+        actor = DummyConcubine()
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.target_chat_id = -100
+        sent = []
+        initial = SimpleNamespace(
+            id=1001,
+            text="你消耗了 **100** 灵石和 **1000** 修为，于红尘俗世中开启了一段寻缘之旅...",
+        )
+        edited = SimpleNamespace(
+            id=1001,
+            text="你踏遍万千红尘，却终是镜花水月，未能寻得有缘之人。",
+        )
+
+        class FakeClient:
+            async def get_messages(self, chat_id, ids):
+                self.last_request = (chat_id, ids)
+                return edited
+
+        async def fake_sleep(seconds):
+            return None
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command, kwargs))
+            if command == ".我的侍妾":
+                return None, "", False
+            if command == ".红尘寻缘":
+                return initial, initial.text, False
+            return None, "", False
+
+        actor.client = FakeClient()
+        actor._send_concubine_identity_command = fake_send
+
+        with patch("concubine_features.asyncio.sleep", new=fake_sleep):
+            self.assertFalse(asyncio.run(actor.execute_target_concubine_search("主魂")))
+
+        self.assertEqual([item[1] for item in sent], [".我的侍妾", ".红尘寻缘"])
+        self.assertTrue(sent[0][2].get("suppress_no_response_alert"))
+        self.assertTrue(sent[1][2].get("return_response_msg"))
+        self.assertEqual(actor.state["concubine_name"], "")
+        self.assertFalse(actor.state["target_concubine_found"])
+        self.assertEqual(actor.state["last_concubine_search_result"], "auto_search")
+        self.assertGreater(seconds_until(actor.state["next_concubine_search_time"]), 7100)
+
     def test_target_concubine_auto_search_stops_when_nangong_wan_found(self):
         actor = DummyConcubine()
         actor.state["target_concubine_name"] = "南宫婉"
