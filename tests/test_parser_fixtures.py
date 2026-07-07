@@ -6979,6 +6979,56 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(asyncio.run(run_case()))
         self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
 
+    def test_edited_pasture_return_targets_identity_username_and_updates_stamina(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.my_info = None
+        actor.notify_users = []
+        actor.mc = {"watch_bot": "fanrenxiuxian_bot"}
+        actor.identity_usernames = {"主魂": ["TitanCreeper"]}
+        actor.state = {
+            "beast_border_patrol_name": "",
+            "last_beast_border_patrol_time": (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": (datetime.now() + timedelta(minutes=25)).strftime("%Y-%m-%d %H:%M:%S"),
+            "pasture_pending_count": 3,
+            "pasture_returned_count": 0,
+            "pasture_pending_since": (datetime.now() - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S"),
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "六阶玄冥冰祖", "status": "放养中", "power": 4096, "exp": 0, "stamina": 4},
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "放养中", "power": 195, "exp": 652, "stamina": 17},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "受伤", "power": 38, "exp": 80, "stamina": 74},
+            ],
+        }
+        actor._pasture_return_seen_counts = {}
+        actor.save_state = lambda: None
+
+        text = """
+**【灵兽归来】**
+道友 @TitanCreeper，你放养的 **3** 只灵兽已一同归来，结算如下：
+• **【六翼】**：体力恢复 **22**，心情 +8，羁绊 +3，获得 **68** 点经验
+• **【猴哥】**：体力恢复 **27**，心情 +5，羁绊 +4，获得 **36** 点经验
+• **【麻花藤】**：体力恢复 **31**，心情 +3，羁绊 +5，获得 **28** 点经验
+"""
+
+        class DummyEvent:
+            message = SimpleNamespace(text=text, id=9902)
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        async def run_case():
+            actor.beast_wakeup = asyncio.Event()
+            return await actor.handle_pasture_return_event(DummyEvent())
+
+        self.assertTrue(asyncio.run(run_case()))
+        by_name = {beast["full_name"]: beast for beast in actor.state["beasts_cache"]}
+        self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
+        self.assertEqual(actor.state["pasture_pending_count"], 0)
+        self.assertEqual(by_name["六翼"]["status"], "休息中")
+        self.assertEqual(by_name["六翼"]["stamina"], 26)
+        self.assertEqual(by_name["猴哥"]["stamina"], 44)
+        self.assertEqual(by_name["麻花藤"]["status"], "休息中")
+        self.assertEqual(by_name["麻花藤"]["stamina"], 100)
+
     def test_beast_action_timer_prioritizes_border_patrol_before_pasture(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         future = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")

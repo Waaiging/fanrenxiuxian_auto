@@ -3548,6 +3548,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             if name not in deduped: deduped.append(name)
         return deduped
 
+    def parse_pasture_return_stamina_recoveries(self, text):
+        """从放养归来结算中解析每只灵兽恢复的体力。"""
+        if not text:
+            return {}
+        clean = str(text or "").replace("**", "")
+        recoveries = {}
+        for match in re.finditer(r"【([^】]+)】[^\n\r]*?体力恢复\s*(\d+)", clean):
+            name = match.group(1).strip()
+            if self.is_valid_beast_name(name):
+                recoveries[name] = int(match.group(2))
+        return recoveries
+
     def is_pasture_return_message(self, text):
         """检测是否为放养归来消息"""
         if not text: return False
@@ -3593,16 +3605,31 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
     def mark_pastured_beasts_returned(self, text):
         """标记放养中的灵兽为已归来（休息中）"""
         names = self.parse_pasture_return_names(text)
+        recoveries = self.parse_pasture_return_stamina_recoveries(text)
         changed = 0
         if names and any(self.beast_name_matches(name, BEAST_FOCUS_NAME) for name in names):
             self.state["focus_pasture_after_abyss_until"] = ""
         for beast in self.state.get("beasts_cache", []):
             if names and not any(self.beast_name_matches(beast.get("full_name"), name) for name in names): continue
-            if "放养" in (beast.get("status") or ""): beast["status"] = "休息中"; changed += 1
+            recovery = next((value for name, value in recoveries.items() if self.beast_name_matches(beast.get("full_name"), name)), None)
+            if recovery is not None:
+                current = self.beast_stamina_value(beast)
+                beast["stamina"] = min(100, max(0, current) + recovery) if current >= 0 else recovery
+            if names:
+                if beast.get("status") != "休息中":
+                    beast["status"] = "休息中"; changed += 1
+            elif "放养" in (beast.get("status") or ""):
+                beast["status"] = "休息中"; changed += 1
         if self.state.get("best_beast_status") and "放养" in self.state.get("best_beast_status"):
             best_name = self.state.get("best_beast_name", "")
             if not names or any(self.beast_name_matches(best_name, name) for name in names):
                 self.state["best_beast_status"] = "休息中"
+        best_name = self.state.get("best_beast_name", "")
+        if best_name:
+            for beast in self.state.get("beasts_cache", []):
+                if self.beast_name_matches(beast.get("full_name", ""), best_name):
+                    self.state["best_beast_stamina"] = self.beast_stamina_value(beast)
+                    break
         return changed
 
     def mark_all_pastured_beasts_returned(self):
@@ -3774,10 +3801,17 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         text = text if text is not None else (msg.text or "")
         sender = sender or await event.get_sender()
         if not self.is_pasture_return_message(text): return False
-        if not self.text_targets_self(msg, text): return False
-        if sender and not is_game_bot_sender(self, sender): return False
+        sender_name = (getattr(sender, "username", "") or getattr(sender, "first_name", "") or "").strip()
+        if sender and not is_game_bot_sender(self, sender):
+            log.info(f"Pasture return ignored from non-game sender {sender_name or 'unknown'}: {text[:120]}")
+            return False
+        if not self.text_targets_self(msg, text):
+            log.info(f"Pasture return ignored because it does not target this account: {text[:160]}")
+            return False
         returned = self.parse_pasture_return_count(text)
-        if returned <= 0: return True
+        if returned <= 0:
+            log.info(f"Pasture return detected but no beast count parsed: {text[:160]}")
+            return True
         msg_id = getattr(msg, "id", None)
         prev_for_msg = self._pasture_return_seen_counts.get(msg_id, 0) if msg_id is not None else 0
         if msg_id is not None and returned <= prev_for_msg: return True
@@ -3800,6 +3834,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         self.wake_overdue_beast_border_patrol("pasture return")
         self.save_state()
         self.beast_wakeup.set()
+        log.info(
+            f"Pasture return recorded: returned={returned}, changed={changed}, "
+            f"pending={self.pasture_pending_count()}, next_patrol={self.state.get('next_beast_border_patrol_time', '')}."
+        )
         return True
 
     async def sleep_beast_action(self, sleep_for):
@@ -5047,6 +5085,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         candidates = []
         if self.my_info: candidates.extend([getattr(self.my_info, "username", "") or "", getattr(self.my_info, "first_name", "") or ""])
         candidates.extend(self.notify_users)
+        for values in (getattr(self, "identity_usernames", {}) or {}).values():
+            if isinstance(values, str):
+                candidates.append(values)
+            else:
+                candidates.extend(values or [])
         for value in candidates:
             name = str(value or "").lower().lstrip("@").strip()
             if not name: continue

@@ -459,6 +459,12 @@ def account_aliases(actor):
         ])
     mc = getattr(actor, "mc", {}) or {}
     aliases.extend(mc.get("account_aliases", []) or [])
+    explicit = getattr(actor, "identity_usernames", None) or {}
+    if isinstance(explicit, dict):
+        values = explicit.get("主魂", []) or []
+        if isinstance(values, str):
+            values = [values]
+        aliases.extend(values)
     return [str(v).lower().lstrip("@").strip() for v in aliases if str(v or "").strip()]
 
 
