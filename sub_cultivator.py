@@ -455,6 +455,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         self.main_formation_enabled = False
         self.main_concubine_enabled = True
         self.field_training_command = ".野外历练 谨慎"  # 野外历练指令，谨慎模式
+        # 副号主魂装备风雷翅后，部分冷却会被装备缩短；成功后用二次查询校准真实时间。
+        self.actual_cooldown_probe_commands = {
+            ("主魂", ASK_DAO_COMMAND),
+            ("主魂", ".深度闭关"),
+        }
 
         # ---- 运行状态 ----
         self.is_running = True    # 主循环开关
@@ -4174,13 +4179,15 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             return False
 
         cd = self.parse_wait_time(response_text)
-        if cd <= 0:
-            # 如果响应中没给冷却时间，通过 .查看闭关 二次确认
-            verify_resp = await self.send_and_wait_feedback(".查看闭关")
-            verify_cd = self.parse_wait_time(verify_resp)
-            if verify_cd > 0 and is_deep_meditation_ongoing_response(verify_resp):
+        if self.should_probe_actual_cooldown("主魂", ".深度闭关") or cd <= 0:
+            # 风雷翅等装备可能让实际闭关时间短于启动回执；以 .查看闭关 的剩余时间为准。
+            verify_cd = await self.probe_deep_meditation_actual_cooldown(
+                "主魂",
+                source=place_reason or ".深度闭关",
+            )
+            if verify_cd > 0:
                 cd = verify_cd
-            else:
+            elif cd <= 0:
                 log.warning(
                     "Deep meditation start confirmed, but .查看闭关 did not return "
                     "a remaining time; using 8h fallback."

@@ -1923,6 +1923,22 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.record_ask_dao_response("问道尚在冷却，请在 10分钟 后再试。"))
         self.assertLessEqual(common_seconds_until(actor.state["next_ask_dao_time"]), 10 * 60)
 
+    def test_common_ask_dao_success_can_record_explicit_shortened_cooldown(self):
+        actor = DummyCommon()
+
+        with patch.object(common_command_features, "record_daily_reward_event_log", lambda *args, **kwargs: True):
+            self.assertTrue(actor.record_ask_dao_response(
+                "你消耗了 **1000** 点修为，虔诚地向宗门长老问道。\n"
+                "**【问道得宝】**\n"
+                "你获得大道感悟。\n"
+                "风雷翅灵光流转，下次问道冷却缩短为 **8小时23分钟44秒**。"
+            ))
+
+        remaining = common_seconds_until(actor.state["next_ask_dao_time"])
+        self.assertGreater(remaining, 8 * 3600)
+        self.assertLessEqual(remaining, 8 * 3600 + 24 * 60)
+        self.assertTrue(actor.state["last_ask_dao_time"])
+
     def test_common_ask_dao_tick_sends_due_command(self):
         class DummyAskDao(DummyCommon):
             async def _wait_for_main_identity(self):
@@ -1943,6 +1959,34 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.sent, [".问道"])
         self.assertEqual(wait, 5)
         self.assertTrue(actor.state["last_ask_dao_time"])
+
+    def test_common_ask_dao_tick_probes_actual_cooldown_when_configured(self):
+        class DummyAskDao(DummyCommon):
+            actual_cooldown_probe_commands = {("主魂", ".问道")}
+            actual_cooldown_probe_delay_seconds = 0
+
+            async def _wait_for_main_identity(self):
+                return None
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                if len(self.sent) == 1:
+                    return "你消耗了 **1000** 点修为，虔诚地向宗门长老问道。\n**【问道得宝】**\n你获得大道感悟。"
+                return "天机不可频繁窥探，请在 **8小时23分钟44秒** 后再来问道。"
+
+        actor = DummyAskDao()
+        actor.sent = []
+
+        wait = asyncio.run(actor.common_ask_dao_tick())
+
+        self.assertEqual(actor.sent, [".问道", ".问道"])
+        self.assertEqual(wait, 5)
+        remaining = common_seconds_until(actor.state["next_ask_dao_time"])
+        self.assertGreater(remaining, 8 * 3600)
+        self.assertLessEqual(remaining, 8 * 3600 + 24 * 60)
 
     def test_fishing_active_round_blocks_switch_until_raise(self):
         class DummyFishing(FishingMixin):
@@ -7827,6 +7871,35 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["deep_meditation_end_time"], "")
         self.assertEqual(actor.state["next_meditation_time"], "")
         self.assertEqual(actor.state["next_meditation_retry_time"], "")
+
+    def test_sub_main_deep_meditation_probes_actual_cooldown_when_configured(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.state = {}
+        actor.actual_cooldown_probe_commands = {("主魂", ".深度闭关")}
+        actor.actual_cooldown_probe_delay_seconds = 0
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return "你正在深度闭关，预计还需 **6小时40分钟** 即可功成圆满。"
+
+        async def fake_place(reason):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+        actor.place_concubine_in_cave = fake_place
+
+        ok = asyncio.run(actor.record_deep_meditation_start(
+            "你已进入深度闭关状态，神魂将自行吐纳 **8** 小时。",
+            "fixture",
+        ))
+
+        self.assertTrue(ok)
+        self.assertEqual(sent, [".查看闭关"])
+        remaining = common_seconds_until(actor.state["deep_meditation_end_time"])
+        self.assertGreater(remaining, 6 * 3600 + 35 * 60)
+        self.assertLessEqual(remaining, 6 * 3600 + 40 * 60)
 
     def test_unowned_passive_exit_text_does_not_clear_main_meditation(self):
         actor = Cultivator.__new__(Cultivator)

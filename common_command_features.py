@@ -3226,6 +3226,55 @@ class CommonCommandMixin:
     def ask_dao_retry_seconds(self):
         return int(getattr(self, "ask_dao_retry", ASK_DAO_RETRY_SECONDS) or ASK_DAO_RETRY_SECONDS)
 
+    def should_probe_actual_cooldown(self, identity, command):
+        """Whether an identity should query the game again for equipment-adjusted cooldowns."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        command = str(command or "").strip()
+        command_root = command.split()[0] if command else ""
+        probes = getattr(self, "actual_cooldown_probe_commands", None)
+        if not probes:
+            return False
+        if isinstance(probes, dict):
+            values = probes.get(identity) or probes.get("*") or []
+            return command in values or command_root in values
+        for item in probes:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                item_identity = str(item[0] or "").strip() or "主魂"
+                item_command = str(item[1] or "").strip()
+                item_root = item_command.split()[0] if item_command else ""
+                if item_identity in {identity, "*"} and item_command in {command, command_root}:
+                    return True
+                if item_identity in {identity, "*"} and item_root and item_root == command_root:
+                    return True
+            else:
+                item_command = str(item or "").strip()
+                item_root = item_command.split()[0] if item_command else ""
+                if item_command in {command, command_root} or (item_root and item_root == command_root):
+                    return True
+        return False
+
+    def ask_dao_success_cooldown_seconds(self, text):
+        """Parse an explicit next .问道 cooldown from a success response if present."""
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return -1
+        relevant_lines = []
+        for line in re.split(r"[\n\r]+", clean):
+            if any(k in line for k in ("冷却", "下次", "再次", "后再", "剩余", "尚需", "请在")):
+                relevant_lines.append(line)
+        if relevant_lines:
+            return self.parse_wait_time("\n".join(relevant_lines))
+        return -1
+
+    def is_ask_dao_cooldown_response(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        success_markers = ("问道得宝", "获得大道感悟", "获得感悟", "道韵萦绕", "参悟成功")
+        if any(k in clean for k in success_markers):
+            return False
+        return any(k in clean for k in ("天机不可频繁", "问道尚在冷却", "后再来问道", "后再试", "请在", "尚需", "剩余"))
+
     def is_ask_dao_response(self, text):
         """Return True when text looks like a .问道 bot response."""
         clean = (text or "").replace("**", "")
@@ -3239,7 +3288,7 @@ class CommonCommandMixin:
         return "获得" in clean and any(k in clean for k in ["感悟", "道心", "贡献"])
 
     def record_ask_dao_response(self, resp, source=None):
-        """Record .问道 response; success uses 12h cooldown, cooldown text uses parsed remaining time."""
+        """Record .问道 response; success may be followed by an actual-cooldown probe."""
         source = source or ASK_DAO_COMMAND
         now = now_str()
         plan = self.ask_dao_plan(source)
@@ -3252,7 +3301,7 @@ class CommonCommandMixin:
             return False
 
         cd = self.parse_wait_time(resp)
-        if any(k in resp for k in ["冷却", "后再", "尚需", "剩余", "请在"]):
+        if self.is_ask_dao_cooldown_response(resp):
             delay = cd if cd > 0 else self.ask_dao_retry_seconds()
             self.state[next_key] = add_seconds_str(now, delay)
             log.info(f"{source}: cooldown from response {delay}s, next at {self.state[next_key]}.")
@@ -3266,17 +3315,104 @@ class CommonCommandMixin:
             return True
 
         if self.is_ask_dao_response(resp):
+            actual_cd = self.ask_dao_success_cooldown_seconds(resp)
             self.record_daily_reward_event("主魂", plan.command, resp, source=source, final=True)
             self.state[last_key] = now
-            self.state[next_key] = add_seconds_str(now, self.ask_dao_cd_seconds())
+            self.state[next_key] = add_seconds_str(
+                now,
+                actual_cd if actual_cd > 0 else self.ask_dao_cd_seconds(),
+            )
             self.state["last_ask_dao_error"] = ""
-            log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
+            if actual_cd > 0:
+                log.info(f"{source}: recorded response with actual cooldown {actual_cd}s, next at {self.state[next_key]}.")
+            else:
+                log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
             return True
 
         self.state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
         notify_unrecognized_response(self, ASK_DAO_COMMAND, resp, log, source)
         log.info(f"{source}: unrecognized response; retry at {self.state[next_key]}.")
         return False
+
+    def ask_dao_needs_actual_cooldown_probe(self, resp, command=None):
+        if not self.should_probe_actual_cooldown("主魂", command or ASK_DAO_COMMAND):
+            return False
+        if not resp or self.is_ask_dao_cooldown_response(resp):
+            return False
+        if any(k in resp for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
+            return False
+        return self.is_ask_dao_response(resp) and self.ask_dao_success_cooldown_seconds(resp) <= 0
+
+    def record_ask_dao_cooldown_probe_response(self, resp, source=None):
+        """Use a follow-up .问道 cooldown reply to correct next_ask_dao_time without recording rewards."""
+        source = source or ASK_DAO_COMMAND
+        plan = self.ask_dao_plan(source)
+        log = self.common_command_logger()
+        if not resp:
+            log.warning(f"{source}: actual cooldown probe got no response; keeping existing schedule.")
+            return False
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and self.is_ask_dao_cooldown_response(resp):
+            now = now_str()
+            self.state[plan.next_key] = add_seconds_str(now, cd)
+            self.state["last_ask_dao_cooldown_probe_time"] = now
+            self.state["last_ask_dao_cooldown_probe_response"] = str(resp)[:200]
+            log.info(f"{source}: actual cooldown probe {cd}s, next at {self.state[plan.next_key]}.")
+            return True
+        log.warning(f"{source}: actual cooldown probe did not contain a cooldown: {str(resp)[:120]}")
+        return False
+
+    async def probe_ask_dao_actual_cooldown(self, plan):
+        """Send one follow-up .问道 to read equipment-adjusted cooldown after a success."""
+        delay = float(getattr(self, "actual_cooldown_probe_delay_seconds", 3) or 0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        log = self.common_command_logger()
+        log.info(f"{plan.command}: probing actual cooldown via follow-up command.")
+        resp = await self.send_and_wait_feedback(
+            plan.command,
+            timeout=min(int(plan.timeout or 45), 45),
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
+        return self.record_ask_dao_cooldown_probe_response(
+            self.timed_command_response_text(resp),
+            plan.command,
+        )
+
+    async def probe_deep_meditation_actual_cooldown(self, identity="主魂", source=".深度闭关"):
+        """Query .查看闭关 once and return the real remaining deep-meditation seconds."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        delay = float(getattr(self, "actual_cooldown_probe_delay_seconds", 3) or 0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        log = self.common_command_logger()
+        log.info(f"[{identity}] {source}: probing actual deep meditation cooldown via .查看闭关.")
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            resp = await self.send_and_wait_feedback_identity(
+                identity,
+                ".查看闭关",
+                timeout=30,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        else:
+            resp = await self.send_and_wait_feedback(
+                ".查看闭关",
+                timeout=30,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        text = self.timed_command_response_text(resp)
+        cd = self.parse_wait_time(text)
+        if cd > 0 and (is_deep_meditation_ongoing_response(text) or "预计还需" in text):
+            log.info(f"[{identity}] {source}: actual deep meditation cooldown {cd}s.")
+            return cd
+        log.warning(f"[{identity}] {source}: .查看闭关 did not return a usable remaining time: {text[:120]}")
+        return -1
 
     async def common_ask_dao_tick(self, command=None):
         """Run one main-soul .问道 scheduling step and return next wait seconds."""
@@ -3294,7 +3430,10 @@ class CommonCommandMixin:
         resp = await self.send_timed_command_plan(plan, "主魂")
         if resp is None and await self.sleep_after_blocked_command(plan.command, "Ask Dao"):
             return 0
-        self.record_ask_dao_response(self.timed_command_response_text(resp), plan.command)
+        resp_text = self.timed_command_response_text(resp)
+        self.record_ask_dao_response(resp_text, plan.command)
+        if self.ask_dao_needs_actual_cooldown_probe(resp_text, plan.command):
+            await self.probe_ask_dao_actual_cooldown(plan)
         self.save_state()
         return 5
 
