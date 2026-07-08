@@ -72,6 +72,7 @@ class DummyConcubine(ConcubineMixin):
 
     def __init__(self):
         self.state = concubine_default_state()
+        self.target_concubine_search_enabled_flag = True
 
     def save_state(self):
         return None
@@ -8666,6 +8667,32 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.concubine_status_matches_identity(status, "主魂"))
         self.assertEqual(actor.state["concubine_name"], "南宫婉")
         self.assertEqual(actor.state["last_concubine_status_mismatch"], "")
+
+    def test_target_concubine_search_disabled_by_default(self):
+        actor = DummyConcubine()
+        delattr(actor, "target_concubine_search_enabled_flag")
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            return None, "", False
+
+        actor._send_concubine_identity_command = fake_send
+
+        self.assertFalse(actor.target_concubine_enabled("主魂"))
+        self.assertEqual(actor.target_concubine_identities(), [])
+        self.assertTrue(asyncio.run(actor.execute_target_concubine_search("主魂")))
+        self.assertEqual(sent, [])
+        self.assertFalse(actor.record_concubine_search_response(
+            "**【红尘偶遇】**\n你遇见了 **【霓裳】**。",
+            identity="主魂",
+            source="fixture",
+        ))
+        self.assertFalse(actor.record_concubine_dismiss_response(
+            "你与 **霓裳** 缘分已尽。",
+            identity="主魂",
+            source="fixture",
+        ))
 
     def test_target_concubine_search_records_wrong_and_dismisses(self):
         actor = DummyConcubine()

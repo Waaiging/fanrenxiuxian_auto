@@ -5091,7 +5091,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
 
         # 侍妾神通循环（继承自 ConcubineMixin）
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
-        self.create_scheduler_task("target_concubine", lambda: self.run_target_concubine_loop(initial_delay=35))
+        if self.target_concubine_identities():
+            self.create_scheduler_task("target_concubine", lambda: self.run_target_concubine_loop(initial_delay=35))
+        else:
+            log.info("Target concubine red-dust search disabled; not starting .红尘寻缘/.遣散侍妾 loop.")
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())

@@ -45,6 +45,8 @@ CONCUBINE_DISMISS_COMMAND = ".遣散侍妾"
 CONCUBINE_SEARCH_CD_SECONDS = 2 * 3600
 CONCUBINE_SEARCH_RETRY_SECONDS = 10 * 60
 CONCUBINE_SEARCH_EDIT_WAIT_SECONDS = 25
+# 红尘寻缘已无法通过“非目标即遣散”的方式稳定寻找南宫婉；默认关闭整条目标侍妾搜索链。
+TARGET_CONCUBINE_SEARCH_ENABLED = False
 TARGET_CONCUBINE_IDENTITIES = {
     "main": {"主魂", "无咎子"},
 }
@@ -644,13 +646,20 @@ class ConcubineMixin:
         return name
 
     def target_concubine_name(self, identity="主魂"):
+        if not self.target_concubine_search_enabled():
+            return ""
         identity = identity or "主魂"
         account = actor_account_key(self)
         if identity in TARGET_CONCUBINE_IDENTITIES.get(account, set()):
             return TARGET_CONCUBINE_NAME
         return ""
 
+    def target_concubine_search_enabled(self):
+        return bool(getattr(self, "target_concubine_search_enabled_flag", TARGET_CONCUBINE_SEARCH_ENABLED))
+
     def target_concubine_identities(self):
+        if not self.target_concubine_search_enabled():
+            return []
         account = actor_account_key(self)
         configured = TARGET_CONCUBINE_IDENTITIES.get(account, set())
         identities = []
