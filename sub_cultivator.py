@@ -459,6 +459,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         self.actual_cooldown_probe_commands = {
             ("主魂", ASK_DAO_COMMAND),
             ("主魂", ".深度闭关"),
+            ("主魂", ".探寻裂缝"),
         }
 
         # ---- 运行状态 ----

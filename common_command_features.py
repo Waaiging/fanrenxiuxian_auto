@@ -2784,14 +2784,15 @@ class CommonCommandMixin:
             log.warning(f"{prefix}{command}: response missing; retry scheduled at {state[next_key]}.")
             return False
 
+        success_with_actual_cd = command == ".探寻裂缝" and self.is_rift_success_response(resp)
         cd = self.parse_wait_time(resp)
-        if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+        if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]) and not success_with_actual_cd:
             state[next_key] = add_seconds_str(now_str(), cd)
             self.save_state()
             log.info(f"{prefix}{command}: cooldown from response {cd}s, next at {state[next_key]}.")
             return False
 
-        if any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+        if any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]) and not success_with_actual_cd:
             state[next_key] = add_seconds_str(now_str(), 600)
             self.save_state()
             log.warning(f"{prefix}{command}: unavailable but no cooldown parsed; retry at {state[next_key]}.")
@@ -2817,10 +2818,97 @@ class CommonCommandMixin:
 
         self.record_daily_reward_event(identity, command, resp, source=command)
         state[last_key] = now
-        state[next_key] = add_seconds_str(now, cd_seconds)
+        actual_cd = self.fixed_command_success_cooldown_seconds(command, resp, cd_seconds)
+        state[next_key] = add_seconds_str(now, actual_cd)
         self.save_state()
-        log.info(f"{prefix}{command}: recorded success/response, next at {state[next_key]}.")
+        if actual_cd != cd_seconds:
+            log.info(
+                f"{prefix}{command}: recorded success/response with actual cooldown "
+                f"{actual_cd}s, next at {state[next_key]}."
+            )
+        else:
+            log.info(f"{prefix}{command}: recorded success/response, next at {state[next_key]}.")
         return True
+
+    def is_rift_success_response(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean or self.is_rift_weakness_response(clean):
+            return False
+        success_markers = (
+            "探寻裂缝成功", "探寻成功", "撕开一道", "探寻机缘",
+            "发现秘藏", "发现一处空间裂缝", "收获", "获得【",
+            "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃",
+        )
+        return any(k in clean for k in success_markers)
+
+    def rift_success_cooldown_seconds(self, text):
+        """Parse equipment-adjusted .探寻裂缝 cooldown from a success response."""
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return -1
+        relevant_lines = []
+        for line in re.split(r"[\n\r]+", clean):
+            if not any(k in line for k in ("冷却", "下次", "再次", "后再", "剩余", "尚需", "请在", "缩短")):
+                continue
+            if any(k in line for k in ("裂缝", "探寻", "空间", "风雷翅", "冷却", "下次")):
+                relevant_lines.append(line)
+        if relevant_lines:
+            return self.parse_wait_time("\n".join(relevant_lines))
+        return -1
+
+    def fixed_command_success_cooldown_seconds(self, command, resp, fallback_seconds):
+        """Return the next cooldown after a successful fixed-cooldown command."""
+        command = str(command or "").strip()
+        fallback = int(fallback_seconds or 0)
+        if command == ".探寻裂缝":
+            actual = self.rift_success_cooldown_seconds(resp)
+            if actual > 0:
+                return actual
+        return fallback
+
+    def is_rift_cooldown_response(self, text):
+        clean = str(text or "").replace("**", "")
+        if not clean or self.is_rift_weakness_response(clean):
+            return False
+        cooldown_markers = (
+            "空间裂缝尚未稳定", "空间波动尚未平复", "空间风暴仍在",
+            "后再行探寻", "后再来探寻裂缝", "再来探寻裂缝",
+            "探寻裂缝尚在冷却", "冷却", "尚未稳定", "请在",
+        )
+        return any(k in clean for k in cooldown_markers) and any(k in clean for k in ("探寻", "裂缝", "空间", "冷却"))
+
+    def rift_needs_actual_cooldown_probe(self, resp, command=".探寻裂缝", identity="主魂"):
+        """Whether to send one follow-up .探寻裂缝 to read an equipment-adjusted cooldown."""
+        if not self.should_probe_actual_cooldown(identity, command):
+            return False
+        if not resp or self.is_rift_weakness_response(resp):
+            return False
+        if self.rift_success_cooldown_seconds(resp) > 0:
+            return False
+        if self.is_rift_cooldown_response(resp):
+            return False
+        return self.is_rift_success_response(resp)
+
+    def record_rift_cooldown_probe_response(self, identity, resp, plan):
+        """Use a follow-up .探寻裂缝 cooldown reply to correct next_rift_search_time."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.identity_state_for_timed_command(identity)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        if not resp:
+            log.warning(f"{prefix}{plan.command}: actual cooldown probe got no response; keeping existing schedule.")
+            return False
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and self.is_rift_cooldown_response(resp):
+            now = now_str()
+            state[plan.next_key] = add_seconds_str(now, cd)
+            state["last_rift_search_cooldown_probe_time"] = now
+            state["last_rift_search_cooldown_probe_response"] = str(resp)[:200]
+            self.save_state()
+            log.info(f"{prefix}{plan.command}: actual cooldown probe {cd}s, next at {state[plan.next_key]}.")
+            return True
+        log.warning(f"{prefix}{plan.command}: actual cooldown probe did not contain a cooldown: {str(resp)[:120]}")
+        return False
 
     def yuanying_out_cd_seconds(self):
         return int(getattr(self, "yuanying_out_cd", YUANYING_OUT_CD_SECONDS) or YUANYING_OUT_CD_SECONDS)
@@ -3218,9 +3306,36 @@ class CommonCommandMixin:
             await self.stop_for_rift_weakness(resp_text, identity="主魂", msg=resp_msg)
             return -1
 
-        self.record_fixed_cd_command_response(resp_text, command, plan.last_key, plan.next_key, cd_seconds)
+        recorded = self.record_fixed_cd_command_response(resp_text, command, plan.last_key, plan.next_key, cd_seconds)
+        if recorded and self.rift_needs_actual_cooldown_probe(resp_text, command, identity="主魂"):
+            await self.probe_rift_actual_cooldown(plan, identity="主魂")
         self.save_state()
         return seconds_until(self.state.get(plan.next_key, "")) or 600
+
+    async def probe_rift_actual_cooldown(self, plan, identity="主魂"):
+        """Send one follow-up .探寻裂缝 to read equipment-adjusted cooldown after a success."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        delay = float(getattr(self, "actual_cooldown_probe_delay_seconds", 3) or 0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
+        log.info(f"{prefix}{plan.command}: probing actual cooldown via follow-up command.")
+        kwargs = {
+            "timeout": min(int(plan.timeout or 45), 45),
+            "max_retries": 0,
+            "force_identity_check": True,
+            "suppress_no_response_alert": True,
+        }
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            resp = await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
+        else:
+            resp = await self.send_and_wait_feedback(plan.command, **kwargs)
+        return self.record_rift_cooldown_probe_response(
+            identity,
+            self.timed_command_response_text(resp),
+            plan,
+        )
 
     def ask_dao_cd_seconds(self):
         return int(getattr(self, "ask_dao_cd", ASK_DAO_CD_SECONDS) or ASK_DAO_CD_SECONDS)

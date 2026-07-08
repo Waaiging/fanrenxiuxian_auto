@@ -4081,6 +4081,8 @@ def _manual_record_meditation_reply(actor, text, identity):
     if real_exit:
         _manual_set_identity_state(actor, identity, "in_deep_meditation", False)
         _manual_set_identity_state(actor, identity, "deep_meditation_end_time", "")
+        _manual_set_identity_state(actor, identity, "deep_meditation_guard_until", "")
+        _manual_set_identity_state(actor, identity, "next_meditation_retry_time", "")
         return True
     if any(k in clean for k in ["深度闭关", "闭关修炼", "预计还需", "开始闭关", "开启闭关"]):
         cd = actor.parse_wait_time(text) if hasattr(actor, "parse_wait_time") else -1

@@ -1916,6 +1916,50 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(wait, 0)
         self.assertFalse(actor.stopped)
 
+    def test_common_main_rift_probes_actual_cooldown_when_configured(self):
+        class DummyRift(DummyCommon):
+            actual_cooldown_probe_commands = {("主魂", ".探寻裂缝")}
+            actual_cooldown_probe_delay_seconds = 0
+
+            async def _wait_for_main_identity(self):
+                return None
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append((command, kwargs.get("force_identity_check")))
+                if len(self.sent) == 1:
+                    return "探寻裂缝成功，发现秘藏，获得【空间碎片】x2。"
+                return "空间裂缝尚未稳定，其中的空间风暴仍在肆虐。请在 **4小时1分钟40秒** 后再行探寻。"
+
+        actor = DummyRift()
+        actor.sent = []
+
+        wait = asyncio.run(actor.common_main_rift_search_tick(12 * 3600))
+
+        self.assertEqual(actor.sent, [(".探寻裂缝", False), (".探寻裂缝", True)])
+        self.assertLess(wait, 5 * 3600)
+        remaining = common_seconds_until(actor.state["next_rift_search_time"])
+        self.assertGreater(remaining, 4 * 3600)
+        self.assertLessEqual(remaining, 4 * 3600 + 2 * 60)
+        self.assertTrue(actor.state["last_rift_search_time"])
+        self.assertTrue(actor.state["last_rift_search_cooldown_probe_time"])
+
+    def test_rift_success_can_record_explicit_shortened_cooldown(self):
+        actor = DummyCommon()
+
+        self.assertTrue(actor.record_identity_fixed_cd_command_response(
+            "主魂",
+            "探寻裂缝成功，发现秘藏，获得【空间碎片】x2。\n"
+            "风雷翅灵光流转，下次探寻裂缝冷却缩短为 **4小时1分钟40秒**。",
+            ".探寻裂缝",
+            "last_rift_search_time",
+            "next_rift_search_time",
+            12 * 3600,
+        ))
+
+        remaining = common_seconds_until(actor.state["next_rift_search_time"])
+        self.assertGreater(remaining, 4 * 3600)
+        self.assertLessEqual(remaining, 4 * 3600 + 2 * 60)
+
     def test_common_treasure_touch_response_records_success_and_failure(self):
         actor = DummyCommon()
         actor.treasure_touch_command = ".抚摸法宝 青竹蜂云剑"
@@ -8047,6 +8091,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["in_deep_meditation"])
         self.assertEqual(actor.state["deep_meditation_end_time"], "")
         self.assertEqual(actor.state["next_meditation_time"], "")
+        self.assertEqual(actor.state["next_meditation_retry_time"], "")
+
+    def test_manual_not_deep_meditation_reply_clears_stale_guard(self):
+        actor = SimpleNamespace(state={
+            "in_deep_meditation": True,
+            "deep_meditation_end_time": "2099-01-01 00:00:00",
+            "deep_meditation_guard_until": "2099-01-01 00:03:00",
+            "next_meditation_retry_time": "2099-01-01 00:10:00",
+        })
+
+        self.assertTrue(log_utils._manual_record_meditation_reply(
+            actor,
+            "你并未处于深度闭关之中。",
+            "主魂",
+        ))
+
+        self.assertFalse(actor.state["in_deep_meditation"])
+        self.assertEqual(actor.state["deep_meditation_end_time"], "")
+        self.assertEqual(actor.state["deep_meditation_guard_until"], "")
         self.assertEqual(actor.state["next_meditation_retry_time"], "")
 
     def test_sub_main_deep_meditation_probes_actual_cooldown_when_configured(self):
