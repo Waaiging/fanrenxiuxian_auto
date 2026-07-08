@@ -27,6 +27,43 @@ YINLUO_IMPENDING_GUARD_SECONDS = 120        # 到点前 2 分钟阻止其他流�
 YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS = 30 * 60  # 安抚无事可做时降噪
 
 
+class _YinluoAtomicTask:
+    """Keep edited-settlement Yinluo commands from being interrupted mid-result."""
+
+    def __init__(self, actor, label):
+        self.actor = actor
+        self.label = label
+        self.task = None
+        self.acquired = False
+
+    async def __aenter__(self):
+        if not hasattr(self.actor, "active_atomic_task"):
+            return self
+        self.task = asyncio.current_task()
+        while getattr(self.actor, "active_atomic_task", None) is not None and self.actor.active_atomic_task != self.task:
+            await asyncio.sleep(0.5)
+        if getattr(self.actor, "active_atomic_task", None) == self.task:
+            return self
+        self.actor.active_atomic_task = self.task
+        self.actor._concubine_atomic_task = self.task
+        self.actor._concubine_atomic_label = self.label
+        self.actor._atomic_task_high_priority_bypass_task = self.task
+        self.actor._atomic_task_high_priority_bypass_label = self.label
+        self.acquired = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.acquired and getattr(self.actor, "active_atomic_task", None) == self.task:
+            self.actor.active_atomic_task = None
+        if self.acquired and getattr(self.actor, "_concubine_atomic_task", None) == self.task:
+            self.actor._concubine_atomic_task = None
+            self.actor._concubine_atomic_label = ""
+            if getattr(self.actor, "_atomic_task_high_priority_bypass_task", None) == self.task:
+                self.actor._atomic_task_high_priority_bypass_task = None
+                self.actor._atomic_task_high_priority_bypass_label = ""
+        return False
+
+
 def _strip_markdown(text):
     return str(text or "").replace("**", "").replace("`", "")
 
@@ -289,25 +326,33 @@ class YinluoMixin:
         self.save_state()
 
     async def send_yinluo_command(self, identity, command, timeout=60, edited_wait=0):
-        msg = await self.send_and_wait_feedback_identity(
-            identity,
-            command,
-            timeout=timeout,
-            max_retries=0,
-            suppress_no_response_alert=True,
-            return_response_msg=True,
-        )
-        text = self.yinluo_response_text(msg)
-        if edited_wait and msg is not None and getattr(msg, "id", None):
-            await asyncio.sleep(edited_wait)
-            try:
-                fresh = await self.client.get_messages(self.target_chat_id, ids=msg.id)
-                fresh_text = self.yinluo_response_text(fresh)
-                if fresh_text:
-                    text = fresh_text
-            except Exception:
-                pass
-        return text
+        async def _send_and_refresh():
+            msg = await self.send_and_wait_feedback_identity(
+                identity,
+                command,
+                timeout=timeout,
+                max_retries=0,
+                suppress_no_response_alert=True,
+                return_response_msg=True,
+            )
+            text = self.yinluo_response_text(msg)
+            if edited_wait and msg is not None and getattr(msg, "id", None):
+                await asyncio.sleep(edited_wait)
+                try:
+                    fresh = await self.client.get_messages(self.target_chat_id, ids=msg.id)
+                    fresh_text = self.yinluo_response_text(fresh)
+                    if fresh_text:
+                        text = fresh_text
+                except Exception:
+                    pass
+            return text
+
+        if edited_wait:
+            command_head = str(command or "").strip().split(" ", 1)[0] or "command"
+            async with _YinluoAtomicTask(self, f"YinluoEdit-{identity}-{command_head}"):
+                return await _send_and_refresh()
+
+        return await _send_and_refresh()
 
     def yinluo_wait_from_state(self, identity, default_seconds=YINLUO_RETRY_SECONDS):
         state = self.get_yinluo_state(identity)

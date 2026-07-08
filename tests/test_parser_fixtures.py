@@ -4168,6 +4168,47 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreaterEqual(wait, 3500)
         self.assertEqual(actor.sent, [".囚禁魂魄 1 凶兽戾魄", YINLUO_CONVERT_COMMAND])
 
+    def test_yinluo_edited_wait_blocks_regular_identity_commands(self):
+        async def scenario():
+            class DummyYinluo(DummyAvatarCommon, ConcubineMixin, YinluoMixin):
+                def __init__(self):
+                    super().__init__()
+                    self.active_atomic_task = None
+                    self.sent = []
+                    self.fetch_started = asyncio.Event()
+                    self.release_fetch = asyncio.Event()
+                    self.client = SimpleNamespace(get_messages=self.get_messages)
+                    self.target_chat_id = -100123
+
+                async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                    self.sent.append(command)
+                    return DummyMessage(701, text="你开始运转魔功，试图将 **10000** 点修为凝练为纯粹的煞气...")
+
+                async def get_messages(self, chat_id, ids):
+                    self.fetch_started.set()
+                    await self.release_fetch.wait()
+                    return DummyMessage(ids, text="**【转化成功】**\n你成功将 **10000** 点修为炼化，煞气池增加了 **2160** 点！")
+
+                def time_critical_identity_command(self, command):
+                    command = str(command or "").strip()
+                    return command == ".观星" or command.startswith(".观星 ")
+
+            actor = DummyYinluo()
+            task = asyncio.create_task(
+                actor.send_yinluo_command("缘生子", YINLUO_CONVERT_COMMAND, timeout=60, edited_wait=0.01)
+            )
+            await actor.fetch_started.wait()
+            try:
+                self.assertTrue(actor.should_wait_for_atomic_task(".元婴出窍"))
+                self.assertFalse(actor.should_wait_for_atomic_task(".观星"))
+            finally:
+                actor.release_fetch.set()
+            text = await task
+            self.assertIn("转化成功", text)
+            self.assertFalse(actor.should_wait_for_atomic_task(".元婴出窍"))
+
+        asyncio.run(scenario())
+
     def test_yinluo_expired_sync_time_does_not_send_master_command(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
