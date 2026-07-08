@@ -103,33 +103,6 @@
         .runtime-item-name { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.35rem; }
         .runtime-item-pid { color: var(--accent-color); font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
         .runtime-item-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .fishing-auto-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; padding: 1rem; backdrop-filter: blur(12px); }
-        .fishing-auto-header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; margin-bottom: 0.85rem; }
-        .fishing-auto-title { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
-        .fishing-auto-title strong { color: var(--text-primary); font-size: 0.98rem; }
-        .fishing-auto-title span { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.35; }
-        .fishing-auto-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: 0.55rem; flex-wrap: wrap; }
-        .fishing-auto-status { border-radius: 999px; padding: 0.24rem 0.62rem; font-size: 0.74rem; font-weight: 900; white-space: nowrap; }
-        .fishing-auto-status.tone-active { background: rgba(0,210,255,0.16); color: var(--accent-color); }
-        .fishing-auto-status.tone-flow { background: rgba(236,72,153,0.16); color: #f9a8d4; }
-        .fishing-auto-status.tone-cooldown { background: rgba(245,158,11,0.18); color: #fbbf24; }
-        .fishing-auto-status.tone-done { background: rgba(148,163,184,0.16); color: #cbd5e1; }
-        .fishing-auto-status.tone-paused { background: rgba(239,68,68,0.18); color: #fca5a5; }
-        .fishing-auto-status.tone-unknown { background: rgba(100,116,139,0.16); color: #94a3b8; }
-        .fishing-auto-select { height: 1.8rem; border: 1px solid rgba(255,255,255,0.14); background: rgba(15,23,42,0.92); color: var(--text-primary); border-radius: 7px; padding: 0 0.48rem; font-size: 0.75rem; outline: none; }
-        .fishing-auto-select:disabled { opacity: 0.58; cursor: wait; }
-        .fishing-auto-switch { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-secondary); font-size: 0.74rem; white-space: nowrap; }
-        .fishing-auto-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.55rem; margin-bottom: 0.75rem; }
-        .fishing-auto-metric { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.62rem 0.7rem; min-width: 0; }
-        .fishing-auto-metric-label { color: var(--text-secondary); font-size: 0.68rem; margin-bottom: 0.24rem; }
-        .fishing-auto-metric-value { color: var(--text-primary); font-size: 0.86rem; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .fishing-auto-progress { height: 0.42rem; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,0.08); margin: 0.25rem 0 0.82rem; }
-        .fishing-auto-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #10b981, #00d2ff); width: 0; transition: width 0.25s ease; }
-        .fishing-auto-identities { display: flex; flex-wrap: wrap; gap: 0.34rem; }
-        .fishing-auto-chip { border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.035); color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.67rem; padding: 0.22rem 0.42rem; white-space: nowrap; }
-        .fishing-auto-chip.active { color: var(--accent-color); border-color: rgba(0,210,255,0.38); background: rgba(0,210,255,0.1); }
-        .fishing-auto-chip.done { color: #34d399; border-color: rgba(52,211,153,0.3); }
-        .fishing-auto-chip.paused { color: #fca5a5; border-color: rgba(248,113,113,0.24); }
         .account-health { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(0,0,0,0.16); padding: 0.65rem; margin: 0.2rem 0 1rem; }
         .account-health-title { display: flex; justify-content: space-between; gap: 0.6rem; color: var(--text-secondary); font-size: 0.72rem; font-weight: 800; margin-bottom: 0.52rem; }
         .account-health-next { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -307,8 +280,6 @@
             main { grid-template-columns: 1fr; padding: 1rem; }
             .runtime-header { flex-direction: column; }
             .runtime-git { text-align: left; }
-            .fishing-auto-header { flex-direction: column; }
-            .fishing-auto-controls { width: 100%; justify-content: flex-start; }
             .log-tools { grid-template-columns: 1fr; align-items: stretch; }
             .log-filter-summary { text-align: left; min-width: 0; }
             .log-search-row { flex-wrap: wrap; }
@@ -475,9 +446,6 @@
     <main>
         <section class="runtime-section" id="runtime-summary">
             <div class="record-empty">运行信息加载中...</div>
-        </section>
-        <section class="fishing-auto-section" id="fishing-auto-summary">
-            <div class="record-empty">全自动钓鱼状态加载中...</div>
         </section>
         <div id="account-cards" style="display: contents;"></div>
         <section class="command-record-section">
@@ -1263,6 +1231,16 @@
             return sameDay ? text.slice(6) : text;
         }
 
+        function dailyRewardDateTimeText(row) {
+            const date = String(row?.date || '').trim();
+            const time = String(row?.time || '').trim().replace('T', ' ');
+            if (!time) return date;
+            if (/^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?/.test(time)) {
+                return time;
+            }
+            return `${date} ${time}`.trim();
+        }
+
         const identityColorPalette = [
             {color: '#60a5fa', rgb: '96,165,250'},
             {color: '#34d399', rgb: '52,211,153'},
@@ -1948,9 +1926,10 @@
                             const identity = row.identity || '主魂';
                             const rewardSummary = row.reward_summary || (row.outcome === '失败' ? '无收益' : '未解析');
                             const outcome = row.outcome || '未定';
+                            const eventTime = dailyRewardDateTimeText(row);
                             return `
                                 <tr style="${identityColorStyle(row.account, identity)}">
-                                    <td class="record-time" title="${escapeHtml((row.date || '') + ' ' + (row.time || ''))}">${escapeHtml(recordDateText(`${row.date || ''} ${row.time || ''}`.trim()))}</td>
+                                    <td class="record-time" title="${escapeHtml(eventTime)}">${escapeHtml(recordDateText(eventTime))}</td>
                                     <td><div class="record-account">${escapeHtml(row.account_name || row.account || '')}</div></td>
                                     <td>
                                         <div class="record-identity">${escapeHtml(identity)}</div>
@@ -2220,7 +2199,6 @@
                 const data = await r.json();
                 document.getElementById('server-time').innerText = data.server_time;
                 renderRuntimeSummary(data);
-                renderFishingAutoSummary(data.fishing_auto);
                 
                 let html = '';
                 window.commandPanelDataMap = {};
