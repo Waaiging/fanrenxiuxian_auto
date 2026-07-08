@@ -8121,7 +8121,7 @@ class ParserFixtureTests(unittest.TestCase):
         sent = []
 
         async def fake_send(command, *args, **kwargs):
-            sent.append(command)
+            sent.append((command, kwargs.get("force_meditation_check")))
             return "你正在深度闭关，预计还需 **6小时40分钟** 即可功成圆满。"
 
         async def fake_place(reason):
@@ -8136,7 +8136,7 @@ class ParserFixtureTests(unittest.TestCase):
         ))
 
         self.assertTrue(ok)
-        self.assertEqual(sent, [".查看闭关"])
+        self.assertEqual(sent, [(".查看闭关", True)])
         remaining = common_seconds_until(actor.state["deep_meditation_end_time"])
         self.assertGreater(remaining, 6 * 3600 + 35 * 60)
         self.assertLessEqual(remaining, 6 * 3600 + 40 * 60)

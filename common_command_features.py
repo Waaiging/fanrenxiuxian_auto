@@ -3513,6 +3513,7 @@ class CommonCommandMixin:
                 timeout=30,
                 max_retries=0,
                 force_identity_check=True,
+                force_meditation_check=True,
                 suppress_no_response_alert=True,
             )
         else:
@@ -3521,6 +3522,7 @@ class CommonCommandMixin:
                 timeout=30,
                 max_retries=0,
                 force_identity_check=True,
+                force_meditation_check=True,
                 suppress_no_response_alert=True,
             )
         text = self.timed_command_response_text(resp)
