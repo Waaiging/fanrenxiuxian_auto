@@ -80,7 +80,7 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
 #   指令反馈等待：封装了发送指令、等待回复、超时重试的通用逻辑
 
-from concubine_features import ConcubineMixin, concubine_default_state
+from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 #   侍妾功能混入类：提供侍妾召回/安置/每日问安等方法的默认状态和基础实现
 
 from fishing_features import FishingMixin
@@ -5633,7 +5633,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             True  — 心劫完成（3轮结束或已结算）
             False — 心劫失败（需重试或跳过）
         """
-        async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
+        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
             status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
             if status_text and not self.concubine_status_matches_identity(status_text, avatar):
                 log.warning(f"Avatar [{avatar}] heart trial: mismatched .我的侍妾 status; retry soon.")

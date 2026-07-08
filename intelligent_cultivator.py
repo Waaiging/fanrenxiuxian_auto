@@ -93,7 +93,7 @@ from telethon import TelegramClient, events  # Telegram 客户端框架，消息
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
 from common_command_features import CommonCommandMixin, common_command_default_state
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
-from concubine_features import ConcubineMixin, concubine_default_state
+from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
@@ -4162,7 +4162,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
     # ============================================================
 
     async def execute_avatar_heart_trial(self, avatar, status_msg):
-        async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
+        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
             status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
             if status_text and not self.concubine_status_matches_identity(status_text, avatar):
                 log.warning(f"Avatar [{avatar}] heart trial: mismatched .我的侍妾 status; retry soon.")

@@ -229,6 +229,31 @@ class ParserFixtureTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_heart_trial_atomic_batch_blocks_yinluo_interrupts(self):
+        async def scenario():
+            actor = DummyAtomicConcubine()
+            acquired = asyncio.Event()
+            release = asyncio.Event()
+
+            async def hold_batch():
+                async with concubine_features._ConcubineAtomicTask(actor, "HeartTrial-素缘子"):
+                    acquired.set()
+                    await release.wait()
+
+            task = asyncio.create_task(hold_batch())
+            await acquired.wait()
+            try:
+                self.assertTrue(actor.should_wait_for_atomic_task(".切换 缘生子"))
+                self.assertTrue(actor.should_wait_for_atomic_task(".召唤魔影"))
+                self.assertFalse(actor.should_wait_for_atomic_task(".观星"))
+            finally:
+                release.set()
+                await task
+
+            self.assertFalse(actor.should_wait_for_atomic_task(".切换 缘生子"))
+
+        asyncio.run(scenario())
+
     def test_meditation_restart_chain_blocks_identity_switches(self):
         async def scenario():
             class DummyMeditation(CommonCommandMixin, ConcubineMixin):

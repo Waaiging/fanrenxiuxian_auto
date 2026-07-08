@@ -66,7 +66,7 @@ from telethon import TelegramClient, events
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
 from common_command_features import CommonCommandMixin, common_command_default_state
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
-from concubine_features import ConcubineMixin, concubine_default_state
+from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
@@ -7302,7 +7302,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         化身共历心劫原子流程：
         .我的侍妾 -> .共历心劫 -> .稳 x3 必须连续执行，避免身份切换打散回复锚点。
         """
-        async with AtomicTaskContext(self, f"HeartTrial-{avatar}"):
+        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
             forced_exit = False
             for flow_attempt in range(1, 3):
                 status_msg = await self.send_and_wait_feedback_identity(
