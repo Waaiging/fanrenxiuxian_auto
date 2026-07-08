@@ -241,6 +241,10 @@ BOT_REPLY_MARKERS = {
     "hantianzz_bot", "@hantianzz_bot",
     "hantianz_bot", "@hantianz_bot",
     "hantianzunhl", "@hantianzunhl",
+    "hantianzun05_bot", "@hantianzun05_bot",
+    "hantianzun06_bot", "@hantianzun06_bot",
+    "hantianzun07_bot", "@hantianzun07_bot",
+    "hantianzun08_bot", "@hantianzun08_bot",
     "韩天尊",
 }
 

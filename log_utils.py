@@ -140,6 +140,10 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzzzzzz_bot",           # 天尊6号（6个z）
     "hantianzzzzzzz_bot",          # 天尊7号（7个z）
     "hantianzzzzzzzz_bot",         # 天尊8号（8个z）
+    "hantianzun05_bot",            # 天尊05号（新机器人）
+    "hantianzun06_bot",            # 天尊06号（新机器人）
+    "hantianzun07_bot",            # 天尊07号（新机器人）
+    "hantianzun08_bot",            # 天尊08号（新机器人）
 }
 
 # 反机器人挑战关键词

@@ -67,6 +67,10 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzzzzzz_bot",
     "hantianzzzzzzz_bot",
     "hantianzzzzzzzz_bot",
+    "hantianzun05_bot",
+    "hantianzun06_bot",
+    "hantianzun07_bot",
+    "hantianzun08_bot",
 }
 
 
