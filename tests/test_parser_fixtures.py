@@ -1333,6 +1333,20 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn("支援慕兰", state["last_mulan_support_response"])
         self.assertEqual(actor.sent[1][2]["max_retries"], 0)
 
+    def test_mulan_support_feedback_family_matches_response(self):
+        text = "【慕兰烽烟】你领了【夜袭法士营】奇袭，小胜险还，边境军功 +5。"
+
+        self.assertEqual(
+            log_utils.command_response_family(common_command_features.AVATAR_TOWER_SUPPORT_COMMAND),
+            "mulan_support",
+        )
+        self.assertEqual(log_utils.text_response_family(text), "mulan_support")
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            common_command_features.AVATAR_TOWER_SUPPORT_COMMAND,
+            text,
+        ))
+        self.assertTrue(log_utils.feedback_response_conflicts(".闯塔", text))
+
     def test_common_avatar_tower_send_can_require_meditation_ready(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):
@@ -2284,6 +2298,46 @@ class ParserFixtureTests(unittest.TestCase):
         }, identity="素心子")
 
         self.assertEqual(wait, 999999)
+
+    def test_daily_one_shot_defers_behind_priority_due_work(self):
+        class DummyDailyPriority(CommonCommandMixin):
+            avatars = []
+
+            def __init__(self, state):
+                self.state = state
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def state_time_command_paused(self, key, identity=""):
+                return False
+
+            def dashboard_command_paused(self, command, identity=""):
+                return False
+
+        due_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor = DummyDailyPriority({"next_field_training_time": due_at})
+
+        self.assertTrue(actor.daily_one_shot_should_defer("主魂", ".宗门点卯"))
+
+        actor = DummyDailyPriority({"done": []})
+        self.assertFalse(actor.daily_one_shot_should_defer("主魂", ".宗门点卯"))
+
+    def test_main_impending_does_not_promote_daily_when_priority_due(self):
+        actor = Cultivator.__new__(Cultivator)
+        due_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {"next_field_training_time": due_at}
+        actor.avatars = []
+        actor.avatar_features = {}
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+        actor.custom_command_impending_wait = lambda identity: -1
+
+        with patch.object(intelligent_cultivator, "seconds_until_daily_task_start", lambda now: 0):
+            wait = actor._state_impending_command_wait({"done": []}, identity="主魂")
+
+        self.assertEqual(wait, -1)
 
     def test_fishing_parsers_cover_core_flow(self):
         basket = parse_fishing_basket(
@@ -8026,6 +8080,28 @@ class ParserFixtureTests(unittest.TestCase):
                 ))
 
         self.assertIsNotNone(actor._last_game_bot_activity_ts)
+
+    def test_shared_bot_maintenance_defers_watchdog_until_activity_resumes(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            _bot_no_response_times=[],
+            _bot_unhealthy_until=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                log_utils.record_bot_no_response(actor, ".问道")
+                self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
+
+                log_utils.record_bot_no_response(actor, ".问道")
+                status = log_utils.shared_bot_maintenance_status(actor)
+                self.assertTrue(status["active"])
+                self.assertEqual(status["source"], "shared_health_pause")
+                self.assertTrue(log_utils.watchdog_should_defer_for_bot_maintenance(actor))
+
+                log_utils.record_game_bot_activity(actor)
+                self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
 
     def test_meditation_feedback_rejects_other_identity_summary_for_main(self):
         actor = Cultivator.__new__(Cultivator)

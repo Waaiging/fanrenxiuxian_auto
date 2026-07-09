@@ -135,6 +135,7 @@ from log_utils import (
     is_reply_to_untracked_message, # 带 reply_to 但不属于本脚本指令的回复
     maybe_handle_han_soul_choice, # 韩天尊神魂抉择自动回复
     wait_for_bot_activity_before_send,  # 等待机器人活跃后再发送（避免竞态）
+    watchdog_should_defer_for_bot_maintenance, # 机器人维护时 watchdog 延后重启
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
@@ -1092,19 +1093,25 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
                 or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
             )
-            if seconds_until_daily_task_start(datetime.now()) <= 0 and daily_due:
+            if (
+                seconds_until_daily_task_start(datetime.now()) <= 0
+                and daily_due
+                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+            ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
         elif identity in self.avatars:
             if (
                 state.get("last_dianmao_date") != today
                 and not self.dashboard_command_paused(".宗门点卯", identity)
                 and seconds_until_daily_task_start(datetime.now()) <= 0
+                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
                 state.get("last_tower_date") != today
                 and not self.dashboard_command_paused(".闯塔", identity)
                 and datetime.now().hour >= 23
+                and not self.daily_one_shot_should_defer(identity, ".闯塔")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -3164,24 +3171,34 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        log.critical(
-                            f"Sub watchdog: scheduler due item stale: {detail}; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Sub watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Sub watchdog: scheduler due item stale: {detail}; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
 
                 if self.avatar_send_lock.locked():
                     if lock_started_at is None:
                         lock_started_at = time.monotonic()
                     held_for = time.monotonic() - lock_started_at
                     if held_for >= 10 * 60:
-                        log.critical(
-                            f"Sub watchdog: avatar_send_lock held for {held_for:.0f}s; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Sub watchdog avatar_send_lock held {held_for:.0f}s"
+                        ):
+                            lock_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Sub watchdog: avatar_send_lock held for {held_for:.0f}s; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
                 else:
                     lock_started_at = None
             except Exception as exc:
@@ -5831,9 +5848,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             try:
                 a_state = self.get_avatar_state(avatar)
 
-                # 被动结算可能由任意指令触发；闭关链路独立负责续上，不阻塞其他任务。
-                await self._avatar_daily_checkin(avatar)
-
                 try:
                     if avatar in AVATAR_FORMATION_AVATARS:
                         await self.execute_avatar_formation(avatar)
@@ -5929,6 +5943,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
                 # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ----
                 await self.execute_avatar_concubine_chain(avatar)
+
+                # 每日一次性点卯放在本轮最后，避免恢复后抢占冷却收益任务。
+                await self._avatar_daily_checkin(avatar)
 
                 # ---- 等待下次循环 ----
                 # 考虑深度闭关、闭关冷却、野外历练冷却、阵法冷却、心劫冷却、入梦冷却，取最小值

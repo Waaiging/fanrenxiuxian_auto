@@ -609,6 +609,8 @@ def command_response_family(command):
         or cmd.startswith(".放生 ")
     ):
         return "beast"
+    if cmd.startswith(".支援慕兰"):
+        return "mulan_support"
     if cmd in {".宗门点卯", ".闯塔"}:
         return cmd
     if cmd in {".元婴出窍", ".元婴闭关"}:
@@ -731,6 +733,11 @@ def text_response_family(text):
         "安抚", "心情", "羁绊", "忠诚", "体力不足", "入渊", "六翼",
     ]):
         return "beast"
+    if any(k in clean for k in [
+        "慕兰烽烟", "支援慕兰", "夜袭法士营", "边境军功",
+        "连续支援", "法士营", "奇袭",
+    ]):
+        return "mulan_support"
     if "宗门点卯" in clean:
         return ".宗门点卯"
     if any(k in clean for k in ["闯塔", "塔钥", "试炼古塔", "重置古塔", "道心受挫", "挑战失败"]):
@@ -873,6 +880,11 @@ def feedback_response_matches_command(command, text):
             "出战", "放养", "寻觅灵兽", "兽栏", "无法立刻出战",
             "尚未派遣任何灵兽出战", "巡游", "亲密", "抚摸",
             "安抚", "心情", "羁绊", "忠诚", "体力不足", "入渊", "六翼",
+        ])
+    if expected == "mulan_support":
+        return any(k in clean for k in [
+            "慕兰烽烟", "支援慕兰", "夜袭法士营", "边境军功",
+            "连续支援", "法士营", "奇袭", "险还", "小胜",
         ])
     if expected == ".宗门点卯":
         return "宗门点卯" in clean or "点卯" in clean
@@ -1350,6 +1362,37 @@ def _write_shared_bot_activity(data):
             pass
 
 
+def _clear_shared_bot_maintenance(data=None):
+    """Clear the cross-script bot maintenance marker when any bot activity resumes."""
+    owns_data = data is None
+    if data is None:
+        data = _read_shared_bot_activity()
+    if isinstance(data, dict) and data.pop("maintenance", None) is not None and owns_data:
+        _write_shared_bot_activity(data)
+    return data
+
+
+def _record_shared_bot_maintenance(actor, command="", pause_seconds=BOT_HEALTH_PAUSE_SECONDS):
+    account = str(_shared_bot_activity_account(actor) or "").strip()
+    now_wall = datetime.now()
+    try:
+        pause_seconds = max(1, int(pause_seconds))
+    except Exception:
+        pause_seconds = BOT_HEALTH_PAUSE_SECONDS
+    data = _read_shared_bot_activity()
+    data["maintenance"] = {
+        "account": account,
+        "command": str(command or "").strip(),
+        "wall": now_wall.strftime(TIME_FORMAT),
+        "updated_epoch": time.time(),
+        "until_epoch": time.time() + pause_seconds,
+        "pause_seconds": pause_seconds,
+        "pid": os.getpid(),
+    }
+    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+    _write_shared_bot_activity(data)
+
+
 def record_shared_game_bot_activity(actor, sender=None):
     account = str(_shared_bot_activity_account(actor) or "").strip()
     if not account:
@@ -1368,6 +1411,7 @@ def record_shared_game_bot_activity(actor, sender=None):
     }
     data["accounts"] = accounts
     data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+    _clear_shared_bot_maintenance(data)
     _write_shared_bot_activity(data)
 
 
@@ -1401,6 +1445,91 @@ def shared_bot_activity_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECONDS):
         "stale": stale,
         "accounts": accounts,
     }
+
+
+def shared_bot_maintenance_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECONDS):
+    """Return whether scripts should treat current bot silence as shared maintenance."""
+    data = _read_shared_bot_activity()
+    maintenance = data.get("maintenance") if isinstance(data, dict) else {}
+    if not isinstance(maintenance, dict):
+        maintenance = {}
+
+    now_epoch = time.time()
+    active_until = 0.0
+    try:
+        active_until = float(maintenance.get("until_epoch", 0) or 0)
+    except Exception:
+        active_until = 0.0
+
+    activity = shared_bot_activity_status(actor, stale_seconds)
+    if activity.get("recent"):
+        if maintenance:
+            _clear_shared_bot_maintenance(data)
+            _write_shared_bot_activity(data)
+        return {
+            "active": False,
+            "source": "recent_activity",
+            "remaining_seconds": 0,
+            "maintenance": maintenance,
+            "activity": activity,
+        }
+
+    local_remaining = bot_health_pause_remaining(actor)
+    shared_remaining = max(0, int(active_until - now_epoch))
+    active = shared_remaining > 0 or local_remaining > 0
+    source = ""
+    if shared_remaining > 0:
+        source = "shared_health_pause"
+    elif local_remaining > 0:
+        source = "local_health_pause"
+
+    return {
+        "active": active,
+        "source": source,
+        "remaining_seconds": max(shared_remaining, local_remaining),
+        "maintenance": maintenance,
+        "activity": activity,
+    }
+
+
+def watchdog_should_defer_for_bot_maintenance(
+    actor,
+    logger=None,
+    reason="watchdog",
+    stale_seconds=BOT_ACTIVITY_STALE_SECONDS,
+):
+    """Tell watchdogs to wait when all scripts are paused for bot silence."""
+    status = shared_bot_maintenance_status(actor, stale_seconds)
+    if not status.get("active"):
+        return False
+
+    now = time.monotonic()
+    last_log = getattr(actor, "_watchdog_bot_maintenance_log_last", 0) or 0
+    if logger and now - last_log >= BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS:
+        maintenance = status.get("maintenance") or {}
+        activity = status.get("activity") or {}
+        shared_accounts = activity.get("accounts") or {}
+        account_ages = []
+        for account, entry in sorted(shared_accounts.items()):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                age = int(max(0, time.time() - float(entry.get("wall_epoch", 0) or 0)))
+            except Exception:
+                continue
+            account_ages.append(f"{account}:{age}s")
+        command = maintenance.get("command") or ""
+        source_account = maintenance.get("account") or ""
+        detail = f"; shared stale accounts: {', '.join(account_ages)}" if account_ages else ""
+        command_detail = f"; last no-response {command}" if command else ""
+        source_detail = f" from {source_account}" if source_account else ""
+        logger.warning(
+            f"{reason}: deferring watchdog restart during bot maintenance "
+            f"({status.get('source')}{source_detail}, remaining "
+            f"{int(status.get('remaining_seconds') or 0)}s{command_detail}{detail})."
+        )
+        setattr(actor, "_watchdog_bot_maintenance_log_last", now)
+    return True
 
 
 def mark_bot_activity_from_shared(actor):
@@ -1730,6 +1859,7 @@ def record_bot_no_response(actor, command, logger=None):
     if len(times) >= BOT_HEALTH_FAILURE_THRESHOLD:
         setattr(actor, "_bot_unhealthy_until", now + BOT_HEALTH_PAUSE_SECONDS)
         setattr(actor, "_bot_no_response_times", [])
+        _record_shared_bot_maintenance(actor, command, BOT_HEALTH_PAUSE_SECONDS)
         if logger:
             logger.warning(
                 f"Bot health paused after {len(times)} no-response commands; "

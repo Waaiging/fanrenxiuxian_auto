@@ -159,6 +159,15 @@ STATE_TIME_COMMAND_MAP = {
     "next_beast_cruise_time": ".灵兽巡游 六翼",
     "next_ask_dao_time": ".问道",
 }
+LOW_PRIORITY_DAILY_COMMANDS = {
+    ".宗门点卯",
+    ".闯塔",
+    ".观命",
+    ".定命",
+    ".借天门势",
+}
+LOW_PRIORITY_DAILY_DEFER_SECONDS = 5 * 60
+LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS = 5 * 60
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
@@ -2135,6 +2144,128 @@ class CommonCommandMixin:
         command = str(command or "").strip()
         prefix = str(prefix or "").strip()
         return bool(command and prefix and (command == prefix or command.startswith(f"{prefix} ")))
+
+    def is_low_priority_daily_command(self, command):
+        return any(
+            self.command_matches_prefix(command, prefix)
+            for prefix in LOW_PRIORITY_DAILY_COMMANDS
+        )
+
+    def iter_identity_states_for_priority(self):
+        state = getattr(self, "state", {})
+        if isinstance(state, dict):
+            yield "主魂", state
+        for identity in getattr(self, "avatars", []) or []:
+            try:
+                avatar_state = self.get_avatar_state(identity)
+            except Exception:
+                continue
+            if isinstance(avatar_state, dict):
+                yield identity, avatar_state
+
+    def priority_due_key_enabled(self, identity, key):
+        if identity == "主魂":
+            return True
+        features = (getattr(self, "avatar_features", {}) or {}).get(identity, {})
+        if not features:
+            return True
+        feature_keys = {
+            "next_yuanying_out_time": "yuanying_out",
+            "next_rift_search_time": "rift_search",
+            "next_dream_map_time": "dream_map",
+            "next_heart_trial_time": "heart_trial",
+            "next_tower_time": "tower",
+            "next_formation_time": "formation",
+            "next_formation_retry_time": "formation",
+            "next_spirit_tree_irrigation_time": "spirit_tree_irrigation",
+            "next_spirit_tree_guard_time": "spirit_tree_guard",
+            "next_star_gazing_time": "star_gazing",
+            "pending_star_gazing_target_time": "star_gazing",
+            "pending_star_shift_target_time": "star_gazing",
+            "next_star_check_time": "star_attraction",
+            "next_star_appease_time": "star_attraction",
+            "next_star_collect_time": "star_attraction",
+            "next_star_attraction_time": "star_attraction",
+        }
+        feature = feature_keys.get(key)
+        if not feature:
+            return True
+        if key in {"next_formation_time", "next_formation_retry_time"}:
+            return bool(features.get("formation"))
+        return bool(features.get(feature))
+
+    def priority_due_work_summary(self, grace_seconds=0):
+        """Return the first non-daily due command, used to make one-shot dailies yield."""
+        try:
+            grace_seconds = max(0, int(grace_seconds))
+        except Exception:
+            grace_seconds = 0
+        now = datetime.now()
+
+        for identity, state in self.iter_identity_states_for_priority():
+            try:
+                if self.identity_pause_seconds(identity) > 0:
+                    continue
+            except Exception:
+                pass
+
+            for key, command in STATE_TIME_COMMAND_MAP.items():
+                if self.is_low_priority_daily_command(command):
+                    continue
+                if not self.priority_due_key_enabled(identity, key):
+                    continue
+                if self.state_time_command_paused(key, identity):
+                    continue
+                value = state.get(key, "")
+                if not isinstance(value, str) or not value:
+                    continue
+                try:
+                    target = str_to_dt(value)
+                except Exception:
+                    continue
+                overdue = int((now - target).total_seconds())
+                if overdue >= grace_seconds:
+                    return {
+                        "identity": identity,
+                        "key": key,
+                        "command": command,
+                        "due_at": value,
+                        "overdue_seconds": overdue,
+                    }
+
+            if identity != "主魂" and hasattr(self, "avatar_meditation_needs_attention"):
+                try:
+                    if self.avatar_meditation_needs_attention(identity):
+                        return {
+                            "identity": identity,
+                            "key": "avatar_meditation",
+                            "command": ".查看闭关",
+                            "due_at": "",
+                            "overdue_seconds": 0,
+                        }
+                except Exception:
+                    continue
+        return {}
+
+    def daily_one_shot_should_defer(self, identity="主魂", command="", logger=None):
+        """Let daily one-shot commands run only after cooldown/retry work has caught up."""
+        command = str(command or "").strip()
+        if command and not self.is_low_priority_daily_command(command):
+            return False
+        due = self.priority_due_work_summary()
+        if not due:
+            return False
+
+        now = time.monotonic()
+        last = getattr(self, "_daily_low_priority_defer_log_last", 0) or 0
+        if logger and now - last >= LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS:
+            logger.info(
+                f"Daily one-shot [{command or 'daily'}] for [{identity}] deferred; "
+                f"priority due work [{due.get('identity')}] {due.get('command')} "
+                f"({due.get('key')}) is overdue by {int(due.get('overdue_seconds') or 0)}s."
+            )
+            setattr(self, "_daily_low_priority_defer_log_last", now)
+        return True
 
     def time_critical_identity_command(self, command):
         return any(
@@ -4137,6 +4268,12 @@ class CommonCommandMixin:
             return False
         if min_hour is not None and now.hour < min_hour:
             return False
+        if self.daily_one_shot_should_defer(
+            avatar,
+            ".闯塔",
+            logger=self.common_command_logger(),
+        ):
+            return False
         return await self.common_avatar_tower_send(
             avatar,
             today=today,
@@ -4182,10 +4319,21 @@ class CommonCommandMixin:
                         require_meditation_ready=require_meditation_ready,
                     )
                 ):
+                    if self.daily_one_shot_should_defer(avatar, ".闯塔", logger=log):
+                        await asyncio.sleep(
+                            self.common_scheduler_sleep_seconds(
+                                LOW_PRIORITY_DAILY_DEFER_SECONDS,
+                                sleep_func=sleep_func,
+                            )
+                        )
+                        continue
                     delay = random.randint(*delay_range)
                     log.info(f"Avatar [{avatar}] daily tower due today ({today}). Waiting {delay}s...")
                     await asyncio.sleep(delay)
-                    if self.get_avatar_state(avatar).get("last_tower_date", "") != today:
+                    if (
+                        self.get_avatar_state(avatar).get("last_tower_date", "") != today
+                        and not self.daily_one_shot_should_defer(avatar, ".闯塔", logger=log)
+                    ):
                         await self.common_avatar_tower_send(
                             avatar,
                             today=today,
@@ -4209,6 +4357,12 @@ class CommonCommandMixin:
         if self.get_avatar_state(avatar).get("last_dianmao_date") == today:
             return False
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(".宗门点卯", avatar):
+            return False
+        if self.daily_one_shot_should_defer(
+            avatar,
+            ".宗门点卯",
+            logger=self.common_command_logger(),
+        ):
             return False
         resp = await self.send_and_wait_feedback_identity(avatar, ".宗门点卯", timeout=60)
         resp_text = self.timed_command_response_text(resp)
@@ -4265,9 +4419,19 @@ class CommonCommandMixin:
                 self.save_state()
 
             done = self.state.setdefault("done", [])
+            deferred_daily = False
             for command in task_commands:
                 if command in done:
                     continue
+                if self.daily_one_shot_should_defer("主魂", command, logger=log):
+                    await asyncio.sleep(
+                        self.common_scheduler_sleep_seconds(
+                            LOW_PRIORITY_DAILY_DEFER_SECONDS,
+                            sleep_func=sleep_func,
+                        )
+                    )
+                    deferred_daily = True
+                    break
 
                 if mark_done_before_send:
                     done.append(command)
@@ -4290,6 +4454,9 @@ class CommonCommandMixin:
                         self.state["last_dianmao_msg_id"] = sent_msg.id
                     self.save_state()
                 await asyncio.sleep(5)
+
+            if deferred_daily:
+                continue
 
             await asyncio.sleep(
                 self.common_scheduler_sleep_seconds(600, sleep_func=sleep_func)

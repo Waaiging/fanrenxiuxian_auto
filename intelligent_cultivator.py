@@ -144,6 +144,7 @@ from log_utils import (
     is_reply_to_untracked_message, # 带 reply_to 但不属于本脚本指令的回复
     maybe_handle_han_soul_choice,   # 韩天尊神魂抉择自动回复
     wait_for_bot_activity_before_send,  # 发送前等待机器人活动确认
+    watchdog_should_defer_for_bot_maintenance, # 机器人维护时 watchdog 延后重启
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
@@ -2307,24 +2308,34 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        log.critical(
-                            f"Main watchdog: scheduler due item stale: {detail}; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Main watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Main watchdog: scheduler due item stale: {detail}; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
 
                 if self.avatar_send_lock.locked():
                     if lock_started_at is None:
                         lock_started_at = time.monotonic()
                     held_for = time.monotonic() - lock_started_at
                     if held_for >= 10 * 60:
-                        log.critical(
-                            f"Main watchdog: avatar_send_lock held for {held_for:.0f}s; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Main watchdog avatar_send_lock held {held_for:.0f}s"
+                        ):
+                            lock_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Main watchdog: avatar_send_lock held for {held_for:.0f}s; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
                 else:
                     lock_started_at = None
             except Exception as exc:
@@ -3835,7 +3846,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
                 or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
             )
-            if seconds_until_daily_task_start(datetime.now()) <= 0 and daily_due:
+            if (
+                seconds_until_daily_task_start(datetime.now()) <= 0
+                and daily_due
+                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+            ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
         elif identity in self.avatars:
             features = self.avatar_features.get(identity, {})
@@ -3844,6 +3859,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 and state.get("last_dianmao_date") != today
                 and not self.dashboard_command_paused(".宗门点卯", identity)
                 and seconds_until_daily_task_start(datetime.now()) <= 0
+                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -3851,6 +3867,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 and state.get("last_tower_date") != today
                 and not self.dashboard_command_paused(".闯塔", identity)
                 and datetime.now().hour >= 23
+                and not self.daily_one_shot_should_defer(identity, ".闯塔")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -4312,11 +4329,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                             continue
                         # 被动结算可能由任意指令触发；闭关链路独立负责续上，不阻塞其他任务。
                         await self._avatar_meditation_check(avatar)
-                        # 0. 每日点卯
-                        if features.get("daily_checkin"): await self._avatar_daily_checkin(avatar)
-                        # 0.1 无咎子每日观命/定命
-                        if features.get("destiny"): await self._avatar_destiny_check(avatar)
-                        # 0.2 无咎子元婴/裂缝
+                        # 1. 无咎子元婴/裂缝
                         if features.get("yuanying_out"): await self._avatar_yuanying_out_check(avatar)
                         if self.identity_pause_seconds(avatar) > 0:
                             continue
@@ -4328,13 +4341,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg and not self.formation_assist_in_progress:
                             await self._avatar_assist_formation(avatar)
-                        # 4. 闯塔
-                        if features.get("tower"): await self._avatar_tower_check(avatar)
-                        # 5. 灵树灌溉
+                        # 4. 灵树灌溉
                         if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
                         # 5. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
                         if features.get("dream_map") or features.get("heart_trial"):
                             await self.execute_avatar_concubine_chain(avatar)
+                        # 6. 每日一次性任务优先级最低，放在本轮最后。
+                        if features.get("daily_checkin"): await self._avatar_daily_checkin(avatar)
+                        if features.get("destiny"): await self._avatar_destiny_check(avatar)
+                        if features.get("tower"): await self._avatar_tower_check(avatar)
                     except Exception as e:
                         log.error(f"Avatar [{avatar}] error: {e}")
                     log.info(f"Avatar [{avatar}] cycle complete")
@@ -4466,6 +4481,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             return
         start, end = self._avatar_destiny_window(now)
         if now < start or now > end:
+            return
+        if self.daily_one_shot_should_defer(avatar, ".观命", logger=log):
             return
 
         async with AtomicTaskContext(self, f"Destiny-{avatar}"):

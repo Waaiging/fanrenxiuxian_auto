@@ -89,6 +89,7 @@ from log_utils import (
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
     schedule_command_auto_delete, send_text_alert, watchdog_diagnostics, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
+    watchdog_should_defer_for_bot_maintenance,
     feedback_response_conflicts,
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
@@ -1589,7 +1590,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
                 or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
             )
-            if seconds_until_daily_task_start(datetime.now()) <= 0 and daily_due:
+            if (
+                seconds_until_daily_task_start(datetime.now()) <= 0
+                and daily_due
+                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+            ):
                 min_wait = min(min_wait, 0)
 
         if (
@@ -1597,6 +1602,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             and state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d")
             and not self.dashboard_command_paused(".宗门点卯", identity)
             and seconds_until_daily_task_start(datetime.now()) <= 0
+            and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
         ):
             min_wait = min(min_wait, 0)
 
@@ -2202,24 +2208,34 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        log.critical(
-                            f"Xiaohao watchdog: scheduler due item stale: {detail}; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Xiaohao watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Xiaohao watchdog: scheduler due item stale: {detail}; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
 
                 if self.avatar_send_lock.locked():
                     if lock_started_at is None:
                         lock_started_at = time.monotonic()
                     held_for = time.monotonic() - lock_started_at
                     if held_for >= 10 * 60:
-                        log.critical(
-                            f"Xiaohao watchdog: avatar_send_lock held for {held_for:.0f}s; "
-                            f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
-                        )
-                        self.save_state()
-                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                        if watchdog_should_defer_for_bot_maintenance(
+                            self, log, reason=f"Xiaohao watchdog avatar_send_lock held {held_for:.0f}s"
+                        ):
+                            lock_started_at = time.monotonic()
+                        else:
+                            log.critical(
+                                f"Xiaohao watchdog: avatar_send_lock held for {held_for:.0f}s; "
+                                f"diagnostics: {watchdog_diagnostics(self)}; restarting process."
+                            )
+                            self.save_state()
+                            os.execv(sys.executable, [sys.executable, *sys.argv])
                 else:
                     lock_started_at = None
             except Exception as exc:
@@ -7484,10 +7500,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 log.info(f"DEBUG: run_avatar_star_palace_loop iteration for {avatar}")
                 state = self.get_avatar_state(avatar)
 
-                # --- 宗门点卯（每日一次，07:30 后） ---
-                await self._avatar_daily_checkin(avatar)
-                state = self.get_avatar_state(avatar)
-                
                 # --- 星辰牵引/安抚/收集由 run_avatar_star_attraction_loop 独立调度 ---
 
                 # --- 周天星斗大阵 ---
@@ -7501,6 +7513,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         name, send_with_cultivation_check
                     ),
                 )
+
+                # --- 宗门点卯（每日一次，低优先级，放在本轮最后） ---
+                await self._avatar_daily_checkin(avatar)
 
             except Exception as e:
                 log.error(f"Error in avatar {avatar} daily avatar loop: {e}", exc_info=True)
