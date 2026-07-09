@@ -1476,17 +1476,22 @@ def shared_bot_maintenance_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECOND
 
     local_remaining = bot_health_pause_remaining(actor)
     shared_remaining = max(0, int(active_until - now_epoch))
-    active = shared_remaining > 0 or local_remaining > 0
+    waiting_command = str(getattr(actor, "_bot_activity_waiting_command", "") or "").strip()
+    waiting_for_shared_stale = bool(waiting_command and activity.get("accounts"))
+    active = shared_remaining > 0 or local_remaining > 0 or waiting_for_shared_stale
     source = ""
     if shared_remaining > 0:
         source = "shared_health_pause"
     elif local_remaining > 0:
         source = "local_health_pause"
+    elif waiting_for_shared_stale:
+        source = "shared_activity_stale"
 
     return {
         "active": active,
         "source": source,
         "remaining_seconds": max(shared_remaining, local_remaining),
+        "waiting_command": waiting_command,
         "maintenance": maintenance,
         "activity": activity,
     }
@@ -1519,9 +1524,12 @@ def watchdog_should_defer_for_bot_maintenance(
                 continue
             account_ages.append(f"{account}:{age}s")
         command = maintenance.get("command") or ""
+        waiting_command = status.get("waiting_command") or ""
         source_account = maintenance.get("account") or ""
         detail = f"; shared stale accounts: {', '.join(account_ages)}" if account_ages else ""
         command_detail = f"; last no-response {command}" if command else ""
+        if waiting_command and not command_detail:
+            command_detail = f"; waiting before {waiting_command}"
         source_detail = f" from {source_account}" if source_account else ""
         logger.warning(
             f"{reason}: deferring watchdog restart during bot maintenance "
@@ -1667,123 +1675,132 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
         return True
 
     disconnected_since = 0
-    while getattr(actor, "is_running", True):
-        if not await ensure_client_connected_before_send(actor, key, logger):
-            now = time.monotonic()
-            if not disconnected_since:
-                disconnected_since = now
-            if now - disconnected_since >= CLIENT_DISCONNECT_ABORT_SECONDS:
-                if logger:
-                    logger.error(
-                        f"Telegram client remained disconnected for "
-                        f"{int(now - disconnected_since)}s before [{key}]; aborting send."
-                    )
-                return False
-            await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
-            continue
-        disconnected_since = 0
-
-        if not is_bot_activity_recent(actor, stale_seconds):
-            await refresh_recent_game_bot_activity(actor, stale_seconds, logger)
-        if is_bot_activity_recent(actor, stale_seconds):
-            if is_bot_health_paused(actor):
-                record_bot_response(actor)
-            return True
-
-        shared_status = shared_bot_activity_status(actor, stale_seconds)
-        if shared_status["recent"]:
-            mark_bot_activity_from_shared(actor)
-            now = time.monotonic()
-            last_shared_log = getattr(actor, "_bot_activity_shared_log_last", 0) or 0
-            if logger and now - last_shared_log >= BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS:
-                recent_accounts = ", ".join(
-                    f"{account}({int(info.get('age_seconds', 0))}s)"
-                    for account, info in sorted(shared_status["recent"].items())
-                )
-                if shared_status["recent_others"]:
-                    logger.info(
-                        f"Bot activity cross-check: other script(s) recently saw the bot: "
-                        f"{recent_accounts}; proceeding before [{key}]."
-                    )
-                else:
-                    logger.info(
-                        f"Bot activity cross-check: this account has recent shared bot activity: "
-                        f"{recent_accounts}; proceeding before [{key}]."
-                    )
-                setattr(actor, "_bot_activity_shared_log_last", now)
-            return True
-
-        age = bot_activity_age(actor)
-        now = time.monotonic()
-        last_log = getattr(actor, "_bot_activity_wait_log_last", 0) or 0
-        if logger and now - last_log >= BOT_ACTIVITY_LOG_INTERVAL_SECONDS:
-            if age is None:
-                logger.info(f"Waiting for bot activity before [{key}]...")
-            else:
-                logger.info(f"Waiting for bot activity [{int(age)}s stale] before [{key}]...")
-            shared_accounts = shared_status.get("accounts") or {}
-            if shared_accounts:
-                account_ages = []
-                for account, entry in sorted(shared_accounts.items()):
-                    if not isinstance(entry, dict):
-                        continue
-                    try:
-                        account_age = int(max(0, time.time() - float(entry.get("wall_epoch", 0) or 0)))
-                    except Exception:
-                        continue
-                    account_ages.append(f"{account}:{account_age}s")
-                if account_ages:
-                    logger.info(
-                        "Bot activity cross-check: no script has recent bot activity "
-                        f"(stale: {', '.join(account_ages)})."
-                    )
-            setattr(actor, "_bot_activity_wait_log_last", now)
-
-        if age is not None and age > BOT_ACTIVITY_ALERT_INTERVAL_SECONDS:
-            last_alert = getattr(actor, "_bot_activity_stale_alert_last", 0) or 0
-            if now - last_alert >= BOT_ACTIVITY_ALERT_INTERVAL_SECONDS:
-                setattr(actor, "_bot_activity_stale_alert_last", now)
-                config = getattr(actor, "config", {}) or {}
-                target = config.get("notify_target", "Waaiging")
-                info = getattr(actor, "my_info", None)
-                account = (
-                    getattr(info, "first_name", None)
-                    or getattr(info, "username", None)
-                    or actor.__class__.__name__
-                )
-                if shared_status["recent_others"]:
-                    verdict = "其他脚本刚记录到机器人活动，疑似当前脚本/账号本地异常。"
-                elif shared_status["recent"]:
-                    verdict = "当前账号共享记录仍较新，疑似当前进程本地等待异常。"
-                elif shared_status.get("accounts"):
-                    verdict = "所有脚本共享记录均无近期机器人活动，疑似机器人维护或全局失联。"
-                else:
-                    verdict = "暂无跨脚本共享记录，正在继续等待机器人恢复。"
-                alert_text = (
-                    "【机器人失联提醒】\\n"
-                    f"账号：{account}\\n"
-                    f"尝试发送指令：{key}\\n"
-                    f"已等待 {int(age // 60)} 分钟，仍在等待...\\n"
-                    f"对账判断：{verdict}"
-                )
-                if logger:
-                    logger.warning(alert_text)
-                bot_token = config.get("notify_bot_token")
-                if bot_token:
-                    try:
-                        final_target = int(target) if isinstance(target, str) and target.lstrip("-").isdigit() else target
-                        data = json.dumps({"chat_id": final_target, "text": alert_text}).encode("utf-8")
-                        req = urllib.request.Request(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                            data=data, headers={"Content-Type": "application/json"},
+    try:
+        while getattr(actor, "is_running", True):
+            if not await ensure_client_connected_before_send(actor, key, logger):
+                now = time.monotonic()
+                if not disconnected_since:
+                    disconnected_since = now
+                if now - disconnected_since >= CLIENT_DISCONNECT_ABORT_SECONDS:
+                    if logger:
+                        logger.error(
+                            f"Telegram client remained disconnected for "
+                            f"{int(now - disconnected_since)}s before [{key}]; aborting send."
                         )
-                        with urllib.request.urlopen(req, timeout=5):
-                            pass
-                    except Exception:
-                        pass
+                    return False
+                await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
+                continue
+            disconnected_since = 0
 
-        await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
-    return False
+            if not is_bot_activity_recent(actor, stale_seconds):
+                await refresh_recent_game_bot_activity(actor, stale_seconds, logger)
+            if is_bot_activity_recent(actor, stale_seconds):
+                if is_bot_health_paused(actor):
+                    record_bot_response(actor)
+                return True
+
+            shared_status = shared_bot_activity_status(actor, stale_seconds)
+            if shared_status["recent"]:
+                mark_bot_activity_from_shared(actor)
+                now = time.monotonic()
+                last_shared_log = getattr(actor, "_bot_activity_shared_log_last", 0) or 0
+                if logger and now - last_shared_log >= BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS:
+                    recent_accounts = ", ".join(
+                        f"{account}({int(info.get('age_seconds', 0))}s)"
+                        for account, info in sorted(shared_status["recent"].items())
+                    )
+                    if shared_status["recent_others"]:
+                        logger.info(
+                            f"Bot activity cross-check: other script(s) recently saw the bot: "
+                            f"{recent_accounts}; proceeding before [{key}]."
+                        )
+                    else:
+                        logger.info(
+                            f"Bot activity cross-check: this account has recent shared bot activity: "
+                            f"{recent_accounts}; proceeding before [{key}]."
+                        )
+                    setattr(actor, "_bot_activity_shared_log_last", now)
+                return True
+
+            if not getattr(actor, "_bot_activity_waiting_command", ""):
+                setattr(actor, "_bot_activity_waiting_since", time.monotonic())
+            setattr(actor, "_bot_activity_waiting_command", key)
+
+            age = bot_activity_age(actor)
+            now = time.monotonic()
+            last_log = getattr(actor, "_bot_activity_wait_log_last", 0) or 0
+            if logger and now - last_log >= BOT_ACTIVITY_LOG_INTERVAL_SECONDS:
+                if age is None:
+                    logger.info(f"Waiting for bot activity before [{key}]...")
+                else:
+                    logger.info(f"Waiting for bot activity [{int(age)}s stale] before [{key}]...")
+                shared_accounts = shared_status.get("accounts") or {}
+                if shared_accounts:
+                    account_ages = []
+                    for account, entry in sorted(shared_accounts.items()):
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            account_age = int(max(0, time.time() - float(entry.get("wall_epoch", 0) or 0)))
+                        except Exception:
+                            continue
+                        account_ages.append(f"{account}:{account_age}s")
+                    if account_ages:
+                        logger.info(
+                            "Bot activity cross-check: no script has recent bot activity "
+                            f"(stale: {', '.join(account_ages)})."
+                        )
+                setattr(actor, "_bot_activity_wait_log_last", now)
+
+            if age is not None and age > BOT_ACTIVITY_ALERT_INTERVAL_SECONDS:
+                last_alert = getattr(actor, "_bot_activity_stale_alert_last", 0) or 0
+                if now - last_alert >= BOT_ACTIVITY_ALERT_INTERVAL_SECONDS:
+                    setattr(actor, "_bot_activity_stale_alert_last", now)
+                    config = getattr(actor, "config", {}) or {}
+                    target = config.get("notify_target", "Waaiging")
+                    info = getattr(actor, "my_info", None)
+                    account = (
+                        getattr(info, "first_name", None)
+                        or getattr(info, "username", None)
+                        or actor.__class__.__name__
+                    )
+                    if shared_status["recent_others"]:
+                        verdict = "其他脚本刚记录到机器人活动，疑似当前脚本/账号本地异常。"
+                    elif shared_status["recent"]:
+                        verdict = "当前账号共享记录仍较新，疑似当前进程本地等待异常。"
+                    elif shared_status.get("accounts"):
+                        verdict = "所有脚本共享记录均无近期机器人活动，疑似机器人维护或全局失联。"
+                    else:
+                        verdict = "暂无跨脚本共享记录，正在继续等待机器人恢复。"
+                    alert_text = (
+                        "【机器人失联提醒】\\n"
+                        f"账号：{account}\\n"
+                        f"尝试发送指令：{key}\\n"
+                        f"已等待 {int(age // 60)} 分钟，仍在等待...\\n"
+                        f"对账判断：{verdict}"
+                    )
+                    if logger:
+                        logger.warning(alert_text)
+                    bot_token = config.get("notify_bot_token")
+                    if bot_token:
+                        try:
+                            final_target = int(target) if isinstance(target, str) and target.lstrip("-").isdigit() else target
+                            data = json.dumps({"chat_id": final_target, "text": alert_text}).encode("utf-8")
+                            req = urllib.request.Request(
+                                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                                data=data, headers={"Content-Type": "application/json"},
+                            )
+                            with urllib.request.urlopen(req, timeout=5):
+                                pass
+                        except Exception:
+                            pass
+
+            await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
+        return False
+    finally:
+        if getattr(actor, "_bot_activity_waiting_command", "") == key:
+            setattr(actor, "_bot_activity_waiting_command", "")
+            setattr(actor, "_bot_activity_waiting_since", 0)
 
 
 # =====================================================================

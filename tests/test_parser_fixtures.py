@@ -8103,6 +8103,31 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.record_game_bot_activity(actor)
                 self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
 
+    def test_watchdog_defers_while_send_waits_for_shared_stale_bot_activity(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            _bot_unhealthy_until=0,
+            _bot_activity_waiting_command=".野外历练",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            stale_epoch = time.time() - 600
+            with open(shared_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "accounts": {
+                        "main": {"wall_epoch": stale_epoch},
+                        "sub": {"wall_epoch": stale_epoch},
+                        "xiaohao": {"wall_epoch": stale_epoch},
+                    }
+                }, f)
+
+            with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                status = log_utils.shared_bot_maintenance_status(actor)
+                self.assertTrue(status["active"])
+                self.assertEqual(status["source"], "shared_activity_stale")
+                self.assertTrue(log_utils.watchdog_should_defer_for_bot_maintenance(actor))
+
     def test_meditation_feedback_rejects_other_identity_summary_for_main(self):
         actor = Cultivator.__new__(Cultivator)
         actor.state = {"current_identity": "主魂"}
