@@ -63,6 +63,13 @@ from cultivator_xiaohao import CultivatorXiaoHao
 from dashboard_server import build_command_panels, outgoing_log_command_full, parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
 from intelligent_cultivator import Cultivator
 from log_utils import parse_cultivation_delta_text, parse_cultivation_profile_text
+from soul_curse_features import (
+    SOUL_CURSE_CO_STUDY_COMMAND,
+    SOUL_CURSE_WANYING_GREETING_COMMAND,
+    SoulCurseMixin,
+    parse_soul_curse_co_study,
+    parse_soul_curse_wanying_greeting,
+)
 from sub_cultivator import SubCultivator
 
 
@@ -115,6 +122,33 @@ class DummyAvatarCommon(DummyCommon):
 
     def update_avatar_states(self, identity, values):
         self.get_avatar_state(identity).update(values)
+
+
+class DummySoulCurse(SoulCurseMixin):
+    def __init__(self, account_key="main"):
+        self.account_key = account_key
+        self.state = {}
+        self.sent = []
+        self.is_running = True
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()
+
+    def save_state(self):
+        return None
+
+    def identity_pause_seconds(self, identity="主魂"):
+        return 0
+
+    def dashboard_command_paused(self, command, identity="主魂"):
+        return False
+
+    async def send_and_wait_feedback(self, command, **kwargs):
+        self.sent.append(command)
+        if command == SOUL_CURSE_WANYING_GREETING_COMMAND:
+            return "婉影问安已成，南宫婉轻声回应。"
+        if command == SOUL_CURSE_CO_STUDY_COMMAND:
+            return "你与南宫婉同参封魂，封魂咒气息渐稳。"
+        return ""
 
 
 class DummyMessage:
@@ -11424,6 +11458,47 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(log_utils.text_response_family(text), "rift")
         self.assertTrue(log_utils.feedback_response_matches_command(".探寻裂缝", text))
+
+    def test_soul_curse_main_extra_parsers_match_feedback_family(self):
+        greeting = "婉影问安已成，南宫婉轻声回应。"
+        co_study = "你与南宫婉同参封魂，封魂咒气息渐稳。"
+        co_cooldown = "同参封魂不可频繁，请在 7小时59分钟 后再试。"
+
+        self.assertEqual(parse_soul_curse_wanying_greeting(greeting).get("status"), "success")
+        self.assertEqual(parse_soul_curse_co_study(co_study).get("status"), "success")
+        parsed_cooldown = parse_soul_curse_co_study(co_cooldown)
+        self.assertEqual(parsed_cooldown.get("status"), "cooldown")
+        self.assertGreater(parsed_cooldown.get("cooldown_seconds"), 7 * 3600)
+        self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_WANYING_GREETING_COMMAND, greeting))
+        self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_CO_STUDY_COMMAND, co_study))
+
+    def test_soul_curse_main_extra_tick_only_runs_for_main_account(self):
+        actor = DummySoulCurse("main")
+        profile = actor.soul_curse_publisher_profile()
+
+        asyncio.run(actor.soul_curse_main_extra_tick(profile))
+        asyncio.run(actor.soul_curse_main_extra_tick(profile))
+
+        self.assertEqual(actor.sent, [SOUL_CURSE_WANYING_GREETING_COMMAND, SOUL_CURSE_CO_STUDY_COMMAND])
+        curse = actor.state["soul_curse"]
+        self.assertEqual(curse.get("last_wanying_greeting_date"), datetime.now().strftime("%Y-%m-%d"))
+        self.assertGreater(common_seconds_until(curse.get("next_co_study_time")), 7 * 3600)
+
+        xiaohao = DummySoulCurse("xiaohao")
+        wait = asyncio.run(xiaohao.soul_curse_main_extra_tick(xiaohao.soul_curse_publisher_profile()))
+        self.assertEqual(xiaohao.sent, [])
+        self.assertEqual(wait, 600)
+
+    def test_dashboard_shows_main_only_soul_curse_extra_commands(self):
+        main_panel = next(panel for panel in build_command_panels("main", {}) if panel.get("identity") == "主魂")
+        xiaohao_panel = next(panel for panel in build_command_panels("xiaohao", {}) if panel.get("identity") == "主魂")
+        main_commands = {row.get("command") for row in main_panel.get("commands", [])}
+        xiaohao_commands = {row.get("command") for row in xiaohao_panel.get("commands", [])}
+
+        self.assertIn(SOUL_CURSE_WANYING_GREETING_COMMAND, main_commands)
+        self.assertIn(SOUL_CURSE_CO_STUDY_COMMAND, main_commands)
+        self.assertNotIn(SOUL_CURSE_WANYING_GREETING_COMMAND, xiaohao_commands)
+        self.assertNotIn(SOUL_CURSE_CO_STUDY_COMMAND, xiaohao_commands)
 
     def test_dashboard_shows_main_soul_lingxiao_cloud_stairs_commands(self):
         panels = build_command_panels("main", {"avatars": {}})

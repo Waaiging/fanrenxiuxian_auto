@@ -67,6 +67,7 @@ from common_command_features import AVATAR_TOWER_SUPPORT_COMMAND
 from concubine_features import CONCUBINE_DISMISS_COMMAND, CONCUBINE_SEARCH_COMMAND, TARGET_CONCUBINE_NAME
 from soul_curse_features import (
     SOUL_CURSE_ACCEPT_COMMAND,
+    SOUL_CURSE_CO_STUDY_COMMAND,
     SOUL_CURSE_IDENTIFY_COMMAND,
     SOUL_CURSE_INFER_COMMAND,
     SOUL_CURSE_PROTECT_COMMAND,
@@ -74,6 +75,7 @@ from soul_curse_features import (
     SOUL_CURSE_STRIP_COMMAND,
     SOUL_CURSE_SUPPRESS_COMMAND,
     SOUL_CURSE_VISIT_COMMAND,
+    SOUL_CURSE_WANYING_GREETING_COMMAND,
 )
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
@@ -259,6 +261,11 @@ ACCOUNT_LOG_TAGS = {
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, WUJIUZI_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
         CONCUBINE_SEARCH_COMMAND, CONCUBINE_DISMISS_COMMAND,
+        SOUL_CURSE_VISIT_COMMAND, SOUL_CURSE_WANYING_GREETING_COMMAND,
+        SOUL_CURSE_CO_STUDY_COMMAND, SOUL_CURSE_INFER_COMMAND,
+        SOUL_CURSE_PROTECT_COMMAND, SOUL_CURSE_PUBLISH_COMMAND,
+        SOUL_CURSE_ACCEPT_COMMAND, SOUL_CURSE_IDENTIFY_COMMAND,
+        SOUL_CURSE_SUPPRESS_COMMAND, SOUL_CURSE_STRIP_COMMAND,
         ".推命 探索", ".改命 探索",
         OTHER_LOG_TAG,
     ],
@@ -272,6 +279,8 @@ ACCOUNT_LOG_TAGS = {
         SUB_TREASURE_TOUCH_COMMAND,
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".野外历练 均衡", ".宗门战况", ".参战", ".我的侍妾",
         ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
+        SOUL_CURSE_ACCEPT_COMMAND, SOUL_CURSE_IDENTIFY_COMMAND,
+        SOUL_CURSE_SUPPRESS_COMMAND, SOUL_CURSE_STRIP_COMMAND,
         OTHER_LOG_TAG,
     ],
     "xiaohao": [
@@ -283,6 +292,8 @@ ACCOUNT_LOG_TAGS = {
         YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
         ".观星台", ".安抚星辰", ".收集精华", ".牵引星辰", ".引道",
         ".我的侍妾", ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
+        SOUL_CURSE_VISIT_COMMAND, SOUL_CURSE_INFER_COMMAND,
+        SOUL_CURSE_PROTECT_COMMAND, SOUL_CURSE_PUBLISH_COMMAND,
         OTHER_LOG_TAG,
     ],
 }
@@ -1325,7 +1336,7 @@ def yinluo_commands(state):
     return rows
 
 
-def soul_curse_publisher_commands(state):
+def soul_curse_publisher_commands(state, account=None):
     curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
     if not isinstance(curse, dict):
         curse = {}
@@ -1409,7 +1420,7 @@ def soul_curse_publisher_commands(state):
             detail=commission_detail,
             group="南宫婉",
         )
-    return [
+    rows = [
         daily_done_command(
             curse,
             SOUL_CURSE_VISIT_COMMAND,
@@ -1418,10 +1429,42 @@ def soul_curse_publisher_commands(state):
             detail=detail,
             group="南宫婉",
         ),
-        infer_row,
-        protect_row,
-        publish_row,
     ]
+    if account == "main":
+        wanying_row = daily_done_command(
+            curse,
+            SOUL_CURSE_WANYING_GREETING_COMMAND,
+            "婉影问安",
+            date_key="last_wanying_greeting_date",
+            detail=detail,
+            group="南宫婉",
+        )
+        if wanying_row.get("tone") != "done":
+            wanying_row = time_command(
+                curse,
+                "next_wanying_greeting_time",
+                SOUL_CURSE_WANYING_GREETING_COMMAND,
+                "婉影问安",
+                waiting="今日稍后",
+                ready="可问安",
+                missing="可问安",
+                detail=detail,
+                group="南宫婉",
+            )
+        rows.append(wanying_row)
+        rows.append(time_command(
+            curse,
+            "next_co_study_time",
+            SOUL_CURSE_CO_STUDY_COMMAND,
+            "同参封魂",
+            waiting="8小时冷却",
+            ready="可同参",
+            missing="可同参",
+            detail=detail,
+            group="南宫婉",
+        ))
+    rows.extend([infer_row, protect_row, publish_row])
+    return rows
 
 
 def soul_curse_assist_commands(state):
@@ -1739,7 +1782,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend(meditation_commands(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
-        rows.extend(soul_curse_publisher_commands(state))
+        rows.extend(soul_curse_publisher_commands(state, account=account))
         rows.extend(sect_war_commands(state))
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
@@ -1774,7 +1817,7 @@ def main_soul_panel(account, state):
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
-        rows.extend(soul_curse_publisher_commands(state))
+        rows.extend(soul_curse_publisher_commands(state, account=account))
         rows.extend([
             manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
             (

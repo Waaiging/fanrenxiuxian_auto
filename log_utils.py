@@ -631,6 +631,15 @@ def command_response_family(command):
         or cmd.startswith(".化功为煞")
     ):
         return "yinluo"
+    if (
+        cmd in {".探望南宫婉", ".婉影问安", ".推演封魂咒", ".护持神魂", ".同参封魂"}
+        or cmd.startswith(".发布解咒委托")
+        or cmd.startswith(".接取解咒委托")
+        or cmd.startswith(".辨认咒纹")
+        or cmd.startswith(".借幡镇魂")
+        or cmd.startswith(".剥离咒源")
+    ):
+        return "soul_curse"
     return ""
 
 
@@ -743,6 +752,11 @@ def text_response_family(text):
         "幡魂谱系精进",
     ]):
         return "yinluo"
+    if any(k in clean for k in [
+        "南宫婉", "婉影问安", "同参封魂", "封魂咒", "解咒委托",
+        "咒契协定", "辨认咒纹", "借幡镇魂", "剥离咒源", "咒源",
+    ]):
+        return "soul_curse"
     return ""
 
 
@@ -899,6 +913,13 @@ def feedback_response_matches_command(command, text):
             "化功为煞", "转化成功", "开始运转魔功",
             "安抚成功", "收取成功", "幡魂谱系精进",
             "升级成功", "缺少材料",
+        ])
+    if expected == "soul_curse":
+        return any(k in clean for k in [
+            "南宫婉", "婉影问安", "同参封魂", "封魂咒",
+            "护持神魂", "解咒委托", "咒契协定",
+            "辨认咒纹", "借幡镇魂", "剥离咒源", "咒源",
+            "煞气不足", "今日已", "请在", "后再", "冷却",
         ])
     return False
 
@@ -4223,8 +4244,10 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_ask_dao_response(text, source="manual .问道"))
     elif (
         cmd == ".探望南宫婉"
+        or cmd == ".婉影问安"
         or cmd == ".推演封魂咒"
         or cmd == ".护持神魂"
+        or cmd == ".同参封魂"
         or cmd.startswith(".发布解咒委托")
         or cmd.startswith(".接取解咒委托")
         or cmd.startswith(".辨认咒纹")

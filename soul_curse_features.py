@@ -19,8 +19,10 @@ from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY
 
 
 SOUL_CURSE_VISIT_COMMAND = ".探望南宫婉"
+SOUL_CURSE_WANYING_GREETING_COMMAND = ".婉影问安"
 SOUL_CURSE_INFER_COMMAND = ".推演封魂咒"
 SOUL_CURSE_PROTECT_COMMAND = ".护持神魂"
+SOUL_CURSE_CO_STUDY_COMMAND = ".同参封魂"
 SOUL_CURSE_PUBLISH_COMMAND = ".发布解咒委托 1"
 SOUL_CURSE_ACCEPT_COMMAND = ".接取解咒委托"
 SOUL_CURSE_IDENTIFY_COMMAND = ".辨认咒纹"
@@ -40,6 +42,8 @@ SOUL_CURSE_PUBLISHERS = {
         "assistant_account": "main",
         "assistant_identity": YINLUO_IDENTITY,
         "visit_minute": 0,
+        "wanying_greeting_enabled": True,
+        "co_study_enabled": True,
         "shared": False,
     },
     "xiaohao": {
@@ -114,10 +118,23 @@ def _next_visit_time(done_today=False, minute=0, now=None):
     return dt_to_str(target)
 
 
+def _next_daily_time(done_today=False, hour=0, minute=5, now=None):
+    now = now or datetime.now()
+    target = now.replace(hour=int(hour or 0), minute=int(minute or 0), second=0, microsecond=0)
+    if done_today or now >= target:
+        target = target + timedelta(days=1)
+    return dt_to_str(target)
+
+
 def soul_curse_publisher_default_state():
     return {
         "last_visit_date": "",
         "next_visit_time": "",
+        "last_wanying_greeting_date": "",
+        "next_wanying_greeting_time": "",
+        "last_wanying_greeting_time": "",
+        "last_co_study_time": "",
+        "next_co_study_time": "",
         "last_infer_time": "",
         "next_infer_time": "",
         "last_protect_time": "",
@@ -177,6 +194,25 @@ def parse_soul_curse_visit(text):
     return {"matched": False, "status": "", "cooldown_seconds": 0}
 
 
+def parse_soul_curse_wanying_greeting(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if ("婉影问安" in clean or ("婉影" in clean and "问安" in clean)) and cd > 0 and any(
+        k in clean for k in ("请在", "后再", "尚需", "冷却", "今日已")
+    ):
+        status = "done" if "今日已" in clean else "cooldown"
+        return {"matched": True, "status": status, "cooldown_seconds": cd}
+    if "今日已" in clean and ("婉影" in clean or "问安" in clean):
+        return {"matched": True, "status": "done", "cooldown_seconds": 0}
+    if "婉影问安" in clean or ("婉影" in clean and "问安" in clean):
+        return {"matched": True, "status": "success", "cooldown_seconds": 24 * 3600}
+    if any(k in clean for k in ("无法问安", "条件不足", "修为不足")):
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
 def parse_soul_curse_infer(text):
     clean = _strip_markdown(text)
     if not clean:
@@ -201,6 +237,22 @@ def parse_soul_curse_protect(text):
     if "护持神魂" in clean or ("神魂" in clean and any(k in clean for k in ("魂封", "月魄", "护持"))):
         return {"matched": True, "status": "success", "cooldown_seconds": SOUL_CURSE_CHAIN_SECONDS}
     if any(k in clean for k in ("无法护持", "条件不足", "修为不足")):
+        return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
+    return {"matched": False, "status": "", "cooldown_seconds": 0}
+
+
+def parse_soul_curse_co_study(text):
+    clean = _strip_markdown(text)
+    if not clean:
+        return {"matched": False, "status": "", "cooldown_seconds": 0}
+    cd = _parse_remaining_seconds(clean)
+    if ("同参封魂" in clean or ("同参" in clean and "封魂" in clean)) and cd > 0 and any(
+        k in clean for k in ("请在", "后再", "冷却", "尚需", "不可频繁")
+    ):
+        return {"matched": True, "status": "cooldown", "cooldown_seconds": cd}
+    if "同参封魂" in clean or ("同参" in clean and "封魂" in clean):
+        return {"matched": True, "status": "success", "cooldown_seconds": SOUL_CURSE_CHAIN_SECONDS}
+    if any(k in clean for k in ("无法同参", "条件不足", "修为不足")):
         return {"matched": True, "status": "blocked", "cooldown_seconds": SOUL_CURSE_UNKNOWN_RETRY_SECONDS}
     return {"matched": False, "status": "", "cooldown_seconds": 0}
 
@@ -440,6 +492,37 @@ class SoulCurseMixin:
         self.soul_curse_set_publisher_status("visit_unknown", "探望回执未识别", SOUL_CURSE_UNKNOWN_RETRY_SECONDS, text)
         return False
 
+    def record_soul_curse_wanying_greeting_response(self, text, profile=None):
+        profile = profile or self.soul_curse_publisher_profile() or {}
+        parsed = parse_soul_curse_wanying_greeting(text)
+        state = self.get_soul_curse_state()
+        if parsed.get("status") in {"success", "done"}:
+            now = now_str()
+            state["last_wanying_greeting_date"] = _today()
+            state["last_wanying_greeting_time"] = now
+            state["next_wanying_greeting_time"] = _next_daily_time(done_today=True)
+            self.soul_curse_set_publisher_status(parsed.get("status"), "婉影问安已记录", None, text)
+            return True
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_wanying_greeting_time"] = add_seconds_str(now_str(), wait)
+            self.soul_curse_set_publisher_status("wanying_greeting_cooldown", f"婉影问安冷却 {wait}秒", wait, text)
+            return True
+        if parsed.get("status") == "blocked":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_wanying_greeting_time"] = add_seconds_str(now_str(), wait)
+            self.soul_curse_set_publisher_status("wanying_greeting_blocked", "婉影问安暂不可用", wait, text)
+            return True
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        state["next_wanying_greeting_time"] = add_seconds_str(now_str(), wait)
+        self.soul_curse_set_publisher_status(
+            "wanying_greeting_unknown",
+            "婉影问安回执未识别" if text else "婉影问安无回执",
+            wait,
+            text,
+        )
+        return False
+
     def record_soul_curse_infer_response(self, text):
         parsed = parse_soul_curse_infer(text)
         state = self.get_soul_curse_state()
@@ -492,6 +575,30 @@ class SoulCurseMixin:
         wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
         state["chain_stage"] = "protect"
         self.soul_curse_set_publisher_status("protect_unknown", "护持回执未识别" if text else "护持无回执", wait, text)
+        return "unknown"
+
+    def record_soul_curse_co_study_response(self, text):
+        parsed = parse_soul_curse_co_study(text)
+        state = self.get_soul_curse_state()
+        now = now_str()
+        if parsed.get("status") == "success":
+            state["last_co_study_time"] = now
+            state["next_co_study_time"] = add_seconds_str(now, int(parsed.get("cooldown_seconds") or SOUL_CURSE_CHAIN_SECONDS))
+            self.soul_curse_set_publisher_status("co_study_success", "同参封魂已记录", 3, text)
+            return "success"
+        if parsed.get("status") == "cooldown":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_co_study_time"] = add_seconds_str(now, wait)
+            self.soul_curse_set_publisher_status("co_study_cooldown", f"同参封魂冷却 {wait}秒", wait, text)
+            return "cooldown"
+        if parsed.get("status") == "blocked":
+            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
+            state["next_co_study_time"] = add_seconds_str(now, wait)
+            self.soul_curse_set_publisher_status("co_study_blocked", "同参封魂暂不可用", wait, text)
+            return "blocked"
+        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+        state["next_co_study_time"] = add_seconds_str(now, wait)
+        self.soul_curse_set_publisher_status("co_study_unknown", "同参封魂回执未识别" if text else "同参封魂无回执", wait, text)
         return "unknown"
 
     def record_soul_curse_publish_response(self, text, profile=None):
@@ -670,6 +777,54 @@ class SoulCurseMixin:
             response_text,
         )
         return False
+
+    def soul_curse_main_extra_enabled(self, profile, key):
+        return bool(profile and profile.get("owner_account") == "main" and profile.get(key))
+
+    async def soul_curse_maybe_wanying_greeting(self, profile):
+        if not self.soul_curse_main_extra_enabled(profile, "wanying_greeting_enabled"):
+            return 600
+        state = self.get_soul_curse_state()
+        if state.get("last_wanying_greeting_date") == _today():
+            state["next_wanying_greeting_time"] = _next_daily_time(done_today=True)
+            self.save_state()
+            return seconds_until(state["next_wanying_greeting_time"])
+        if self.soul_curse_command_paused(SOUL_CURSE_WANYING_GREETING_COMMAND, "主魂"):
+            return 300
+        next_time = state.get("next_wanying_greeting_time", "")
+        if next_time and is_future(next_time):
+            return seconds_until(next_time)
+        if self.identity_pause_seconds("主魂") > 0:
+            return 300
+        async with self.soul_curse_atomic_task("SoulCurseWanyingGreeting"):
+            resp = await self.soul_curse_send_main(SOUL_CURSE_WANYING_GREETING_COMMAND, timeout=60)
+            self.record_soul_curse_wanying_greeting_response(self.soul_curse_response_text(resp), profile)
+        return 5
+
+    async def soul_curse_maybe_co_study(self, profile):
+        if not self.soul_curse_main_extra_enabled(profile, "co_study_enabled"):
+            return 600
+        state = self.get_soul_curse_state()
+        if self.soul_curse_command_paused(SOUL_CURSE_CO_STUDY_COMMAND, "主魂"):
+            return 300
+        next_time = state.get("next_co_study_time", "")
+        if next_time and is_future(next_time):
+            return seconds_until(next_time)
+        if self.identity_pause_seconds("主魂") > 0:
+            return 300
+        async with self.soul_curse_atomic_task("SoulCurseCoStudy"):
+            resp = await self.soul_curse_send_main(SOUL_CURSE_CO_STUDY_COMMAND, timeout=60)
+            self.record_soul_curse_co_study_response(self.soul_curse_response_text(resp))
+        return 5
+
+    async def soul_curse_main_extra_tick(self, profile):
+        waits = []
+        for runner in (self.soul_curse_maybe_wanying_greeting, self.soul_curse_maybe_co_study):
+            wait = await runner(profile)
+            if wait <= 10:
+                return max(5, wait)
+            waits.append(wait)
+        return min(waits or [600])
 
     async def soul_curse_maybe_visit(self, profile):
         state = self.get_soul_curse_state()
@@ -912,6 +1067,11 @@ class SoulCurseMixin:
                 return max(5, visit_wait)
             waits.append(visit_wait)
 
+            extra_wait = await self.soul_curse_main_extra_tick(publisher)
+            if extra_wait <= 10:
+                return max(5, extra_wait)
+            waits.append(extra_wait)
+
             state = self.get_soul_curse_state()
             if not publisher.get("shared") and state.get("commission_id") and state.get("commission_status") in {"success", "existing"}:
                 assist_state = self.get_soul_curse_assist_state(publisher.get("assistant_identity") or YINLUO_IDENTITY)
@@ -977,10 +1137,14 @@ class SoulCurseMixin:
         assistant = self.soul_curse_assistant_profile()
         if cmd == SOUL_CURSE_VISIT_COMMAND and identity == "主魂" and publisher:
             return self.record_soul_curse_visit_response(text, publisher)
+        if cmd == SOUL_CURSE_WANYING_GREETING_COMMAND and identity == "主魂" and publisher:
+            return self.record_soul_curse_wanying_greeting_response(text, publisher)
         if cmd == SOUL_CURSE_INFER_COMMAND and identity == "主魂" and publisher:
             return self.record_soul_curse_infer_response(text) in {"success", "cooldown", "blocked"}
         if cmd == SOUL_CURSE_PROTECT_COMMAND and identity == "主魂" and publisher:
             return self.record_soul_curse_protect_response(text) in {"success", "cooldown", "blocked"}
+        if cmd == SOUL_CURSE_CO_STUDY_COMMAND and identity == "主魂" and publisher:
+            return self.record_soul_curse_co_study_response(text) in {"success", "cooldown", "blocked"}
         if cmd.startswith(".发布解咒委托") and identity == "主魂" and publisher:
             return self.record_soul_curse_publish_response(text, publisher) in {"success", "cooldown", "blocked"}
 
