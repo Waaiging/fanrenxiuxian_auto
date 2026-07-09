@@ -1094,7 +1094,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
 
             # 记录游戏机器人活动（用于判断机器人是否在线）
             if is_game_bot_sender(self, sender_cache):
-                record_game_bot_activity(self, sender_cache, log)
+                record_game_bot_activity(self, sender_cache, log, msg=msg, text=text)
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
                 # 被动身份自愈 + 手动指令状态同步
                 self.update_identity_passively(msg)
@@ -5179,7 +5179,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 text = msg.text or ""
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
-                    record_game_bot_activity(self, sender, log)
+                    record_game_bot_activity(self, sender, log, msg=msg, text=text)
                     record_star_gazing_event("main", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")

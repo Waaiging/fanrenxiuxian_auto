@@ -2953,7 +2953,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             if await maybe_handle_han_soul_choice(self, msg, text, sender, log):
                 return
             if is_game_bot_sender(self, sender):
-                record_game_bot_activity(self, sender, log)
+                record_game_bot_activity(self, sender, log, msg=msg, text=text)
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
                 self.record_star_shift_attempt_if_needed(msg, text, source="new message")
                 if self.maybe_record_main_yuanying_retreat_settlement_reply(msg, text, source="new message"):
@@ -6080,7 +6080,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 text = msg.text or ""
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
-                    record_game_bot_activity(self, sender, log)
+                    record_game_bot_activity(self, sender, log, msg=msg, text=text)
                     record_star_gazing_event("sub", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")

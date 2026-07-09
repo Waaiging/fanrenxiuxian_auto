@@ -126,6 +126,7 @@ BOT_ACTIVITY_ALERT_INTERVAL_SECONDS = 10 * 60  # 失联告警间隔
 BOT_ACTIVITY_HISTORY_SCAN_INTERVAL_SECONDS = 30  # 历史消息扫描间隔
 BOT_ACTIVITY_HISTORY_SCAN_LIMIT = 40        # 扫描最近 40 条消息
 BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS = 5 * 60  # 跨脚本对账日志限流
+BOT_COMMAND_RESPONSE_GRACE_SECONDS = 30     # 带点指令超过 30 秒无回执视作机器人维护信号
 CLIENT_DISCONNECT_ABORT_SECONDS = 2 * 60    # 本地 Telegram 客户端断线超过 2 分钟就释放发送锁
 
 # 游戏机器人账号列表
@@ -1372,6 +1373,68 @@ def _clear_shared_bot_maintenance(data=None):
     return data
 
 
+def _record_shared_command_probe(actor, msg=None, command="", logger=None):
+    """Record the latest dotted command seen in the game chat."""
+    command = str(command or "").strip()
+    if not is_command_message_text(command):
+        return False
+    if msg is not None and getattr(msg, "date", None) is None:
+        return False
+    if command in PAUSE_CONTROL_COMMANDS or command in RESUME_CONTROL_COMMANDS:
+        return False
+    account = str(_shared_bot_activity_account(actor) or "").strip()
+    now_wall = datetime.now()
+    data = _read_shared_bot_activity()
+    existing = data.get("command_probe") if isinstance(data, dict) else {}
+    response = data.get("command_response") if isinstance(data, dict) else {}
+    if isinstance(existing, dict):
+        try:
+            existing_epoch = float(existing.get("wall_epoch", 0) or 0)
+        except Exception:
+            existing_epoch = 0.0
+        try:
+            response_epoch = float((response or {}).get("wall_epoch", 0) or 0) if isinstance(response, dict) else 0.0
+        except Exception:
+            response_epoch = 0.0
+        if existing_epoch > response_epoch:
+            return False
+    data["command_probe"] = {
+        "account": account,
+        "command": command.splitlines()[0][:80],
+        "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
+        "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
+        "wall": now_wall.strftime(TIME_FORMAT),
+        "wall_epoch": time.time(),
+        "pid": os.getpid(),
+    }
+    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+    _write_shared_bot_activity(data)
+    return True
+
+
+def _record_shared_command_response(actor, command="", msg=None, sender=None):
+    """Record a real bot response to a dotted command and clear maintenance."""
+    account = str(_shared_bot_activity_account(actor) or "").strip()
+    now_wall = datetime.now()
+    username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
+    data = _read_shared_bot_activity()
+    data["command_response"] = {
+        "account": account,
+        "command": str(command or "").strip().splitlines()[0][:80],
+        "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
+        "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
+        "reply_to_msg_id": _safe_message_int(meaningful_reply_to_msg_id(actor, msg)) if msg is not None else None,
+        "bot_username": username,
+        "wall": now_wall.strftime(TIME_FORMAT),
+        "wall_epoch": time.time(),
+        "pid": os.getpid(),
+    }
+    _clear_shared_bot_maintenance(data)
+    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+    _write_shared_bot_activity(data)
+    return True
+
+
 def _record_shared_bot_maintenance(actor, command="", pause_seconds=BOT_HEALTH_PAUSE_SECONDS):
     account = str(_shared_bot_activity_account(actor) or "").strip()
     now_wall = datetime.now()
@@ -1411,8 +1474,133 @@ def record_shared_game_bot_activity(actor, sender=None):
     }
     data["accounts"] = accounts
     data["updated_at"] = now_wall.strftime(TIME_FORMAT)
-    _clear_shared_bot_maintenance(data)
     _write_shared_bot_activity(data)
+
+
+def _command_text_for_message_id(actor, msg, message_id):
+    """Return command text for a message id from memory or SQLite ledgers."""
+    if message_id is None:
+        return ""
+    try:
+        message_id = int(message_id)
+    except Exception:
+        return ""
+
+    texts = getattr(actor, "_manual_command_texts", None) or {}
+    command = str(texts.get(message_id, "") or "").strip()
+    if is_command_message_text(command):
+        return command
+    feedback_commands = getattr(actor, "feedback_commands", None) or {}
+    command = str(feedback_commands.get(message_id, "") or "").strip()
+    if is_command_message_text(command):
+        return command
+
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    try:
+        with _message_db_connect() as conn:
+            row = None
+            if chat_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT command
+                    FROM command_ledger
+                    WHERE account=? AND chat_id IS ? AND command_msg_id=?
+                    LIMIT 1
+                    """,
+                    (account, chat_id, message_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT command
+                    FROM command_ledger
+                    WHERE account=? AND command_msg_id=?
+                    LIMIT 1
+                    """,
+                    (account, message_id),
+                ).fetchone()
+            if row and is_command_message_text(row[0]):
+                return str(row[0] or "").strip()
+
+            row = None
+            if chat_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(NULLIF(command, ''), text)
+                    FROM message_events
+                    WHERE account=? AND chat_id IS ? AND msg_id=? AND is_game_bot=0
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (account, chat_id, message_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(NULLIF(command, ''), text)
+                    FROM message_events
+                    WHERE account=? AND msg_id=? AND is_game_bot=0
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (account, message_id),
+                ).fetchone()
+            if row and is_command_message_text(row[0]):
+                return str(row[0] or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def bot_command_response_text(actor, msg):
+    """Return the dotted command a bot message is responding to, if known."""
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    if not replied_id:
+        return ""
+    return _command_text_for_message_id(actor, msg, replied_id)
+
+
+def shared_bot_command_silence_status(actor, grace_seconds=BOT_COMMAND_RESPONSE_GRACE_SECONDS):
+    """Return whether the latest dotted command has no later command response."""
+    data = _read_shared_bot_activity()
+    probe = data.get("command_probe") if isinstance(data, dict) else {}
+    if not isinstance(probe, dict):
+        probe = {}
+    command = str(probe.get("command") or "").strip()
+    if not is_command_message_text(command):
+        return {"active": False, "probe": probe, "remaining_seconds": 0}
+    try:
+        probe_epoch = float(probe.get("wall_epoch", 0) or 0)
+    except Exception:
+        probe_epoch = 0.0
+    if probe_epoch <= 0:
+        return {"active": False, "probe": probe, "remaining_seconds": 0}
+
+    response = data.get("command_response") if isinstance(data, dict) else {}
+    if not isinstance(response, dict):
+        response = {}
+    try:
+        response_epoch = float(response.get("wall_epoch", 0) or 0)
+    except Exception:
+        response_epoch = 0.0
+    if response_epoch >= probe_epoch:
+        return {
+            "active": False,
+            "probe": probe,
+            "response": response,
+            "remaining_seconds": 0,
+        }
+
+    age = max(0, time.time() - probe_epoch)
+    remaining = max(0, int(grace_seconds - age))
+    return {
+        "active": age >= grace_seconds,
+        "probe": probe,
+        "response": response,
+        "age_seconds": age,
+        "remaining_seconds": remaining,
+    }
 
 
 def shared_bot_activity_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECONDS):
@@ -1461,39 +1649,54 @@ def shared_bot_maintenance_status(actor, stale_seconds=BOT_ACTIVITY_STALE_SECOND
     except Exception:
         active_until = 0.0
 
+    local_remaining = bot_health_pause_remaining(actor)
+    shared_remaining = max(0, int(active_until - now_epoch))
+    command_silence = shared_bot_command_silence_status(actor)
+    if command_silence.get("active"):
+        return {
+            "active": True,
+            "source": "unanswered_dot_command",
+            "remaining_seconds": 0,
+            "maintenance": maintenance,
+            "activity": shared_bot_activity_status(actor, stale_seconds),
+            "command_silence": command_silence,
+        }
+    if shared_remaining > 0 or local_remaining > 0:
+        return {
+            "active": True,
+            "source": "shared_health_pause" if shared_remaining > 0 else "local_health_pause",
+            "remaining_seconds": max(shared_remaining, local_remaining),
+            "maintenance": maintenance,
+            "activity": shared_bot_activity_status(actor, stale_seconds),
+            "command_silence": command_silence,
+        }
+
     activity = shared_bot_activity_status(actor, stale_seconds)
     if activity.get("recent"):
-        if maintenance:
-            _clear_shared_bot_maintenance(data)
-            _write_shared_bot_activity(data)
         return {
             "active": False,
             "source": "recent_activity",
             "remaining_seconds": 0,
             "maintenance": maintenance,
             "activity": activity,
+            "command_silence": command_silence,
         }
 
-    local_remaining = bot_health_pause_remaining(actor)
-    shared_remaining = max(0, int(active_until - now_epoch))
     waiting_command = str(getattr(actor, "_bot_activity_waiting_command", "") or "").strip()
     waiting_for_shared_stale = bool(waiting_command and activity.get("accounts"))
-    active = shared_remaining > 0 or local_remaining > 0 or waiting_for_shared_stale
+    active = waiting_for_shared_stale
     source = ""
-    if shared_remaining > 0:
-        source = "shared_health_pause"
-    elif local_remaining > 0:
-        source = "local_health_pause"
-    elif waiting_for_shared_stale:
+    if waiting_for_shared_stale:
         source = "shared_activity_stale"
 
     return {
         "active": active,
         "source": source,
-        "remaining_seconds": max(shared_remaining, local_remaining),
+        "remaining_seconds": 0,
         "waiting_command": waiting_command,
         "maintenance": maintenance,
         "activity": activity,
+        "command_silence": command_silence,
     }
 
 
@@ -1525,9 +1728,15 @@ def watchdog_should_defer_for_bot_maintenance(
             account_ages.append(f"{account}:{age}s")
         command = maintenance.get("command") or ""
         waiting_command = status.get("waiting_command") or ""
+        command_silence = status.get("command_silence") or {}
+        probe = command_silence.get("probe") or {}
         source_account = maintenance.get("account") or ""
         detail = f"; shared stale accounts: {', '.join(account_ages)}" if account_ages else ""
         command_detail = f"; last no-response {command}" if command else ""
+        if status.get("source") == "unanswered_dot_command":
+            probe_command = probe.get("command") or ""
+            age = int(command_silence.get("age_seconds") or 0)
+            command_detail = f"; unanswered dotted command {probe_command} age {age}s"
         if waiting_command and not command_detail:
             command_detail = f"; waiting before {waiting_command}"
         source_detail = f" from {source_account}" if source_account else ""
@@ -1545,19 +1754,16 @@ def mark_bot_activity_from_shared(actor):
     setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
 
 
-def record_game_bot_activity(actor, sender=None, logger=None):
+def record_game_bot_activity(actor, sender=None, logger=None, msg=None, text=None):
     """记录游戏机器人有活动"""
+    response_command = bot_command_response_text(actor, msg) if msg is not None else ""
+    if response_command:
+        record_bot_response(actor, command=response_command, msg=msg, sender=sender, logger=logger)
+        return
     now = time.monotonic()
     setattr(actor, "_last_game_bot_activity_ts", now)
     setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
-    setattr(actor, "_bot_no_response_times", [])
     record_shared_game_bot_activity(actor, sender)
-    if getattr(actor, "_bot_unhealthy_until", 0):
-        setattr(actor, "_bot_unhealthy_until", 0)
-        if logger:
-            username = (getattr(sender, "username", "") or "").lstrip("@")
-            suffix = f" from @{username}" if username else ""
-            logger.warning(f"Bot activity resumed{suffix}; command sending unlocked.")
 
 
 def bot_activity_age(actor):
@@ -1599,7 +1805,7 @@ async def refresh_recent_game_bot_activity(actor, stale_seconds=BOT_ACTIVITY_STA
                 continue
             sender = await msg.get_sender()
             if is_game_bot_sender(actor, sender):
-                record_game_bot_activity(actor, sender, logger)
+                record_game_bot_activity(actor, sender, logger, msg=msg, text=getattr(msg, "text", None) or "")
                 return True
     except Exception as exc:
         if logger:
@@ -1653,14 +1859,20 @@ def bot_health_pause_remaining(actor):
     return max(0, int(until - time.monotonic()))
 
 
-def record_bot_response(actor):
+def record_bot_response(actor, command="", msg=None, sender=None, logger=None):
     """记录机器人有响应，解除暂停"""
+    was_paused = bool(getattr(actor, "_bot_unhealthy_until", 0))
     setattr(actor, "_last_game_bot_activity_ts", time.monotonic())
     setattr(actor, "_last_game_bot_activity_wall", datetime.now().strftime(TIME_FORMAT))
     setattr(actor, "_bot_no_response_times", [])
-    record_shared_game_bot_activity(actor)
+    record_shared_game_bot_activity(actor, sender)
+    _record_shared_command_response(actor, command=command, msg=msg, sender=sender)
     if getattr(actor, "_bot_unhealthy_until", 0):
         setattr(actor, "_bot_unhealthy_until", 0)
+    if was_paused and logger:
+        username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
+        suffix = f" from @{username}" if username else ""
+        logger.warning(f"Bot command response resumed{suffix}; command sending unlocked.")
 
 
 async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_seconds=BOT_ACTIVITY_STALE_SECONDS):
@@ -1692,11 +1904,34 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                 continue
             disconnected_since = 0
 
+            maintenance_status = shared_bot_maintenance_status(actor, stale_seconds)
+            if maintenance_status.get("active"):
+                if not getattr(actor, "_bot_activity_waiting_command", ""):
+                    setattr(actor, "_bot_activity_waiting_since", time.monotonic())
+                setattr(actor, "_bot_activity_waiting_command", key)
+                now = time.monotonic()
+                last_log = getattr(actor, "_bot_activity_wait_log_last", 0) or 0
+                if logger and now - last_log >= BOT_ACTIVITY_LOG_INTERVAL_SECONDS:
+                    source = maintenance_status.get("source") or "maintenance"
+                    command_silence = maintenance_status.get("command_silence") or {}
+                    probe = command_silence.get("probe") or {}
+                    if source == "unanswered_dot_command":
+                        logger.info(
+                            f"Waiting for bot command responsiveness before [{key}] "
+                            f"(unanswered {probe.get('command') or 'dotted command'})."
+                        )
+                    else:
+                        logger.info(
+                            f"Waiting for bot maintenance pause before [{key}] "
+                            f"({source}, remaining {int(maintenance_status.get('remaining_seconds') or 0)}s)."
+                        )
+                    setattr(actor, "_bot_activity_wait_log_last", now)
+                await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
+                continue
+
             if not is_bot_activity_recent(actor, stale_seconds):
                 await refresh_recent_game_bot_activity(actor, stale_seconds, logger)
             if is_bot_activity_recent(actor, stale_seconds):
-                if is_bot_health_paused(actor):
-                    record_bot_response(actor)
                 return True
 
             shared_status = shared_bot_activity_status(actor, stale_seconds)
@@ -3219,6 +3454,8 @@ def record_message_event(
                     datetime.now().strftime(TIME_FORMAT),
                 ),
             )
+        if not is_bot and is_command_message_text(text_value):
+            _record_shared_command_probe(actor, msg, command=str(command or text_value or ""), logger=logger)
         return True
     except Exception as exc:
         target_logger = logger or logging.getLogger(actor.__class__.__name__)
@@ -3408,6 +3645,9 @@ def record_command_response_for_reply(actor, msg, text=None, status="matched", l
                         replied_id,
                     ),
                 )
+        command = _command_text_for_message_id(actor, msg, replied_id)
+        if is_command_message_text(command):
+            _record_shared_command_response(actor, command=command, msg=msg)
         return True
     except Exception as exc:
         target_logger = logger or logging.getLogger(actor.__class__.__name__)
@@ -4932,7 +5172,7 @@ async def log_edited_message_if_needed(actor, event):
             logger=logger,
         )
         if is_game_bot:
-            record_game_bot_activity(actor, sender, logger)
+            record_game_bot_activity(actor, sender, logger, msg=msg, text=text)
         if is_game_bot and is_relevant_game_bot_edited_message(actor, msg, text):
             record_edited_cultivation_state_if_needed(actor, msg, text=text, sender=sender, logger=logger)
             return log_edited_text_once(actor, msg, text=text, sender=sender)

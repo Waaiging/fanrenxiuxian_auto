@@ -5224,7 +5224,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             record_message_event(self, msg, text=text, sender=sender, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("xiaohao", msg, text, sender=sender, logger=log)
             if is_game_bot_sender(self, sender):
-                record_game_bot_activity(self, sender, log)
+                record_game_bot_activity(self, sender, log, msg=msg, text=text)
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
                 self.record_star_shift_attempt_if_needed(msg, text, source="new message")
             # 身外化身：被动身份自愈更新
@@ -7548,7 +7548,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 text = msg.text or ""
                 sender = await e.get_sender()
                 if is_game_bot_sender(self, sender):
-                    record_game_bot_activity(self, sender, log)
+                    record_game_bot_activity(self, sender, log, msg=msg, text=text)
                     record_star_gazing_event("xiaohao", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")

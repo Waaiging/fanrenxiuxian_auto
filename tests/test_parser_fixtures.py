@@ -6031,15 +6031,18 @@ class ParserFixtureTests(unittest.TestCase):
             old_precheck = actor_module.command_send_precheck
             actor_module.command_send_precheck = lambda *args, **kwargs: True
             try:
-                await asyncio.wait_for(
-                    actor.send_and_wait_feedback(
-                        ".深度闭关",
-                        timeout=5,
-                        max_retries=0,
-                        force_identity_check=True,
-                    ),
-                    timeout=1,
-                )
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+                    with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                        await asyncio.wait_for(
+                            actor.send_and_wait_feedback(
+                                ".深度闭关",
+                                timeout=5,
+                                max_retries=0,
+                                force_identity_check=True,
+                            ),
+                            timeout=1,
+                        )
             finally:
                 actor_module.command_send_precheck = old_precheck
             return sent
@@ -8101,7 +8104,127 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertTrue(log_utils.watchdog_should_defer_for_bot_maintenance(actor))
 
                 log_utils.record_game_bot_activity(actor)
+                self.assertTrue(log_utils.shared_bot_maintenance_status(actor)["active"])
+
+                log_utils.record_bot_response(actor, command=".问道")
                 self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
+
+    def test_unanswered_dotted_command_counts_as_maintenance_even_with_raw_bot_activity(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            target_chat_id=-100123456,
+            _bot_unhealthy_until=0,
+        )
+        player = SimpleNamespace(username="player")
+        bot = SimpleNamespace(username="fanrenxiuxian_bot")
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            db_path = os.path.join(tmpdir, "message_events.sqlite3")
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = db_path
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                    command_msg = DummyMessage(90001, text=".洞府")
+                    command_msg.date = datetime.now(timezone.utc)
+                    self.assertTrue(log_utils.record_message_event(
+                        actor, command_msg, text=".洞府", sender=player, event_kind="new", direction="raw"
+                    ))
+                    data = log_utils._read_shared_bot_activity()
+                    data["command_probe"]["wall_epoch"] = time.time() - 120
+                    data["accounts"] = {
+                        "main": {
+                            "wall": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "wall_epoch": time.time(),
+                            "bot_username": "fanrenxiuxian_bot",
+                        }
+                    }
+                    log_utils._write_shared_bot_activity(data)
+
+                    log_utils.record_game_bot_activity(actor, bot)
+                    status = log_utils.shared_bot_maintenance_status(actor)
+                    self.assertTrue(status["active"])
+                    self.assertEqual(status["source"], "unanswered_dot_command")
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+    def test_bot_reply_to_dotted_command_clears_command_silence(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            target_chat_id=-100123456,
+            _bot_unhealthy_until=0,
+        )
+        player = SimpleNamespace(username="player")
+        bot = SimpleNamespace(username="fanrenxiuxian_bot")
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            db_path = os.path.join(tmpdir, "message_events.sqlite3")
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = db_path
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                    command_msg = DummyMessage(90011, text=".洞府")
+                    command_msg.date = datetime.now(timezone.utc)
+                    log_utils.record_message_event(
+                        actor, command_msg, text=".洞府", sender=player, event_kind="new", direction="raw"
+                    )
+                    data = log_utils._read_shared_bot_activity()
+                    data["command_probe"]["wall_epoch"] = time.time() - 120
+                    log_utils._write_shared_bot_activity(data)
+                    self.assertTrue(log_utils.shared_bot_maintenance_status(actor)["active"])
+
+                    reply_msg = DummyMessage(90012, text="**【洞府】**", reply_to_msg_id=90011)
+                    log_utils.record_game_bot_activity(actor, bot, msg=reply_msg, text=reply_msg.text)
+
+                    self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
+                    data = log_utils._read_shared_bot_activity()
+                    self.assertGreaterEqual(
+                        data.get("command_response", {}).get("wall_epoch", 0),
+                        data.get("command_probe", {}).get("wall_epoch", 0),
+                    )
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+    def test_unanswered_dotted_command_probe_is_not_overwritten(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            target_chat_id=-100123456,
+            _bot_unhealthy_until=0,
+        )
+        player = SimpleNamespace(username="player")
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_path = os.path.join(tmpdir, "bot_activity_shared.json")
+            db_path = os.path.join(tmpdir, "message_events.sqlite3")
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = db_path
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
+                    first_msg = DummyMessage(90021, text=".洞府")
+                    second_msg = DummyMessage(90022, text=".野外历练")
+                    first_msg.date = datetime.now(timezone.utc)
+                    second_msg.date = datetime.now(timezone.utc)
+                    log_utils.record_message_event(
+                        actor, first_msg, text=".洞府", sender=player, event_kind="new", direction="raw"
+                    )
+                    data = log_utils._read_shared_bot_activity()
+                    first_epoch = data["command_probe"]["wall_epoch"]
+
+                    log_utils.record_message_event(
+                        actor, second_msg, text=".野外历练", sender=player, event_kind="new", direction="raw"
+                    )
+                    data = log_utils._read_shared_bot_activity()
+                    self.assertEqual(data["command_probe"]["command"], ".洞府")
+                    self.assertEqual(data["command_probe"]["wall_epoch"], first_epoch)
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
     def test_watchdog_defers_while_send_waits_for_shared_stale_bot_activity(self):
         actor = SimpleNamespace(

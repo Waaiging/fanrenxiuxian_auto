@@ -395,7 +395,7 @@ async def send_and_wait_feedback_common(
                 resp_text = actor.last_feedback_text.pop(msg_id, "").strip()
                 final_resp_msg = actor.last_feedback_msg.pop(msg_id, None)
                 matched_feedback = True
-                record_bot_response(actor)
+                record_bot_response(actor, command=message, msg=final_resp_msg, logger=logger)
                 await log_incoming_message(
                     actor, message, resp_text, msg=final_resp_msg, logger=logger, identity=_identity or "主魂"
                 )
