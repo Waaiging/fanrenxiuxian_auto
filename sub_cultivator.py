@@ -119,6 +119,7 @@ from log_utils import (
     record_command_sent,       # 指令台账
     record_game_bot_activity,   # 记录游戏机器人的最后活动时间
     record_message_event,       # 消息事件库
+    resolve_target_chat_id,     # 将公开群用户名/链接解析为数值 ID
     record_manual_command_reply_state_if_needed, # 同步手动指令回复状态
     recent_profile_identity_for_text, # 识别无 reply 档案回复的身份
     remember_script_send_intent, # 记录脚本即将发送指令的意图
@@ -438,8 +439,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         )
 
         # ---- 目标聊天/主题 ----
-        self.target_chat_id = self.mc.get('chat_id', 1680975844)   # 游戏群组 ID
-        self.topic_id = self.mc.get('topic_id', 7310786)           # 子区（话题）ID
+        self.target_chat_id = self.mc.get('chat_id', 'fanrenxxz')  # 游戏群组 ID 或公开用户名
+        self.topic_id = self.mc.get('topic_id')                    # 可选 Forum Topic ID
 
         # ---- 游戏机器人用户名 ----
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
@@ -6061,6 +6062,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         5. 保持主线程存活，直到 is_running 变为 False。
         """
         await self.client.start()
+        self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         # 热身：获取最近的对话列表，确保缓存了目标 ID
         await self.client.get_dialogs(limit=20)
         self.my_info = await self.client.get_me()

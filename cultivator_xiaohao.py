@@ -86,6 +86,7 @@ from log_utils import (
     record_command_sent,
     record_game_bot_activity, record_manual_command_reply_state_if_needed,
     record_message_event,
+    resolve_target_chat_id,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
     schedule_command_auto_delete, send_text_alert, watchdog_diagnostics, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
@@ -332,8 +333,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         self.mc = self.config.get('monitor', {})
         self.session_file = os.path.join(CONFIG_DIR, session_name)
         self.client = TelegramClient(self.session_file, self.config['api_id'], self.config['api_hash'])
-        self.target_chat_id = self.mc.get('chat_id', 1680975844)
-        self.topic_id = self.mc.get('topic_id', 7310786)
+        self.target_chat_id = self.mc.get('chat_id', 'fanrenxxz')
+        self.topic_id = self.mc.get('topic_id')
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]
         self.keywords = [k.lower() for k in self.mc.get('keywords', [])]
@@ -7535,6 +7536,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
     async def start(self):
         """脚本入口：连接 Telegram、注册事件处理器、启动所有循环"""
         await self.client.start()
+        self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
         log.info(f"XiaoHao Login: {self.my_info.first_name}")

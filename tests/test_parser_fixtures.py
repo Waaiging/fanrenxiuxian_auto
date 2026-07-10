@@ -5156,9 +5156,10 @@ class ParserFixtureTests(unittest.TestCase):
         )
 
     def test_new_hantianzun_bots_are_recognized_as_game_bots(self):
-        sender = SimpleNamespace(username="hantianzun07_bot", first_name="韩天尊")
         actor = SimpleNamespace(mc={})
-        self.assertTrue(log_utils.is_game_bot_sender(actor, sender))
+        for index in range(10, 26):
+            sender = SimpleNamespace(username=f"hantianzun{index}_bot", first_name="韩天尊")
+            self.assertTrue(log_utils.is_game_bot_sender(actor, sender))
 
         msg = DummyMessage(7304, text="")
         msg.date = datetime(2026, 6, 23, 1, 0, 35, tzinfo=timezone.utc)
@@ -5170,12 +5171,14 @@ class ParserFixtureTests(unittest.TestCase):
 **当前天命所归**: **@bar**
 """
 
-        record = star_gazing_collector.build_star_gazing_event_record(
-            "sub", msg, text, sender=sender
-        )
+        for index in range(10, 26):
+            sender = SimpleNamespace(username=f"hantianzun{index}_bot", first_name="韩天尊")
+            record = star_gazing_collector.build_star_gazing_event_record(
+                "sub", msg, text, sender=sender
+            )
 
-        self.assertIsNotNone(record)
-        self.assertEqual(record["event_kind"], "manifest")
+            self.assertIsNotNone(record)
+            self.assertEqual(record["event_kind"], "manifest")
 
     def test_sub_star_gazing_account_date_does_not_block_other_avatars(self):
         async def run_case():

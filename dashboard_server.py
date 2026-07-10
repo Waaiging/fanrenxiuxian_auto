@@ -248,6 +248,10 @@ BOT_REPLY_MARKERS = {
     "hantianzun07_bot", "@hantianzun07_bot",
     "hantianzun08_bot", "@hantianzun08_bot",
     "韩天尊",
+} | {
+    marker
+    for index in range(10, 26)
+    for marker in (f"hantianzun{index}_bot", f"@hantianzun{index}_bot")
 }
 
 # 每个账号的日志标签定义（对应不同的游戏指令）

@@ -130,6 +130,7 @@ from log_utils import (
     record_command_sent,      # 指令台账
     record_game_bot_activity,  # 记录游戏机器人活动
     record_message_event,      # 消息事件库
+    resolve_target_chat_id,    # 将公开群用户名/链接解析为数值 ID
     record_manual_command_reply_state_if_needed, # 同步手动指令回复状态
     recent_profile_identity_for_text, # 识别无 reply 档案回复的身份
     remember_script_send_intent,  # 记录脚本发送意图
@@ -439,8 +440,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         self.client = TelegramClient(self.session_file, self.config['api_id'], self.config['api_hash'])
 
         # ------ 3. 目标聊天/主题 ------
-        self.target_chat_id = self.mc.get('chat_id', 1680975844)  # 游戏群 ID
-        self.topic_id = self.mc.get('topic_id', 7310786)          # 游戏主题（Forum Topic）ID
+        self.target_chat_id = self.mc.get('chat_id', 'fanrenxxz')  # 游戏群 ID 或公开用户名
+        self.topic_id = self.mc.get('topic_id')                    # 可选 Forum Topic ID
         # 游戏机器人用户名，去掉 @ 前缀并转小写，方便后续比较
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
         self.notify_bot_username = self.config.get('notify_bot', 'waaiging_bot')  # 告警机器人
@@ -5159,6 +5160,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
           - MessageEdited: 记录编辑过的消息（仅日志）
         """
         await self.client.start()
+        self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         # 热身：获取最近的对话列表，确保缓存了目标聊天 ID
         await self.client.get_dialogs(limit=20)
         # 获取当前账号信息（用户名、first_name 等）

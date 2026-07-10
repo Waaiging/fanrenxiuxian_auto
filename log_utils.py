@@ -54,6 +54,42 @@ MESSAGE_EVENTS_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__))
 BOT_ACTIVITY_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_activity_shared.json")
 USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
 
+
+async def resolve_target_chat_id(client, configured_target, logger=None):
+    """Resolve a configured Telegram group username/link to Telethon's numeric entity ID."""
+    target = configured_target
+    if isinstance(target, str):
+        target = target.strip()
+        if target.lstrip("-").isdigit():
+            return int(target)
+
+        parsed = urlparse(target)
+        if parsed.netloc.lower() in {"t.me", "telegram.me", "www.t.me", "www.telegram.me"}:
+            target = parsed.path.strip("/").split("/", 1)[0]
+        target = target.lstrip("@").strip()
+        if not target:
+            raise ValueError("Telegram target group is empty")
+
+        entity = await client.get_entity(target)
+        if getattr(entity, "broadcast", False) and not getattr(entity, "megagroup", False):
+            raise ValueError(f"Telegram target @{target} is a broadcast channel, not a group")
+        resolved_id = getattr(entity, "id", None)
+        if resolved_id is None:
+            raise ValueError(f"Unable to resolve Telegram target @{target}")
+        if logger:
+            logger.info(
+                "Resolved game group @%s -> %s (title=%r, forum=%s)",
+                target,
+                resolved_id,
+                getattr(entity, "title", None),
+                bool(getattr(entity, "forum", False)),
+            )
+        return resolved_id
+
+    if target is None:
+        raise ValueError("Telegram target group is not configured")
+    return int(target)
+
 # 命令守卫参数
 COMMAND_GUARD_WINDOW_SECONDS = 30 * 60      # 监控窗口 30 分钟
 COMMAND_GUARD_BLOCK_SECONDS = 60 * 60       # 触发守卫后拦截 1 小时
@@ -145,7 +181,7 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzun06_bot",            # 天尊06号（新机器人）
     "hantianzun07_bot",            # 天尊07号（新机器人）
     "hantianzun08_bot",            # 天尊08号（新机器人）
-}
+} | {f"hantianzun{index}_bot" for index in range(10, 26)}
 
 # 反机器人挑战关键词
 ANTI_BOT_KEYWORDS = [

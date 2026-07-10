@@ -81,8 +81,8 @@ def load_account_config(account):
         "api_id": config["api_id"],
         "api_hash": config["api_hash"],
         "session": os.path.join(CONFIG_DIR, meta["session"]),
-        "chat_id": monitor.get("chat_id", 1680975844),
-        "topic_id": monitor.get("topic_id", 7310786),
+        "chat_id": monitor.get("chat_id", "fanrenxxz"),
+        "topic_id": monitor.get("topic_id"),
         "label": meta["label"],
     }
 
