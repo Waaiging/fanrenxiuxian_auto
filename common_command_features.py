@@ -4278,12 +4278,6 @@ class CommonCommandMixin:
             return False
         if min_hour is not None and now.hour < min_hour:
             return False
-        if self.daily_one_shot_should_defer(
-            avatar,
-            ".闯塔",
-            logger=self.common_command_logger(),
-        ):
-            return False
         return await self.common_avatar_tower_send(
             avatar,
             today=today,
@@ -4329,20 +4323,17 @@ class CommonCommandMixin:
                         require_meditation_ready=require_meditation_ready,
                     )
                 ):
-                    if self.daily_one_shot_should_defer(avatar, ".闯塔", logger=log):
-                        await asyncio.sleep(
-                            self.common_scheduler_sleep_seconds(
-                                LOW_PRIORITY_DAILY_DEFER_SECONDS,
-                                sleep_func=sleep_func,
-                            )
-                        )
-                        continue
                     delay = random.randint(*delay_range)
+                    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    safe_delay = max(0, int((midnight - now).total_seconds()) - 30)
+                    delay = min(delay, safe_delay)
                     log.info(f"Avatar [{avatar}] daily tower due today ({today}). Waiting {delay}s...")
                     await asyncio.sleep(delay)
+                    after_delay = datetime.now()
                     if (
-                        self.get_avatar_state(avatar).get("last_tower_date", "") != today
-                        and not self.daily_one_shot_should_defer(avatar, ".闯塔", logger=log)
+                        after_delay.strftime("%Y-%m-%d") == today
+                        and after_delay.hour == 23
+                        and self.get_avatar_state(avatar).get("last_tower_date", "") != today
                     ):
                         await self.common_avatar_tower_send(
                             avatar,

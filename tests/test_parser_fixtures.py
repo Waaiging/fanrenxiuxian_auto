@@ -1375,6 +1375,70 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn("支援慕兰", state["last_mulan_support_response"])
         self.assertEqual(actor.sent[1][2]["max_retries"], 0)
 
+    def test_avatar_tower_tick_does_not_defer_to_other_overdue_work(self):
+        class DummyTowerAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def daily_one_shot_should_defer(self, identity="主魂", command="", logger=None):
+                raise AssertionError("tower must not defer to unrelated overdue work")
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                return "你成功通关试炼古塔第 7 层。"
+
+        actor = DummyTowerAvatar()
+        self.assertTrue(asyncio.run(actor.common_avatar_tower_tick("缘生子", min_hour=0)))
+        self.assertEqual(actor.sent[0], ("缘生子", ".闯塔"))
+
+    def test_avatar_tower_loop_does_not_defer_to_other_overdue_work(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 11, 23, 59, 50)
+
+        class DummyTowerAvatar(DummyAvatarCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.is_running = True
+                self.startup_done = asyncio.Event()
+                self.startup_done.set()
+                self.pause_event = asyncio.Event()
+                self.pause_event.set()
+                self._avatar_loop_count = 0
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def daily_one_shot_should_defer(self, identity="主魂", command="", logger=None):
+                raise AssertionError("tower loop must not defer to unrelated overdue work")
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                if command == ".闯塔":
+                    self.is_running = False
+                return "你成功通关试炼古塔第 7 层。"
+
+        sleeps = []
+
+        async def no_sleep(_seconds):
+            sleeps.append(_seconds)
+            return None
+
+        actor = DummyTowerAvatar()
+        with patch.object(common_command_features, "datetime", FixedDateTime), patch.object(
+            common_command_features.asyncio, "sleep", no_sleep
+        ), patch.object(common_command_features.random, "randint", return_value=600):
+            asyncio.run(actor.run_common_avatar_tower_loop("缘生子", delay_range=(10, 600)))
+
+        self.assertEqual(actor.sent[0], ("缘生子", ".闯塔"))
+        self.assertEqual(sleeps[0], 0)
+
     def test_mulan_support_feedback_family_matches_response(self):
         text = "【慕兰烽烟】你领了【夜袭法士营】奇袭，小胜险还，边境军功 +5。"
 
