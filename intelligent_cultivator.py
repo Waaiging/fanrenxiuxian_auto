@@ -146,6 +146,7 @@ from log_utils import (
     maybe_handle_han_soul_choice,   # 韩天尊神魂抉择自动回复
     wait_for_bot_activity_before_send,  # 发送前等待机器人活动确认
     watchdog_should_defer_for_bot_maintenance, # 机器人维护时 watchdog 延后重启
+    watchdog_should_defer_for_active_atomic_task, # 原子任务正常执行时延后 stale watchdog
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
@@ -2309,7 +2310,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        if watchdog_should_defer_for_bot_maintenance(
+                        if watchdog_should_defer_for_active_atomic_task(
+                            self, log, reason=f"Main watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        elif watchdog_should_defer_for_bot_maintenance(
                             self, log, reason=f"Main watchdog stale due ({detail})"
                         ):
                             stale_due_watch_started_at = time.monotonic()

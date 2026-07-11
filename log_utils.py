@@ -810,8 +810,6 @@ def feedback_response_matches_command(command, text):
     clean = str(text or "").replace("**", "")
     if not expected or not clean:
         return False
-    if is_passive_settlement_response(clean):
-        return True
     if is_yuanying_rebirth_block_response(clean) or is_yuanying_rebirth_success_response(clean):
         return True
 
@@ -1782,6 +1780,51 @@ def watchdog_should_defer_for_bot_maintenance(
             f"{int(status.get('remaining_seconds') or 0)}s{command_detail}{detail})."
         )
         setattr(actor, "_watchdog_bot_maintenance_log_last", now)
+    return True
+
+
+def watchdog_should_defer_for_active_atomic_task(
+    actor,
+    logger=None,
+    reason="watchdog",
+    max_defer_seconds=10 * 60,
+):
+    """Defer stale-schedule restarts while a bounded atomic workflow is active."""
+    task = getattr(actor, "active_atomic_task", None) or getattr(actor, "_common_atomic_task", None)
+    if task is None:
+        setattr(actor, "_watchdog_atomic_task_id", None)
+        setattr(actor, "_watchdog_atomic_task_since", 0.0)
+        return False
+
+    try:
+        if task.done():
+            setattr(actor, "_watchdog_atomic_task_id", None)
+            setattr(actor, "_watchdog_atomic_task_since", 0.0)
+            return False
+    except Exception:
+        pass
+
+    now = time.monotonic()
+    task_id = id(task)
+    if getattr(actor, "_watchdog_atomic_task_id", None) != task_id:
+        setattr(actor, "_watchdog_atomic_task_id", task_id)
+        started_at = float(getattr(actor, "_common_atomic_started_at", 0.0) or 0.0)
+        setattr(actor, "_watchdog_atomic_task_since", started_at if started_at > 0 else now)
+    since = float(getattr(actor, "_watchdog_atomic_task_since", now) or now)
+    active_for = max(0.0, now - since)
+    if active_for >= max(1, int(max_defer_seconds)):
+        return False
+
+    last_log = float(getattr(actor, "_watchdog_atomic_task_log_last", 0.0) or 0.0)
+    if logger and now - last_log >= 60:
+        get_name = getattr(task, "get_name", None)
+        task_name = get_name() if callable(get_name) else ""
+        label = getattr(actor, "_common_atomic_label", "") or task_name
+        logger.warning(
+            f"{reason}: deferring stale-schedule restart while atomic task "
+            f"[{label or task_id}] is active ({active_for:.0f}s)."
+        )
+        setattr(actor, "_watchdog_atomic_task_log_last", now)
     return True
 
 

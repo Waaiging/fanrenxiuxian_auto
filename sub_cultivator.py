@@ -137,6 +137,7 @@ from log_utils import (
     maybe_handle_han_soul_choice, # 韩天尊神魂抉择自动回复
     wait_for_bot_activity_before_send,  # 等待机器人活跃后再发送（避免竞态）
     watchdog_should_defer_for_bot_maintenance, # 机器人维护时 watchdog 延后重启
+    watchdog_should_defer_for_active_atomic_task, # 原子任务正常执行时延后 stale watchdog
     mentions_self,             # 判定消息是否提到了当前账号
     mentions_other_user,        # 判定消息是否明确提到了其他账号
     mentions_other_user_for_identity, # 身份感知的“其他用户”提及判定
@@ -1644,8 +1645,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         log.info(f"[DEBUG-IDENTITY] [{identity}] sending switch cmd: {switch_cmd}")
                         switch_resp = await self._send_and_wait_feedback_raw(
                             switch_cmd,
-                            timeout=5 if high_priority_identity_command else 30,
-                            max_retries=0 if high_priority_identity_command else 2,
+                            timeout=8 if high_priority_identity_command else 30,
+                            max_retries=1 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
                             skip_bot_activity_wait=True,
                         )
@@ -3172,7 +3173,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        if watchdog_should_defer_for_bot_maintenance(
+                        if watchdog_should_defer_for_active_atomic_task(
+                            self, log, reason=f"Sub watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        elif watchdog_should_defer_for_bot_maintenance(
                             self, log, reason=f"Sub watchdog stale due ({detail})"
                         ):
                             stale_due_watch_started_at = time.monotonic()
@@ -4981,7 +4986,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 check_resp = "Skip"  # 占位符，避免进入后续解析逻辑
             else:
                 log.info("Checking meditation status via .查看闭关...")
-                check_resp = await self.send_and_wait_feedback(".查看闭关")
+                check_resp = self.response_text(await self.send_and_wait_feedback(".查看闭关"))
                 med_cd = self.parse_wait_time(check_resp)
 
             med_wait = 300  # 默认等待时间

@@ -8112,6 +8112,27 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.record_bot_response(actor, command=".问道")
                 self.assertFalse(log_utils.shared_bot_maintenance_status(actor)["active"])
 
+    def test_watchdog_defers_stale_due_while_atomic_task_is_active(self):
+        class ActiveTask:
+            def done(self):
+                return False
+
+            def get_name(self):
+                return "FieldTraining-测试"
+
+        task = ActiveTask()
+        actor = SimpleNamespace(active_atomic_task=task, _common_atomic_label="FieldTraining-测试")
+
+        self.assertTrue(log_utils.watchdog_should_defer_for_active_atomic_task(actor))
+        actor._watchdog_atomic_task_since = time.monotonic() - 601
+        self.assertFalse(log_utils.watchdog_should_defer_for_active_atomic_task(actor))
+
+    def test_switch_feedback_rejects_passive_yuanying_settlement(self):
+        settlement = "✨ **元神回响**：感应到 @Lvdoumiao 的元婴已神游归来，正在清点收获..."
+
+        self.assertFalse(log_utils.feedback_response_matches_command(".切换 主魂", settlement))
+        self.assertTrue(log_utils.feedback_response_matches_command(".元婴出窍", settlement))
+
     def test_unanswered_dotted_command_counts_as_maintenance_even_with_raw_bot_activity(self):
         actor = SimpleNamespace(
             state_file="state_main.json",
