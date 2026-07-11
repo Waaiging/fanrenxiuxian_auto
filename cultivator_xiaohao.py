@@ -91,6 +91,7 @@ from log_utils import (
     remember_script_send_intent, remember_script_sent_message,
     schedule_command_auto_delete, send_text_alert, watchdog_diagnostics, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
     watchdog_should_defer_for_bot_maintenance,
+    watchdog_should_defer_for_active_atomic_task,
     feedback_response_conflicts,
     feedback_response_matches_command,
     feedback_response_requires_positive_match,
@@ -1789,8 +1790,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         log.info(f"[DEBUG-IDENTITY] [{identity}] sending switch cmd: {switch_cmd}")
                         switch_resp = await self._send_and_wait_feedback_raw(
                             switch_cmd,
-                            timeout=5 if high_priority_identity_command else 30,
-                            max_retries=0 if high_priority_identity_command else 2,
+                            timeout=8 if high_priority_identity_command else 30,
+                            max_retries=1 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
                             skip_bot_activity_wait=True,
                         )
@@ -2209,7 +2210,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             f"{key}/{command} due {due_at} ({overdue}s overdue)"
                             for key, command, due_at, overdue in stale_due
                         )
-                        if watchdog_should_defer_for_bot_maintenance(
+                        if watchdog_should_defer_for_active_atomic_task(
+                            self, log, reason=f"Xiaohao watchdog stale due ({detail})"
+                        ):
+                            stale_due_watch_started_at = time.monotonic()
+                        elif watchdog_should_defer_for_bot_maintenance(
                             self, log, reason=f"Xiaohao watchdog stale due ({detail})"
                         ):
                             stale_due_watch_started_at = time.monotonic()
@@ -7044,7 +7049,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 if retry_cd:
                     return retry_cd + random.randint(10, 30)
                 await asyncio.sleep(3)
-                med_resp = await self.send_and_wait_feedback(".深度闭关"); cd_med = self.parse_wait_time(med_resp)
+                med_resp = self.response_text(await self.send_and_wait_feedback(".深度闭关")); cd_med = self.parse_wait_time(med_resp)
                 if any(k in med_resp for k in ["冷却", "后再试", "无法立即", "尚未平复"]):
                     if cd_med > 0: self.state["in_deep_meditation"] = False; self.state["deep_meditation_guard_until"] = ""; self.state["next_meditation_retry_time"] = add_seconds_str(now_str(), cd_med); return cd_med + random.randint(10, 30)
                 if any(k in med_resp for k in ["已进入", "深度闭关", "已在", "开启", "成功"]):

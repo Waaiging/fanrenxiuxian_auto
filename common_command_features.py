@@ -282,6 +282,7 @@ class _CommonAtomicTask:
         self.actor.active_atomic_task = self.task
         self.actor._common_atomic_task = self.task
         self.actor._common_atomic_label = self.label
+        self.actor._common_atomic_started_at = time.monotonic()
         self.acquired = True
         try:
             self.actor.common_command_logger().info(f"Atomic task acquired by {self.label}.")
@@ -295,6 +296,7 @@ class _CommonAtomicTask:
         if self.acquired and getattr(self.actor, "_common_atomic_task", None) == self.task:
             self.actor._common_atomic_task = None
             self.actor._common_atomic_label = ""
+            self.actor._common_atomic_started_at = 0.0
             try:
                 self.actor.common_command_logger().info(f"Atomic task released by {self.label}.")
             except Exception:
