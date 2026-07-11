@@ -1992,6 +1992,42 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["last_rift_search_time"])
         self.assertTrue(actor.state["last_rift_search_cooldown_probe_time"])
 
+    def test_sub_main_rift_loop_probes_actual_cooldown_after_success(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.state = {}
+        actor.is_running = True
+        actor.startup_done = asyncio.Event()
+        actor.startup_done.set()
+        actor.actual_cooldown_probe_commands = {("主魂", ".探寻裂缝")}
+        actor.save_state = lambda: None
+        actor.record_daily_reward_event = lambda *args, **kwargs: True
+        probes = []
+
+        async def wait_for_main():
+            return None
+
+        async def send(command, **kwargs):
+            return SimpleNamespace(
+                text="探寻裂缝成功，发现秘藏，获得【空间碎片】x2。",
+            )
+
+        async def probe(plan, identity="主魂"):
+            probes.append((plan.command, identity))
+            actor.is_running = False
+            return True
+
+        async def no_sleep(_seconds):
+            return None
+
+        actor._wait_for_main_identity = wait_for_main
+        actor.send_and_wait_feedback = send
+        actor.probe_rift_actual_cooldown = probe
+
+        with patch("sub_cultivator.asyncio.sleep", no_sleep):
+            asyncio.run(actor.run_rift_search_loop())
+
+        self.assertEqual(probes, [(".探寻裂缝", "主魂")])
+
     def test_rift_success_can_record_explicit_shortened_cooldown(self):
         actor = DummyCommon()
 
@@ -7243,6 +7279,50 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sent, [".灵兽休息 麻花藤", ".灵兽巡边 麻花藤 袭营"])
         self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertEqual(actor.state["beasts_cache"][2]["status"], "巡边中")
+
+    def test_border_patrol_recalls_low_cached_pastured_beasts_until_one_has_stamina(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 23},
+                {"full_name": "猴哥", "species": "二阶金瞳妖猴", "status": "放养中", "power": 195, "exp": 652, "stamina": 17},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽休息 麻花藤":
+                return "已将灵兽【麻花藤】召回休息。"
+            if command == ".灵兽巡边 麻花藤 袭营":
+                return "灵兽【麻花藤】体力不足。本次夜嗅敌营需要 **24** 体力，当前 **10**。"
+            if command == ".灵兽休息 猴哥":
+                return "已将灵兽【猴哥】召回休息。"
+            if command == ".灵兽巡边 猴哥 袭营":
+                return "灵兽【猴哥】领命前往边境巡行，执行【袭营】。"
+            return ""
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
+
+        self.assertEqual(
+            sent,
+            [
+                ".灵兽休息 麻花藤",
+                ".灵兽巡边 麻花藤 袭营",
+                ".灵兽休息 猴哥",
+                ".灵兽巡边 猴哥 袭营",
+            ],
+        )
+        self.assertEqual(actor.state["beasts_cache"][0]["stamina"], 10)
+        self.assertEqual(actor.state["beast_border_patrol_name"], "猴哥")
+        self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
 
     def test_border_patrol_recall_guard_tries_next_candidate(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

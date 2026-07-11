@@ -461,7 +461,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         # 副号主魂装备风雷翅后，部分冷却会被装备缩短；成功后用二次查询校准真实时间。
         self.actual_cooldown_probe_commands = {
             ("主魂", ASK_DAO_COMMAND),
-            ("主魂", ".深度闭关"),
             ("主魂", ".探寻裂缝"),
         }
 
@@ -3390,9 +3389,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 break
 
             # 常规冷却处理
-            self.record_fixed_cd_command_response(
+            recorded = self.record_fixed_cd_command_response(
                 resp_text, command, last_key, next_key, RIFT_SEARCH_CD_SECONDS
             )
+            if recorded and self.rift_needs_actual_cooldown_probe(
+                resp_text, command, identity="主魂"
+            ):
+                await self.probe_rift_actual_cooldown(plan, identity="主魂")
             self.save_state()
             wait_time = seconds_until(self.state.get(next_key, "")) or 600
             await asyncio.sleep(scheduler_sleep_seconds(wait_time))

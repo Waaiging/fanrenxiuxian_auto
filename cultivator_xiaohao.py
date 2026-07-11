@@ -2706,7 +2706,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 log.info(f"Border patrol recall candidate skipped: {name} status is {status}.")
                 continue
             stamina = self.beast_stamina_value(beast)
-            if 0 <= stamina < BEAST_BORDER_PATROL_MIN_STAMINA:
+            # 放养期间缓存仍是出发前体力，可能已经恢复；召回后用巡边回执确认真实体力。
+            if 0 <= stamina < BEAST_BORDER_PATROL_MIN_STAMINA and not self.is_pastured_status(status):
                 log.info(
                     f"Border patrol recall candidate skipped: {name} stamina "
                     f"{stamina} < {BEAST_BORDER_PATROL_MIN_STAMINA}."
