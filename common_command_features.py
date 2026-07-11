@@ -2796,15 +2796,16 @@ class CommonCommandMixin:
             return False
 
         a_state = self.get_avatar_state(avatar)
-        repaired_next = self.preserve_cooldown_floor(
-            a_state,
-            plan.last_key,
-            plan.next_key,
-            cd_seconds,
-            f"avatar rift search [{avatar}]",
-        )
-        if repaired_next and is_future(repaired_next):
-            return False
+        if not self.should_probe_actual_cooldown(avatar, plan.command):
+            repaired_next = self.preserve_cooldown_floor(
+                a_state,
+                plan.last_key,
+                plan.next_key,
+                cd_seconds,
+                f"avatar rift search [{avatar}]",
+            )
+            if repaired_next and is_future(repaired_next):
+                return False
         next_time = a_state.get(plan.next_key, "")
         if next_time and is_future(next_time):
             return False
@@ -2815,7 +2816,7 @@ class CommonCommandMixin:
         if self.is_rift_weakness_response(resp_text):
             await self.stop_for_rift_weakness(resp_text, identity=avatar)
             return True
-        self.record_identity_fixed_cd_command_response(
+        recorded = self.record_identity_fixed_cd_command_response(
             avatar,
             resp_text,
             plan.command,
@@ -2823,6 +2824,10 @@ class CommonCommandMixin:
             plan.next_key,
             cd_seconds,
         )
+        if recorded and self.rift_needs_actual_cooldown_probe(
+            resp_text, plan.command, identity=avatar
+        ):
+            await self.probe_rift_actual_cooldown(plan, identity=avatar)
         self.save_state()
         return True
 
@@ -3698,29 +3703,32 @@ class CommonCommandMixin:
             wait_time = await self.common_ask_dao_tick(command)
             await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
 
-    def record_treasure_touch_response(self, resp, command=None):
-        """Parse .抚摸法宝 response and update the shared main-soul cooldown state."""
+    def record_treasure_touch_response(self, resp, command=None, identity="主魂"):
+        """Parse .抚摸法宝 response and update the identity's cooldown state."""
         plan = self.treasure_touch_plan(command)
         command = plan.command
         next_key = plan.next_key
         last_key = plan.last_key
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.identity_state_for_timed_command(identity)
         log = self.common_command_logger()
+        prefix = f"[{identity}] " if identity != "主魂" else ""
         if not resp:
-            self.state[next_key] = add_seconds_str(now_str(), 600)
-            log.warning(f"{command}: response missing; retry scheduled at {self.state[next_key]}.")
+            state[next_key] = add_seconds_str(now_str(), 600)
+            log.warning(f"{prefix}{command}: response missing; retry scheduled at {state[next_key]}.")
             return False
 
         cd = self.parse_wait_time(resp)
         if cd > 0 and any(k in resp for k in ["休息", "冷却", "后再", "尚需", "还需", "互动"]):
-            self.state[next_key] = add_seconds_str(now_str(), cd)
-            log.info(f"{command}: cooldown from response {cd}s, next at {self.state[next_key]}.")
+            state[next_key] = add_seconds_str(now_str(), cd)
+            log.info(f"{prefix}{command}: cooldown from response {cd}s, next at {state[next_key]}.")
             return False
 
         if any(k in resp for k in ["联系更加紧密", "器灵传来了喜悦", "默契", "经验", "与它互动", "微微颤动"]):
             now = now_str()
-            self.state[last_key] = now
-            self.state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
-            log.info(f"{command}: recorded success, next at {self.state[next_key]}.")
+            state[last_key] = now
+            state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
+            log.info(f"{prefix}{command}: recorded success, next at {state[next_key]}.")
             return True
 
         if (
@@ -3729,20 +3737,20 @@ class CommonCommandMixin:
             or ("没有这件" in resp and "器灵" in resp)
         ):
             now = now_str()
-            self.state["last_treasure_touch_error"] = resp[:200]
-            self.state["last_treasure_touch_error_time"] = now
-            self.state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
-            if hasattr(self, "_main_confirmed"):
+            state["last_treasure_touch_error"] = resp[:200]
+            state["last_treasure_touch_error_time"] = now
+            state[next_key] = add_seconds_str(now, self.treasure_touch_cd_seconds())
+            if identity == "主魂" and hasattr(self, "_main_confirmed"):
                 self._main_confirmed = False
             log.warning(
-                f"{command}: definite failure ({resp[:80]}), next at "
-                f"{self.state[next_key]}; main identity will be re-confirmed."
+                f"{prefix}{command}: definite failure ({resp[:80]}), next at "
+                f"{state[next_key]}."
             )
             return False
 
-        self.state[next_key] = add_seconds_str(now_str(), 600)
+        state[next_key] = add_seconds_str(now_str(), 600)
         notify_unrecognized_response(self, command, resp, log, "抚摸法宝")
-        log.warning(f"{command}: unrecognized response; skipped and retry scheduled at {self.state[next_key]}.")
+        log.warning(f"{prefix}{command}: unrecognized response; skipped and retry scheduled at {state[next_key]}.")
         return False
 
     def is_field_training_response(self, text):

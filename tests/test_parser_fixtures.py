@@ -1266,6 +1266,48 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.sent, [("无咎子", ".改命 探索"), ("无咎子", ".探寻裂缝")])
         self.assertTrue(actor.get_avatar_state("无咎子")["next_rift_search_time"])
 
+    def test_wujiuzi_rift_probes_wind_wing_adjusted_cooldown(self):
+        class DummyWujiuziRift(DummyCommon):
+            avatars = ["无咎子"]
+            actual_cooldown_probe_commands = {("无咎子", ".探寻裂缝")}
+            actual_cooldown_probe_delay_seconds = 0
+
+            def __init__(self):
+                super().__init__()
+                self.state = {"avatars": {"无咎子": {}}}
+                self.identity_sect_names = {"无咎子": "天星宗"}
+                self.sent = []
+
+            def get_avatar_state(self, identity):
+                return self.state.setdefault("avatars", {}).setdefault(identity, {})
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append((identity, command))
+                rift_count = sum(1 for _, sent_command in self.sent if sent_command == ".探寻裂缝")
+                if command == ".探寻裂缝" and rift_count == 1:
+                    return "探寻裂缝成功，发现秘藏，获得【空间碎片】x2。"
+                if command == ".探寻裂缝":
+                    return "空间裂缝尚未稳定，请在 **4小时1分钟40秒** 后再行探寻。"
+                return "司命演算完成。"
+
+        actor = DummyWujiuziRift()
+        self.assertTrue(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
+
+        self.assertEqual(
+            actor.sent,
+            [("无咎子", ".改命 探索"), ("无咎子", ".探寻裂缝"), ("无咎子", ".探寻裂缝")],
+        )
+        remaining = common_seconds_until(actor.get_avatar_state("无咎子")["next_rift_search_time"])
+        self.assertGreater(remaining, 4 * 3600)
+        self.assertLessEqual(remaining, 4 * 3600 + 2 * 60)
+        calibrated_next = actor.get_avatar_state("无咎子")["next_rift_search_time"]
+        self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
+        self.assertEqual(actor.get_avatar_state("无咎子")["next_rift_search_time"], calibrated_next)
+        self.assertEqual(len(actor.sent), 3)
+
     def test_non_tianxing_avatar_rift_does_not_send_destiny_prefix(self):
         class DummyStarRift(DummyAvatarCommon):
             def __init__(self):
@@ -2057,6 +2099,37 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(actor.record_treasure_touch_response("没有这件拥有器灵的法宝。"))
         self.assertFalse(actor._main_confirmed)
         self.assertTrue(actor.state["last_treasure_touch_error"])
+
+    def test_wujiuzi_treasure_touch_uses_avatar_two_hour_cooldown(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["无咎子"]
+        actor.avatar_nicknames = {"无咎子": "天星雷总"}
+        actor.avatar_features = {
+            "无咎子": {"treasure_touch_command": ".抚摸法宝 风雷翅"},
+        }
+        actor.state = {
+            "last_treasure_touch_time": "",
+            "next_treasure_touch_time": "",
+            "avatars": {"无咎子": {}},
+        }
+        actor.save_state = lambda: None
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        sent = []
+
+        async def send(identity, command, **kwargs):
+            sent.append((identity, command))
+            return "风雷翅器灵微微颤动，与你默契提升。"
+
+        actor.send_and_wait_feedback_identity = send
+
+        self.assertTrue(asyncio.run(actor._avatar_treasure_touch_check("无咎子")))
+        self.assertEqual(sent, [("无咎子", ".抚摸法宝 风雷翅")])
+        avatar_state = actor.state["avatars"]["无咎子"]
+        remaining = common_seconds_until(avatar_state["next_treasure_touch_time"])
+        self.assertGreater(remaining, 115 * 60)
+        self.assertLessEqual(remaining, 2 * 3600)
+        self.assertEqual(actor.state["next_treasure_touch_time"], "")
 
     def test_common_ask_dao_response_records_success_and_cooldown(self):
         actor = DummyCommon()

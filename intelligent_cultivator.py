@@ -192,6 +192,7 @@ SECT_SKILL_MAX_DAILY = 3                    # 宗门传功每日上限次数
 YUANYING_OUT_CD_SECONDS = 8 * 3600          # 元婴出窍冷却：8 小时
 RIFT_SEARCH_CD_SECONDS = 12 * 3600          # 探寻裂缝冷却：12 小时
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 玄天斩灵剑"  # 抚摸法宝的具体指令
+WUJIU_TREASURE_TOUCH_COMMAND = ".抚摸法宝 风雷翅"
 NURTURE_SPIRIT_COMMAND = ".温养器灵 斩灵"  # 温养器灵指令
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600        # 抚摸法宝冷却：2 小时
 SPIRIT_TREE_AVATAR = "缘生子"
@@ -491,9 +492,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             "主魂": ["Weeguu"],
         }
         self.avatar_features = {
-            "无咎子": {"meditation_prefix": ".推命", "training_prefix_commands": [".推命 探索", ".改命 探索"], "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True},
+            "无咎子": {"meditation_prefix": ".推命", "training_prefix_commands": [".推命 探索", ".改命 探索"], "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True, "treasure_touch_command": WUJIU_TREASURE_TOUCH_COMMAND},
             "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True, "yuanying_out": True, "rift_search": True},
             "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
+        }
+        self.actual_cooldown_probe_commands = {
+            ("无咎子", ".探寻裂缝"),
         }
         # 化身 chat_id 映射（供 log_utils.log_manual_outgoing_if_needed 使用）
         self._avatar_chat_ids = {
@@ -2649,6 +2653,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             "next_yuanying_out_time": "", "yuanying_out_active": False,
             "yuanying_out_end_time": "", "last_rift_search_time": "",
             "next_rift_search_time": "",
+            "last_treasure_touch_time": "", "next_treasure_touch_time": "",
             "last_destiny_date": "", "last_destiny_time": "", "last_destiny_choice": "",
             "last_star_attraction_time": "", "next_star_attraction_time": "",
             "last_star_appease_time": "", "next_star_appease_time": "",
@@ -4342,6 +4347,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         if features.get("rift_search"): await self._avatar_rift_search_check(avatar)
                         if self.identity_pause_seconds(avatar) > 0:
                             continue
+                        if features.get("treasure_touch_command"): await self._avatar_treasure_touch_check(avatar)
                         # 2. 野外历练由独立循环负责，避免被闭关/侍妾/阵法长流程拖慢。
                         # 3. 阵法 (星宫)
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
@@ -4868,6 +4874,29 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             require_meditation_ready=False,
         )
 
+    async def _avatar_treasure_touch_check(self, avatar):
+        """按化身独立冷却抚摸其本命法宝。"""
+        features = self.avatar_features.get(avatar, {})
+        command = str(features.get("treasure_touch_command") or "").strip()
+        if not command:
+            return False
+        plan = self.treasure_touch_plan(command)
+        if not self.avatar_timed_command_available(avatar, plan, action_name="treasure touch"):
+            return False
+        a_state = self.get_avatar_state(avatar)
+        next_time = a_state.get(plan.next_key, "")
+        if next_time and is_future(next_time):
+            return False
+        log.info(f"Avatar [{avatar}] treasure touch due: sending {command}.")
+        resp = await self.send_timed_command_plan(plan, avatar)
+        self.record_treasure_touch_response(
+            self.timed_command_response_text(resp),
+            command,
+            identity=avatar,
+        )
+        self.save_state()
+        return True
+
     async def _get_avatar_min_cd_seconds(self):
         """计算所有化身中最早到期的CD时间（秒），用于替代固定30分钟sleep"""
         now = datetime.now()
@@ -4912,6 +4941,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 value = a_state.get(key, "")
                 if value and is_future(value):
                     min_cd = min(min_cd, seconds_until(value))
+                else:
+                    min_cd = min(min_cd, 60)
+            if features.get("treasure_touch_command"):
+                next_touch = a_state.get("next_treasure_touch_time", "")
+                if next_touch and is_future(next_touch):
+                    min_cd = min(min_cd, seconds_until(next_touch))
                 else:
                     min_cd = min(min_cd, 60)
             # 阵法CD/重试/强行出关
