@@ -4363,7 +4363,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         if features.get("destiny"): await self._avatar_destiny_check(avatar)
                         if features.get("tower"): await self._avatar_tower_check(avatar)
                     except Exception as e:
-                        log.error(f"Avatar [{avatar}] error: {e}")
+                        log.error(f"Avatar [{avatar}] error: {e}", exc_info=True)
                     log.info(f"Avatar [{avatar}] cycle complete")
             finally:
                 self._avatar_loop_active = False  # 所有化身完成后才释放

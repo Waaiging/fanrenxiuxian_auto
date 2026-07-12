@@ -108,6 +108,13 @@ class DummyCommon(CommonCommandMixin):
         return parse_duration_seconds(text)
 
 
+class IncomingTelemetryFailureActor:
+    current_identity = "主魂"
+
+    def get_identity_from_msg(self, msg):
+        raise IndexError("fixture telemetry failure")
+
+
 class DummyAvatarCommon(DummyCommon):
     avatars = ["缘生子"]
 
@@ -187,6 +194,19 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_incoming_telemetry_failure_does_not_interrupt_workflow(self):
+        actor = IncomingTelemetryFailureActor()
+        msg = SimpleNamespace(id=14731, sender_id=12345, text="坠魔心劫·第2轮")
+
+        result = asyncio.run(log_utils.log_incoming_message(
+            actor,
+            ".稳 1/3 try 1/3 (无咎子)",
+            msg.text,
+            msg=msg,
+        ))
+
+        self.assertFalse(result)
+
     def test_time_critical_wait_clears_stale_star_schedule(self):
         actor = DummyAvatarCommon()
         avatar = actor.get_avatar_state("缘生子")
@@ -5330,7 +5350,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_new_hantianzun_bots_are_recognized_as_game_bots(self):
         actor = SimpleNamespace(mc={})
-        for index in range(10, 26):
+        for index in range(10, 51):
             sender = SimpleNamespace(username=f"hantianzun{index}_bot", first_name="韩天尊")
             self.assertTrue(log_utils.is_game_bot_sender(actor, sender))
 
@@ -5344,7 +5364,7 @@ class ParserFixtureTests(unittest.TestCase):
 **当前天命所归**: **@bar**
 """
 
-        for index in range(10, 26):
+        for index in range(10, 51):
             sender = SimpleNamespace(username=f"hantianzun{index}_bot", first_name="韩天尊")
             record = star_gazing_collector.build_star_gazing_event_record(
                 "sub", msg, text, sender=sender

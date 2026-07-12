@@ -181,7 +181,7 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzun06_bot",            # 天尊06号（新机器人）
     "hantianzun07_bot",            # 天尊07号（新机器人）
     "hantianzun08_bot",            # 天尊08号（新机器人）
-} | {f"hantianzun{index}_bot" for index in range(10, 26)}
+} | {f"hantianzun{index}_bot" for index in range(10, 51)}
 
 # 反机器人挑战关键词
 ANTI_BOT_KEYWORDS = [
@@ -257,7 +257,7 @@ def command_from_log_label(label):
     return ""
 
 
-async def log_incoming_message(actor, label, text, msg=None, sender=None, logger=None, identity=None):
+async def _log_incoming_message_impl(actor, label, text, msg=None, sender=None, logger=None, identity=None):
     """记录收到的消息到日志"""
     if sender is None and msg is not None:
         try:
@@ -287,6 +287,28 @@ async def log_incoming_message(actor, label, text, msg=None, sender=None, logger
     record_command_response_for_reply(actor, msg, text=text, status="matched", logger=target_logger)
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id)
+
+
+async def log_incoming_message(actor, label, text, msg=None, sender=None, logger=None, identity=None):
+    """Record an incoming message without allowing telemetry failures to stop workflows."""
+    target_logger = logger or logging.getLogger(actor.__class__.__name__)
+    try:
+        await _log_incoming_message_impl(
+            actor,
+            label,
+            text,
+            msg=msg,
+            sender=sender,
+            logger=target_logger,
+            identity=identity,
+        )
+        return True
+    except Exception as exc:
+        target_logger.warning(
+            f"Incoming message telemetry failed for [{label}]: {exc}",
+            exc_info=True,
+        )
+        return False
 
 
 # ---- 重试限制 ----

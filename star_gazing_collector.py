@@ -71,7 +71,7 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzun06_bot",
     "hantianzun07_bot",
     "hantianzun08_bot",
-} | {f"hantianzun{index}_bot" for index in range(10, 26)}
+} | {f"hantianzun{index}_bot" for index in range(10, 51)}
 
 
 def _local_tz():

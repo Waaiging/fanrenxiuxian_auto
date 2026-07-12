@@ -250,7 +250,7 @@ BOT_REPLY_MARKERS = {
     "韩天尊",
 } | {
     marker
-    for index in range(10, 26)
+    for index in range(10, 51)
     for marker in (f"hantianzun{index}_bot", f"@hantianzun{index}_bot")
 }
 
