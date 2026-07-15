@@ -6940,7 +6940,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual([b["full_name"] for b in candidates], ["青蛟"])
 
-    def test_beast_steal_prefers_mahuateng_then_fallback(self):
+    def test_beast_steal_prefers_focus_then_fallback(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         cache = [
             {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
@@ -6948,10 +6948,10 @@ class ParserFixtureTests(unittest.TestCase):
             {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
         ]
 
-        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
+        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "六翼")
 
-        cache[2]["status"] = "受伤"
-        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "青蛟")
+        cache[0]["status"] = "受伤"
+        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
 
     def test_pastured_beasts_remain_action_candidates(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -7232,16 +7232,88 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sent, [".灵兽偷菜"])
         self.assertTrue(actor.state.get("next_steal_time"))
 
+    def test_focus_beast_waits_for_steal_settlement_before_pasture(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "best_beast_name": "六翼",
+            "best_beast_status": "出战中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+        pending_text = "灵兽已锁定目标：**@q** 的药园，其中一块灵田种着**【清灵草】**！\n正在准备动手..."
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return pending_text
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
+        self.assertEqual(sent, [".灵兽偷菜"])
+        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "偷菜中")
+        self.assertGreater(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 9 * 60)
+
+        settlement = "灵兽偷菜成功，获得【灵石】x1。"
+        self.assertTrue(actor.record_manual_beast_command_response(".灵兽偷菜", settlement))
+        self.assertTrue(actor.focus_pasture_after_abyss_due())
+
+    def test_focus_beast_is_pastured_after_steal(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽出战 六翼":
+                return "已将灵兽【六翼】设为出战状态。"
+            if command == ".灵兽偷菜":
+                return "灵兽偷菜成功，获得【灵石】x1。"
+            if command == ".灵兽休息 六翼":
+                return "已将灵兽【六翼】召回休息。"
+            if command == ".一键放养":
+                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
+            return ""
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
+        self.assertEqual(sent, [
+            ".灵兽出战 六翼",
+            ".灵兽偷菜",
+            ".灵兽休息 六翼",
+            ".一键放养",
+        ])
+        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
+
     def test_border_patrol_selects_highest_stamina_resting_beast(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {}
         cache = [
-            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 100},
             {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
             {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "出战中", "power": 31, "exp": 0, "stamina": 100},
         ]
 
         self.assertEqual(actor.select_beast_for_border_patrol(cache)["full_name"], "青蛟")
+
+    def test_border_patrol_recall_never_selects_focus_beast(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {}
+        cache = [
+            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 100},
+            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "偷菜中", "power": 31, "exp": 0, "stamina": 24},
+        ]
+
+        self.assertEqual(actor.select_beast_to_recall_for_border_patrol(cache)["full_name"], "麻花藤")
 
     def test_border_patrol_skips_known_low_stamina_candidate(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -8106,6 +8178,59 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreater(common_seconds_until(actor.state["next_abyss_time"]), 5 * 3600)
         self.assertEqual(actor.state["next_focus_pasture_after_abyss_time"], "")
         self.assertGreater(common_seconds_until(actor.state["focus_pasture_after_abyss_until"]), 3 * 3600)
+
+    def test_focus_beast_finishes_due_abyss_and_steal_before_pasture(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "best_beast_name": "六翼",
+            "best_beast_status": "休息中",
+            "beasts_cache": [
+                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+            ],
+        }
+        actor.save_state = lambda: None
+        actor.record_daily_reward_event = lambda *args, **kwargs: True
+        sent = []
+
+        async def fake_update():
+            return True
+
+        async def fake_abyss(beast_name):
+            sent.append(f".探渊 {beast_name}")
+            return "你的灵兽【六翼】成功击败了对手！它带回了战利品：【兽骨】x1。"
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if command == ".灵兽出战 六翼":
+                return "已将灵兽【六翼】设为出战状态。"
+            if command == ".灵兽偷菜":
+                return "灵兽偷菜成功，获得【灵石】x1。"
+            if command == ".灵兽休息 六翼":
+                return "已将灵兽【六翼】召回休息。"
+            if command == ".一键放养":
+                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
+            return ""
+
+        actor.update_beast_cache = fake_update
+        actor.send_abyss_with_busy_retry = fake_abyss
+        actor.send_and_wait_feedback = fake_send
+
+        async def run_actions():
+            self.assertTrue(await actor.execute_abyss_with_fallback(defer_focus_pasture=True))
+            self.assertNotIn(".一键放养", sent)
+            self.assertTrue(await actor.execute_steal_with_candidate())
+
+        asyncio.run(run_actions())
+
+        self.assertEqual(sent, [
+            ".探渊 六翼",
+            ".灵兽出战 六翼",
+            ".灵兽偷菜",
+            ".灵兽休息 六翼",
+            ".一键放养",
+        ])
+        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
 
     def test_focus_beast_after_abyss_immediate_pasture_block_reschedules(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

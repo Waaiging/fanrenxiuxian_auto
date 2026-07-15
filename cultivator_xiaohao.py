@@ -5,9 +5,9 @@
 本脚本是「凡人修仙传」Telegram 游戏的万灵宗角色自动修仙脚本。
 负责自动完成万灵宗特有的灵兽玩法循环：
   1. 灵兽管理 —— 缓存灵兽列表，自动放生/寻觅/更新状态
-  2. 灵兽探渊 —— 派遣最高战力灵兽探索万兽渊（6h CD）
-  3. 灵兽偷菜 —— 派遣灵兽偷取资源（4h CD）
-  4. 一键放养 + 灵兽互动/巡游 —— 批量放养、六翼互动与休息状态巡游
+  2. 灵兽探渊 —— 六翼优先探索万兽渊（6h CD）
+  3. 灵兽偷菜 —— 六翼优先偷取资源（4h CD）
+  4. 巡边/放养/互动 —— 其他灵兽巡边，六翼完成探渊/偷菜后优先放养恢复
   5. 深度闭关 —— 自动开闭关、8小时等待、结算重开
   6. 每日任务 —— 闯塔、宗门点卯
   7. 元婴出窍 —— 元婴期能力循环
@@ -179,7 +179,7 @@ PASTURE_CD_SECONDS = 4 * 3600 + 60             # 历史一键放养被动同步�
 PASTURE_RETURN_DELAY_SECONDS = 60              # 放养归来后延迟
 FOCUS_PASTURE_AFTER_ABYSS_RETRY_SECONDS = 30 * 60
 BEAST_FOCUS_NAME = "六翼"
-BEAST_STEAL_PREFERRED_NAME = "麻花藤"
+BEAST_STEAL_PREFERRED_NAME = BEAST_FOCUS_NAME
 BEAST_INTERACTION_COMMAND = f".灵兽互动 {BEAST_FOCUS_NAME}"
 BEAST_SOOTHE_COMMAND = f".灵兽互动 {BEAST_FOCUS_NAME} 安抚"
 BEAST_INTERACTION_CD_SECONDS = 90 * 60
@@ -2624,7 +2624,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         return candidates
 
     def steal_candidate_beasts(self, cache=None):
-        """偷菜候选：首选麻花藤，不可用时按体力/战力补位。"""
+        """偷菜候选：首选六翼，不可用时按体力/战力补位。"""
         candidates = self.beast_action_candidates("steal", cache, BEAST_STEAL_MIN_STAMINA)
         preferred = None
         fallback = []
@@ -2656,6 +2656,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 continue
             status = beast.get("status", "未知")
             name = beast.get("full_name", "")
+            if self.beast_name_matches(name, BEAST_FOCUS_NAME):
+                log.info(f"Border patrol candidate skipped: {BEAST_FOCUS_NAME} is reserved for abyss/steal/pasture.")
+                continue
             if any(self.beast_name_matches(name, excluded) for excluded in exclude_names):
                 log.info(f"Border patrol candidate skipped: {name} already failed this round.")
                 continue
@@ -2696,6 +2699,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 continue
             status = beast.get("status", "未知")
             name = beast.get("full_name", "")
+            if self.beast_name_matches(name, BEAST_FOCUS_NAME):
+                log.info(f"Border patrol recall candidate skipped: {BEAST_FOCUS_NAME} is reserved for abyss/steal/pasture.")
+                continue
             if any(self.beast_name_matches(name, excluded) for excluded in exclude_names):
                 log.info(f"Border patrol recall candidate skipped: {name} already failed this round.")
                 continue
@@ -4005,20 +4011,27 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         f_resp = await self.send_and_wait_feedback(".一键放养")
         return self.record_auto_pasture_response(f_resp, cache, focus_name, status, block_actions=False)
 
-    async def attempt_focus_pasture_after_abyss(self, beast_name):
-        """六翼探渊结算后先立刻尝试一次放养；若仍需休养则由回执重排。"""
+    def queue_focus_pasture_after_priority_action(self, beast_name, action="priority action"):
+        """标记六翼完成探渊/偷菜，等待立即放养恢复体力。"""
         if not self.beast_name_matches(beast_name, BEAST_FOCUS_NAME):
             return False
         self.state["next_focus_pasture_after_abyss_time"] = now_str()
         self.set_next_pasture_not_after(now_str())
         self.save_state()
+        log.info(f"Focus pasture queued after {action}: {BEAST_FOCUS_NAME}.")
+        return True
+
+    async def attempt_focus_pasture_after_priority_action(self, beast_name, action="priority action"):
+        """六翼完成探渊/偷菜后立刻尝试放养；若仍需休养则由回执重排。"""
+        if not self.queue_focus_pasture_after_priority_action(beast_name, action):
+            return False
         if not await self.ensure_focus_beast_ready_for_pasture():
             self.schedule_focus_pasture_after_abyss(
                 BEAST_FOCUS_NAME,
                 retry_seconds=BEAST_ACTION_RETRY_SECONDS,
             )
             return False
-        log.info(f"Focus pasture after abyss: trying .一键放养 immediately for {BEAST_FOCUS_NAME}.")
+        log.info(f"Focus pasture after {action}: trying .一键放养 immediately for {BEAST_FOCUS_NAME}.")
         f_resp = await self.send_and_wait_feedback(".一键放养")
         handled = self.record_auto_pasture_response(
             f_resp,
@@ -4029,6 +4042,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         )
         self.record_focus_pasture_after_abyss_attempt(f_resp, handled)
         return handled
+
+    async def attempt_focus_pasture_after_abyss(self, beast_name):
+        return await self.attempt_focus_pasture_after_priority_action(beast_name, "abyss")
 
     def is_no_beast_deployed_for_steal_response(self, text):
         """检测偷菜时未出战灵兽的明确失败回复"""
@@ -4042,6 +4058,18 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             "成功", "获得", "偷菜", "已领命", "潜行",
             "已锁定目标", "正在准备动手",
         ])
+
+    def is_steal_pending_response(self, text):
+        """偷菜已受理但尚未结算，此时不能提前放养执行灵兽。"""
+        clean = str(text or "")
+        return any(k in clean for k in ["已领命", "潜行", "已锁定目标", "正在准备动手"])
+
+    def is_steal_settled_response(self, text):
+        """偷菜已经产生最终成功/收益回执，可以放养恢复。"""
+        clean = str(text or "")
+        if not clean or self.is_steal_pending_response(clean):
+            return False
+        return any(k in clean for k in ["偷菜成功", "获得", "收获", "带回", "战利品", "偷得"])
 
     def handle_beast_deploy_failure_for_steal(self, beast_name, response_text, context):
         """Handle explicit deploy failures before steal without emitting unknown alerts."""
@@ -4066,7 +4094,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         return False
 
     async def execute_steal_with_candidate(self, cache=None):
-        """偷菜首选麻花藤；候选受伤/体力不足/忙碌时继续补位。"""
+        """偷菜首选六翼；候选受伤/体力不足/忙碌时继续补位。"""
         steal_cache = list(self.state.get("beasts_cache", [])) or list(cache or [])
         candidates = self.steal_candidate_beasts(steal_cache)
         if not candidates:
@@ -4205,11 +4233,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             elif self.is_steal_accepted_response(s_resp):
                 self.state["last_steal_time"] = now_str()
                 self.state["next_steal_time"] = add_seconds_str(now_str(), 14400)
-                self.set_best_beast_status(best_name, "出战中")
+                self.set_best_beast_status(
+                    best_name,
+                    "偷菜中" if self.is_steal_pending_response(s_resp) else "出战中",
+                )
             else:
                 notify_unrecognized_response(self, ".灵兽偷菜", s_resp, log, f"灵兽偷菜[{best_name}]")
                 continue
             self.save_state()
+            if self.beast_name_matches(best_name, BEAST_FOCUS_NAME):
+                if self.is_steal_pending_response(s_resp):
+                    self.schedule_focus_pasture_after_abyss(
+                        best_name,
+                        retry_seconds=BEAST_ACTION_RETRY_SECONDS,
+                    )
+                    log.info(f"Focus pasture deferred: {BEAST_FOCUS_NAME} is still stealing.")
+                else:
+                    await self.attempt_focus_pasture_after_priority_action(best_name, "steal")
             return True
 
         status_check = self.state.get("next_beast_status_check_time", "")
@@ -4554,7 +4594,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             ordered.extend(fallback)
         return ordered
 
-    async def execute_abyss_with_fallback(self):
+    async def execute_abyss_with_fallback(self, defer_focus_pasture=False):
         """探渊前按防刷屏标准更新灵兽缓存；六翼>=50优先，否则按候选体力/战力补位。"""
         log.info("Abyss: checking beast roster cache before selecting candidate.")
         if not await self.update_beast_cache():
@@ -4663,7 +4703,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 self.set_best_beast_status(best_name, "休息中")
                 abyss_settled = any(k in a_resp for k in ["获得", "收获", "战利品", "带回", "奖励", "击败"])
                 if self.beast_name_matches(best_name, BEAST_FOCUS_NAME) and abyss_settled:
-                    await self.attempt_focus_pasture_after_abyss(best_name)
+                    if defer_focus_pasture:
+                        self.queue_focus_pasture_after_priority_action(best_name, "abyss; waiting for steal")
+                    else:
+                        await self.attempt_focus_pasture_after_abyss(best_name)
                 self.save_state()
                 return True
 
@@ -5087,6 +5130,12 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 self.state["last_abyss_time"] = now_str()
                 self.state["next_abyss_time"] = add_seconds_str(now_str(), 21600)
                 self.set_best_beast_status(beast_name, "休息中")
+                abyss_settled = any(k in str(text or "") for k in ["获得", "收获", "战利品", "带回", "奖励", "击败"])
+                if self.beast_name_matches(beast_name, BEAST_FOCUS_NAME) and abyss_settled:
+                    self.queue_focus_pasture_after_priority_action(beast_name, "abyss settlement")
+                    beast_wakeup = getattr(self, "beast_wakeup", None)
+                    if beast_wakeup is not None:
+                        beast_wakeup.set()
                 self.save_state()
                 return True
             return False
@@ -5105,6 +5154,23 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             if self.is_steal_accepted_response(text):
                 self.state["last_steal_time"] = now_str()
                 self.state["next_steal_time"] = add_seconds_str(now_str(), 14400)
+                best_name = self.state.get("best_beast_name", "")
+                if best_name:
+                    self.set_best_beast_status(
+                        best_name,
+                        "偷菜中" if self.is_steal_pending_response(text) else "出战中",
+                    )
+                if self.beast_name_matches(best_name, BEAST_FOCUS_NAME):
+                    if self.is_steal_pending_response(text):
+                        self.schedule_focus_pasture_after_abyss(
+                            best_name,
+                            retry_seconds=BEAST_ACTION_RETRY_SECONDS,
+                        )
+                    elif self.is_steal_settled_response(text):
+                        self.queue_focus_pasture_after_priority_action(best_name, "steal settlement")
+                        beast_wakeup = getattr(self, "beast_wakeup", None)
+                        if beast_wakeup is not None:
+                            beast_wakeup.set()
                 self.save_state()
                 return True
         return False
@@ -6862,9 +6928,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
     async def run_beast_action_timer(self):
         """
         灵兽行动主循环。
-        按优先级执行：探渊(6h) → 偷菜(4h) → 灵兽巡边(75min) → 一键放养(4h) → 灵兽互动(90min) → 灵兽巡游(120min)。
-        探渊首选六翼；偷菜首选麻花藤；首选灵兽受伤、忙碌或体力不足时按候选补位。
-        六翼体力低于50时仍优先放养保护，不参与偷菜/巡边/巡游/探渊。
+        按优先级执行：探渊(6h) → 偷菜(4h) → 六翼放养恢复 → 灵兽巡边(75min) → 常规一键放养(4h) → 灵兽互动(90min) → 灵兽巡游(120min)。
+        探渊、偷菜首选六翼；巡边始终排除六翼，改由其他可用灵兽执行。
+        六翼体力低于50时仍优先放养保护，不参与偷菜/巡游/探渊。
         """
         await self.startup_done.wait()
         while self.is_running:
@@ -6942,15 +7008,27 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                     if need_abyss or need_steal:
                         if cache:
                             if need_abyss:
-                                await self.execute_abyss_with_fallback()
+                                await self.execute_abyss_with_fallback(defer_focus_pasture=need_steal)
                                 await asyncio.sleep(3)
                             if need_steal:
                                 await self.execute_steal_with_candidate(cache)
                                 await asyncio.sleep(3)
                         else:
                             log.warning("Beast action due but cache is empty; scheduling abyss/steal retry.")
-                            if need_abyss: await self.execute_abyss_with_fallback()
-                            if need_steal: self.set_next_steal_not_before(add_seconds_str(now_str(), 1800)); self.save_state()
+                            if need_abyss: await self.execute_abyss_with_fallback(defer_focus_pasture=need_steal)
+                            if need_steal:
+                                refreshed_cache = list(self.state.get("beasts_cache", []))
+                                if refreshed_cache:
+                                    await self.execute_steal_with_candidate(refreshed_cache)
+                                    await asyncio.sleep(3)
+                                else:
+                                    self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
+                                    self.save_state()
+                    if self.focus_pasture_after_abyss_due():
+                        log.info(f"Beast focus recovery: priority work finished; pasturing {BEAST_FOCUS_NAME} before patrol.")
+                        await self.attempt_focus_pasture_after_priority_action(BEAST_FOCUS_NAME, "abyss/steal")
+                        need_pasture = False
+                        await asyncio.sleep(3)
                     if need_patrol:
                         async with AtomicTaskContext(self, "BeastBorderPatrol"):
                             log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
