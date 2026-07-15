@@ -95,6 +95,10 @@ from common_command_features import CommonCommandMixin, common_command_default_s
 from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 from fishing_features import FishingMixin
+from group_visibility_control import (
+    TelegramGroupXiaohaoController,
+    TmuxXiaohaoProcessManager,
+)
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from yinluo_features import YinluoMixin, YINLUO_IDENTITY
@@ -444,6 +448,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         # ------ 3. 目标聊天/主题 ------
         self.target_chat_id = self.mc.get('chat_id', 'fanrenxxz')  # 游戏群 ID 或公开用户名
         self.topic_id = self.mc.get('topic_id')                    # 可选 Forum Topic ID
+        self.xiaohao_visibility_control_enabled = bool(
+            self.mc.get("xiaohao_visibility_control", True)
+        )
+        self.xiaohao_visibility_poll_seconds = max(
+            15,
+            int(self.mc.get("xiaohao_visibility_poll_seconds", 60) or 60),
+        )
+        self.group_visibility_controller = None
         # 游戏机器人用户名，去掉 @ 前缀并转小写，方便后续比较
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
         self.notify_bot_username = self.config.get('notify_bot', 'waaiging_bot')  # 告警机器人
@@ -603,6 +615,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             "pending_star_gazing_manifest_time": "",           # 待观星对应的显化整点
             "star_gazing_claimed_manifest_time": "",           # 本账号已指派观星的显化整点
             "star_gazing_claimed_avatar": "",                  # 本轮显化已指派的身份
+            "target_group_visibility": "",                      # 游戏群公开/私密状态
+            "target_group_visibility_changed_at": "",           # 最近一次可见性变化时间
+            "xiaohao_visibility_last_action": "",               # 因群可见性启停小号的动作
+            "xiaohao_visibility_last_action_at": "",            # 最近自动启停时间
         }
         # 合并继承的默认状态
         default_state.update(common_command_default_state())
@@ -5160,6 +5176,11 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         self.create_scheduler_task("bushi_wentian_daily", lambda: self.run_bushi_wentian_daily_loop(initial_delay=30, sleep_func=scheduler_sleep_seconds))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
+        if getattr(self, "group_visibility_controller", None) is not None:
+            self.create_scheduler_task(
+                "xiaohao_visibility_control",
+                lambda: self.group_visibility_controller.run(lambda: self.is_running),
+            )
         if not self.lingxiao_enabled:
             self.create_scheduler_task("main_spirit_tree", lambda: self.run_main_spirit_tree_loop())
 
@@ -5207,6 +5228,28 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         self.my_info = await self.client.get_me()
         log.info(f"Main Login: {self.my_info.first_name}")
 
+        if self.xiaohao_visibility_control_enabled and os.name != "nt":
+            process_manager = TmuxXiaohaoProcessManager(
+                CONFIG_DIR,
+                log,
+                python_executable=sys.executable,
+            )
+            self.group_visibility_controller = TelegramGroupXiaohaoController(
+                self.client,
+                self.target_chat_id,
+                process_manager,
+                log,
+                state=self.state,
+                save_state=self.save_state,
+                poll_seconds=self.xiaohao_visibility_poll_seconds,
+            )
+            log.info(
+                "Xiaohao visibility control enabled: private=start, public=stop, poll=%ss.",
+                self.xiaohao_visibility_poll_seconds,
+            )
+        elif self.xiaohao_visibility_control_enabled:
+            log.info("Xiaohao visibility control is only active on the VPS/Linux runtime.")
+
         # 注册新消息事件（所有游戏消息走这里）
         @self.client.on(events.NewMessage(chats=self.target_chat_id))
         async def handler(event):
@@ -5250,6 +5293,14 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         )
             except Exception as e:
                 log.error(f"Edited message handler error: {e}")
+
+        if self.group_visibility_controller is not None:
+            @self.client.on(events.Raw)
+            async def group_visibility_update_handler(update):
+                if self.group_visibility_controller.update_targets_group(update):
+                    asyncio.create_task(
+                        self.group_visibility_controller.check_once("UpdateChannel")
+                    )
 
         # 进入主循环（会阻塞直到脚本停止）
         await self.run_cultivation_loop()

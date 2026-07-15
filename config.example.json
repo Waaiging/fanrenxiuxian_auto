@@ -9,6 +9,8 @@
   "monitor": {
     "chat_id": "fanrenxxz",
     "topic_id": null,
+    "xiaohao_visibility_control": true,
+    "xiaohao_visibility_poll_seconds": 60,
     "keywords": [
       "玄骨上人",
       "极阴祖师",
