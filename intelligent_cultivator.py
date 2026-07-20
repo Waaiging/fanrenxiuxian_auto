@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Intelligent Cultivator v8.5 (LingXiaoGong Edition)
-- Specialized for LingXiaoGong Cloud Stairs and Cultivation.
+Intelligent Cultivator v8.6 (Wanling Edition)
+- Main soul Wanling beast automation with avatar-aware scheduling.
 - STRICT feedback matching: Only accepts Mentions or Reply-To.
 - Synchronized Actions: Uses Lock to prevent command racing between loops.
 - 300s retention, 10-30s variance.
@@ -14,7 +14,7 @@ Intelligent Cultivator v8.5 (LingXiaoGong Edition)
   2. 深度闭关 —— 自动开闭关、8小时等待、结算重开
   3. 引九天罡风 —— 增益 buff 循环
   4. 问心台 —— 爬塔辅助 buff
-  5. 每日任务 —— 闯塔、宗门点卯
+  5. 每日任务 —— 宗门点卯
   6. 元婴出窍 —— 元婴期能力循环
   7. 探寻裂缝 —— 定时搜寻裂缝
   8. 抚摸法宝 —— 本命法宝器灵互动
@@ -90,9 +90,16 @@ def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
-from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
+from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 from common_command_features import CommonCommandMixin, common_command_default_state
-from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
+from duel_features import DuelMixin
+from main_beast_features import MainBeastMixin, main_beast_default_state, main_beast_feedback_candidate
+from command_feedback import (
+    _handle_telegram_send_protection,
+    is_retired_auto_command,
+    record_telegram_send_success,
+    send_and_wait_feedback_common,
+)
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 from fishing_features import FishingMixin
 from group_visibility_control import (
@@ -127,6 +134,7 @@ from log_utils import (
     match_pending_feedback_by_reply,        # 按 reply_to 匹配机器人反馈
     notify_unrecognized_response,           # 通知无法识别的回复
     periodic_log_prune,        # 定期修剪日志文件
+    periodic_message_events_prune, # SQLite 事件库 15 天保留清理
     prune_log_file,            # 修剪日志文件
     record_bot_no_response,    # 记录机器人无响应
     record_bot_response,       # 记录机器人响应
@@ -187,6 +195,7 @@ DESTINY_WINDOW_START_HOUR = 0               # 观命开始小时
 DESTINY_WINDOW_START_MINUTE = 10            # 观命开始分钟
 DESTINY_WINDOW_END_HOUR = 0                 # 观命结束小时
 DESTINY_WINDOW_END_MINUTE = 20              # 观命结束分钟
+DESTINY_DEFER_CUTOFF_MINUTES = 5            # 窗口结束前 5 分钟不再为普通逾期任务让路
 DESTINY_MEDITATION_DEFER_SECONDS = 20 * 60  # 观命窗口前短暂暂缓新开闭关
 DESTINY_OBSERVE_FAILURE_KEYWORDS = (
     "无法", "不能", "不可", "闭关中", "深度闭关", "正在闭关", "闭关状态",
@@ -258,6 +267,16 @@ def now_str():
 def str_to_dt(s):
     """标准格式时间字符串 → datetime 对象"""
     return datetime.strptime(s, TIME_FORMAT)
+
+def safe_str_to_dt(s, default=None):
+    """Best-effort state timestamp parser; empty/corrupt persisted values are not fatal."""
+    value = str(s or "").strip()
+    if not value:
+        return default
+    try:
+        return datetime.strptime(value, TIME_FORMAT)
+    except (TypeError, ValueError):
+        return default
 
 def dt_to_str(dt):
     """datetime 对象 → 标准格式时间字符串"""
@@ -347,6 +366,27 @@ logging.getLogger('telethon').setLevel(logging.WARNING)  # Telethon 库日志只
 logging.getLogger('asyncio').setLevel(logging.WARNING)   # asyncio 库日志只显示 WARNING 以上
 
 
+def configure_runtime_files(config_file, log_file, state_file):
+    """Rebind the shared main-soul engine to another account's runtime files."""
+    global CONFIG_FILE, LOG_FILE, STATE_FILE
+
+    CONFIG_FILE = os.path.abspath(config_file)
+    LOG_FILE = os.path.abspath(log_file)
+    STATE_FILE = os.path.abspath(state_file)
+    prune_log_file(LOG_FILE)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(LOG_FILE, encoding='utf-8', mode='a'),
+            logging.StreamHandler(sys.stdout),
+        ],
+        force=True,
+    )
+    logging.getLogger('telethon').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+
+
 def load_config():
     """从 JSON 文件加载配置（API ID、API Hash、监控设置等）"""
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -408,7 +448,7 @@ class AtomicTaskContext:
 # 主类：Cultivator
 # =====================================================================
 
-class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
+class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """
     凌霄宫修仙主控类。
     继承自:
@@ -456,19 +496,29 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             int(self.mc.get("xiaohao_visibility_poll_seconds", 60) or 60),
         )
         self.group_visibility_controller = None
+        self.group_visibility_controllers = []
+        self.manage_restricted_accounts = True
         # 游戏机器人用户名，去掉 @ 前缀并转小写，方便后续比较
         self.watch_bot = self.mc.get('watch_bot', 'fanrenxiuxian_bot').lower().lstrip('@')
         self.notify_bot_username = self.config.get('notify_bot', 'waaiging_bot')  # 告警机器人
 
         # ------ 4. 宗派信息 ------
-        self.sect_name = "凌霄宫"
+        self.sect_name = "万灵宗"
         self.identity_sect_names = {
-            "主魂": "凌霄宫",
+            "主魂": "万灵宗",
             "无咎子": "天星宗",
             "缘生子": "阴罗宗",
             "素缘子": "星宫",
         }
-        self.lingxiao_enabled = True
+        self.lingxiao_enabled = False
+        self.enable_treasure_touch = True
+        self.enable_nurture_spirit = True
+        self.enable_concubine = True
+        self.enable_avatar_tasks = True
+        self.enable_spirit_tree = False
+        self.enable_main_beasts = True
+        self.enable_soul_curse = True
+        self.enable_telegram_write_permission_monitor = False
 
         # ------ 5. 运行控制 ------
         self.is_running = True                     # 控制所有循环的运行状态
@@ -504,9 +554,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             "主魂": ["Weeguu"],
         }
         self.avatar_features = {
-            "无咎子": {"meditation_prefix": ".推命", "training_prefix_commands": [".推命 探索", ".改命 探索"], "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "tower": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True, "treasure_touch_command": WUJIU_TREASURE_TOUCH_COMMAND},
-            "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "spirit_tree_irrigation": True, "daily_checkin": True, "yuanying_out": True, "rift_search": True},
-            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "tower": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
+            "无咎子": {"meditation_prefix": ".推命", "training_cmd": ".野外历练", "training_level": "深入", "dream_map": True, "heart_trial": True, "daily_checkin": True, "destiny": True, "yuanying_out": True, "rift_search": True, "treasure_touch_command": WUJIU_TREASURE_TOUCH_COMMAND},
+            "缘生子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "daily_checkin": True, "yuanying_out": True, "rift_search": True},
+            "素缘子": {"meditation_prefix": "", "training_cmd": ".野外历练", "training_level": "", "dream_map": True, "heart_trial": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True, "daily_checkin": True},
         }
         self.actual_cooldown_probe_commands = {
             ("无咎子", ".探寻裂缝"),
@@ -525,14 +575,28 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         # ------ 6. 状态持久化 ------
         self.state_file = STATE_FILE
         self.state = self.load_state()             # 从文件加载持久化状态
+        self.initialize_main_beast_runtime()
+        sect_state_changed = False
+        if self.state.get("sect_name") != self.sect_name:
+            self.state["sect_name"] = self.sect_name
+            sect_state_changed = True
+        if self.state.get("identity_sect_names") != self.identity_sect_names:
+            self.state["identity_sect_names"] = dict(self.identity_sect_names)
+            sect_state_changed = True
+        if sect_state_changed:
+            self.save_state()
         # startup: restore paused state
         if self.state.get("is_paused", False):
             self.pause_event.clear()
             log.info("Startup: is_paused=True, entering paused state.")
 
         # ---- 化身状态（依赖 self.state） ----
-        self._current_identity = self.state.get("current_identity", "主魂")
-        self._main_confirmed = (self._current_identity == "主魂")  # 启动时若上次为主魂则默认确认，否则强制对齐
+        # The persisted identity describes the previous process, not the
+        # Telegram session's live identity.  Force the first command after a
+        # restart through an explicit .切换 confirmation.
+        self._persisted_identity = self.state.get("current_identity", "主魂")
+        self._current_identity = ""
+        self._main_confirmed = False
         self._switch_lock = asyncio.Lock()  # 防止多个任务同时发送 .切换 主魂
         self.star_gazing_lock = asyncio.Lock()  # 观星操作互斥锁
         self.ensure_avatar_states()
@@ -624,6 +688,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         default_state.update(common_command_default_state())
         default_state.update(concubine_default_state())
         default_state.update(spirit_tree_default_state())
+        default_state.update(main_beast_default_state())
 
         if os.path.exists(self.state_file):
             try:
@@ -711,6 +776,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             remember_script_send_intent(self, message)
             # 发送消息到目标聊天
             msg = await self.client.send_message(self.target_chat_id, message, reply_to=target_reply)
+            await record_telegram_send_success(self, logger=log)
             remember_script_sent_message(self, msg)
             record_command_sent(self, msg, message, identity=getattr(self, "current_identity", "主魂"), source="auto", reply_to=target_reply, logger=log)
             # 安排自动删除（120 秒后删除，保持聊天清洁）
@@ -755,6 +821,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         发送指令并等待回复（带 avatar_send_lock 保护）。
         所有主魂业务通过此方法发送。如果当前身份不是主魂，或者主魂状态未确认，自动切回主魂再发送。
         """
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         # 整体任务守卫
         current_t = asyncio.current_task()
         while self.should_wait_for_atomic_task(message):
@@ -986,6 +1055,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             return "修士状态" in text and "境界" in text
         if command == ".我的灵根":
             return "天命玉牒" in text and "修为" in text
+        if main_beast_feedback_candidate(command, text):
+            return True
         if command in {SPIRIT_TREE_IRRIGATION_COMMAND, SPIRIT_TREE_STATUS_COMMAND, SPIRIT_TREE_HARVEST_COMMAND, SPIRIT_TREE_GUARD_COMMAND}:
             return any(k in text for k in [
                 "灵树", "灵果", "采摘期", "成熟采摘期", "造化青莲果",
@@ -1092,19 +1163,23 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
 
             # ---- 控制指令：止/启（仅管理员可触发） ----
             sender_check = await event.get_sender()
+            # 所有主魂/化身 @ 提及先记日志，不能被控制指令、反馈匹配或其他提前返回吞掉。
+            log_mention_if_needed(
+                self, msg, text=text, sender=sender_check, mentions_only=True
+            )
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
             _chat_id_match = (msg.chat_id == self.target_chat_id or msg.chat_id == int(f"-100{self.target_chat_id}"))
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender_check, log):
                     return
-                if await handle_pause_control_command(self, msg, text, sender_check, log, label="凌霄宫脚本"):
+                if await handle_pause_control_command(self, msg, text, sender_check, log, label="万灵宗主号脚本"):
                     return
                 if await self.maybe_handle_fishing_control_message(msg, text, sender_check):
                     return
 
             sender_cache = await event.get_sender()
             record_message_event(self, msg, text=text, sender=sender_cache, event_kind="new", direction="raw", logger=log)
-            record_star_gazing_event("main", msg, text, sender=sender_cache, logger=log)
+            record_star_gazing_event(self.account_key, msg, text, sender=sender_cache, logger=log)
 
             # 如果是脚本自己手动发出的消息，记录但不处理
             if log_manual_outgoing_if_needed(self, msg, text=text):
@@ -1122,6 +1197,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 self.update_identity_passively(msg)
                 manual_reply = is_reply_to_manual_command(self, msg)
                 manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender_cache, log)
+                if text_targets_current_account(self, msg, text):
+                    self.record_main_pasture_return(text)
                 self.record_star_shift_attempt_if_needed(msg, text, source="new message")
                 if not manual_reply or not manual_processed:
                     self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
@@ -1135,7 +1212,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                     asyncio.create_task(self.maybe_assist_target_formation_invite(msg))
 
             # 处理反机器人验证（如 captcha）
-            if await handle_anti_bot_challenge(self, msg, text, sender_cache, log, title="凌霄宫自证告警"):
+            if await handle_anti_bot_challenge(self, msg, text, sender_cache, log, title="万灵宗主号自证告警"):
                 return
 
             # 被动记录田野修炼和宗门战信息
@@ -1209,7 +1286,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
 
             # 1) 精确匹配：优先使用 Telegram reply_to 归属到待处理命令
             is_matched = match_pending_feedback_by_reply(
-                self, msg, text, self.is_loose_feedback_candidate, log, label="[REPLY-FEEDBACK]"
+                self, msg, text, self.is_loose_feedback_candidate, log,
+                label="[REPLY-FEEDBACK]", sender=sender_cache
             )
 
             # 2) 宽松匹配：消息提到了我们的用户名，但没有回复我们的消息
@@ -1232,6 +1310,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         log,
                         id_window=20,
                         label="[MENTION-FEEDBACK]",
+                        sender=sender_cache,
                     )
 
             # 3) 模糊匹配：没有回复我们的消息，也没有 @我们，但内容明显是某个指令的回复
@@ -1252,6 +1331,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                             log,
                             id_window=20,
                             label="[LOOSE-FEEDBACK]",
+                            sender=sender_cache,
                         )
 
             # 未匹配的消息：记录 @提及，处理自动回复
@@ -1948,8 +2028,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         pause_until = self.mark_identity_rift_rebirth_pending(identity, response, source=".探寻裂缝")
         await send_text_alert(
             self,
-            "凌霄宫探寻裂缝告警",
-            f"探寻裂缝触发元婴虚弱期，主号身份【{identity}】已暂停；其他身份继续执行。\n\n"
+            f"{self.sect_name}探寻裂缝告警",
+            f"探寻裂缝触发元婴虚弱期，账号【{self.account_key}】身份【{identity}】已暂停；其他身份继续执行。\n\n"
             f"恢复条件：发送 `.重生 1` / `.重生 2` / `.重生 3` 任一成功后自动恢复。\n"
             f"当前状态：{pause_until}\n\n机器人回复：\n{response}",
             log,
@@ -2199,23 +2279,16 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
     async def run_daily_tasks(self):
         """
         每日任务循环。
-        每天早上 7:00 执行一次，完成以下任务：
-          1. 宗门点卯（.宗门点卯）
-          2. 闯塔（.闯塔，配合 .借天门势）
-
-        实现细节：
-          - 使用 state["done"] 记录今日已完成的任务，防止重复执行
-          - 闯塔前先 .借天门势（增加成功率）
+        每天早上 7:00 执行宗门点卯。
         """
         return await self.run_common_daily_tasks_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".宗门点卯", ".闯塔"],
+            [".宗门点卯"],
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
             send_kwargs_func=lambda command: {"return_msg": True},
             mark_done_before_send=True,
-            use_lingxiao_tower_buff=True,
             reset_heart_platform_date=True,
         )
 
@@ -2653,8 +2726,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         avatar_default = {
             "next_meditation_time": "", "last_meditation_time": "", "level": "",
             "next_field_training_time": "", "last_field_training_time": "",
-            "bushi_wentian_date": "", "bushi_wentian_count": 0, "bushi_wentian_exchange_count": 0,
-            "bushi_wentian_kunwu_exchanged": False,
             "nickname": "", "in_deep_meditation": False,
             "deep_meditation_end_time": "", "deep_meditation_guard_until": "",
             "meditation_restart_pending": False,
@@ -3869,10 +3940,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         today = datetime.now().strftime("%Y-%m-%d")
         if identity == "主魂":
             done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            daily_due = (
-                (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
-                or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
-            )
+            daily_due = ".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity)
             if (
                 seconds_until_daily_task_start(datetime.now()) <= 0
                 and daily_due
@@ -3887,14 +3955,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 and not self.dashboard_command_paused(".宗门点卯", identity)
                 and seconds_until_daily_task_start(datetime.now()) <= 0
                 and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
-            ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
-            if (
-                features.get("tower")
-                and state.get("last_tower_date") != today
-                and not self.dashboard_command_paused(".闯塔", identity)
-                and datetime.now().hour >= 23
-                and not self.daily_one_shot_should_defer(identity, ".闯塔")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -3936,6 +3996,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
 
     async def send_and_wait_feedback_identity(self, identity, message, timeout=45, max_retries=2, **kwargs):
         """带身份感知的指令发送：先切换到目标化身，再发送指令"""
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         high_priority_identity_command = self.time_critical_identity_command(message)
@@ -4293,7 +4356,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         )
                         return False
 
-                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
+                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
                         current_msg, sent, round_num, timeout_sec=90, poll_sec=3,
                     )
                     if result_msg:
@@ -4320,20 +4383,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                     return False
             self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 10 * 3600))
             return True
-
-    # ============================================================
-    # 身外化身：闯塔
-    # ============================================================
-
-    async def run_avatar_tower_loop(self, avatar):
-        return await self.run_common_avatar_tower_loop(
-            avatar,
-            timeout=120,
-            handle_insufficient_cultivation=True,
-            require_meditation_ready=False,
-            sleep_func=scheduler_sleep_seconds,
-            delay_range=(0, 1800),
-        )
 
     # ============================================================
     # 身外化身：顺序执行主循环
@@ -4369,15 +4418,12 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg and not self.formation_assist_in_progress:
                             await self._avatar_assist_formation(avatar)
-                        # 4. 灵树灌溉
-                        if features.get("spirit_tree_irrigation"): await self._avatar_spirit_tree_irrigation_check(avatar)
-                        # 5. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
+                        # 4. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
                         if features.get("dream_map") or features.get("heart_trial"):
                             await self.execute_avatar_concubine_chain(avatar)
-                        # 6. 每日一次性任务优先级最低，放在本轮最后。
+                        # 5. 每日一次性任务优先级最低，放在本轮最后。
                         if features.get("daily_checkin"): await self._avatar_daily_checkin(avatar)
                         if features.get("destiny"): await self._avatar_destiny_check(avatar)
-                        if features.get("tower"): await self._avatar_tower_check(avatar)
                     except Exception as e:
                         log.error(f"Avatar [{avatar}] error: {e}", exc_info=True)
                     log.info(f"Avatar [{avatar}] cycle complete")
@@ -4461,8 +4507,10 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         if a_state.get("last_destiny_date") != today:
             if now < start:
                 return max(0, int((start - now).total_seconds()))
-            if now <= end:
-                return 0
+            # Once today's window opens, keep retrying for the rest of the day.
+            # The old implementation jumped straight to tomorrow after 00:20,
+            # permanently losing a deferred or temporarily blocked daily run.
+            return 0
         tomorrow = now + timedelta(days=1)
         tomorrow_start = tomorrow.replace(
             hour=DESTINY_WINDOW_START_HOUR,
@@ -4479,8 +4527,9 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         a_state = self.get_avatar_state(avatar)
         today = now.strftime("%Y-%m-%d")
         start, end = self._avatar_destiny_window(now)
-        if a_state.get("last_destiny_date") != today and now <= end:
-            return start, end
+        day_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        if a_state.get("last_destiny_date") != today and now <= day_end:
+            return start, day_end
         tomorrow = now + timedelta(days=1)
         tomorrow_start = tomorrow.replace(
             hour=DESTINY_WINDOW_START_HOUR,
@@ -4497,7 +4546,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         return tomorrow_start, tomorrow_end
 
     async def _avatar_destiny_check(self, avatar):
-        """无咎子每日 00:10-00:20 观命，并按结果定命。"""
+        """无咎子每日 00:10 后观命；主窗口错过后在当天持续补跑。"""
         if avatar != DESTINY_AVATAR:
             return
         if self.dashboard_command_paused(".观命", avatar):
@@ -4508,9 +4557,13 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         if a_state.get("last_destiny_date") == today:
             return
         start, end = self._avatar_destiny_window(now)
-        if now < start or now > end:
+        if now < start:
             return
-        if self.daily_one_shot_should_defer(avatar, ".观命", logger=log):
+        defer_cutoff = end - timedelta(minutes=DESTINY_DEFER_CUTOFF_MINUTES)
+        # Before the deadline approaches, daily destiny may yield to genuinely
+        # overdue work. During the last five minutes and all catch-up time after
+        # 00:20 it must run instead of being deferred until tomorrow.
+        if now < defer_cutoff and self.daily_one_shot_should_defer(avatar, ".观命", logger=log):
             return
 
         async with AtomicTaskContext(self, f"Destiny-{avatar}"):
@@ -4529,17 +4582,47 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 log.warning(f"[{avatar}] .观命 未收到有效回复，保留今日重试机会。")
                 return
             clean_text = resp_text.replace("**", "")
+            if any(marker in clean_text for marker in ("今日已定命", "命轨已定", "今日命轨定在")):
+                existing_choice = next(
+                    (name for name in ("贪狼", "太阴", "紫微", "天府") if name in clean_text),
+                    "",
+                )
+                self.set_avatar_state(avatar, "last_destiny_date", today)
+                self.set_avatar_state(avatar, "last_destiny_time", now_str())
+                self.set_avatar_state(avatar, "last_destiny_choice", existing_choice)
+                log.info(f"[{avatar}] 检测到今日命轨已由手动操作完成：{existing_choice or '未知命星'}。")
+                return
             if any(keyword in clean_text for keyword in DESTINY_OBSERVE_FAILURE_KEYWORDS):
                 log.info(f"[{avatar}] .观命 返回失败/不可执行，跳过定命并保留重试机会。")
                 return
 
-            choice = "贪狼" if "贪狼" in clean_text else "太阴"
+            choice = next(
+                (name for name in ("贪狼", "太阴", "紫微", "天府") if name in clean_text),
+                "",
+            )
+            if not choice:
+                log.warning(f"[{avatar}] .观命 未解析出可选命星，保留今日重试机会。")
+                return
             destiny_cmd = f".定命 {choice}"
             if self.dashboard_command_paused(destiny_cmd, avatar):
-                log.info(f"[{avatar}] {destiny_cmd} 已在 dashboard 暂停，跳过定命。")
-            else:
-                await asyncio.sleep(3)
-                await self.send_and_wait_feedback_identity(avatar, destiny_cmd, timeout=90)
+                log.info(f"[{avatar}] {destiny_cmd} 已在 dashboard 暂停，保留今日重试机会。")
+                return
+
+            await asyncio.sleep(3)
+            destiny_resp = await self.send_and_wait_feedback_identity(avatar, destiny_cmd, timeout=90)
+            destiny_text = self.response_text(destiny_resp).replace("**", "")
+            destiny_success = (
+                bool(destiny_text)
+                and choice in destiny_text
+                and any(keyword in destiny_text for keyword in ("命轨定在", "定下命星", "今日命轨"))
+                and not any(keyword in destiny_text for keyword in DESTINY_OBSERVE_FAILURE_KEYWORDS)
+            )
+            if not destiny_success:
+                log.warning(
+                    f"[{avatar}] {destiny_cmd} 未收到可确认的成功回复，保留今日重试机会："
+                    f"{destiny_text[:120]!r}"
+                )
+                return
 
             self.set_avatar_state(avatar, "last_destiny_date", today)
             self.set_avatar_state(avatar, "last_destiny_time", now_str())
@@ -4652,15 +4735,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
             dr = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
             dr_text = getattr(dr, "text", "") if hasattr(dr, "text") else str(dr) if dr else ""
             await self.record_avatar_deep_meditation_start(avatar, dr_text)
-
-    async def _avatar_tower_check(self, avatar):
-        await self.common_avatar_tower_tick(
-            avatar,
-            timeout=120,
-            min_hour=23,
-            handle_insufficient_cultivation=True,
-            require_meditation_ready=False,
-        )
 
     async def _avatar_dream_map_check(self, avatar):
         a_state = self.get_avatar_state(avatar)
@@ -4939,9 +5013,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 end = a_state.get("deep_meditation_end_time", "")
                 if end and is_future(end):
                     min_cd = min(min_cd, seconds_until(end))
-            # 闯塔CD（23点后+今天没做过）
-            if features.get("tower") and a_state.get("last_tower_date") != today and now.hour >= 23:
-                min_cd = min(min_cd, 60)
             # 野外历练CD
             ft = a_state.get("next_field_training_time", "")
             if ft and is_future(ft):
@@ -5002,22 +5073,6 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                     or a_state.get("concubine_voyage_active")
                 ):
                     min_cd = min(min_cd, seconds_until(voyage))
-            # 灵树灌溉CD
-            if features.get("spirit_tree_irrigation"):
-                tree_state = self.spirit_tree_state_for_identity(avatar)
-                if tree_state.get("spirit_tree_status") == SPIRIT_TREE_MATURE_STATUS:
-                    mature_until = tree_state.get("spirit_tree_mature_until", "")
-                    if mature_until and is_future(mature_until):
-                        min_cd = min(min_cd, seconds_until(mature_until))
-                        continue
-                st = self.get_spirit_tree_irrigation_time(avatar)
-                if st and is_future(st):
-                    remaining = seconds_until(st)
-                    if self.current_identity != avatar:
-                        remaining = max(1, remaining - SWITCH_COMMAND_LEAD_SECONDS)
-                    min_cd = min(min_cd, remaining)
-                else:
-                    min_cd = min(min_cd, 60)
         return max(min_cd, 1)
     async def run_cultivation_loop(self):
         """
@@ -5136,12 +5191,15 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         asyncio.create_task(startup_sync())
         # 启动日志修剪任务（定期清理旧日志）
         asyncio.create_task(periodic_log_prune(LOG_FILE))
+        asyncio.create_task(periodic_message_events_prune(logger=log))
         asyncio.create_task(self.run_health_watchdog_loop())
+        if self.enable_telegram_write_permission_monitor:
+            asyncio.create_task(self.run_telegram_write_permission_monitor())
 
         # ---- 启动所有独立循环 ----
         # 每个循环都是独立的 asyncio.Task，通过 startup_done.wait() 等待同步完成
 
-        # 每日任务循环（闯塔、点卯、传功）
+        # 每日任务循环（点卯、传功）
         self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())
 
         if self.lingxiao_enabled:
@@ -5156,44 +5214,54 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
 
-        # 抚摸法宝循环
-        self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
-        self.create_scheduler_task("nurture_spirit", lambda: self.run_nurture_spirit_loop())
+        # 抚摸法宝/温养器灵依赖账号的具体法宝名称，新账号未配置时不启动。
+        if self.enable_treasure_touch:
+            self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
+        if self.enable_nurture_spirit:
+            self.create_scheduler_task("nurture_spirit", lambda: self.run_nurture_spirit_loop())
 
         # 闭关循环（内部会检查深度闭关状态）
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
 
         # 侍妾神通循环（继承自 ConcubineMixin）
-        self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
-        if self.target_concubine_identities():
-            self.create_scheduler_task("target_concubine", lambda: self.run_target_concubine_loop(initial_delay=35))
-        else:
-            log.info("Target concubine red-dust search disabled; not starting .红尘寻缘/.遣散侍妾 loop.")
+        if self.enable_concubine:
+            self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
+            if self.target_concubine_identities():
+                self.create_scheduler_task("target_concubine", lambda: self.run_target_concubine_loop(initial_delay=35))
+            else:
+                log.info("Target concubine red-dust search disabled; not starting .红尘寻缘/.遣散侍妾 loop.")
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
-        self.create_scheduler_task("bushi_wentian_daily", lambda: self.run_bushi_wentian_daily_loop(initial_delay=30, sleep_func=scheduler_sleep_seconds))
+        self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=35))
+        if self.enable_main_beasts:
+            self.create_scheduler_task("main_beast_hunt", lambda: self.run_main_beast_hunt_timer())
+            self.create_scheduler_task("main_beast_action", lambda: self.run_main_beast_action_timer())
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
-        if getattr(self, "group_visibility_controller", None) is not None:
+        for index, controller in enumerate(self.group_visibility_controllers):
             self.create_scheduler_task(
-                "xiaohao_visibility_control",
-                lambda: self.group_visibility_controller.run(lambda: self.is_running),
+                f"restricted_account_visibility_{index}",
+                lambda controller=controller: controller.run(lambda: self.is_running),
             )
-        if not self.lingxiao_enabled:
+        if self.enable_spirit_tree and not self.lingxiao_enabled:
             self.create_scheduler_task("main_spirit_tree", lambda: self.run_main_spirit_tree_loop())
 
         # ---- 化身系统 ----
-        self.create_scheduler_task("all_avatars_sequential", lambda: self.run_all_avatars_sequential())
-        self.create_scheduler_task("avatar_field_training", lambda: self.run_avatar_field_training_loop())
-        self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
-        for i, avatar_name in enumerate(self.avatars):
-            if avatar_name in STAR_ATTRACTION_AVATARS:
-                self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
-        if YINLUO_IDENTITY in self.avatars:
-            self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
-        self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
+        if self.enable_avatar_tasks and self.avatars:
+            self.create_scheduler_task("all_avatars_sequential", lambda: self.run_all_avatars_sequential())
+            self.create_scheduler_task("avatar_field_training", lambda: self.run_avatar_field_training_loop())
+            self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
+            for i, avatar_name in enumerate(self.avatars):
+                if avatar_name in STAR_ATTRACTION_AVATARS:
+                    self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
+            if YINLUO_IDENTITY in self.avatars:
+                self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
+        else:
+            log.info("Avatar scheduler disabled for this account.")
+        if self.enable_soul_curse:
+            self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
 
 
         # ---- 保持主循环运行 ----
@@ -5204,6 +5272,50 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
     # ------------------------------------------------------------------
     # 启动入口
     # ------------------------------------------------------------------
+
+    def restricted_account_specs(self):
+        """Return enabled private-group-only account process definitions."""
+        if not self.manage_restricted_accounts:
+            return []
+        configured = self.mc.get("restricted_accounts")
+        if configured is None:
+            if not self.xiaohao_visibility_control_enabled:
+                return []
+            configured = [{
+                "key": "xiaohao",
+                "label": "Xiaohao",
+                "script": "cultivator_xiaohao.py",
+                "tmux_target": "xiuxian:2",
+                "state_file": "state_xiaohao.json",
+                "poll_seconds": self.xiaohao_visibility_poll_seconds,
+            }]
+        if not isinstance(configured, list):
+            log.error("monitor.restricted_accounts must be a list; visibility control disabled.")
+            return []
+
+        specs = []
+        for item in configured:
+            if not isinstance(item, dict) or not item.get("enabled", True):
+                continue
+            key = str(item.get("key") or "").strip().lower()
+            script = os.path.basename(str(item.get("script") or "").strip())
+            tmux_target = str(item.get("tmux_target") or "").strip()
+            state_file = os.path.basename(str(item.get("state_file") or "").strip())
+            if not key or not script or not tmux_target or not state_file:
+                log.error("Invalid restricted account definition ignored: %r", item)
+                continue
+            specs.append({
+                "key": key,
+                "label": str(item.get("label") or key),
+                "script": script,
+                "tmux_target": tmux_target,
+                "state_file": state_file,
+                "poll_seconds": max(
+                    15,
+                    int(item.get("poll_seconds", self.xiaohao_visibility_poll_seconds) or 60),
+                ),
+            })
+        return specs
 
     async def start(self):
         """
@@ -5226,29 +5338,52 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
         await self.client.get_dialogs(limit=20)
         # 获取当前账号信息（用户名、first_name 等）
         self.my_info = await self.client.get_me()
-        log.info(f"Main Login: {self.my_info.first_name}")
+        expected_username = str(getattr(self, "expected_username", "") or "").lstrip("@").casefold()
+        actual_username = str(getattr(self.my_info, "username", "") or "").lstrip("@").casefold()
+        if expected_username and actual_username != expected_username:
+            raise RuntimeError(
+                f"Telegram session account mismatch: expected @{expected_username}, "
+                f"got @{actual_username or '<none>'}"
+            )
+        log.info(
+            "%s Login: %s (@%s)",
+            self.account_key,
+            self.my_info.first_name,
+            getattr(self.my_info, "username", "") or "",
+        )
 
-        if self.xiaohao_visibility_control_enabled and os.name != "nt":
-            process_manager = TmuxXiaohaoProcessManager(
-                CONFIG_DIR,
-                log,
-                python_executable=sys.executable,
-            )
-            self.group_visibility_controller = TelegramGroupXiaohaoController(
-                self.client,
-                self.target_chat_id,
-                process_manager,
-                log,
-                state=self.state,
-                save_state=self.save_state,
-                poll_seconds=self.xiaohao_visibility_poll_seconds,
-            )
-            log.info(
-                "Xiaohao visibility control enabled: private=start, public=stop, poll=%ss.",
-                self.xiaohao_visibility_poll_seconds,
-            )
-        elif self.xiaohao_visibility_control_enabled:
-            log.info("Xiaohao visibility control is only active on the VPS/Linux runtime.")
+        restricted_specs = self.restricted_account_specs()
+        if restricted_specs and os.name != "nt":
+            for spec in restricted_specs:
+                process_manager = TmuxXiaohaoProcessManager(
+                    CONFIG_DIR,
+                    log,
+                    python_executable=sys.executable,
+                    script=spec["script"],
+                    tmux_target=spec["tmux_target"],
+                    state_file=os.path.join(CONFIG_DIR, spec["state_file"]),
+                    account_label=spec["label"],
+                )
+                controller = TelegramGroupXiaohaoController(
+                    self.client,
+                    self.target_chat_id,
+                    process_manager,
+                    log,
+                    state=self.state,
+                    save_state=self.save_state,
+                    poll_seconds=spec["poll_seconds"],
+                    account_label=spec["label"],
+                    state_prefix=spec["key"],
+                )
+                self.group_visibility_controllers.append(controller)
+                log.info(
+                    "%s visibility control enabled: private=start, public=stop, poll=%ss.",
+                    spec["label"],
+                    spec["poll_seconds"],
+                )
+            self.group_visibility_controller = self.group_visibility_controllers[0]
+        elif restricted_specs:
+            log.info("Restricted-account visibility control is only active on VPS/Linux.")
 
         # 注册新消息事件（所有游戏消息走这里）
         @self.client.on(events.NewMessage(chats=self.target_chat_id))
@@ -5265,7 +5400,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
                     record_game_bot_activity(self, sender, log, msg=msg, text=text)
-                    record_star_gazing_event("main", msg, text, sender=sender, is_edited=True, logger=log)
+                    record_star_gazing_event(self.account_key, msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
                     self.maybe_record_daily_reward_from_edited_message(msg, text, source="edited message")
@@ -5277,32 +5412,37 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         return
                     manual_reply = is_reply_to_manual_command(self, msg)
                     manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
+                    if text_targets_current_account(self, msg, text):
+                        self.record_main_pasture_return(text)
                     if not manual_reply or not manual_processed:
                         self.maybe_record_spirit_tree_passive_message(msg, text, source="edited message")
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令）
                     is_matched = match_pending_feedback_by_reply(
-                        self, msg, text, self.is_loose_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                        self, msg, text, self.is_loose_feedback_candidate, log,
+                        label="[EDITED-FEEDBACK]", sender=sender
                     )
                     if not is_matched:
                         is_matched = match_pending_feedback_by_message_id(
-                            self, msg, text, self.is_loose_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                            self, msg, text, self.is_loose_feedback_candidate, log,
+                            label="[EDITED-FEEDBACK]", sender=sender
                         )
                     if not is_matched:
                         is_matched = match_pending_edited_feedback(
-                            self, msg, text, self.is_loose_feedback_candidate, log, id_window=20
+                            self, msg, text, self.is_loose_feedback_candidate, log,
+                            id_window=20, sender=sender
                         )
             except Exception as e:
                 log.error(f"Edited message handler error: {e}")
 
-        if self.group_visibility_controller is not None:
+        if self.group_visibility_controllers:
             @self.client.on(events.Raw)
             async def group_visibility_update_handler(update):
-                if self.group_visibility_controller.update_targets_group(update):
-                    asyncio.create_task(
-                        self.group_visibility_controller.check_once("UpdateChannel")
-                    )
+                for controller in self.group_visibility_controllers:
+                    if controller.update_targets_group(update):
+                        asyncio.create_task(controller.check_once("UpdateChannel"))
 
         # 进入主循环（会阻塞直到脚本停止）
+        asyncio.create_task(resume_pending_exchange_events(self))
         await self.run_cultivation_loop()
 
 
@@ -6156,7 +6296,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                         self.state.get("pending_star_gazing_manifest_time", "")
                         or self.state.get("star_gazing_claimed_manifest_time", "")
                     )
-                    pending_manifest_dt = str_to_dt(pending_manifest)
+                    pending_manifest_dt = safe_str_to_dt(pending_manifest)
                     current_manifest_dt = self.current_star_report_manifest_dt(now)
                     cancels_pending_manifest = (
                         pending_manifest == manifest_key
@@ -6196,7 +6336,7 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                     claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
                     claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
                     if claimed_manifest and claimed_avatar and self.claimed_star_gazing_pending_due(claimed_avatar, now):
-                        claimed_manifest_dt = str_to_dt(claimed_manifest)
+                        claimed_manifest_dt = safe_str_to_dt(claimed_manifest)
                         if claimed_manifest_dt:
                             manifest_dt = claimed_manifest_dt
                             manifest_key = claimed_manifest
@@ -6319,7 +6459,22 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 pending_date and pending_target and pending_msg_id
                 and not self.star_shift_done_today(pending_date)
             ):
-                target_dt = str_to_dt(pending_target)
+                target_dt = safe_str_to_dt(pending_target)
+                if target_dt is None:
+                    log.warning(
+                        f"Star gazing: clearing invalid pending shift timestamp {pending_target!r}."
+                    )
+                    self.clear_pending_star_shift()
+                    self.save_state()
+                    pending_target = ""
+                    pending_msg_id = 0
+            if (
+                pending_date and pending_target and pending_msg_id
+                and not self.star_shift_done_today(pending_date)
+            ):
+                target_dt = safe_str_to_dt(pending_target)
+                if target_dt is None:
+                    return
                 if datetime.now() < target_dt:
                     log.info(
                         f"Star gazing: restoring pending shift for {pending_target}, "
@@ -6356,8 +6511,8 @@ class Cultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, 
                 self.save_state()
                 pending_gazing_send = ""
             if pending_gazing_send and pending_manifest and pending_avatar:
-                send_dt = str_to_dt(pending_gazing_send)
-                manifest_dt = str_to_dt(pending_manifest)
+                send_dt = safe_str_to_dt(pending_gazing_send)
+                manifest_dt = safe_str_to_dt(pending_manifest)
                 latest_send_dt = manifest_dt - timedelta(seconds=60) if manifest_dt else None
                 pending_send_is_valid = bool(
                     send_dt

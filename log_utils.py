@@ -38,11 +38,18 @@ from collections import deque  # 用于手动指令 ID 的固定大小队列
 # =====================================================================
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 LOG_RETENTION_HOURS = 7 * 24               # 日志保留 7 天
+MESSAGE_EVENTS_RETENTION_DAYS = 15         # SQLite 消息/指令/收益记录保留 15 天
+MESSAGE_EVENTS_PRUNE_INTERVAL_SECONDS = 6 * 3600
+ALERT_BOT_ATTEMPTS = 3
+ALERT_BOT_RETRY_DELAYS = (1, 3)
 COMMAND_AUTO_DELETE_SECONDS = 120           # 指令发送后 2 分钟自动删除
 CLEAR_HISTORY_OLDER_THAN_MINUTES = 35       # 清屏：只删除 35 分钟以前的点号指令
 MAX_COMMAND_RETRIES = 3                     # 最大重试次数
 DISABLED_AUTO_COMMANDS = {
     ".召回侍妾",
+    # 天星宗探索命令已迁入 miniapp，聊天自动化不再发送。
+    ".推命 探索",
+    ".改命 探索",
     # 星宫观星台相关入口已迁入 miniapp，聊天指令不再生效，自动脚本一律不发送。
     ".观星台",
     ".安抚星辰",
@@ -148,6 +155,7 @@ PARAM_COMMAND_ROOTS = {
     ".辨认咒纹",
     ".借幡镇魂",
     ".剥离咒源",
+    ".侍妾远航",
 }
 _COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
 
@@ -181,6 +189,8 @@ DEFAULT_GAME_BOT_USERNAMES = {
     "hantianzun06_bot",            # 天尊06号（新机器人）
     "hantianzun07_bot",            # 天尊07号（新机器人）
     "hantianzun08_bot",            # 天尊08号（新机器人）
+    "snpao_bot",                   # 韩天尊新 bot
+    "xlqlcy_bot",                  # 韩天尊新 bot
 } | {f"hantianzun{index}_bot" for index in range(10, 51)}
 
 # 反机器人挑战关键词
@@ -284,7 +294,12 @@ async def _log_incoming_message_impl(actor, label, text, msg=None, sender=None, 
         command=command_from_log_label(label),
         logger=target_logger,
     )
-    record_command_response_for_reply(actor, msg, text=text, status="matched", logger=target_logger)
+    record_command_response_for_reply(
+        actor, msg, text=text, status="matched", logger=target_logger, sender=sender
+    )
+    record_command_response_for_related_event(
+        actor, msg, text=text, status="matched", logger=target_logger, sender=sender
+    )
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id)
 
@@ -651,10 +666,6 @@ def command_response_family(command):
         return "divination"
     if cmd == ".查看货品" or cmd.startswith(".购买商品"):
         return "merchant"
-    if cmd == ".卜筮问天":
-        return "bushi_wentian"
-    if cmd == ".换取":
-        return "bushi_exchange"
     if cmd == ".宗门传功":
         return "sect_skill"
     if cmd in {".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"}:
@@ -772,10 +783,6 @@ def text_response_family(text):
         "心神未定", "情缘值", "未随行", "无法出航", "无法远航",
     ]):
         return "concubine_voyage"
-    if any(k in clean for k in ["卜筮问天", "神物现世", "天道示警"]):
-        return "bushi_wentian"
-    if "换取" in clean and any(k in clean for k in ["天道认可", "获取此等逆天之物", "机缘"]):
-        return "bushi_exchange"
     if "卦象" in clean:
         return "divination"
     if "天机代卜" in clean or "天机链路" in clean:
@@ -913,16 +920,6 @@ def feedback_response_matches_command(command, text):
             "异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤",
             "购买成功", "交易成功", "收入储物袋", "灵石不足", "无法购买", "商品不存在",
         ])
-    if expected == "bushi_wentian":
-        return any(k in clean for k in [
-            "卜筮问天", "神物现世", "天道示警", "天机罗盘", "卦象显示",
-            "回复本消息", "换取", "今日次数", "次数已用尽",
-        ])
-    if expected == "bushi_exchange":
-        return any(k in clean for k in [
-            "换取成功", "天道认可", "获取此等逆天之物", "机缘消散",
-            "材料不足", "超时", "来确认", "献上祭品", "祭品", "收入囊中",
-        ]) or ("换取" in clean and any(k in clean for k in ["获得", "消耗", "机缘"]))
     if expected == "sect_skill":
         return any(k in clean for k in ["宗门传功", "传功玉简", "元神", "传功"])
     if expected == "spirit_tree":
@@ -1155,8 +1152,54 @@ async def maybe_handle_han_soul_choice(actor, msg, text, sender=None, logger=Non
 
 # ---- 告警发送 ----
 
+def _send_bot_api_alert_sync(bot_token, payload, timeout=5):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        response.read()
+
+
+async def _resolve_alert_client_target(client, target, fallback_username=""):
+    """Resolve a numeric Telegram user ID through the session dialog cache."""
+    if isinstance(target, str) and not target.startswith("@") and not target.lstrip("-").isdigit():
+        return f"@{target}"
+    if isinstance(target, str) and target.startswith("@"):
+        return target
+
+    try:
+        numeric_target = int(target)
+    except (TypeError, ValueError):
+        return target
+
+    try:
+        return await client.get_input_entity(numeric_target)
+    except Exception:
+        pass
+
+    comparable_id = abs(numeric_target)
+    if str(numeric_target).startswith("-100"):
+        comparable_id = int(str(abs(numeric_target))[3:])
+    try:
+        dialogs = await client.get_dialogs(limit=200)
+        for dialog in dialogs:
+            entity = getattr(dialog, "entity", None)
+            if int(getattr(entity, "id", 0) or 0) == comparable_id:
+                return getattr(dialog, "input_entity", None) or entity
+    except Exception:
+        pass
+
+    fallback = str(fallback_username or "").strip().lstrip("@")
+    if fallback:
+        return f"@{fallback}"
+    return numeric_target
+
+
 async def send_text_alert(actor, title, text, logger=None, parse_mode=None):
-    """发送告警消息给用户（优先使用 bot token，降级到客户端）"""
+    """发送告警消息给用户（Bot API 重试，失败后使用客户端会话兜底）。"""
     alert_text = f"【{title}】\n{text}"
     config = getattr(actor, "config", {}) or {}
     target = config.get("notify_target", "Waaiging")
@@ -1164,29 +1207,37 @@ async def send_text_alert(actor, title, text, logger=None, parse_mode=None):
 
     bot_token = config.get("notify_bot_token")
     if bot_token:
-        try:
-            final_target = int(target) if isinstance(target, str) and target.lstrip("-").isdigit() else target
-            payload = {"chat_id": final_target, "text": alert_text}
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                data=data, headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=5):
+        final_target = int(target) if isinstance(target, str) and target.lstrip("-").isdigit() else target
+        payload = {"chat_id": final_target, "text": alert_text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        for attempt in range(ALERT_BOT_ATTEMPTS):
+            if attempt:
+                delay_index = min(attempt - 1, len(ALERT_BOT_RETRY_DELAYS) - 1)
+                await asyncio.sleep(ALERT_BOT_RETRY_DELAYS[delay_index])
+            try:
+                await asyncio.to_thread(_send_bot_api_alert_sync, bot_token, payload, 5)
                 sent = True
-        except Exception as exc:
-            if logger:
-                logger.error(f"Alert bot send failed, falling back to client: {exc}")
+                break
+            except Exception as exc:
+                if logger:
+                    level = logger.error if attempt + 1 >= ALERT_BOT_ATTEMPTS else logger.warning
+                    level(
+                        "Alert bot send failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        ALERT_BOT_ATTEMPTS,
+                        exc,
+                    )
 
     if not sent:
         client = getattr(actor, "client", None)
         if client:
             try:
-                final_target = target
-                if isinstance(target, str) and not target.startswith("@") and not target.lstrip("-").isdigit():
-                    final_target = f"@{target}"
+                final_target = await _resolve_alert_client_target(
+                    client,
+                    target,
+                    fallback_username=config.get("notify_target_username", ""),
+                )
                 kwargs = {}
                 if parse_mode and parse_mode != "MarkdownV2":
                     kwargs["parse_mode"] = parse_mode
@@ -1309,6 +1360,7 @@ def clear_history_account_label(actor):
         "main": "凌霄宫（主号）",
         "sub": "元婴宗（副号）",
         "xiaohao": "万灵宗（小号）",
+        "waaiging": "天星宗（@Waaiging）",
     }.get(key, key or actor.__class__.__name__)
 
 
@@ -1474,9 +1526,10 @@ def _record_shared_command_response(actor, command="", msg=None, sender=None):
     now_wall = datetime.now()
     username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
     data = _read_shared_bot_activity()
+    command_lines = str(command or "").strip().splitlines()
     data["command_response"] = {
         "account": account,
-        "command": str(command or "").strip().splitlines()[0][:80],
+        "command": command_lines[0][:80] if command_lines else "",
         "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
         "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
         "reply_to_msg_id": _safe_message_int(meaningful_reply_to_msg_id(actor, msg)) if msg is not None else None,
@@ -2432,11 +2485,25 @@ def command_root(command):
     return text.split()[0]
 
 
-def disabled_by_local_policy(command):
+def actor_allows_retired_auto_command(actor, command):
+    """Allow a narrowly scoped actor workflow to use an otherwise retired command."""
+    if actor is None:
+        return False
+    hook = getattr(actor, "allow_retired_auto_command", None)
+    if not callable(hook):
+        return False
+    try:
+        return bool(hook(command))
+    except Exception:
+        return False
+
+
+def disabled_by_local_policy(command, actor=None):
     """Return True when an auto command is disabled regardless of dashboard state."""
     key = str(command or "").strip()
     root = command_root(key)
-    return bool(key and (key in DISABLED_AUTO_COMMANDS or root in DISABLED_AUTO_COMMANDS))
+    disabled = bool(key and (key in DISABLED_AUTO_COMMANDS or root in DISABLED_AUTO_COMMANDS))
+    return disabled and not actor_allows_retired_auto_command(actor, key)
 
 
 def command_control_key(command):
@@ -2554,7 +2621,7 @@ def command_send_precheck(actor, command, logger=None, identity=None,
     key = str(command or "").strip()
     if not key:
         return True
-    if disabled_by_local_policy(key):
+    if disabled_by_local_policy(key, actor=actor):
         if logger:
             logger.info(f"Command [{key}] is disabled by local policy; skipping pre-switch.")
         remember_command_guard_block(actor, key, 0, reason="disabled")
@@ -2664,7 +2731,7 @@ def command_send_allowed(actor, command, logger=None, limit=MAX_COMMAND_RETRIES,
     key = str(command or "").strip()
     if not key:
         return True
-    if disabled_by_local_policy(key):
+    if disabled_by_local_policy(key, actor=actor):
         if logger:
             logger.info(f"Command [{key}] is disabled by local policy; skipping send.")
         remember_command_guard_block(actor, key, 0, reason="disabled")
@@ -2910,7 +2977,7 @@ def _sender_id_variants(sender_id):
 
 
 def _is_own_outgoing_sender(actor, msg):
-    """Return True for messages sent by this account or its configured avatars/admin senders."""
+    """Return True for messages sent by this account or its configured avatars."""
     me = getattr(actor, "my_info", None)
     my_id = getattr(me, "id", None)
     sender_id = getattr(msg, "sender_id", None)
@@ -2925,11 +2992,7 @@ def _is_own_outgoing_sender(actor, msg):
         avatar_ids.update(_sender_id_variants(key))
     if sender_variants & avatar_ids:
         return True
-
-    admin_ids = set()
-    for value in getattr(actor, "pause_admins", set()) or set():
-        admin_ids.update(_sender_id_variants(value))
-    return bool(sender_variants & admin_ids)
+    return False
 
 
 def sender_is_pause_admin(actor, msg):
@@ -3452,10 +3515,13 @@ def _message_db_connect():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_kind_created ON message_events(account, event_kind, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_account_bot_created ON message_events(account, is_game_bot, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_bot_created ON message_events(is_game_bot, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_created ON message_events(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_status ON command_ledger(account, status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_updated ON command_ledger(updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_account_date ON daily_reward_events(account, event_date, event_time)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_identity ON daily_reward_events(account, identity, event_date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_command ON daily_reward_events(account, command, event_date)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_date ON daily_reward_events(event_date)")
             conn.commit()
             _MESSAGE_EVENTS_SCHEMA_READY = True
         yield conn
@@ -3465,6 +3531,99 @@ def _message_db_connect():
         raise
     finally:
         conn.close()
+
+
+def prune_message_events_db(retention_days=MESSAGE_EVENTS_RETENTION_DAYS, batch_size=5000, logger=None):
+    """Delete SQLite audit rows older than the configured retention window.
+
+    Deletes are committed in batches so the three Telegram clients can continue
+    writing between batches. SQLite will reuse freed pages; an explicit VACUUM is
+    reserved for controlled maintenance windows.
+    """
+    try:
+        retention_days = max(1, int(retention_days or MESSAGE_EVENTS_RETENTION_DAYS))
+        batch_size = max(100, int(batch_size or 5000))
+    except Exception:
+        retention_days = MESSAGE_EVENTS_RETENTION_DAYS
+        batch_size = 5000
+
+    cutoff_dt = datetime.now() - timedelta(days=retention_days)
+    cutoff = cutoff_dt.strftime(TIME_FORMAT)
+    cutoff_date = cutoff_dt.strftime("%Y-%m-%d")
+    deleted = {"message_events": 0, "command_ledger": 0, "daily_reward_events": 0}
+
+    conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "message_events" in tables:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_message_events_created ON message_events(created_at)")
+            while True:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM message_events
+                    WHERE id IN (
+                        SELECT id FROM message_events
+                        WHERE created_at < ?
+                        ORDER BY created_at
+                        LIMIT ?
+                    )
+                    """,
+                    (cutoff, batch_size),
+                )
+                count = max(0, int(cursor.rowcount or 0))
+                deleted["message_events"] += count
+                conn.commit()
+                if count < batch_size:
+                    break
+        if "command_ledger" in tables:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_command_ledger_updated ON command_ledger(updated_at)")
+            cursor = conn.execute("DELETE FROM command_ledger WHERE updated_at < ?", (cutoff,))
+            deleted["command_ledger"] = max(0, int(cursor.rowcount or 0))
+            conn.commit()
+        if "daily_reward_events" in tables:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_reward_events_date ON daily_reward_events(event_date)")
+            cursor = conn.execute("DELETE FROM daily_reward_events WHERE event_date < ?", (cutoff_date,))
+            deleted["daily_reward_events"] = max(0, int(cursor.rowcount or 0))
+            conn.commit()
+        conn.execute("PRAGMA optimize")
+        conn.commit()
+    finally:
+        conn.close()
+
+    if logger:
+        logger.info(
+            "SQLite retention prune complete: days=%s cutoff=%s deleted=%s",
+            retention_days,
+            cutoff,
+            deleted,
+        )
+    return {"retention_days": retention_days, "cutoff": cutoff, "deleted": deleted}
+
+
+async def periodic_message_events_prune(
+    retention_days=MESSAGE_EVENTS_RETENTION_DAYS,
+    interval=MESSAGE_EVENTS_PRUNE_INTERVAL_SECONDS,
+    initial_delay=300,
+    logger=None,
+):
+    """Run the SQLite retention job from one designated process (the main account)."""
+    if initial_delay:
+        await asyncio.sleep(max(0, int(initial_delay)))
+    while True:
+        try:
+            await asyncio.to_thread(
+                prune_message_events_db,
+                retention_days,
+                5000,
+                logger,
+            )
+        except Exception:
+            (logger or logging.getLogger(__name__)).exception("SQLite retention prune failed")
+        await asyncio.sleep(max(300, int(interval or MESSAGE_EVENTS_PRUNE_INTERVAL_SECONDS)))
 
 
 def record_message_event(
@@ -3568,7 +3727,9 @@ def record_daily_reward_event_log(actor, event, logger=None):
     """Persist a parsed daily reward event for dashboard filtering."""
     if not isinstance(event, dict):
         return False
-    account = actor_account_key(actor) or actor.__class__.__name__
+    account = actor_account_key(actor)
+    if account not in {"main", "sub", "xiaohao", "waaiging"}:
+        return False
     event_date = str(event.get("date") or "").strip()
     event_time = str(event.get("time") or "").strip()
     identity = str(event.get("identity") or "主魂").strip() or "主魂"
@@ -3700,10 +3861,24 @@ def record_command_sent(actor, msg, command, identity="", source="auto", reply_t
         return False
 
 
-def record_command_response_for_reply(actor, msg, text=None, status="matched", logger=None):
-    """Attach a bot response to the command row it replies to, if tracked."""
-    replied_id = _safe_message_int(meaningful_reply_to_msg_id(actor, msg))
-    if replied_id is None:
+def _verified_game_bot_response(actor, msg=None, sender=None):
+    """Only authenticated game-bot messages may complete command feedback."""
+    candidate = sender or getattr(msg, "sender", None)
+    return bool(candidate is not None and is_game_bot_sender(actor, candidate))
+
+
+def record_command_response_for_command_id(
+    actor,
+    command_msg_id,
+    msg,
+    text=None,
+    status="matched",
+    logger=None,
+    sender=None,
+):
+    """Attach a verified bot response to one authoritative command message id."""
+    command_msg_id = _safe_message_int(command_msg_id)
+    if command_msg_id is None or not _verified_game_bot_response(actor, msg=msg, sender=sender):
         return False
     account = actor_account_key(actor) or actor.__class__.__name__
     chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
@@ -3726,7 +3901,7 @@ def record_command_response_for_reply(actor, msg, text=None, status="matched", l
                     now,
                     account,
                     chat_id,
-                    replied_id,
+                    command_msg_id,
                 ),
             )
             if cur.rowcount <= 0 and chat_id is not None:
@@ -3743,16 +3918,110 @@ def record_command_response_for_reply(actor, msg, text=None, status="matched", l
                         now,
                         now,
                         account,
-                        replied_id,
+                        command_msg_id,
                     ),
                 )
-        command = _command_text_for_message_id(actor, msg, replied_id)
+            # A retry that succeeds also resolves recent identical attempts. This
+            # prevents the first, settlement-consumed switch/check attempt from
+            # remaining a permanent false-positive `sent` row.
+            row = conn.execute(
+                """
+                SELECT command, identity, sent_at FROM command_ledger
+                WHERE account=? AND chat_id IS ? AND command_msg_id=?
+                ORDER BY sent_at DESC LIMIT 1
+                """,
+                (account, chat_id, command_msg_id),
+            ).fetchone()
+            if row:
+                command, identity, sent_at = row
+                try:
+                    retry_cutoff = (
+                        datetime.strptime(sent_at, TIME_FORMAT) - timedelta(minutes=5)
+                    ).strftime(TIME_FORMAT)
+                except Exception:
+                    retry_cutoff = sent_at
+                conn.execute(
+                    """
+                    UPDATE command_ledger
+                    SET status=?, response_msg_id=?, response_hash=?, response_at=?, updated_at=?
+                    WHERE account=? AND command=? AND identity=? AND status='sent'
+                      AND sent_at BETWEEN ? AND ?
+                    """,
+                    (
+                        str(status or "matched"), response_id, _message_text_hash(text_value),
+                        now, now, account, command, identity, retry_cutoff, sent_at,
+                    ),
+                )
+        command = _command_text_for_message_id(actor, msg, command_msg_id)
         if is_command_message_text(command):
             _record_shared_command_response(actor, command=command, msg=msg)
         return True
     except Exception as exc:
         target_logger = logger or logging.getLogger(actor.__class__.__name__)
         target_logger.debug(f"command ledger response persist skipped: {exc}")
+        return False
+
+
+def record_command_response_for_reply(actor, msg, text=None, status="matched", logger=None, sender=None):
+    """Attach a verified bot response to the command row it replies to."""
+    replied_id = _safe_message_int(meaningful_reply_to_msg_id(actor, msg))
+    if replied_id is None:
+        return False
+    return record_command_response_for_command_id(
+        actor,
+        replied_id,
+        msg,
+        text=text,
+        status=status,
+        logger=logger,
+        sender=sender,
+    )
+
+
+def record_command_response_for_related_event(actor, msg, text=None, status="edited", logger=None, sender=None):
+    """Attach edited/event-root settlements such as heart-trial `.稳` rounds."""
+    if not _verified_game_bot_response(actor, msg=msg, sender=sender):
+        return False
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    msg_id = _safe_message_int(_message_id(msg))
+    if msg_id is None:
+        return False
+    response_id = msg_id
+    text_value = text if text is not None else (getattr(msg, "text", None) or "")
+    now = datetime.now().strftime(TIME_FORMAT)
+    cutoff = (datetime.now() - timedelta(minutes=15)).strftime(TIME_FORMAT)
+    try:
+        with _message_db_connect() as conn:
+            # Edited responses retain the same response message id.
+            cur1 = conn.execute(
+                """
+                UPDATE command_ledger
+                SET status=?, response_hash=?, response_at=?, updated_at=?
+                WHERE account=? AND chat_id IS ? AND response_msg_id=?
+                """,
+                (str(status or "edited"), _message_text_hash(text_value), now, now,
+                 account, chat_id, msg_id),
+            )
+            # Interactive choices reply to an event message; that event is later
+            # edited in place instead of replying to each `.稳` command.
+            cur2 = conn.execute(
+                """
+                UPDATE command_ledger
+                SET status=?, response_msg_id=?, response_hash=?, response_at=?, updated_at=?
+                WHERE account=? AND chat_id IS ? AND status='sent' AND reply_to_msg_id=?
+                  AND sent_at>=? AND (
+                    command='.稳' OR command='.狠' OR command='.骗'
+                  )
+                """,
+                (str(status or "edited"), response_id, _message_text_hash(text_value), now, now,
+                 account, chat_id, msg_id, cutoff),
+            )
+        return bool((cur1.rowcount or 0) + (cur2.rowcount or 0))
+    except Exception as exc:
+        (logger or logging.getLogger(actor.__class__.__name__)).debug(
+            f"related command settlement persist skipped: {exc}"
+        )
         return False
 
 
@@ -3802,14 +4071,16 @@ def _meditation_feedback_matches_identity(actor, text, identity):
     return True
 
 
-def _set_feedback_match(actor, pending_id, msg, text, command, identity, logger=None, label="[FEEDBACK]", reason="reply_to"):
+def _set_feedback_match(actor, pending_id, msg, text, command, identity, logger=None, label="[FEEDBACK]", reason="reply_to", sender=None):
     evt = (getattr(actor, "feedback_events", None) or {}).get(pending_id)
     if evt is None or evt.is_set():
         return False
     actor.last_feedback_text[pending_id] = text
     actor.last_feedback_msg[pending_id] = msg
     remember_incoming_message_context(actor, msg, command=command, identity=identity, text=text)
-    record_command_response_for_reply(actor, msg, text=text, status="matched", logger=logger)
+    record_command_response_for_command_id(
+        actor, pending_id, msg, text=text, status="matched", logger=logger, sender=sender
+    )
     evt.set()
     if logger:
         logger.info(f"{label} Matched [{command}] by {reason}: command_msg={pending_id}, response_msg={getattr(msg, 'id', None)}")
@@ -3825,6 +4096,7 @@ def match_pending_feedback_by_id(
     logger=None,
     label="[REPLY-FEEDBACK]",
     reason="reply_to",
+    sender=None,
 ):
     """Validate and match a bot message to one pending command id."""
     feedback_events = getattr(actor, "feedback_events", {}) or {}
@@ -3836,6 +4108,13 @@ def match_pending_feedback_by_id(
         pending_id, getattr(actor, "current_identity", "主魂")
     ) or "主魂"
     clean_text = str(text or "").strip()
+    if not _verified_game_bot_response(actor, msg=msg, sender=sender):
+        if logger:
+            logger.info(
+                f"{label} Rejected [{command or 'pending'}]: sender is not a verified game bot "
+                f"(msg {getattr(msg, 'id', None)})."
+            )
+        return False
     if not command:
         return False
     if not claim_message_version(actor, msg, clean_text, purpose=f"feedback:{pending_id}"):
@@ -3880,10 +4159,11 @@ def match_pending_feedback_by_id(
         logger=logger,
         label=label,
         reason=reason,
+        sender=sender,
     )
 
 
-def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=None, label="[REPLY-FEEDBACK]"):
+def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=None, label="[REPLY-FEEDBACK]", sender=None):
     """Prefer direct Telegram reply_to attribution for command feedback."""
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
@@ -3897,10 +4177,11 @@ def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=
         logger=logger,
         label=label,
         reason="reply_to",
+        sender=sender,
     )
 
 
-def match_pending_feedback_by_message_id(actor, msg, text, candidate_fn=None, logger=None, label="[EDITED-FEEDBACK]"):
+def match_pending_feedback_by_message_id(actor, msg, text, candidate_fn=None, logger=None, label="[EDITED-FEEDBACK]", sender=None):
     """Fallback for responses whose own msg_id was registered as pending."""
     msg_id = _message_id(msg)
     if msg_id is None:
@@ -3914,6 +4195,7 @@ def match_pending_feedback_by_message_id(actor, msg, text, candidate_fn=None, lo
         logger=logger,
         label=label,
         reason="message_id",
+        sender=sender,
     )
 
 
@@ -4084,8 +4366,9 @@ def cultivation_profile_update_is_plausible(actor, profile, identity, is_avatar,
     """Reject username-less profile snapshots that jump far away from the known state."""
     if has_username:
         return True
-    if profile_source_is_direct_profile_command(source):
-        return True
+
+    # Direct profile commands can still return a stale or wrong account snapshot
+    # without a username. Keep the level/experience plausibility checks in force.
     if is_avatar:
         if not hasattr(actor, "get_avatar_state"):
             return True
@@ -4111,7 +4394,13 @@ def cultivation_profile_update_is_plausible(actor, profile, identity, is_avatar,
     new_total = _cultivation_int(profile.get("total_exp"))
     if old_total and new_total:
         ratio = max(old_total, new_total) / max(1, min(old_total, new_total))
-        if ratio > 2:
+        legitimate_breakthrough_cap_growth = (
+            new_total > old_total
+            and old_rank is not None
+            and new_rank is not None
+            and new_rank > old_rank
+        )
+        if ratio > 2 and not legitimate_breakthrough_cap_growth:
             if logger:
                 logger.warning(
                     f"Cultivation profile sync skipped for [{identity}]: username-less exp cap jump "
@@ -4705,6 +4994,8 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_spirit_tree_guard_response(text, identity=identity))
     elif (
         cmd == ".我的灵兽"
+        or cmd == ".寻觅灵兽"
+        or cmd == ".一键放养"
         or cmd == ".灵兽偷菜"
         or cmd.startswith(".探渊 ")
         or cmd.startswith(".灵兽探渊 ")
@@ -4826,6 +5117,45 @@ def mentions_self(actor, msg, text):
                     return True
     return False
 
+
+def managed_mention_identities(actor, msg, text=None):
+    """Return every locally managed identity explicitly @mentioned by a message."""
+    if getattr(msg, "out", False):
+        return []
+
+    me = getattr(actor, "my_info", None)
+    my_id = getattr(me, "id", None) if me else None
+    if my_id and str(getattr(msg, "sender_id", "")) == str(my_id):
+        return []
+
+    text_value = text if text is not None else (getattr(msg, "text", None) or "")
+    mentioned_usernames = {
+        _normalize_account_name(value)
+        for value in text_username_mentions(text_value)
+        if _normalize_account_name(value)
+    }
+    identity_usernames = _identity_profile_usernames(actor)
+    matched = {
+        identity
+        for identity, usernames in identity_usernames.items()
+        if mentioned_usernames.intersection(usernames or set())
+    }
+
+    # Telegram also marks text mentions/tg://user links for the logged-in account,
+    # even when the visible text does not contain its @username.
+    if mentions_self(actor, msg, text_value):
+        matched.add("主魂")
+
+    ordered = []
+    preferred_order = ["主魂", *(getattr(actor, "avatars", None) or [])]
+    preferred_order.extend(identity_usernames.keys())
+    for identity in preferred_order:
+        identity = str(identity or "").strip()
+        if identity and identity in matched and identity not in ordered:
+            ordered.append(identity)
+    ordered.extend(sorted(matched.difference(ordered)))
+    return ordered
+
 def mentions_other_user(actor, msg, text=None):
     """检测消息是否明确提及了其他用户且未提及本账号"""
     text_value = text if text is not None else getattr(msg, "text", "")
@@ -4866,13 +5196,16 @@ def mentions_other_user(actor, msg, text=None):
     return has_other_mention and not mentions_me
 
 
-def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
+def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, mentions_only=False):
     """需要时记录提到了本账号的消息"""
     text = text if text is not None else (getattr(msg, "text", None) or "")
     msg_id = _message_id(msg)
+    mentioned_identities = managed_mention_identities(actor, msg, text)
     if label != "edited" and was_manual_reply_logged_message(actor, msg):
         return True
-    if sender is not None and is_game_bot_sender(actor, sender):
+    if mentions_only and not mentioned_identities:
+        return False
+    if not mentioned_identities and sender is not None and is_game_bot_sender(actor, sender):
         profile_identity = recent_profile_identity_for_text(actor, text, msg_id=msg_id, consume=False)
         if profile_identity:
             profile_text = text
@@ -4891,7 +5224,9 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
                 identity=profile_identity,
                 command="profile",
             )
-            record_command_response_for_reply(actor, msg, text=profile_text, status="matched")
+            record_command_response_for_reply(
+                actor, msg, text=profile_text, status="matched", sender=sender
+            )
             remember_logged_incoming_message(actor, msg, text=profile_text)
             remember_incoming_message_context(actor, msg, command="profile", identity=profile_identity, text=profile_text)
             logger = logging.getLogger(actor.__class__.__name__)
@@ -4903,19 +5238,20 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
             )
             recent_profile_identity_for_text(actor, text, msg_id=msg_id, consume=True)
             return True
-    if not mentions_self(actor, msg, text):
+    if not mentioned_identities:
         return False
-    current_id = avatar_marker_identity_from_text(text) or "主魂"
-    if current_id == "主魂" and hasattr(actor, "get_identity_from_msg"):
-        current_id = actor.get_identity_from_msg(msg) or getattr(actor, "current_identity", "主魂")
-    elif current_id == "主魂":
-        current_id = getattr(actor, "current_identity", "主魂")
+
+    if len(mentioned_identities) == 1:
+        current_id = mentioned_identities[0]
+    else:
+        current_id = avatar_marker_identity_from_text(text) or "主魂"
+    if len(mentioned_identities) > 1:
+        text = f"[Mentioned: {', '.join(mentioned_identities)}]\n{text or ''}"
     if sender is not None and is_game_bot_sender(actor, sender) and hasattr(actor, "record_identity_yuanying_recovery_from_text"):
-        if actor.record_identity_yuanying_recovery_from_text(
+        actor.record_identity_yuanying_recovery_from_text(
             current_id, text, source=f"mention {msg_id}", command=""
-        ):
-            return True
-    if current_id != "主魂":
+        )
+    if current_id != "主魂" and len(mentioned_identities) == 1:
         text = f"[Avatar: {current_id}]\n{text or ''}"
     if label == "edited":
         cache_name = "_logged_edited_message_texts"
@@ -4944,17 +5280,28 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None):
                 setattr(actor, cache_name, set(list(seen)[-250:]))
 
     logging.getLogger(actor.__class__.__name__).info(format_in_log(f"{label} {msg_id}", text, sender=sender, msg=msg))
+    is_edited = label == "edited"
     record_message_event(
         actor,
         msg,
         text=text,
         sender=sender,
-        event_kind="new",
-        direction="bot_in" if sender is not None and is_game_bot_sender(actor, sender) else "in",
+        event_kind="edited" if is_edited else "new",
+        direction=(
+            "bot_edited" if is_edited and sender is not None and is_game_bot_sender(actor, sender)
+            else "edited" if is_edited
+            else "bot_in" if sender is not None and is_game_bot_sender(actor, sender)
+            else "in"
+        ),
         identity=current_id,
         command=command_from_log_label(label),
     )
-    record_command_response_for_reply(actor, msg, text=text, status="matched")
+    record_command_response_for_reply(
+        actor, msg, text=text, status="matched", sender=sender
+    )
+    record_command_response_for_related_event(
+        actor, msg, text=text, status="matched", sender=sender
+    )
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id, text=text)
     return True
@@ -4990,10 +5337,15 @@ def match_pending_edited_feedback(
     id_window=30,
     max_age_seconds=150,
     label="[EDITED-FEEDBACK]",
+    sender=None,
 ):
     """Safely match a bot message to a pending command."""
     feedback_events = getattr(actor, "feedback_events", {}) or {}
     if not feedback_events:
+        return False
+    if not _verified_game_bot_response(actor, msg=msg, sender=sender):
+        if logger:
+            logger.info(f"{label} Message {getattr(msg, 'id', None)} rejected: sender is not a verified game bot.")
         return False
     if is_reply_to_untracked_message(actor, msg):
         if logger:
@@ -5060,6 +5412,9 @@ def match_pending_edited_feedback(
             continue
         actor.last_feedback_text[mid] = text
         actor.last_feedback_msg[mid] = msg
+        record_command_response_for_command_id(
+            actor, mid, msg, text=text, status="edited", logger=logger, sender=sender
+        )
         evt.set()
         if logger:
             logger.info(f"{label} Loose matched [{command}] message {msg_id} to command {mid}.")
@@ -5161,7 +5516,13 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
         identity=tracked_command_identity_for_reply(actor, msg),
         command=tracked_command_text_for_reply(actor, msg),
     )
-    record_command_response_for_reply(actor, msg, text=text, status="edited", logger=logging.getLogger(actor.__class__.__name__))
+    edit_logger = logging.getLogger(actor.__class__.__name__)
+    record_command_response_for_reply(
+        actor, msg, text=text, status="edited", logger=edit_logger, sender=sender
+    )
+    record_command_response_for_related_event(
+        actor, msg, text=text, status="edited", logger=edit_logger, sender=sender
+    )
     cache_name = "_logged_edited_message_texts"
     seen_texts = getattr(actor, cache_name, None)
     if seen_texts is None:
@@ -5236,7 +5597,7 @@ def is_relevant_game_bot_edited_message(actor, msg, text):
     """Edited bot messages are relevant when they mention us or continue a tracked reply."""
     if is_reply_to_untracked_message(actor, msg):
         return False
-    if mentions_self(actor, msg, text):
+    if managed_mention_identities(actor, msg, text):
         return True
     if was_logged_incoming_message(actor, msg):
         return True
@@ -5274,10 +5635,17 @@ async def log_edited_message_if_needed(actor, event):
         )
         if is_game_bot:
             record_game_bot_activity(actor, sender, logger, msg=msg, text=text)
+        if managed_mention_identities(actor, msg, text):
+            return log_mention_if_needed(
+                actor,
+                msg,
+                text=text,
+                label="edited",
+                sender=sender,
+                mentions_only=True,
+            )
         if is_game_bot and is_relevant_game_bot_edited_message(actor, msg, text):
             record_edited_cultivation_state_if_needed(actor, msg, text=text, sender=sender, logger=logger)
-            return log_edited_text_once(actor, msg, text=text, sender=sender)
-        if mentions_self(actor, msg, text):
             return log_edited_text_once(actor, msg, text=text, sender=sender)
         return False
     except Exception as e:

@@ -29,6 +29,8 @@ soul_curse_commissions.json
 bot_activity_shared.json
 star_gazing_events.jsonl
 star_gazing_events.lock
+duel_state.json
+duel_state.lock
 
 # Local backups, snapshots, and temporary scripts
 *.bak
@@ -56,6 +58,7 @@ read_*.py
 update_*_remote.py
 gen_update_script.py
 temp_*.txt
+repair_reward_ownership_*.py
 sftp_cmds.txt
 test_*.py
 !tests/
@@ -71,6 +74,7 @@ ANTY_MEMORY.md
 
 # Local AI/Codex/Claude tooling noise
 .codex/
+.claude/
 =
 CLAUDE.md
 package.json
@@ -83,3 +87,7 @@ watch-codex-provider-model.ps1
 Thumbs.db
 .idea/
 .vscode/
+
+# Local snapshots and visual debugging captures
+state_*.json.*
+telegram_2048_*.png

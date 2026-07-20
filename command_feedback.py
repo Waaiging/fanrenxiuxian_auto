@@ -19,10 +19,10 @@
 import asyncio
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from log_utils import (
-    cap_command_retries,          # 限制最大重试次数
+    actor_allows_retired_auto_command,
     command_response_family,      # 指令回复类型
     command_send_allowed,         # 指令守卫：检测发送频率
     is_passive_settlement_response, # 被动结算会截断任意指令回复
@@ -41,10 +41,26 @@ from log_utils import (
     force_command_guard_block,     # 响应异常时强制暂停当前指令
 )
 
+# 统一无响应策略：每条自动指令最多等待 1 分钟，随后只重试 1 次。
+# 这里集中执行，覆盖各业务计划中遗留的 max_retries=0/2 配置。
+NO_RESPONSE_TIMEOUT_SECONDS = 60
+NO_RESPONSE_RETRY_COUNT = 1
+RETIRED_AUTO_COMMAND_PREFIXES = (
+    ".闯塔",
+    ".借天门势",
+    ".灵树灌溉",
+    ".灵树状态",
+    ".采摘灵果",
+    ".协同守山",
+    ".推命 探索",
+    ".改命 探索",
+)
+
 REPEATED_RESPONSE_GUARD_WINDOW_SECONDS = 3 * 60
 REPEATED_RESPONSE_GUARD_LIMIT = 3
 REPEATED_RESPONSE_GUARD_BLOCK_SECONDS = 60 * 60
 REPEATED_RESPONSE_GUARD_EXCLUDED_PREFIXES = (
+    ".切换",
     ".查看闭关",
     ".我的状态",
     ".状态",
@@ -91,6 +107,7 @@ TELEGRAM_FLOOD_WAIT_PATTERNS = (
     "A wait of",
     "seconds is required",
 )
+TELEGRAM_WRITE_RETRY_SECONDS = 15 * 60
 
 
 def _normalize_repeated_response_text(text):
@@ -98,6 +115,15 @@ def _normalize_repeated_response_text(text):
     clean = re.sub(r"^\s*\[Avatar:\s*[^\]]+\]\s*", "", clean, flags=re.I)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean[:500]
+
+
+def is_retired_auto_command(message, actor=None):
+    command = str(message or "").strip()
+    retired = any(
+        command == prefix or command.startswith(f"{prefix} ")
+        for prefix in RETIRED_AUTO_COMMAND_PREFIXES
+    )
+    return retired and not actor_allows_retired_auto_command(actor, command)
 
 
 def _record_repeated_response_guard(actor, message, response_text, logger=None, identity=None):
@@ -201,18 +227,35 @@ async def _handle_telegram_send_protection(actor, message, exc, logger=None, ide
         return False
 
     current_id = str(identity or getattr(actor, "current_identity", "主魂") or "主魂")
+    now = datetime.now()
+    retry_write_restriction = bool(
+        getattr(actor, "telegram_write_restriction_retry_enabled", False)
+    ) or str(getattr(actor, "account_key", "") or "").lower() == "xiaohao"
+    retry_seconds = 0
+    if retry_write_restriction and reason == "write_restricted":
+        try:
+            retry_seconds = max(
+                60,
+                int(getattr(actor, "telegram_send_protection_retry_seconds", TELEGRAM_WRITE_RETRY_SECONDS)),
+            )
+        except Exception:
+            retry_seconds = TELEGRAM_WRITE_RETRY_SECONDS
+    stop_record = {
+        "identity": current_id,
+        "command": str(message or ""),
+        "reason": reason,
+        "error": str(exc),
+        "at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "retry_at": (now + timedelta(seconds=retry_seconds)).strftime("%Y-%m-%d %H:%M:%S") if retry_seconds else "",
+        "alert_sent": False,
+        "alert_pending": True,
+    }
     try:
         setattr(actor, "is_running", False)
-        setattr(actor, "_telegram_send_protection_stop", {
-            "identity": current_id,
-            "command": str(message or ""),
-            "reason": reason,
-            "error": str(exc),
-            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        setattr(actor, "_telegram_send_protection_stop", stop_record)
         state = getattr(actor, "state", None)
         if isinstance(state, dict):
-            state["telegram_send_protection_stop"] = getattr(actor, "_telegram_send_protection_stop")
+            state["telegram_send_protection_stop"] = stop_record
             save_state = getattr(actor, "save_state", None)
             if callable(save_state):
                 save_state()
@@ -220,13 +263,20 @@ async def _handle_telegram_send_protection(actor, message, exc, logger=None, ide
         pass
 
     if logger:
+        retry_text = f", retry_at={stop_record['retry_at']}" if stop_record["retry_at"] else ""
         logger.critical(
             f"Telegram send protection triggered; stopping script. "
-            f"identity={current_id}, command={message!r}, reason={reason}, error={exc}"
+            f"identity={current_id}, command={message!r}, reason={reason}{retry_text}, error={exc}"
         )
 
+    alert_sent = False
     try:
-        await send_text_alert(
+        retry_notice = (
+            f"将在 {retry_seconds // 60} 分钟后由主号控制器重新探测写权限。"
+            if retry_seconds else
+            "已自动停止当前脚本，避免继续触发 Telegram 限制。"
+        )
+        alert_sent = await send_text_alert(
             actor,
             "Telegram发送保护",
             (
@@ -234,7 +284,57 @@ async def _handle_telegram_send_protection(actor, message, exc, logger=None, ide
                 f"指令：{message}\n"
                 f"原因：{reason}\n"
                 f"错误：{exc}\n"
-                "已自动停止当前脚本，避免继续触发 Telegram 限制。"
+                f"{retry_notice}"
+            ),
+            logger=logger,
+        )
+    except Exception:
+        pass
+    stop_record["alert_sent"] = bool(alert_sent)
+    stop_record["alert_pending"] = not bool(alert_sent)
+    stop_record["alert_attempted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        state = getattr(actor, "state", None)
+        if isinstance(state, dict):
+            state["telegram_send_protection_stop"] = stop_record
+            save_state = getattr(actor, "save_state", None)
+            if callable(save_state):
+                save_state()
+    except Exception:
+        pass
+    return True
+
+
+async def record_telegram_send_success(actor, logger=None):
+    """Clear a persisted write-restriction stop after a real group send succeeds."""
+    state = getattr(actor, "state", None)
+    if not isinstance(state, dict):
+        return False
+    stop_record = state.get("telegram_send_protection_stop")
+    if not isinstance(stop_record, dict) or stop_record.get("reason") != "write_restricted":
+        return False
+
+    recovered = dict(stop_record)
+    recovered["recovered_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["telegram_send_protection_last_recovered"] = recovered
+    state.pop("telegram_send_protection_stop", None)
+    setattr(actor, "_telegram_send_protection_stop", None)
+    save_state = getattr(actor, "save_state", None)
+    if callable(save_state):
+        save_state()
+    if logger:
+        logger.warning(
+            "Telegram write permission recovered after successful send; previous restriction at %s.",
+            recovered.get("at", "unknown"),
+        )
+    try:
+        await send_text_alert(
+            actor,
+            "Telegram发送权限恢复",
+            (
+                f"账号已成功向目标群发送消息。\n"
+                f"上次受限：{recovered.get('at', '未知')}\n"
+                f"恢复确认：{recovered['recovered_at']}"
             ),
             logger=logger,
         )
@@ -290,6 +390,10 @@ async def send_and_wait_feedback_common(
         6. 等待 asyncio.Event 触发（由 handle_game_response 在收到回复时设置）
         7. 超时则重试，直到 max_retries
     """
+    if is_retired_auto_command(message, actor=actor):
+        logger.info("Retired auto command blocked: %s", str(message or "").strip())
+        return None
+
     pause_event = getattr(actor, "pause_event", None)
     if pause_event is not None:
         await pause_event.wait()
@@ -297,7 +401,10 @@ async def send_and_wait_feedback_common(
     async with actor.cmd_lock:
         _func_start = time.monotonic()
         logger.info(f"[DEBUG-FEEDBACK] ENTER send_and_wait_feedback, cmd={message!r}, identity={getattr(actor, 'current_identity', '?')}")
-        max_retries = cap_command_retries(max_retries)
+        # 统一覆盖调用方的旧参数：无响应只允许一次重试，避免有的指令不重试、
+        # 有的指令连续重试多次，行为不一致。
+        max_retries = NO_RESPONSE_RETRY_COUNT
+        timeout = NO_RESPONSE_TIMEOUT_SECONDS
         retries = 0
         resp_text = ""
         final_sent_msg = None
@@ -335,12 +442,17 @@ async def send_and_wait_feedback_common(
                     else:
                         logger.info(f"[DEBUG-FEEDBACK] [{message}] blocked by command guard")
                     break
+                before_auto_send = getattr(actor, "before_auto_command_send", None)
+                if callable(before_auto_send) and not before_auto_send(message):
+                    logger.warning(f"[DEBUG-FEEDBACK] [{message}] blocked by actor send quota")
+                    break
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] sending message to chat...")
                 sent_msg = await actor.client.send_message(actor.target_chat_id, message, reply_to=target_reply)
                 if not sent_msg:
                     break
+                await record_telegram_send_success(actor, logger=logger)
                 sent_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 remember_script_sent_message(actor, sent_msg)
                 schedule_command_auto_delete(actor, sent_msg, text=message, logger=logger)
@@ -388,7 +500,7 @@ async def send_and_wait_feedback_common(
             actor.feedback_identities = getattr(actor, "feedback_identities", {})
             actor.feedback_identities[msg_id] = _identity or "主魂"
             try:
-                # 等待机器人回复，超时可能重试
+                # 等待机器人回复；统一 60 秒无响应后重试一次
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] waiting for response (timeout={timeout}s)...")
                 await asyncio.wait_for(evt.wait(), timeout=timeout)
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] response received!")
@@ -445,7 +557,8 @@ async def send_and_wait_feedback_common(
                         logger.info(f"Timeout [{message}] ({retries}/{max_retries}), retrying...")
                     else:
                         logger.warning(f"Timeout [{message}] ({retries}/{max_retries}), retrying...")
-                    await asyncio.sleep(5)
+                    # timeout 已经代表首轮 60 秒等待，超时后立即发唯一一次重试。
+                    await asyncio.sleep(0)
                 else:
                     if suppress_no_response_alert:
                         logger.info(f"Timeout [{message}] - no direct response; continuing without retry.")

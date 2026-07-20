@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 DEFAULT_MAIN_FIELD_TRAINING_COMMAND = ".野外历练 谨慎"
 DEFAULT_AVATAR_FIELD_TRAINING_COMMAND = ".野外历练"
+DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND = ".野外历练 深入"
 YUANYING_OUT_COMMAND = ".元婴出窍"
 YUANYING_RETREAT_COMMAND = ".元婴闭关"
 RIFT_SEARCH_COMMAND = ".探寻裂缝"
@@ -23,7 +24,7 @@ ASK_DAO_COMMAND = ".问道"
 
 @dataclass(frozen=True)
 class CommandStep:
-    """一个前置步骤，例如历练前先 `.推命 探索`。"""
+    """一个前置步骤。"""
     command: str
     delay_after: float = 0
 
@@ -85,10 +86,9 @@ def field_training_plan_from_features(
         base_command = default_avatar_command
     command = join_command(base_command, features.get("training_level", ""))
 
-    prefix_commands = features.get("training_prefix_commands")
-    if prefix_commands is None:
-        meditation_prefix = str(features.get("meditation_prefix") or "").strip()
-        prefix_commands = [f"{meditation_prefix} 探索"] if meditation_prefix else []
+    # Exploration divination moved to the Tianxing miniapp. Meditation
+    # prefixes no longer imply a chat-command prefix for field training.
+    prefix_commands = features.get("training_prefix_commands") or []
     pre_steps = tuple(
         CommandStep(str(command).strip(), delay_after=3)
         for command in prefix_commands

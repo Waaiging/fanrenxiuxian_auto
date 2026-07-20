@@ -9,7 +9,7 @@
   3. 灵兽偷菜 —— 六翼优先偷取资源（4h CD）
   4. 巡边/放养/互动 —— 其他灵兽巡边，六翼完成探渊/偷菜后优先放养恢复
   5. 深度闭关 —— 自动开闭关、8小时等待、结算重开
-  6. 每日任务 —— 闯塔、宗门点卯
+  6. 每日任务 —— 宗门点卯
   7. 元婴出窍 —— 元婴期能力循环
   8. 探寻裂缝 —— 定时搜寻裂缝
   9. 抚摸法宝 —— 本命法宝器灵互动
@@ -63,13 +63,20 @@ if hasattr(time, 'tzset'):
 from datetime import datetime, timedelta
 
 from telethon import TelegramClient, events
-from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
+from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 from common_command_features import CommonCommandMixin, common_command_default_state
-from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
+from duel_features import DuelMixin
+from command_feedback import (
+    _handle_telegram_send_protection,
+    is_retired_auto_command,
+    record_telegram_send_success,
+    send_and_wait_feedback_common,
+)
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
+from group_visibility_control import run_telegram_write_permission_monitor
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
@@ -295,7 +302,7 @@ def load_config():
 class AtomicTaskContext:
     """小号脚本级原子任务锁。
 
-    用于共历心劫、化身闯塔、星宫收集等连续指令链。灵兽流程另有 beast_lock，
+    用于共历心劫、星宫收集等连续指令链。灵兽流程另有 beast_lock，
     两类锁分开是为了避免灵兽长流程把普通身份任务完全堵住。
     """
     def __init__(self, cultivator, name="Task"):
@@ -320,7 +327,7 @@ class AtomicTaskContext:
 # CultivatorXiaoHao 主类
 # =====================================================================
 
-class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
+class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
     """
     万灵宗小号脚本主类。
     继承 CommonCommandMixin（通用指令）和 ConcubineMixin（侍妾功能）。
@@ -348,6 +355,15 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         }
         self.field_training_command = ".野外历练 谨慎"
         self.notified_alert_ids = set()
+        self.telegram_write_restriction_retry_enabled = True
+        self.telegram_send_protection_retry_seconds = max(
+            60,
+            int(self.mc.get("telegram_send_protection_retry_seconds", 15 * 60) or 15 * 60),
+        )
+        self.telegram_write_permission_poll_seconds = max(
+            30,
+            int(self.mc.get("telegram_write_permission_poll_seconds", 60) or 60),
+        )
 
         # 运行时状态
         self.is_running = True
@@ -405,8 +421,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         if self.state.get("is_paused", False):
             self.pause_event.clear()
             log.info("Startup: is_paused=True, entering paused state.")
-        self._current_identity = self.state.get("current_identity", "主魂")
-        self._main_confirmed = (self._current_identity == "主魂")  # 启动时若上次为主魂则默认确认，否则强制对齐
+        # Do not trust the identity persisted by the previous process.  The
+        # first command must explicitly switch and confirm the live identity.
+        self._persisted_identity = self.state.get("current_identity", "主魂")
+        self._current_identity = ""
+        self._main_confirmed = False
         self._switch_lock = asyncio.Lock()  # 防止多个任务同时发送 .切换 主魂
         self.ensure_avatar_states()
         self.migrate_yuanshengzi_taiyi_state()
@@ -536,10 +555,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             "yuanying_out_end_time": "",
             "last_rift_search_time": "",
             "next_rift_search_time": "",
-            "bushi_wentian_date": "",
-            "bushi_wentian_count": 0,
-            "bushi_wentian_exchange_count": 0,
-            "bushi_wentian_kunwu_exchanged": False,
             "nickname": "",
             "last_tower_date": "",
             "last_mulan_support_date": "",
@@ -948,16 +963,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 self.set_avatar_state(avatar, "next_meditation_time", add_seconds_str(now, cd))
                 log.info(f"Avatar {avatar}: passive meditation cooldown {cd}s.")
 
-        # 4. 闯塔
-        if "通关" in text and ("层" in text or "塔" in text):
-            today = datetime.now().strftime("%Y-%m-%d")
-            self.set_avatar_state(avatar, "last_tower_date", today)
-            log.info(f"Avatar {avatar}: passive tower cleared today.")
-        elif "闯塔冷却" in text or "今日已闯" in text:
-            today = datetime.now().strftime("%Y-%m-%d")
-            self.set_avatar_state(avatar, "last_tower_date", today)
-
-        # 6. 入梦寻图
+        # 5. 入梦寻图
         if "当前进度：" in text and "残图" in text and "拼图" in text:
             self.set_avatar_state(avatar, "next_dream_map_time", add_seconds_str(now, 8 * 3600))
             log.info(f"Avatar {avatar}: passive detect Dream Map success. Cooldown 8h.")
@@ -1507,7 +1513,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         keys_to_check = [
             "next_meditation_retry_time",
             "next_field_training_time",
-            "next_tower_time",
             "next_star_palace_time",
             "next_star_gazing_time",
             "pending_star_gazing_target_time",
@@ -1588,10 +1593,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 
         if identity == "主魂":
             done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            daily_due = (
-                (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
-                or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
-            )
+            daily_due = ".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity)
             if (
                 seconds_until_daily_task_start(datetime.now()) <= 0
                 and daily_due
@@ -1697,6 +1699,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         """
         带身份感知的物理串行发送管线。
         """
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()
@@ -1949,6 +1954,48 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
 
     # ---- 指令发送 ----
 
+    def reserve_beast_roster_auto_query(self, hold_for_send=True):
+        """Reserve one automatic roster query before entering the send pipeline."""
+        if self.normalize_beast_roster_auto_query_quota():
+            self.save_state()
+        if self.beast_roster_auto_query_remaining() <= 0:
+            self.defer_beast_roster_auto_query_after_limit()
+            return None
+        used = self.record_beast_roster_auto_query_sent()
+        if hold_for_send:
+            self._beast_roster_query_reservations = int(
+                getattr(self, "_beast_roster_query_reservations", 0) or 0
+            ) + 1
+        self.save_state()
+        return used
+
+    def before_auto_command_send(self, message):
+        """Enforce the small-account daily cap at the actual send boundary."""
+        if str(message or "").strip() != ".我的灵兽":
+            return True
+
+        reservations = int(getattr(self, "_beast_roster_query_reservations", 0) or 0)
+        if reservations > 0:
+            self._beast_roster_query_reservations = reservations - 1
+            return True
+
+        used = self.reserve_beast_roster_auto_query(hold_for_send=False)
+        if used is None:
+            log.warning("Blocked automatic .我的灵兽: daily cap reached.")
+            return False
+        log.info(
+            f"Automatic .我的灵兽 reserved at send boundary "
+            f"({used}/{BEAST_ROSTER_AUTO_DAILY_LIMIT} today)."
+        )
+        return True
+
+    async def run_telegram_write_permission_monitor(self):
+        await run_telegram_write_permission_monitor(
+            self,
+            log,
+            protection_handler=_handle_telegram_send_protection,
+        )
+
     async def send_to_game(self, message, reply_to=None):
         """发送指令到游戏群组（带活跃度检测和守卫）"""
         # 整体任务独占锁守卫
@@ -1968,8 +2015,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 return None
             if not command_send_allowed(self, message, log):
                 return None
+            if not self.before_auto_command_send(message):
+                return None
             remember_script_send_intent(self, message)
             msg = await self.client.send_message(self.target_chat_id, message, reply_to=target_reply)
+            await record_telegram_send_success(self, logger=log)
             remember_script_sent_message(self, msg)
             # 记录 msg_id → avatar，供回复归属判断
             self.command_avatar_map[msg.id] = self.current_identity
@@ -1989,6 +2039,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         发送指令并等待回复（带 avatar_send_lock 保护）。
         所有主魂业务通过此方法发送。如果当前身份不是主魂，自动切回主魂再发送。
         """
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()
         while self.should_wait_for_atomic_task(message):
@@ -2152,12 +2205,11 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         """
         每日任务循环：
         1. 宗门点卯
-        2. 闯塔
         """
         return await self.run_common_daily_tasks_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".宗门点卯", ".闯塔"],
+            [".宗门点卯"],
             pre_loop_func=lambda: self.sleep_if_main_soul_paused("Daily tasks"),
             sleep_func=scheduler_sleep_seconds,
             send_kwargs_func=lambda command: {"return_msg": True},
@@ -4952,8 +5004,9 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             )
             return False
 
-        used = self.record_beast_roster_auto_query_sent()
-        self.save_state()
+        used = self.reserve_beast_roster_auto_query()
+        if used is None:
+            return bool(cache)
         log.info(f"Refreshing Beast Cache with .我的灵兽 ({used}/{BEAST_ROSTER_AUTO_DAILY_LIMIT} today).")
         resp = await self.send_and_wait_feedback(".我的灵兽", timeout=45, max_retries=0)
         if resp and "灵兽" in resp:
@@ -5294,6 +5347,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         try:
             msg = event.message; text = (msg.text or ""); msg_text_lower = text.lower()
             sender = await event.get_sender()
+            # 所有主魂/化身 @ 提及先记日志，不能被反馈匹配或其他提前返回吞掉。
+            log_mention_if_needed(
+                self, msg, text=text, sender=sender, mentions_only=True
+            )
             record_message_event(self, msg, text=text, sender=sender, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("xiaohao", msg, text, sender=sender, logger=log)
             if is_game_bot_sender(self, sender):
@@ -5341,7 +5398,8 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             is_matched = False
             # 1. 回复匹配（最优先）
             is_matched = match_pending_feedback_by_reply(
-                self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[REPLY-FEEDBACK]"
+                self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                label="[REPLY-FEEDBACK]", sender=sender
             )
             if not is_matched and await self.handle_pasture_return_event(event, text=text, sender=sender): return
             # 2. 用户名/昵称匹配
@@ -5362,6 +5420,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                     log,
                     id_window=30,
                     label="[MENTION-FEEDBACK]",
+                    sender=sender,
                 )
             # 3. 宽松匹配（针对特定指令如闭关、一键放养）
             if not is_matched and self.feedback_events and is_game_bot_sender(self, sender):
@@ -5381,6 +5440,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         log,
                         id_window=30,
                         label="[LOOSE-FEEDBACK]",
+                        sender=sender,
                     )
             if not is_matched:
                 log_mention_if_needed(self, msg, text=text, sender=sender)
@@ -7292,7 +7352,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                 continue
 
             except Exception as e:
-                log.error(f"Avatar [{avatar}] meditation loop error: {e}")
+                log.error(f"Avatar [{avatar}] meditation loop error: {e}", exc_info=True)
                 await asyncio.sleep(300)
 
     async def _avatar_settle_and_start_deep(self, avatar, initial_check_text=None):
@@ -7343,23 +7403,6 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             initial_delay=initial_delay,
             sleep_func=scheduler_sleep_seconds,
             handle_insufficient_cultivation=False,
-        )
-
-    # ---- 身外化身：分身闯塔循环 ----
-
-    async def run_avatar_tower_loop(self, avatar, initial_delay=0):
-        """
-        分身每日 23 点自动闯塔任务。
-        每天 23:00 - 23:30 之间随机错开时间，为指定分身发送一次 .闯塔。
-        状态记录在 state.avatars[avatar]["last_tower_date"] 中。
-        """
-        return await self.run_common_avatar_tower_loop(
-            avatar,
-            initial_delay=initial_delay,
-            timeout=90,
-            handle_insufficient_cultivation=False,
-            require_meditation_ready=False,
-            sleep_func=scheduler_sleep_seconds,
         )
 
     # ============================================================
@@ -7491,12 +7534,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                                     break
                                 remember_script_send_intent(self, ".稳")
                                 sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
+                                await record_telegram_send_success(self, logger=log)
                                 remember_script_sent_message(self, sent)
                                 record_command_sent(self, sent, ".稳", identity=avatar, source="auto", reply_to=current_msg.id, logger=log)
                                 schedule_command_auto_delete(self, sent, text=".稳", logger=log)
                                 log.info(f"🟢 OUT [{avatar}]:\n.稳 ({idx}/3, try {attempt}/3)")
 
-                                result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
+                                result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
                                     current_msg, sent, idx, timeout_sec=90, poll_sec=3,
                                 )
                                 if result_msg:
@@ -7649,11 +7693,13 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                     self.maybe_record_avatar_passive_states(msg)
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令，如共历心劫）
                     is_matched = match_pending_feedback_by_reply(
-                        self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                        self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                        label="[EDITED-FEEDBACK]", sender=sender
                     )
                     if not is_matched:
                         is_matched = match_pending_feedback_by_message_id(
-                            self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                            self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                            label="[EDITED-FEEDBACK]", sender=sender
                         )
                     # 3. 宽松匹配：有待处理事件且来自游戏bot
                     if not is_matched:
@@ -7667,6 +7713,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                             ),
                             log,
                             id_window=30,
+                            sender=sender,
                         )
             except Exception as ex:
                 log.error(f"Edited message handler error: {ex}")
@@ -7681,7 +7728,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
             self._main_confirmed = False
             log.info(
                 "Startup Sync: Keep persisted identity "
-                f"{self.current_identity}; main soul will be re-confirmed before commands."
+                f"{getattr(self, '_persisted_identity', 'unknown')}; live identity will be re-confirmed before commands."
             )
             if self.identity_pause_seconds("主魂") > 0:
                 log.info(
@@ -7744,8 +7791,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
                         self.state["deep_meditation_guard_until"] = ""
             self.save_state(); self.startup_done.set(); log.info("Startup Sync: Finished. All loops released.")
         asyncio.create_task(startup_sync())
+        asyncio.create_task(resume_pending_exchange_events(self))
         asyncio.create_task(self.restore_pending_star_gazing_after_startup())
         asyncio.create_task(periodic_log_prune(LOG_FILE))
+        asyncio.create_task(self.run_telegram_write_permission_monitor())
         asyncio.create_task(self.run_health_watchdog_loop())
 
         # 启动所有定时任务
@@ -7756,7 +7805,7 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
-        self.create_scheduler_task("bushi_wentian_daily", lambda: self.run_bushi_wentian_daily_loop(initial_delay=30, sleep_func=scheduler_sleep_seconds))
+        self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=25))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
@@ -7765,11 +7814,10 @@ class CultivatorXiaoHao(CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCu
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=100, sleep_func=scheduler_sleep_seconds))
 
-        # 身外化身：为每个分身启动独立的闭关+历练+闯塔循环（取消强制错开等待，完全依赖全局锁排队执行）
+        # 身外化身：为每个分身启动独立的闭关+历练循环
         for avatar in self.avatars:
             self.create_scheduler_task(f"avatar_meditation_{avatar}", lambda avatar=avatar: self.run_avatar_meditation_loop(avatar, initial_delay=0))
             self.create_scheduler_task(f"avatar_field_training_{avatar}", lambda avatar=avatar: self.run_avatar_field_training_loop(avatar, initial_delay=0))
-            self.create_scheduler_task(f"avatar_tower_{avatar}", lambda avatar=avatar: self.run_avatar_tower_loop(avatar, initial_delay=0))
             if avatar in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar}", lambda avatar=avatar: self.run_avatar_yuanying_rift_loop(avatar, initial_delay=0))
             # 所有分身都启动此循环，内含对星宫指令的身份判定，问心子借此执行入梦和心劫

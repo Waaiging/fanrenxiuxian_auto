@@ -3,7 +3,7 @@
 
 基于 FastAPI 的 Web 面板，提供修仙脚本的图形化管理界面。
 功能：
-  1. 账号状态查看 —— 实时查看三个账号的运行状态、修为进度
+  1. 账号状态查看 —— 实时查看四个账号的运行状态、修为进度
   2. 日志浏览 —— 按指令标签分类/搜索浏览日志
   3. 修为统计 —— 自动从日志中提取修为变化，按日统计
   4. 进程管理 —— 启动/停止/重启账号脚本
@@ -38,6 +38,7 @@ import uvicorn
 from log_utils import command_control_key
 from command_modules import (
     ASK_DAO_COMMAND,
+    DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
     NURTURE_SPIRIT_COMMAND,
     RIFT_SEARCH_COMMAND,
     YUANYING_OUT_COMMAND,
@@ -45,6 +46,7 @@ from command_modules import (
     treasure_touch_plan,
     yuanying_out_plan,
 )
+from duel_features import duel_dashboard_payload, set_duel_control
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -63,7 +65,6 @@ from fishing_features import (
     fishing_dashboard_command,
     fishing_dashboard_state,
 )
-from common_command_features import AVATAR_TOWER_SUPPORT_COMMAND
 from concubine_features import CONCUBINE_DISMISS_COMMAND, CONCUBINE_SEARCH_COMMAND, TARGET_CONCUBINE_NAME
 from soul_curse_features import (
     SOUL_CURSE_ACCEPT_COMMAND,
@@ -153,8 +154,18 @@ SERVER_START_TS = time.time()
 SERVER_STARTED_AT = datetime.fromtimestamp(SERVER_START_TS).strftime(TIME_FORMAT)
 GIT_META_CACHE = {}
 GIT_META_CACHE_SECONDS = 60
-ACCOUNT_DISPLAY_NAMES = {"main": "凌霄宫 (主号)", "sub": "元婴宗 (副号)", "xiaohao": "万灵宗 (小号)"}
-ACCOUNT_SHORT_NAMES = {"main": "主号", "sub": "副号", "xiaohao": "小号"}
+ACCOUNT_DISPLAY_NAMES = {
+    "main": "万灵宗 (主号)",
+    "sub": "元婴宗 (副号)",
+    "xiaohao": "万灵宗 (小号)",
+    "waaiging": "天星宗 (@Waaiging)",
+}
+ACCOUNT_SHORT_NAMES = {
+    "main": "主号",
+    "sub": "副号",
+    "xiaohao": "小号",
+    "waaiging": "Waaiging",
+}
 ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
@@ -166,7 +177,7 @@ CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 
 ACCOUNT_PROFILE_USERNAMES = {
     "main": {
-        "主魂": {"waaiging"},
+        "主魂": {"weeguu"},
         "无咎子": {"wuxinglinggen"},
         "缘生子": {"kulipabp"},
         "素缘子": {"oldeinstein"},
@@ -183,7 +194,11 @@ ACCOUNT_PROFILE_USERNAMES = {
         "素心子": {"hajiimiii"},
         "缘生子": {"adai925"},
     },
+    "waaiging": {
+        "主魂": {"waaiging"},
+    },
 }
+MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
 
 def account_profile_usernames(account):
     """Return dashboard-safe username mapping for every identity in an account."""
@@ -257,8 +272,10 @@ BOT_REPLY_MARKERS = {
 # 每个账号的日志标签定义（对应不同的游戏指令）
 ACCOUNT_LOG_TAGS = {
     "main": [
-        ".闯塔", ".借天门势", ".宗门点卯", ".宗门传功",
+        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
+        ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
+        ".探渊", ".一键放养", ".灵兽互动", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
         ".召回侍妾", ".安置侍妾", YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
         MAIN_TREASURE_TOUCH_COMMAND,
@@ -270,11 +287,10 @@ ACCOUNT_LOG_TAGS = {
         SOUL_CURSE_PROTECT_COMMAND, SOUL_CURSE_PUBLISH_COMMAND,
         SOUL_CURSE_ACCEPT_COMMAND, SOUL_CURSE_IDENTIFY_COMMAND,
         SOUL_CURSE_SUPPRESS_COMMAND, SOUL_CURSE_STRIP_COMMAND,
-        ".推命 探索", ".改命 探索",
         OTHER_LOG_TAG,
     ],
     "sub": [
-        ".闯塔", ".宗门点卯", ".宗门传功", ASK_DAO_COMMAND,
+        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功", ASK_DAO_COMMAND,
         ".启阵", ".助阵", ".强行出关",
         ".查看闭关", ".闭关修炼", ".深度闭关",
         ".召回侍妾", ".安置侍妾", ".每日问安",
@@ -288,7 +304,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "xiaohao": [
-        ".闯塔", ".宗门点卯", ".宗门传功",
+        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
@@ -300,11 +316,26 @@ ACCOUNT_LOG_TAGS = {
         SOUL_CURSE_PROTECT_COMMAND, SOUL_CURSE_PUBLISH_COMMAND,
         OTHER_LOG_TAG,
     ],
+    "waaiging": [
+        ".拜入宗门 天星宗",
+        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
+        ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
+        YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
+        DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
+        ".宗门战况", ".参战", ".我的侍妾", ".安置侍妾", ".召回侍妾",
+        ".入梦寻图", ".共历心劫", ".稳", ".天机代卜", ".侍妾远航", ".远航归来",
+        OTHER_LOG_TAG,
+    ],
 }
 
 # 脚本文件名 -> tmux 窗口编号 映射
-SCRIPT_MAP = {"main": "intelligent_cultivator.py", "sub": "sub_cultivator.py", "xiaohao": "cultivator_xiaohao.py"}
-WINDOW_MAP = {"main": 0, "sub": 1, "xiaohao": 2}
+SCRIPT_MAP = {
+    "main": "intelligent_cultivator.py",
+    "sub": "sub_cultivator.py",
+    "xiaohao": "cultivator_xiaohao.py",
+    "waaiging": "cultivator_waaiging.py",
+}
+WINDOW_MAP = {"main": 0, "sub": 1, "xiaohao": 2, "waaiging": 3}
 
 
 # =====================================================================
@@ -318,6 +349,10 @@ def get_state(name):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                # Waaiging is a single-soul account. Ignore stale avatar data
+                # copied from another account until its next clean save.
+                if name == "waaiging":
+                    data.pop("avatars", None)
                 if data.get("deep_meditation_end_time"):
                     from datetime import datetime
                     end_time = data["deep_meditation_end_time"]
@@ -565,7 +600,7 @@ def apply_command_controls(account, panel):
             control_key,
             default_disabled=bool(row.get("default_paused")),
         )
-        if row["control_disabled"]:
+        if row["control_disabled"] and row.get("actionable", True):
             row["status"] = "已暂停"
             row["tone"] = "paused"
             detail = row.get("detail", "")
@@ -733,53 +768,13 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
     return command_row(command, label, "今日未执行", "ready", remaining="待执行", detail=detail, group=group, schedule_type="daily", next_seconds=0)
 
 
-def avatar_tower_command(state):
-    today = datetime.now().strftime("%Y-%m-%d")
-    if str(state.get("last_tower_date", "") or "") == today:
-        return command_row(".闯塔", "闯塔", "今日已执行", "done", remaining="今日", at=today, group="每日", schedule_type="daily")
-    now = datetime.now()
-    if now.hour < 23:
-        target = now.replace(hour=23, minute=0, second=0, microsecond=0)
-        next_seconds = max(0, int((target - now).total_seconds()))
-        return command_row(
-            ".闯塔",
-            "闯塔",
-            "23点后执行",
-            "cooldown",
-            format_remaining(next_seconds),
-            target.strftime(TIME_FORMAT),
-            group="每日",
-            schedule_type="daily",
-            next_seconds=next_seconds,
-        )
-    return command_row(".闯塔", "闯塔", "今日未执行", "ready", remaining="待执行", at=str(state.get("last_tower_date", "") or ""), group="每日", schedule_type="daily", next_seconds=0)
-
-
-def avatar_tower_support_command(state):
-    detail = str(state.get("last_mulan_support_error") or state.get("last_mulan_support_response") or "")
-    if len(detail) > 80:
-        detail = detail[:80] + "..."
-    today = datetime.now().strftime("%Y-%m-%d")
-    if str(state.get("last_tower_date", "") or "") != today:
-        tower = avatar_tower_command(state)
-        return command_row(
-            AVATAR_TOWER_SUPPORT_COMMAND,
-            "支援慕兰",
-            "随闯塔执行",
-            "cooldown",
-            tower.get("remaining", ""),
-            tower.get("at", ""),
-            detail=detail,
-            group="每日",
-            schedule_type="daily",
-            next_seconds=tower.get("next_seconds"),
-        )
+def mulan_support_daily_command(state):
     return daily_done_command(
         state,
-        AVATAR_TOWER_SUPPORT_COMMAND,
-        "支援慕兰",
+        MULAN_SUPPORT_COMMAND,
+        "支援慕兰 奇袭",
         date_key="last_mulan_support_date",
-        detail=detail,
+        detail="随宗门点卯执行",
         group="每日",
     )
 
@@ -1601,50 +1596,6 @@ def taiyi_guide_command(state):
     )
 
 
-def spirit_tree_irrigation_time_for_identity(state, identity="主魂"):
-    times = state.get("spirit_tree_irrigation_times")
-    if isinstance(times, dict):
-        value = times.get(identity or "主魂", "")
-        if value:
-            return value
-    if (identity or "主魂") == "主魂":
-        return state.get("next_spirit_tree_irrigation_time", "")
-    return ""
-
-
-def spirit_tree_command(state, group="落云宗", identity="主魂"):
-    status = state.get("spirit_tree_status", "灌溉期")
-    mature_until = parse_state_time(state.get("spirit_tree_mature_until", ""))
-    harvested = state.get("spirit_tree_harvested_in_mature_period")
-    attempted = state.get("spirit_tree_harvest_attempted_in_mature_period")
-    if status == "成熟采摘期" and mature_until and mature_until > datetime.now():
-        detail = "本期已采摘" if harvested else ("本期已处理" if attempted else "等待采摘")
-        return command_row(
-            ".采摘灵果", "灵树状态", "成熟采摘期", "active",
-            format_remaining((mature_until - datetime.now()).total_seconds()),
-            str(state.get("spirit_tree_mature_until", "")), detail, group,
-            schedule_type="cooldown", next_seconds=(mature_until - datetime.now()).total_seconds(),
-        )
-    display_state = dict(state)
-    display_state["next_spirit_tree_irrigation_time"] = spirit_tree_irrigation_time_for_identity(state, identity)
-    irrigation = time_command(display_state, "next_spirit_tree_irrigation_time", ".灵树灌溉", "灵树灌溉", group=group)
-    irrigation["detail"] = status or irrigation.get("detail", "")
-    return irrigation
-
-
-def spirit_tree_guard_command(state, group="落云宗"):
-    invasion = state.get("spirit_tree_invasion_status", "")
-    row = time_command(
-        state, "next_spirit_tree_guard_time", ".协同守山", "协同守山",
-        waiting="守山冷却", ready="待来袭", missing="待来袭",
-        detail=invasion, group=group,
-    )
-    if invasion:
-        row["status"] = "来袭待处理"
-        row["tone"] = "active"
-    return row
-
-
 def global_sync_commands():
     return [
         watch_command(".我的灵根", "我的灵根", "同步当前修为和灵根", "资料同步"),
@@ -1671,7 +1622,11 @@ def sect_war_commands(state):
 
 
 def concubine_voyage_enabled(account, identity):
-    return CONCUBINE_VOYAGE_AUTO_START_ENABLED
+    return (
+        CONCUBINE_VOYAGE_AUTO_START_ENABLED
+        and account == "main"
+        and (identity or "主魂") == "主魂"
+    )
 
 
 def concubine_voyage_detail(state):
@@ -1703,8 +1658,8 @@ def concubine_commands(state, include_divination=True, include_voyage=False):
     ]
     if include_voyage:
         rows.insert(2, time_command(
-            state, "next_concubine_voyage_time", ".侍妾远航 冒险", "侍妾远航",
-            waiting="12小时冷却", detail=concubine_voyage_detail(state), group="侍妾",
+            state, "next_concubine_voyage_time", ".侍妾远航 月殿寻痕", "侍妾远航",
+            waiting="6小时冷却", detail=concubine_voyage_detail(state), group="侍妾",
         ))
     if include_divination:
         rows.append(time_command(state, "next_divination_time", ".天机代卜", "天机代卜", group="侍妾"))
@@ -1772,17 +1727,14 @@ def main_soul_panel(account, state):
     rows = []
     rows.extend(global_sync_commands())
     if account == "main":
+        hunt_stopped = bool(state.get("beast_hunt_stopped"))
+        hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         rows.extend([
-            daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
             time_command(state, "next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "温养器灵", waiting="6小时冷却", group="法宝"),
-            time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group="天阶"),
-            time_command(state, "next_heart_time", ".问心台", "问心台", group="天阶"),
-            manual_command(".天阶状态", "天阶状态", "查询天阶状态", "天阶"),
-            time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="天阶"),
         ])
         rows.extend(meditation_commands(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
@@ -1791,11 +1743,27 @@ def main_soul_panel(account, state):
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
+        rows.extend([
+            manual_command(".我的灵兽", "我的灵兽", "查询主号灵兽缓存", "灵兽"),
+            (
+                command_row(
+                    ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
+                    detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False,
+                )
+                if hunt_stopped
+                else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
+            ),
+            time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
+            time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
+            time_command(state, "next_beast_interaction_time", ".灵兽互动 <重点灵兽>", "灵兽互动", group="灵兽"),
+            time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+            manual_command(".巡边状态", "巡边状态", group="灵兽"),
+            manual_command(".巡边归来", "巡边归来", group="灵兽"),
+        ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "sub":
         rows.extend([
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
-            daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             yuanying_retreat_command(state),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
@@ -1809,7 +1777,6 @@ def main_soul_panel(account, state):
         hunt_stopped = bool(state.get("beast_hunt_stopped"))
         hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         rows.extend([
-            daily_done_command(state, ".闯塔", "闯塔", done_command=".闯塔", group="每日"),
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
@@ -1845,6 +1812,42 @@ def main_soul_panel(account, state):
             time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
         ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
+    elif account == "waaiging":
+        sect_joined = bool(state.get("sect_join_confirmed"))
+        rows.extend([
+            (
+                command_row(
+                    ".拜入宗门 天星宗",
+                    "拜入天星宗",
+                    "已入宗",
+                    "done",
+                    detail="机器人已确认天星宗弟子身份",
+                    group="天星宗",
+                    schedule_type="once",
+                    actionable=False,
+                )
+                if sect_joined
+                else time_command(
+                    state,
+                    "next_sect_join_time",
+                    ".拜入宗门 天星宗",
+                    "拜入天星宗",
+                    waiting="叛宗冷却",
+                    ready="待入宗",
+                    missing="待确认",
+                    group="天星宗",
+                )
+            ),
+            daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_field_training_time", DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND, "野外历练 深入", group="通用"),
+        ])
+        rows.extend(sect_war_commands(state))
+        rows.extend(meditation_commands(state))
+        rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
+        rows.extend(concubine_commands(state, include_divination=True, include_voyage=False))
+    rows.append(mulan_support_daily_command(state))
     return {"identity": "主魂", "role": "主魂", "commands": rows}
 
 
@@ -1859,8 +1862,6 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
-            manual_command(".推命 探索", "推命探索", group="推命"),
-            manual_command(".改命 探索", "改命探索", group="推命"),
             time_command(state, "next_field_training_time", WUJIUZI_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
@@ -1875,15 +1876,10 @@ def lingxiao_avatar_commands(name, state, root_state=None):
         ])
     else:
         rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
-    rows.append(avatar_tower_command(state))
-    rows.append(avatar_tower_support_command(state))
     if name == "缘生子":
-        tree_state = root_state or state
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
-            spirit_tree_command(tree_state, identity=name),
-            spirit_tree_guard_command(tree_state),
         ])
     if name == "素缘子":
         rows.extend(xiaohao_star_attraction_commands(state))
@@ -1913,7 +1909,10 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             ),
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
-    rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
+    rows.extend([
+        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
+        mulan_support_daily_command(state),
+    ])
     return rows
 
 
@@ -1930,8 +1929,6 @@ def star_avatar_commands(name, state):
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
     rows.extend(meditation_commands(state, include_force_exit=True))
-    rows.append(avatar_tower_command(state))
-    rows.append(avatar_tower_support_command(state))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
@@ -1940,7 +1937,10 @@ def star_avatar_commands(name, state):
             time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
             time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         ])
-    rows.append(daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"))
+    rows.extend([
+        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
+        mulan_support_daily_command(state),
+    ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
     return rows
 
@@ -1951,8 +1951,6 @@ def xiaohao_avatar_commands(name, state):
     rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
     rows.extend([
         time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
-        avatar_tower_command(state),
-        avatar_tower_support_command(state),
         daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
     ])
     if name == "缘生子":
@@ -1978,6 +1976,7 @@ def xiaohao_avatar_commands(name, state):
             time_command(state, "pending_star_shift_target_time", ".改换星移 @TitanCreeper", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("xiaohao", name)))
+    rows.append(mulan_support_daily_command(state))
     return rows
 
 
@@ -2020,6 +2019,7 @@ def get_log_filename(name):
     if name == 'main': return 'cultivator.log'
     if name == 'sub': return 'sub_cultivator.log'
     if name == 'xiaohao': return 'cultivator_xiaohao.log'
+    if name == 'waaiging': return 'cultivator_waaiging.log'
     return f'{name}_cultivator.log'
 
 def normalize_log_command(first, second=""):
@@ -4088,7 +4088,12 @@ def clear_account_history(account):
     return {"success": True, "msg": output or "清屏完成"}
 
 def account_display_name(account):
-    return {"main": "凌霄宫（主号）", "sub": "元婴宗（副号）", "xiaohao": "万灵宗（小号）"}.get(account, account)
+    return {
+        "main": "万灵宗（主号）",
+        "sub": "元婴宗（副号）",
+        "xiaohao": "万灵宗（小号）",
+        "waaiging": "天星宗（@Waaiging）",
+    }.get(account, account)
 
 def run_clear_job(job_id, account):
     """后台执行清屏任务"""
@@ -4234,6 +4239,39 @@ def daily_rewards(date: str = "", account: str = "", identity: str = "", command
             oldest_key = min(DAILY_REWARD_ENDPOINT_CACHE, key=lambda key: DAILY_REWARD_ENDPOINT_CACHE[key].get("at", 0))
             DAILY_REWARD_ENDPOINT_CACHE.pop(oldest_key, None)
         return payload
+
+
+@app.get("/api/duels")
+def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate)):
+    """Return shared duel queues, per-identity chances, and structured results."""
+    try:
+        safe_limit = max(1, min(int(limit or 200), 1000))
+    except Exception:
+        safe_limit = 200
+    return duel_dashboard_payload(date=date, limit=safe_limit)
+
+
+@app.post("/api/duels/control")
+async def duel_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Pause or resume all duel automation or one target queue."""
+    queue_key = str(payload.get("queue") or "").strip().lower()
+    enabled = bool(payload.get("enabled"))
+    try:
+        data = set_duel_control(enabled, queue_key=queue_key)
+    except ValueError:
+        return {"success": False, "msg": "未知斗法队列"}
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "enabled": bool(data.get("enabled")),
+        "queue": queue_key,
+        "queue_enabled": (
+            bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
+            if queue_key else None
+        ),
+        "updated_by": username,
+    }
 
 @app.get("/api/logs/{name}")
 def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "", kind: str = "",
@@ -4568,5 +4606,5 @@ async def index(username: str = Depends(authenticate)):
     return "<h1>Dashboard UI File Missing</h1>"
 
 if __name__ == "__main__":
-    """启动服务（0.0.0.0:8000）"""
-    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+    """启动服务（仅监听本机 127.0.0.1:8000，由 HTTPS 反向代理对外提供）。"""
+    uvicorn.run(app, host="127.0.0.1", port=8000, access_log=False)

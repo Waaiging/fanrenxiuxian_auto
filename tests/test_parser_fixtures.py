@@ -207,6 +207,102 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_managed_mentions_cover_all_twelve_identities(self):
+        account_fixtures = (
+            (
+                "Weeguu",
+                {"wuxinglinggen": "无咎子", "kulipabp": "缘生子", "OldEinstein": "素缘子"},
+            ),
+            (
+                "Gamling33",
+                {"crayonxxin": "厚土", "lvdoumiao": "缘生子", "ding303": "寻真子"},
+            ),
+            (
+                "TitanCreeper",
+                {"lianqi10000": "问心子", "hajiimiii": "素心子", "adai925": "缘生子"},
+            ),
+        )
+        checked = 0
+        for main_username, avatar_usernames in account_fixtures:
+            actor = SimpleNamespace(
+                my_info=SimpleNamespace(id=100 + checked, username=main_username, first_name="", last_name=""),
+                identity_usernames={"主魂": [main_username]},
+                avatar_usernames=avatar_usernames,
+                avatars=list(avatar_usernames.values()),
+            )
+            identities_by_username = {main_username: "主魂", **avatar_usernames}
+            for username, identity in identities_by_username.items():
+                msg = DummyMessage(1000 + checked, text=f"请查看 @{username} 的消息")
+                msg.mentioned = identity == "主魂"
+                msg.entities = []
+                self.assertEqual(
+                    log_utils.managed_mention_identities(actor, msg, msg.text),
+                    [identity],
+                )
+                checked += 1
+
+        self.assertEqual(checked, 12)
+
+    def test_mentions_only_logs_avatar_before_feedback_matching(self):
+        actor = SimpleNamespace(
+            my_info=SimpleNamespace(id=42, username="Gamling33", first_name="", last_name=""),
+            identity_usernames={"主魂": ["Gamling33"]},
+            avatar_usernames={"crayonxxin": "厚土"},
+            avatars=["厚土"],
+            current_identity="主魂",
+        )
+        msg = DummyMessage(2001, text="秘境提醒 @Crayonxxin 请立即处理")
+        msg.mentioned = False
+        msg.entities = []
+        sender = SimpleNamespace(username="some_player", first_name="路人", last_name="")
+        target_logger = log_utils.logging.getLogger(actor.__class__.__name__)
+
+        with (
+            patch.object(target_logger, "info") as info_mock,
+            patch.object(log_utils, "record_message_event") as event_mock,
+            patch.object(log_utils, "record_command_response_for_reply", return_value=False),
+            patch.object(log_utils, "record_command_response_for_related_event", return_value=False),
+        ):
+            self.assertTrue(log_utils.log_mention_if_needed(
+                actor,
+                msg,
+                text=msg.text,
+                sender=sender,
+                mentions_only=True,
+            ))
+
+        self.assertIn("[Avatar: 厚土]", info_mock.call_args.args[0])
+        self.assertEqual(event_mock.call_args.kwargs["identity"], "厚土")
+
+    def test_main_mention_is_not_relabelled_as_current_avatar(self):
+        actor = SimpleNamespace(
+            my_info=SimpleNamespace(id=42, username="Gamling33", first_name="", last_name=""),
+            identity_usernames={"主魂": ["Gamling33"]},
+            avatar_usernames={"crayonxxin": "厚土"},
+            avatars=["厚土"],
+            current_identity="厚土",
+            get_identity_from_msg=lambda msg: None,
+        )
+        msg = DummyMessage(2002, text="@Gamling33 主魂请查看")
+        msg.mentioned = True
+        msg.entities = []
+
+        with (
+            patch.object(log_utils.logging.getLogger(actor.__class__.__name__), "info"),
+            patch.object(log_utils, "record_message_event") as event_mock,
+            patch.object(log_utils, "record_command_response_for_reply", return_value=False),
+            patch.object(log_utils, "record_command_response_for_related_event", return_value=False),
+        ):
+            self.assertTrue(log_utils.log_mention_if_needed(
+                actor,
+                msg,
+                text=msg.text,
+                sender=SimpleNamespace(username="some_player"),
+                mentions_only=True,
+            ))
+
+        self.assertEqual(event_mock.call_args.kwargs["identity"], "主魂")
+
     def test_time_critical_wait_clears_stale_star_schedule(self):
         actor = DummyAvatarCommon()
         avatar = actor.get_avatar_state("缘生子")
@@ -429,11 +525,55 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_auto_exchange_wraps_exchange_with_concubine_place_and_recall(self):
         actions = []
+        actor_holder = {}
 
         class FakeClient:
+            async def get_messages(self, chat_id, ids):
+                # The bot deletes the offer quickly; exchange must fall back to
+                # a plain command instead of abandoning the event.
+                return None
+
             async def send_message(self, chat_id, command, reply_to=None):
                 actions.append(("direct", command, reply_to))
-                return SimpleNamespace(id=900 + len(actions), text=command)
+                sent = SimpleNamespace(
+                    id=900 + len(actions), text=command, chat_id=chat_id,
+                    sender_id=42, reply_to=None,
+                )
+                actor = actor_holder["actor"]
+                loop = asyncio.get_running_loop()
+                if command == ".交换 法宝":
+                    settlement = SimpleNamespace(
+                        id=990,
+                        text=(
+                            "【天机异闻·南陇侯的交易】道友 @hajiimiii 经过深思熟虑，"
+                            "选择将侍妾【测试】与南陇侯交换！作为回报，南陇侯赐予法宝。"
+                        ),
+                        chat_id=chat_id,
+                        sender_id=777,
+                        reply_to=None,
+                    )
+                    loop.call_soon(
+                        auto_reply_features._consume_exchange_settlement,
+                        actor,
+                        settlement,
+                        settlement.text,
+                        SimpleNamespace(username="fanrenxiuxian_bot"),
+                    )
+                elif command == ".召回侍妾":
+                    reply = SimpleNamespace(
+                        id=991,
+                        text="你已将【测试】从藏娇阁中召回，随你一同历练。",
+                        chat_id=chat_id,
+                        sender_id=778,
+                        reply_to=SimpleNamespace(reply_to_msg_id=sent.id),
+                    )
+                    loop.call_soon(
+                        auto_reply_features.is_auto_reply_followup,
+                        actor,
+                        reply,
+                        SimpleNamespace(username="fanrenxiuxian_bot"),
+                    )
+                return sent
 
         class DummyActor:
             def __init__(self):
@@ -446,17 +586,19 @@ class ParserFixtureTests(unittest.TestCase):
                 self.my_info = SimpleNamespace(id=42, username="TitanCreeper")
                 self.current_identity = "主魂"
                 self.active_atomic_task = None
+                self.state = {}
+                self.save_state = lambda: None
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 actions.append((identity, command, kwargs.get("reply_to")))
                 self.current_identity = identity
-                return SimpleNamespace(text="OK")
+                return SimpleNamespace(text="你已将侍妾安置在藏娇阁中。")
 
         class FakeEvent:
             def __init__(self):
                 self.message = SimpleNamespace(
                     id=321,
-                    text="【hajiimiii】南陇侯给出选项：.交换",
+                    text="@hajiimiii！南陇侯给出选项：.交换 法宝 / .交换 功法",
                     entities=[],
                     reply_to=None,
                 )
@@ -469,20 +611,31 @@ class ParserFixtureTests(unittest.TestCase):
         async def fake_sleep(seconds):
             delays.append(seconds)
 
-        actor = DummyActor()
-        with patch("auto_reply_features.asyncio.sleep", new=fake_sleep):
-            handled = asyncio.run(auto_reply_features.maybe_auto_reply_exchange(actor, FakeEvent()))
+        async def scenario():
+            actor = DummyActor()
+            actor_holder["actor"] = actor
+            handled = await auto_reply_features.maybe_auto_reply_exchange(actor, FakeEvent())
+            await asyncio.gather(*list(actor._exchange_auto_tasks))
+            return actor, handled
+
+        with patch("auto_reply_features.asyncio.sleep", new=fake_sleep), patch.object(
+            auto_reply_features, "record_command_sent", return_value=True
+        ), patch.object(
+            auto_reply_features, "record_command_response_for_command_id", return_value=True
+        ):
+            actor, handled = asyncio.run(scenario())
 
         self.assertTrue(handled)
         self.assertEqual(
             actions,
             [
                 ("素心子", ".安置侍妾", None),
-                ("素心子", ".交换 法宝", 321),
+                ("direct", ".交换 法宝", None),
                 ("direct", ".召回侍妾", None),
             ],
         )
-        self.assertEqual(delays[-2:], [5, 5])
+        self.assertIn(5, delays)
+        self.assertEqual(actor.state[auto_reply_features.EXCHANGE_STATE_KEY]["321"]["status"], "done")
         self.assertIsNone(actor.active_atomic_task)
 
     def test_auto_merchant_ignores_other_username(self):
@@ -1254,7 +1407,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("缘生子", 12 * 3600, require_meditation_ready=True)))
         self.assertEqual(actor.sent, [])
 
-    def test_tianxing_avatar_rift_sends_destiny_prefix_before_search(self):
+    def test_tianxing_avatar_rift_sends_both_exploration_prefixes(self):
         class DummyTianxingRift(DummyCommon):
             avatars = ["无咎子"]
 
@@ -1283,7 +1436,11 @@ class ParserFixtureTests(unittest.TestCase):
         with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
             self.assertTrue(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
 
-        self.assertEqual(actor.sent, [("无咎子", ".改命 探索"), ("无咎子", ".探寻裂缝")])
+        self.assertEqual(actor.sent, [
+            ("无咎子", ".推命 探索"),
+            ("无咎子", ".改命 探索"),
+            ("无咎子", ".探寻裂缝"),
+        ])
         self.assertTrue(actor.get_avatar_state("无咎子")["next_rift_search_time"])
 
     def test_wujiuzi_rift_probes_wind_wing_adjusted_cooldown(self):
@@ -1318,7 +1475,12 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(
             actor.sent,
-            [("无咎子", ".改命 探索"), ("无咎子", ".探寻裂缝"), ("无咎子", ".探寻裂缝")],
+            [
+                ("无咎子", ".推命 探索"),
+                ("无咎子", ".改命 探索"),
+                ("无咎子", ".探寻裂缝"),
+                ("无咎子", ".探寻裂缝"),
+            ],
         )
         remaining = common_seconds_until(actor.get_avatar_state("无咎子")["next_rift_search_time"])
         self.assertGreater(remaining, 4 * 3600)
@@ -1326,7 +1488,7 @@ class ParserFixtureTests(unittest.TestCase):
         calibrated_next = actor.get_avatar_state("无咎子")["next_rift_search_time"]
         self.assertFalse(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
         self.assertEqual(actor.get_avatar_state("无咎子")["next_rift_search_time"], calibrated_next)
-        self.assertEqual(len(actor.sent), 3)
+        self.assertEqual(len(actor.sent), 4)
 
     def test_non_tianxing_avatar_rift_does_not_send_destiny_prefix(self):
         class DummyStarRift(DummyAvatarCommon):
@@ -1366,7 +1528,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertFalse(actor.should_send_keyword_alert(msg, boss_text))
                 self.assertTrue(actor.should_send_keyword_alert(msg, normal_text))
 
-    def test_common_avatar_tower_send_records_done_on_usable_response(self):
+    def test_common_avatar_tower_send_does_not_trigger_mulan_support(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):
                 super().__init__()
@@ -1377,8 +1539,6 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
-                if command == common_command_features.AVATAR_TOWER_SUPPORT_COMMAND:
-                    return "支援慕兰奇袭成功，获得灵石x100。"
                 return "你成功通关试炼古塔第 7 层。"
 
         actor = DummyTowerAvatar()
@@ -1387,13 +1547,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(asyncio.run(actor.common_avatar_tower_send("缘生子", today=today)))
         self.assertEqual(
             [(identity, command) for identity, command, _kwargs in actor.sent],
-            [("缘生子", ".闯塔"), ("缘生子", common_command_features.AVATAR_TOWER_SUPPORT_COMMAND)],
+            [("缘生子", ".闯塔")],
         )
         state = actor.get_avatar_state("缘生子")
         self.assertEqual(state["last_tower_date"], today)
-        self.assertEqual(state["last_mulan_support_date"], today)
-        self.assertIn("支援慕兰", state["last_mulan_support_response"])
-        self.assertEqual(actor.sent[1][2]["max_retries"], 0)
+        self.assertNotIn("last_mulan_support_date", state)
 
     def test_avatar_tower_tick_does_not_defer_to_other_overdue_work(self):
         class DummyTowerAvatar(DummyAvatarCommon):
@@ -1463,12 +1621,12 @@ class ParserFixtureTests(unittest.TestCase):
         text = "【慕兰烽烟】你领了【夜袭法士营】奇袭，小胜险还，边境军功 +5。"
 
         self.assertEqual(
-            log_utils.command_response_family(common_command_features.AVATAR_TOWER_SUPPORT_COMMAND),
+            log_utils.command_response_family(common_command_features.MULAN_SUPPORT_COMMAND),
             "mulan_support",
         )
         self.assertEqual(log_utils.text_response_family(text), "mulan_support")
         self.assertTrue(log_utils.feedback_response_matches_command(
-            common_command_features.AVATAR_TOWER_SUPPORT_COMMAND,
+            common_command_features.MULAN_SUPPORT_COMMAND,
             text,
         ))
         self.assertTrue(log_utils.feedback_response_conflicts(".闯塔", text))
@@ -1526,9 +1684,6 @@ class ParserFixtureTests(unittest.TestCase):
 
             def record_identity_field_training_response(self, avatar, text, context=""):
                 self.set_avatar_state(avatar, "next_field_training_time", add_seconds_str(now_str(), 2 * 3600))
-
-            async def maybe_run_bushi_wentian_after_field_training(self, avatar, text):
-                return False
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command))
@@ -1609,6 +1764,8 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
+                if command == common_command_features.MULAN_SUPPORT_COMMAND:
+                    return "支援慕兰奇袭成功，获得灵石x100。"
                 return "宗门点卯成功。"
 
         actor = DummyDailyAvatar()
@@ -1617,13 +1774,20 @@ class ParserFixtureTests(unittest.TestCase):
             "缘生子",
             daily_start_wait_func=lambda now: 0,
         )))
-        self.assertEqual(actor.sent[0][1], ".宗门点卯")
+        self.assertEqual(
+            [item[1] for item in actor.sent],
+            [".宗门点卯", common_command_features.MULAN_SUPPORT_COMMAND],
+        )
         self.assertEqual(
             actor.get_avatar_state("缘生子")["last_dianmao_date"],
             datetime.now().strftime("%Y-%m-%d"),
         )
+        self.assertEqual(
+            actor.get_avatar_state("缘生子")["last_mulan_support_date"],
+            datetime.now().strftime("%Y-%m-%d"),
+        )
 
-    def test_common_daily_tasks_main_marks_done_before_send_and_keeps_lingxiao_buff(self):
+    def test_common_daily_tasks_main_sends_mulan_after_checkin(self):
         class DummyDailyLoop(DummyCommon):
             def __init__(self):
                 super().__init__()
@@ -1631,13 +1795,12 @@ class ParserFixtureTests(unittest.TestCase):
                 self.startup_done = asyncio.Event()
                 self.startup_done.set()
                 self.is_running = True
-                self.lingxiao_enabled = True
                 self.sent = []
 
             async def send_and_wait_feedback(self, command, **kwargs):
                 self.sent.append((command, kwargs))
-                if command == ".闯塔":
-                    return None
+                if command == common_command_features.MULAN_SUPPORT_COMMAND:
+                    return "支援慕兰奇袭成功，获得灵石x100。"
                 return SimpleNamespace(id=8801)
 
         actor = DummyDailyLoop()
@@ -1653,18 +1816,21 @@ class ParserFixtureTests(unittest.TestCase):
             asyncio.run(actor.run_common_daily_tasks_loop(
                 lambda now: 0,
                 lambda: "07:00",
-                [".闯塔", ".宗门点卯"],
+                [".宗门点卯"],
                 pre_loop_func=no_wait_main,
                 send_kwargs_func=lambda command: {"return_msg": True},
                 mark_done_before_send=True,
-                use_lingxiao_tower_buff=True,
                 reset_heart_platform_date=True,
             ))
 
-        self.assertEqual([item[0] for item in actor.sent], [".借天门势", ".闯塔", ".宗门点卯"])
-        self.assertIn(".闯塔", actor.state["done"])
+        self.assertEqual(
+            [item[0] for item in actor.sent],
+            [".宗门点卯", common_command_features.MULAN_SUPPORT_COMMAND],
+        )
         self.assertIn(".宗门点卯", actor.state["done"])
         self.assertEqual(actor.state["last_dianmao_msg_id"], 8801)
+        self.assertEqual(actor.state["last_dianmao_date"], datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(actor.state["last_mulan_support_date"], datetime.now().strftime("%Y-%m-%d"))
         self.assertEqual(actor.state["heart_platform_date"], "")
 
     def test_common_daily_tasks_success_only_mode_preserves_send_kwargs(self):
@@ -1679,8 +1845,8 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback(self, command, **kwargs):
                 self.sent.append((command, kwargs))
-                if command == ".闯塔":
-                    return None
+                if command == common_command_features.MULAN_SUPPORT_COMMAND:
+                    return "支援慕兰奇袭成功，获得灵石x100。"
                 return SimpleNamespace(id=9901)
 
         actor = DummyDailyLoop()
@@ -1696,7 +1862,7 @@ class ParserFixtureTests(unittest.TestCase):
             asyncio.run(actor.run_common_daily_tasks_loop(
                 lambda now: 0,
                 lambda: "07:15",
-                [".宗门点卯", ".闯塔"],
+                [".宗门点卯"],
                 pre_loop_func=no_wait_main,
                 send_kwargs_func=lambda command: {
                     "return_sent": True,
@@ -1706,9 +1872,43 @@ class ParserFixtureTests(unittest.TestCase):
             ))
 
         self.assertEqual(actor.sent[0], (".宗门点卯", {"return_sent": True, "delete_after": False}))
-        self.assertEqual(actor.sent[1], (".闯塔", {"return_sent": True, "delete_after": True}))
+        self.assertEqual(actor.sent[1][0], common_command_features.MULAN_SUPPORT_COMMAND)
         self.assertEqual(actor.state["done"], [".宗门点卯"])
         self.assertEqual(actor.state["last_dianmao_msg_id"], 9901)
+        self.assertEqual(actor.state["last_dianmao_date"], datetime.now().strftime("%Y-%m-%d"))
+
+    def test_common_daily_tasks_does_not_support_after_unconfirmed_checkin(self):
+        class DummyDailyLoop(DummyCommon):
+            def __init__(self):
+                super().__init__()
+                self.state = {"date": "2026-06-24", "done": []}
+                self.startup_done = asyncio.Event()
+                self.startup_done.set()
+                self.is_running = True
+                self.sent = []
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return None
+
+        actor = DummyDailyLoop()
+
+        async def fake_sleep(seconds):
+            if seconds >= 600:
+                actor.is_running = False
+
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+            asyncio.run(actor.run_common_daily_tasks_loop(
+                lambda now: 0,
+                lambda: "07:00",
+                [".宗门点卯"],
+                send_kwargs_func=lambda command: {"return_msg": True},
+                mark_done_before_send=True,
+            ))
+
+        self.assertEqual(actor.sent, [".宗门点卯"])
+        self.assertEqual(actor.state["last_dianmao_date"], "")
+        self.assertNotIn("last_mulan_support_date", actor.state)
 
     def test_common_record_sect_skill_response_updates_count(self):
         actor = DummyCommon()
@@ -4767,38 +4967,17 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(rows[".囚禁魂魄 <槽位> 凶兽戾魄"]["control_key"], ".囚禁魂魄 *")
         self.assertNotIn(".囚禁魂魄 <槽位> 妖兽精魄", rows)
 
-    def test_dashboard_avatar_tower_waits_until_23_and_support_follows_tower(self):
-        class FixedDatetime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 17, 30, 0)
-
-        with patch.object(dashboard_server, "datetime", FixedDatetime):
-            rows = {
-                row["command"]: row
-                for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
-            }
-
-        self.assertEqual(rows[".闯塔"]["status"], "23点后执行")
-        self.assertEqual(rows[".闯塔"]["tone"], "cooldown")
-        self.assertEqual(rows[".支援慕兰 奇袭"]["status"], "随闯塔执行")
-        self.assertEqual(rows[".支援慕兰 奇袭"]["tone"], "cooldown")
-
-        class Fixed23Datetime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 23, 5, 0)
-
-        with patch.object(dashboard_server, "datetime", Fixed23Datetime):
-            rows = {
-                row["command"]: row
-                for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
-            }
-
-        self.assertEqual(rows[".闯塔"]["status"], "今日未执行")
-        self.assertEqual(rows[".闯塔"]["tone"], "ready")
-        self.assertEqual(rows[".支援慕兰 奇袭"]["status"], "随闯塔执行")
-        self.assertEqual(rows[".支援慕兰 奇袭"]["tone"], "cooldown")
+    def test_dashboard_removes_tower_and_keeps_checkin_support(self):
+        rows = {
+            row["command"]: row
+            for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
+        }
+        self.assertNotIn(".闯塔", rows)
+        self.assertIn(common_command_features.MULAN_SUPPORT_COMMAND, rows)
+        self.assertEqual(
+            rows[common_command_features.MULAN_SUPPORT_COMMAND]["detail"],
+            "随宗门点卯执行",
+        )
 
     def test_dashboard_sub_main_yuanying_retreat_active_unknown_is_not_due(self):
         state = {
@@ -4846,6 +5025,93 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=3999815554, out=False)))
         self.assertTrue(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=-1003658665113, out=False)))
         self.assertFalse(log_utils.sender_is_pause_admin(actor, SimpleNamespace(sender_id=123, out=False)))
+
+    def test_pause_admin_is_not_an_account_outgoing_sender(self):
+        actor = SimpleNamespace(
+            my_info=SimpleNamespace(id=42),
+            pause_admins={8219248252},
+            _avatar_chat_ids={"-1003658665113": "问心子"},
+        )
+
+        admin_msg = SimpleNamespace(sender_id=8219248252, out=False)
+
+        self.assertTrue(log_utils.sender_is_pause_admin(actor, admin_msg))
+        self.assertFalse(log_utils._is_own_outgoing_sender(actor, admin_msg))
+
+    def test_pause_admin_command_does_not_pollute_manual_ledger_or_state(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            state={},
+            target_chat_id=-100123456,
+            current_identity="主魂",
+            my_info=SimpleNamespace(id=42),
+            pause_admins={8219248252},
+            _avatar_chat_ids={},
+            _script_sent_message_ids=set(),
+        )
+        admin_command = DummyMessage(51001, text=".共历心劫")
+        admin_command.sender_id = 8219248252
+        bot_reply = DummyMessage(
+            51002,
+            text="共历心劫成功，冷却10小时。",
+            reply_to_msg_id=admin_command.id,
+        )
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = os.path.join(tmpdir, "message_events.sqlite3")
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+                self.assertFalse(log_utils.log_manual_outgoing_if_needed(
+                    actor, admin_command, text=admin_command.text
+                ))
+                self.assertFalse(asyncio.run(log_utils.record_manual_command_reply_state_if_needed(
+                    actor,
+                    bot_reply,
+                    text=bot_reply.text,
+                    sender=SimpleNamespace(username="fanrenxiuxian_bot"),
+                )))
+
+                self.assertNotIn("next_heart_trial_time", actor.state)
+                conn = sqlite3.connect(log_utils.MESSAGE_EVENTS_DB_FILE)
+                try:
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM command_ledger"
+                    ).fetchone()[0], 0)
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM daily_reward_events"
+                    ).fetchone()[0], 0)
+                    self.assertEqual(conn.execute(
+                        "SELECT COUNT(*) FROM message_events WHERE direction='manual_out'"
+                    ).fetchone()[0], 0)
+                finally:
+                    conn.close()
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+    def test_reward_log_rejects_unsupported_test_account(self):
+        actor = SimpleNamespace(account_key="DummyReward")
+        event = {
+            "date": "2026-07-18",
+            "time": "12:00:00",
+            "identity": "主魂",
+            "command": ".野外历练",
+            "clean": "历练成功，获得修为100。",
+        }
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = os.path.join(tmpdir, "message_events.sqlite3")
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+                self.assertFalse(log_utils.record_daily_reward_event_log(actor, event))
+                self.assertFalse(os.path.exists(log_utils.MESSAGE_EVENTS_DB_FILE))
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
     def test_clear_actor_command_history_deletes_only_old_dot_commands(self):
         old = datetime.now(timezone.utc) - timedelta(minutes=40)
@@ -5350,6 +5616,10 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_new_hantianzun_bots_are_recognized_as_game_bots(self):
         actor = SimpleNamespace(mc={})
+        for username in ("snpao_bot", "xlqlcy_bot"):
+            sender = SimpleNamespace(username=username, first_name="韩天尊")
+            self.assertTrue(log_utils.is_game_bot_sender(actor, sender))
+
         for index in range(10, 51):
             sender = SimpleNamespace(username=f"hantianzun{index}_bot", first_name="韩天尊")
             self.assertTrue(log_utils.is_game_bot_sender(actor, sender))
@@ -6098,6 +6368,23 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["star_gazing_claimed_avatar"], "")
         self.assertEqual(state["next_star_gazing_time"], "")
 
+    def test_manifest_notice_without_pending_star_gazing_does_not_parse_empty_time(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.star_gazing_lock = asyncio.Lock()
+        actor.save_state = lambda: None
+
+        handled = asyncio.run(actor.maybe_handle_star_gazing_opportunity(
+            DummyMessage(7304),
+            """**【星盘显化】**
+**下一次天道演化将是**: **【Bad - 心魔大劫】**
+**当前天命所归**: **@bar**
+""",
+            SimpleNamespace(username="hantianzun31_bot"),
+        ))
+
+        self.assertTrue(handled)
+
     def test_bad_manifest_cancels_same_round_pending_star_gazing_main_and_xiaohao(self):
         class FixedDatetime(datetime):
             @classmethod
@@ -6523,6 +6810,34 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["current_exp"], 36030)
         self.assertEqual(state["total_exp"], 500000)
 
+    def test_username_less_profile_does_not_regress_main_cultivation(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = []
+        actor.state = {
+            "level": "元婴后期",
+            "current_exp": 1931125,
+            "total_exp": 2000000,
+        }
+        actor.save_state = lambda: None
+
+        text = """
+**【闭关成功】**
+本次闭关，你的修为最终增加了 **71** 点。
+
+当前境界: 筑基初期
+当前修为: **3369 / 5000**
+"""
+
+        self.assertFalse(log_utils.record_cultivation_profile_from_text(
+            actor,
+            text,
+            identity="主魂",
+            source="manual .闭关修炼",
+        ))
+        self.assertEqual(actor.state["level"], "元婴后期")
+        self.assertEqual(actor.state["current_exp"], 1931125)
+        self.assertEqual(actor.state["total_exp"], 2000000)
+
     def test_edited_cultivation_delta_uses_single_avatar_username(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]
@@ -6574,230 +6889,6 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(log_utils.text_response_family(text), "divination")
         self.assertTrue(log_utils.feedback_response_matches_command(".天机代卜", text))
         self.assertFalse(log_utils.feedback_response_conflicts(".天机代卜", text))
-
-    def test_bushi_wentian_offer_reply_matches_command_family(self):
-        text = """
-**【神物现世】**！天机罗盘疯狂转动，最终指向一处被迷雾笼罩的上古神山！卦象显示，【昆吾通行令】的机缘已降临于你！
-
-天道示警：获取此等逆天之物，需献上祭品以获天道认可。
-你是否愿意消耗【三级妖丹】x7、【养魂木】x1 来换取它？
-
-请在 5分钟 内回复本消息 .换取 来确认，超时则机缘消散。
-"""
-
-        self.assertEqual(log_utils.command_response_family(".卜筮问天"), "bushi_wentian")
-        self.assertEqual(log_utils.text_response_family(text), "bushi_wentian")
-        self.assertTrue(log_utils.feedback_response_matches_command(".卜筮问天", text))
-        self.assertFalse(log_utils.feedback_response_conflicts(".卜筮问天", text))
-        self.assertTrue(log_utils.feedback_response_matches_command(".换取", "天道认可，你已献上祭品，机缘收入囊中。"))
-        actor = DummyCommon()
-        self.assertTrue(actor.is_bushi_wentian_kunwu_offer(text.replace("昆吾通行令", "昆吾令")))
-
-    def test_bushi_wentian_daily_for_identity_sends_eight_times(self):
-        actor = DummyCommon()
-        actor.state = {}
-        actor.dashboard_command_paused = lambda command, identity: False
-        sent = []
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append((command, kwargs))
-            return SimpleNamespace(id=71000 + len(sent), text="**【卜筮问天】**\n卦象显示今日灵机平稳。")
-
-        actor.send_and_wait_feedback = fake_send
-
-        async def fake_sleep(seconds):
-            return None
-
-        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
-            result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "done")
-        self.assertEqual([item[0] for item in sent], [".卜筮问天"] * 8)
-        self.assertEqual(actor.state["bushi_wentian_count"], 8)
-        self.assertTrue(actor.state["bushi_wentian_done_at"])
-
-    def test_bushi_wentian_daily_replies_kunwu_offer_and_stops(self):
-        actor = DummyCommon()
-        actor.state = {}
-        actor.dashboard_command_paused = lambda command, identity: False
-        sent = []
-        offer = SimpleNamespace(
-            id=71001,
-            text=(
-                "**【神物现世】**！天机罗盘疯狂转动，卦象显示，【昆吾通行令】的机缘已降临于你！\n"
-                "天道示警：获取此等逆天之物，需献上祭品以获天道认可。\n"
-                "你是否愿意消耗【三级妖丹】x7、【养魂木】x1 来换取它？\n"
-                "请在 5分钟 内回复本消息 .换取 来确认，超时则机缘消散。"
-            ),
-        )
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append((command, kwargs))
-            if command == ".卜筮问天":
-                return offer
-            return SimpleNamespace(id=71002, text="天道认可，你已换取此物。")
-
-        actor.send_and_wait_feedback = fake_send
-
-        async def fake_sleep(seconds):
-            return None
-
-        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
-            result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "kunwu_seen")
-        self.assertEqual([item[0] for item in sent], [".卜筮问天", ".换取"])
-        self.assertTrue(sent[0][1]["return_response_msg"])
-        self.assertEqual(sent[1][1]["reply_to"], 71001)
-        self.assertEqual(actor.state["bushi_wentian_count"], 1)
-        self.assertEqual(actor.state["bushi_wentian_exchange_count"], 1)
-        self.assertTrue(actor.state["bushi_wentian_kunwu_seen"])
-        self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
-        self.assertTrue(actor.state["bushi_wentian_done_at"])
-
-    def test_bushi_wentian_daily_limit_skips_send(self):
-        actor = DummyCommon()
-        actor.state = {
-            "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
-            "bushi_wentian_count": 8,
-            "bushi_wentian_exchange_count": 0,
-        }
-        actor.dashboard_command_paused = lambda command, identity: False
-
-        async def fake_send(*args, **kwargs):
-            raise AssertionError("daily-limited bushi wentian should not send")
-
-        actor.send_and_wait_feedback = fake_send
-
-        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "done")
-
-    def test_bushi_wentian_preclaims_final_daily_slot_on_no_response(self):
-        actor = DummyCommon()
-        actor.state = {
-            "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
-            "bushi_wentian_count": 7,
-            "bushi_wentian_exchange_count": 0,
-        }
-        actor.dashboard_command_paused = lambda command, identity: False
-        sent = []
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            return None
-
-        actor.send_and_wait_feedback = fake_send
-
-        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "no_response")
-        self.assertEqual(sent, [".卜筮问天"])
-        self.assertEqual(actor.state["bushi_wentian_count"], 8)
-
-        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "done")
-        self.assertEqual(sent, [".卜筮问天"])
-
-    def test_bushi_wentian_existing_exchange_count_stops_today(self):
-        actor = DummyCommon()
-        actor.state = {
-            "bushi_wentian_date": datetime.now().strftime("%Y-%m-%d"),
-            "bushi_wentian_count": 1,
-            "bushi_wentian_exchange_count": 1,
-        }
-        actor.dashboard_command_paused = lambda command, identity: False
-
-        async def fake_send(*args, **kwargs):
-            raise AssertionError("bushi wentian should stop after today's Kunwu exchange")
-
-        actor.send_and_wait_feedback = fake_send
-
-        result = asyncio.run(actor.run_bushi_wentian_daily_for_identity("主魂"))
-
-        self.assertEqual(result, "done")
-        self.assertTrue(actor.state["bushi_wentian_kunwu_exchanged"])
-
-    def test_bushi_wentian_targets_are_staggered_by_account_and_identity(self):
-        base = datetime(2026, 7, 7, 0, 3, 0)
-
-        main = DummyCommon()
-        main.account_key = "main"
-        main.avatars = ["无咎子", "缘生子"]
-
-        sub = DummyCommon()
-        sub.account_key = "sub"
-        sub.avatars = ["厚土", "寻真子"]
-
-        xiaohao = DummyCommon()
-        xiaohao.account_key = "xiaohao"
-        xiaohao.avatars = ["问心子", "素心子"]
-
-        self.assertEqual(main.bushi_wentian_target_time(base, "主魂"), base)
-        self.assertEqual(sub.bushi_wentian_target_time(base, "主魂"), base + timedelta(hours=1))
-        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "主魂"), base + timedelta(hours=2))
-        self.assertEqual(main.bushi_wentian_target_time(base, "无咎子"), base + timedelta(hours=3))
-        self.assertEqual(sub.bushi_wentian_target_time(base, "厚土"), base + timedelta(hours=4))
-        self.assertEqual(xiaohao.bushi_wentian_target_time(base, "问心子"), base + timedelta(hours=5))
-
-    def test_bushi_wentian_due_waits_for_identity_stagger_slot(self):
-        actor = DummyCommon()
-        actor.account_key = "main"
-        actor.avatars = ["无咎子"]
-        actor.state = {
-            "bushi_wentian_date": "2026-07-07",
-            "bushi_wentian_count": 0,
-            "bushi_wentian_exchange_count": 0,
-            "avatars": {"无咎子": {"bushi_wentian_date": "2026-07-07"}},
-        }
-
-        class AtMainSlot(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 0, 3, 30)
-
-        class AtAvatarSlot(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 3, 3, 30)
-
-        with patch.object(common_command_features, "datetime", AtMainSlot):
-            self.assertTrue(actor.bushi_wentian_identity_due("主魂"))
-            self.assertFalse(actor.bushi_wentian_identity_due("无咎子"))
-            self.assertGreater(actor.bushi_wentian_next_due_seconds(["无咎子"]), 2 * 3600)
-
-        with patch.object(common_command_features, "datetime", AtAvatarSlot):
-            self.assertTrue(actor.bushi_wentian_identity_due("无咎子"))
-
-    def test_bushi_wentian_start_window_is_near_midnight_only(self):
-        actor = DummyCommon()
-
-        class AtStart(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 0, 3, 30)
-
-        class LateDay(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 7, 7, 18, 0, 0)
-
-        with patch.object(common_command_features, "datetime", AtStart):
-            self.assertTrue(actor.bushi_wentian_start_window_open())
-
-        with patch.object(common_command_features, "datetime", LateDay):
-            self.assertFalse(actor.bushi_wentian_start_window_open())
-            self.assertGreater(actor.bushi_wentian_next_start_seconds(), 5 * 3600)
-
-    def test_field_training_initial_reply_does_not_trigger_bushi(self):
-        actor = DummyCommon()
-        pending = "**【野外历练】**\n@foo 选择【均衡】策略，正向荒野深处行去..."
-
-        self.assertTrue(actor.is_field_training_pending_response(pending))
-        self.assertFalse(actor.is_field_training_command_result(pending))
-        self.assertFalse(actor.is_field_training_settlement_response(pending))
-        self.assertFalse(asyncio.run(actor.maybe_run_bushi_wentian_after_field_training("主魂", pending)))
 
     def test_wait_for_field_training_settlement_fetches_edited_result(self):
         actor = DummyCommon()
@@ -8576,6 +8667,107 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = old_db
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
+    def test_shared_command_response_accepts_empty_command(self):
+        written = []
+        actor = SimpleNamespace(state_file="state_main.json", target_chat_id=-100123456)
+        msg = DummyMessage(90015, text="edited response")
+        with patch.object(log_utils, "_read_shared_bot_activity", return_value={}), patch.object(
+            log_utils,
+            "_write_shared_bot_activity",
+            side_effect=lambda data: written.append(data),
+        ):
+            self.assertTrue(log_utils._record_shared_command_response(actor, command="", msg=msg))
+        self.assertEqual(written[0]["command_response"]["command"], "")
+
+    def test_text_alert_resolves_numeric_target_from_dialog_cache(self):
+        sent = []
+        input_entity = object()
+
+        class FakeClient:
+            async def get_input_entity(self, target):
+                raise ValueError("not cached")
+
+            async def get_dialogs(self, limit=200):
+                return [SimpleNamespace(
+                    entity=SimpleNamespace(id=8219248252),
+                    input_entity=input_entity,
+                )]
+
+            async def send_message(self, target, text, **kwargs):
+                sent.append((target, text, kwargs))
+
+        actor = SimpleNamespace(
+            config={"notify_target": "8219248252"},
+            client=FakeClient(),
+        )
+        self.assertTrue(asyncio.run(log_utils.send_text_alert(actor, "测试", "内容")))
+        self.assertIs(sent[0][0], input_entity)
+
+    def test_message_events_sqlite_retention_prunes_older_than_15_days(self):
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "message_events.sqlite3")
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = db_path
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                actor = SimpleNamespace(state_file="state_main.json", target_chat_id=-100123456)
+                msg = DummyMessage(90100, text="new")
+                self.assertTrue(log_utils.record_message_event(
+                    actor,
+                    msg,
+                    text="new",
+                    sender=SimpleNamespace(username="player"),
+                    event_kind="new",
+                    direction="raw",
+                ))
+                old_time = (datetime.now() - timedelta(days=20)).strftime(log_utils.TIME_FORMAT)
+                old_date = old_time[:10]
+                conn = sqlite3.connect(db_path)
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO message_events (
+                            account,event_kind,direction,chat_id,msg_id,is_out,is_game_bot,
+                            text,text_hash,created_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        ("main", "new", "raw", -100123456, 90099, 0, 0, "old", "oldhash", old_time),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO command_ledger (
+                            account,chat_id,command_msg_id,command,identity,source,status,
+                            sent_at,updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?)
+                        """,
+                        ("main", -100123456, 90099, ".旧", "主魂", "auto", "sent", old_time, old_time),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO daily_reward_events (
+                            account,event_key,event_date,event_time,identity,command,final,
+                            text_hash,created_at,updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        ("main", "old-event", old_date, "00:00:00", "主魂", ".旧", 1, "old", old_time, old_time),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                result = log_utils.prune_message_events_db(retention_days=15, batch_size=100)
+                self.assertEqual(result["deleted"]["message_events"], 1)
+                self.assertEqual(result["deleted"]["command_ledger"], 1)
+                self.assertEqual(result["deleted"]["daily_reward_events"], 1)
+                conn = sqlite3.connect(db_path)
+                try:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM message_events").fetchone()[0], 1)
+                finally:
+                    conn.close()
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
     def test_unanswered_dotted_command_probe_is_not_overwritten(self):
         actor = SimpleNamespace(
             state_file="state_main.json",
@@ -8658,6 +8850,142 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertFalse(log_utils.match_pending_feedback_by_id(actor, 1000, msg, text))
         self.assertFalse(event.is_set())
+
+    def test_pending_feedback_rejects_human_reply_even_with_exact_reply_to(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            target_chat_id=-100123456,
+            current_identity="主魂",
+            feedback_events={1000: asyncio.Event()},
+            feedback_commands={1000: ".切换 主魂"},
+            feedback_identities={1000: "主魂"},
+            feedback_senders={1000: 42},
+            last_feedback_text={},
+            last_feedback_msg={},
+            identity_usernames={"主魂": ["Weeguu"]},
+            avatar_usernames={},
+        )
+        msg = DummyMessage(1001, text="糊涂啊", reply_to_msg_id=1000)
+
+        self.assertFalse(log_utils.match_pending_feedback_by_id(
+            actor,
+            1000,
+            msg,
+            msg.text,
+            sender=SimpleNamespace(username="WalterWA2000"),
+        ))
+        self.assertFalse(actor.feedback_events[1000].is_set())
+
+        bot_text = "你已收回神通，神念重归主魂肉身。"
+        with patch.object(log_utils, "record_command_response_for_command_id", return_value=True):
+            self.assertTrue(log_utils.match_pending_feedback_by_id(
+                actor,
+                1000,
+                msg,
+                bot_text,
+                sender=SimpleNamespace(username="fanrenxiuxian_bot"),
+            ))
+        self.assertTrue(actor.feedback_events[1000].is_set())
+
+    def test_command_ledger_resolves_retry_attempts_and_heart_trial_event_edits(self):
+        actor = SimpleNamespace(
+            state_file="state_main.json",
+            target_chat_id=-100123456,
+        )
+        bot = SimpleNamespace(username="fanrenxiuxian_bot")
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = os.path.join(tmpdir, "message_events.sqlite3")
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+                first = DummyMessage(1100, text=".切换 素缘子", out=True)
+                second = DummyMessage(1101, text=".切换 素缘子", out=True)
+                log_utils.record_command_sent(actor, first, first.text, identity="主魂")
+                log_utils.record_command_sent(actor, second, second.text, identity="主魂")
+                response = DummyMessage(
+                    1102,
+                    text="切换成功！你的神念已附着在【素缘子】之上。",
+                    reply_to_msg_id=1101,
+                )
+                with patch.object(log_utils, "_record_shared_command_response", return_value=True):
+                    self.assertTrue(log_utils.record_command_response_for_command_id(
+                        actor, 1101, response, text=response.text, sender=bot
+                    ))
+
+                heart = DummyMessage(1201, text=".稳", reply_to_msg_id=1200, out=True)
+                log_utils.record_command_sent(
+                    actor, heart, heart.text, identity="无咎子", reply_to=1200
+                )
+                settlement = DummyMessage(1200, text="【坠魔心劫·结算】稳 / 稳 / 稳")
+                self.assertTrue(log_utils.record_command_response_for_related_event(
+                    actor, settlement, text=settlement.text, sender=bot
+                ))
+
+                conn = sqlite3.connect(log_utils.MESSAGE_EVENTS_DB_FILE)
+                try:
+                    statuses = dict(conn.execute(
+                        "SELECT command_msg_id,status FROM command_ledger ORDER BY command_msg_id"
+                    ).fetchall())
+                finally:
+                    conn.close()
+                self.assertEqual(statuses[1100], "matched")
+                self.assertEqual(statuses[1101], "matched")
+                self.assertEqual(statuses[1201], "edited")
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+    def test_destiny_catches_up_after_primary_window_and_records_only_confirmed_success(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 17, 12, 0, 0)
+
+        actor = Cultivator.__new__(Cultivator)
+        state = {"last_destiny_date": ""}
+        saved = []
+        sent = []
+        responses = [
+            "【观命结果】今日可定下的命星如下：【贪狼】、【太阴】。",
+            "天机紊乱，未能定下命星。",
+        ]
+        actor.active_atomic_task = None
+        actor.dashboard_command_paused = lambda command, identity: False
+        actor.daily_one_shot_should_defer = lambda *args, **kwargs: True
+        actor.get_avatar_state = lambda avatar: state
+        actor.set_avatar_state = lambda avatar, key, value: (state.__setitem__(key, value), saved.append((key, value)))
+        actor.response_text = lambda response: str(response or "")
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append(command)
+            return responses.pop(0)
+
+        async def fake_sleep(seconds):
+            return None
+
+        actor.send_and_wait_feedback_identity = fake_send
+        with patch.object(intelligent_cultivator, "datetime", FixedDatetime), patch.object(
+            intelligent_cultivator.asyncio, "sleep", fake_sleep
+        ):
+            self.assertEqual(actor._avatar_destiny_wait_seconds("无咎子"), 0)
+            asyncio.run(actor._avatar_destiny_check("无咎子"))
+
+        self.assertEqual(sent, [".观命", ".定命 贪狼"])
+        self.assertNotIn("last_destiny_date", {k: v for k, v in saved})
+
+        responses.extend([
+            "【观命结果】今日可定下的命星如下：【太阴】。",
+            "你将今日命轨定在【太阴】。",
+        ])
+        sent.clear()
+        with patch.object(intelligent_cultivator, "datetime", FixedDatetime), patch.object(
+            intelligent_cultivator.asyncio, "sleep", fake_sleep
+        ):
+            asyncio.run(actor._avatar_destiny_check("无咎子"))
+
+        self.assertEqual(sent, [".观命", ".定命 太阴"])
+        self.assertEqual(state["last_destiny_date"], "2026-07-17")
+        self.assertEqual(state["last_destiny_choice"], "太阴")
 
     def test_force_exit_restart_sends_deep_meditation_directly(self):
         actor = Cultivator.__new__(Cultivator)
@@ -9262,6 +9590,63 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreater(seconds_until(actor.state["next_dream_map_time"]), 50 * 60)
         self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 50 * 60)
 
+    def test_concubine_voyage_only_main_main_uses_moon_route(self):
+        identities = {
+            "main": ["主魂", "无咎子", "缘生子", "素缘子"],
+            "sub": ["主魂", "厚土", "缘生子", "寻真子"],
+            "xiaohao": ["主魂", "问心子", "素心子", "缘生子"],
+        }
+        for account, names in identities.items():
+            actor = DummyConcubine()
+            actor.account_key = account
+            for identity in names:
+                enabled = account == "main" and identity == "主魂"
+                with self.subTest(account=account, identity=identity):
+                    self.assertEqual(actor.concubine_voyage_enabled(identity), enabled)
+                    self.assertEqual(actor.concubine_voyage_auto_start_enabled(identity), enabled)
+
+        main = DummyConcubine()
+        main.account_key = "main"
+        self.assertEqual(main.concubine_voyage_command("主魂"), ".侍妾远航 月殿寻痕")
+        self.assertIn(
+            ".侍妾远航 *",
+            log_utils.command_control_candidate_keys(".侍妾远航 月殿寻痕"),
+        )
+
+    def test_concubine_voyage_start_sends_only_main_main_moon_route(self):
+        actor = DummyConcubine()
+        actor.account_key = "main"
+        actor.dashboard_command_paused = lambda command, identity="": False
+        actor.recent_concubine_status_mismatch = lambda identity="主魂": False
+        actor.record_concubine_voyage_response = lambda *args, **kwargs: True
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            return None, "侍妾已启航，前往月殿寻痕。", False
+
+        actor._send_concubine_identity_command = fake_send
+        self.assertTrue(asyncio.run(actor.execute_concubine_voyage_start("主魂")))
+        self.assertEqual(sent, [("主魂", ".侍妾远航 月殿寻痕")])
+
+        actor.account_key = "sub"
+        actor.state["next_concubine_voyage_time"] = ""
+        actor.state["concubine_voyage_active"] = False
+        self.assertFalse(asyncio.run(actor.execute_concubine_voyage_start("主魂")))
+        self.assertEqual(sent, [("主魂", ".侍妾远航 月殿寻痕")])
+
+    def test_dashboard_shows_voyage_only_for_main_main(self):
+        seen = []
+        for account in ("main", "sub", "xiaohao"):
+            for panel in build_command_panels(account, {"avatars": {}}):
+                identity = panel.get("identity") or "主魂"
+                commands = [row.get("command", "") for row in panel.get("commands", [])]
+                voyage_commands = [cmd for cmd in commands if cmd.startswith(".侍妾远航")]
+                if voyage_commands:
+                    seen.append((account, identity, voyage_commands))
+
+        self.assertEqual(seen, [("main", "主魂", [".侍妾远航 月殿寻痕"])])
+
     def test_trusted_avatar_concubine_name_migrates_for_any_identity(self):
         actor = SubCultivator.__new__(SubCultivator)
         actor.account_key = "sub"
@@ -9664,6 +10049,22 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.identity_for_concubine_voyage_text(text), "")
         self.assertFalse(actor.record_passive_concubine_voyage_response(text))
+
+    def test_concubine_voyage_ignores_beast_recall_return_text(self):
+        actor = DummyConcubine()
+        due = now_str()
+        actor.state["concubine_voyage_active"] = True
+        actor.state["next_concubine_voyage_time"] = due
+        text = """
+你已提前召回放养中的灵兽【铁甲龟 (之贰)】。
+原本还需 **2小时53分钟15秒** 才会自行归来。
+提前召回不会结算放养收获。
+"""
+
+        self.assertEqual(actor.identity_for_concubine_voyage_text(text), "")
+        self.assertFalse(actor.record_passive_concubine_voyage_response(text))
+        self.assertTrue(actor.state["concubine_voyage_active"])
+        self.assertEqual(actor.state["next_concubine_voyage_time"], due)
 
     def test_main_heart_trial_anchor_lost_syncs_cooldown_without_unknown_alert(self):
         actor = DummyConcubine()
@@ -10341,7 +10742,7 @@ class ParserFixtureTests(unittest.TestCase):
         expected = datetime.strptime(sent_at, "%Y-%m-%d %H:%M:%S") + timedelta(hours=2)
         self.assertEqual(retry_at, expected)
 
-    def test_spirit_tree_irrigation_is_time_critical_for_deferral(self):
+    def test_retired_spirit_tree_irrigation_is_not_time_critical(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]
         actor.avatar_nicknames = {}
@@ -10355,8 +10756,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor.save_state = lambda: None
         actor.dashboard_command_paused = lambda command, identity="": False
 
-        self.assertTrue(actor.time_critical_identity_command(".灵树灌溉"))
-        self.assertLess(actor.time_critical_identity_wait("缘生子", exclude_command=".抚摸法宝 青竹蜂云剑（神雷版）"), 31)
+        self.assertFalse(actor.time_critical_identity_command(".灵树灌溉"))
+        self.assertEqual(actor.time_critical_identity_wait("缘生子", exclude_command=".抚摸法宝 青竹蜂云剑（神雷版）"), -1)
         self.assertEqual(actor.time_critical_identity_wait("缘生子", exclude_command=".灵树灌溉"), -1)
 
     def test_spirit_tree_wait_uses_switch_lead_for_other_identity(self):
@@ -10413,7 +10814,7 @@ class ParserFixtureTests(unittest.TestCase):
         )
         self.assertEqual(asyncio.run(run_with_identity("缘生子")), [])
 
-    def test_avatar_min_cd_uses_spirit_tree_switch_lead_without_sixty_second_floor(self):
+    def test_avatar_min_cd_ignores_retired_spirit_tree_schedule(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["缘生子"]
         actor.avatar_nicknames = {}
@@ -10433,8 +10834,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         wait = asyncio.run(actor._get_avatar_min_cd_seconds())
 
-        self.assertLess(wait, 30)
-        self.assertGreaterEqual(wait, 25)
+        self.assertEqual(wait, 1800)
 
     def test_untrusted_spirit_tree_irrigation_reply_does_not_move_main_cooldown(self):
         actor = Cultivator.__new__(Cultivator)
@@ -10973,6 +11373,75 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(saved)
         self.assertEqual(actor.state["telegram_send_protection_stop"]["reason"], "write_restricted")
         self.assertEqual(alerts[0][0], "Telegram发送保护")
+
+    def test_xiaohao_send_protection_records_retry_and_clears_after_success(self):
+        saved = []
+        alerts = []
+        actor = SimpleNamespace(
+            account_key="xiaohao",
+            current_identity="主魂",
+            is_running=True,
+            telegram_send_protection_retry_seconds=900,
+            state={},
+            save_state=lambda: saved.append(True),
+        )
+        old_alert = command_feedback.send_text_alert
+
+        async def fake_alert(actor_arg, title, text, logger=None, parse_mode=None):
+            alerts.append((title, text))
+            return True
+
+        command_feedback.send_text_alert = fake_alert
+        try:
+            handled = asyncio.run(command_feedback._handle_telegram_send_protection(
+                actor,
+                ".野外历练 谨慎",
+                RuntimeError("USER_BANNED_IN_CHANNEL: banned from sending messages"),
+                identity="主魂",
+            ))
+            self.assertTrue(handled)
+            stop = actor.state["telegram_send_protection_stop"]
+            self.assertTrue(stop["retry_at"])
+            self.assertTrue(stop["alert_sent"])
+            self.assertFalse(stop["alert_pending"])
+
+            recovered = asyncio.run(command_feedback.record_telegram_send_success(actor))
+        finally:
+            command_feedback.send_text_alert = old_alert
+
+        self.assertTrue(recovered)
+        self.assertNotIn("telegram_send_protection_stop", actor.state)
+        self.assertIn("telegram_send_protection_last_recovered", actor.state)
+        self.assertEqual([item[0] for item in alerts], ["Telegram发送保护", "Telegram发送权限恢复"])
+        self.assertGreaterEqual(len(saved), 3)
+
+    def test_xiaohao_write_permission_monitor_triggers_protection(self):
+        calls = []
+
+        class FakeClient:
+            async def get_permissions(self, chat_id, who):
+                return SimpleNamespace(is_banned=False, send_messages=False, view_messages=True)
+
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.client = FakeClient()
+        actor.target_chat_id = -100123456
+        actor.state = {}
+        actor.save_state = lambda: None
+        actor.current_identity = "主魂"
+        actor.is_running = True
+        actor.telegram_write_permission_poll_seconds = 30
+
+        async def fake_handle(actor_arg, message, exc, logger=None, identity=None):
+            calls.append((message, str(exc), identity))
+            actor_arg.is_running = False
+            return True
+
+        with patch.object(cultivator_xiaohao, "_handle_telegram_send_protection", fake_handle):
+            asyncio.run(actor.run_telegram_write_permission_monitor())
+
+        self.assertEqual(calls[0][0], "(permission monitor)")
+        self.assertIn("CHAT_WRITE_FORBIDDEN", calls[0][1])
+        self.assertEqual(actor.state["telegram_write_permission_monitor"]["status"], "blocked")
 
     def test_spirit_tree_harvest_pending_text_waits_for_edited_result(self):
         actor = Cultivator.__new__(Cultivator)
@@ -11959,7 +12428,8 @@ class ParserFixtureTests(unittest.TestCase):
         by_identity = {panel.get("identity"): panel for panel in panels}
 
         self.assertIn(".野外历练 深入", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
-        self.assertIn(".改命 探索", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
+        self.assertNotIn(".推命 探索", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
+        self.assertNotIn(".改命 探索", {row.get("command") for row in by_identity["无咎子"].get("commands", [])})
         self.assertIn(".野外历练", {row.get("command") for row in by_identity["缘生子"].get("commands", [])})
         self.assertIn(".野外历练", {row.get("command") for row in by_identity["素缘子"].get("commands", [])})
         self.assertNotIn(".野外历练 谨慎", {row.get("command") for row in by_identity["缘生子"].get("commands", [])})
@@ -12005,14 +12475,13 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(sent, [("缘生子", ".野外历练")])
         self.assertTrue(actor.state["avatars"]["缘生子"]["next_field_training_time"])
 
-    def test_main_wujiuzi_field_training_sends_destiny_change_before_deep_training(self):
+    def test_main_wujiuzi_field_training_no_longer_sends_exploration_prefixes(self):
         actor = Cultivator.__new__(Cultivator)
         actor.avatars = ["无咎子"]
         actor.avatar_nicknames = {"无咎子": "天星雷总"}
         actor.avatar_features = {
             "无咎子": {
                 "meditation_prefix": ".推命",
-                "training_prefix_commands": [".推命 探索", ".改命 探索"],
                 "training_cmd": ".野外历练",
                 "training_level": "深入",
             }
@@ -12035,8 +12504,6 @@ class ParserFixtureTests(unittest.TestCase):
             asyncio.run(actor._avatar_field_training_check("无咎子"))
 
         self.assertEqual(sent, [
-            ("无咎子", ".推命 探索"),
-            ("无咎子", ".改命 探索"),
             ("无咎子", ".野外历练 深入"),
         ])
         self.assertTrue(actor.state["avatars"]["无咎子"]["next_field_training_time"])
@@ -12110,15 +12577,22 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn(SOUL_CURSE_WANYING_GREETING_COMMAND, xiaohao_commands)
         self.assertNotIn(SOUL_CURSE_CO_STUDY_COMMAND, xiaohao_commands)
 
-    def test_dashboard_shows_main_soul_lingxiao_cloud_stairs_commands(self):
+    def test_dashboard_shows_main_soul_wanling_beast_commands(self):
         panels = build_command_panels("main", {"avatars": {}})
         main_panel = next(panel for panel in panels if panel.get("identity") == "主魂")
         commands = {row.get("command") for row in main_panel.get("commands", [])}
 
-        self.assertIn(".天阶状态", commands)
-        self.assertIn(".登天阶", commands)
-        self.assertIn(".引九天罡风", commands)
-        self.assertIn(".问心台", commands)
+        self.assertNotIn(".天阶状态", commands)
+        self.assertNotIn(".登天阶", commands)
+        self.assertNotIn(".引九天罡风", commands)
+        self.assertNotIn(".问心台", commands)
+        self.assertTrue({
+            ".寻觅灵兽",
+            ".探渊 <灵兽>",
+            ".一键放养",
+            ".灵兽互动 <重点灵兽>",
+            ".灵兽巡边 <灵兽> 袭营",
+        }.issubset(commands))
         self.assertFalse({
             ".灵树状态",
             ".灵树灌溉",
@@ -12154,7 +12628,7 @@ class ParserFixtureTests(unittest.TestCase):
         asyncio.run(actor.run_nurture_spirit_loop())
         self.assertEqual(sent, [])
 
-    def test_dashboard_uses_avatar_spirit_tree_irrigation_time(self):
+    def test_dashboard_removes_luoyun_spirit_tree_commands(self):
         state = {
             "spirit_tree_status": "灌溉期",
             "next_spirit_tree_irrigation_time": "2026-06-12 19:24:56",
@@ -12165,12 +12639,12 @@ class ParserFixtureTests(unittest.TestCase):
             "avatars": {"缘生子": {}},
         }
         panels = build_command_panels("main", state)
-        main_panel = next(panel for panel in panels if panel.get("identity") == "主魂")
-        yuanshengzi = next(panel for panel in panels if panel.get("identity") == "缘生子")
-        avatar_row = next(row for row in yuanshengzi.get("commands", []) if row.get("command") == ".灵树灌溉")
-
-        self.assertFalse(any(row.get("command") == ".灵树灌溉" for row in main_panel.get("commands", [])))
-        self.assertEqual(avatar_row.get("at"), "2026-06-12 19:25:03")
+        commands = {
+            row.get("command")
+            for panel in panels
+            for row in panel.get("commands", [])
+        }
+        self.assertFalse({".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"} & commands)
 
     def test_manual_reply_falls_back_to_command_ledger_after_memory_loss(self):
         old_db = log_utils.MESSAGE_EVENTS_DB_FILE

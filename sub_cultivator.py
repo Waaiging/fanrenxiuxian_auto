@@ -12,7 +12,7 @@ Sub Cultivator v1.0 (Star Palace / 星宫 Edition)
   - 元婴出窍：8 小时周期。
   - 探寻裂缝：12 小时周期，检测到虚弱期自动停止脚本并告警。
   - 抚摸法宝（青竹蜂云剑）：2 小时周期。
-  - 每日任务：点卯、闯塔。
+  - 每日任务：点卯。
   - 侍妾管理：自动安置/召回侍妾以配合闭关与星辰操作。
   - 野外历练与宗门战：被动处理，简版逻辑。
   - 低价天雷竹告警：监控万宝楼低价上架并发送通知。
@@ -71,13 +71,14 @@ from telethon import TelegramClient, events  # Telegram MTProto 客户端与事�
 # ============================================================
 # 项目内部模块导入
 # ============================================================
-from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange
+from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 #   自动回复辅助：判断消息是否为自动回复链的一部分，并处理私聊互动
 
 from common_command_features import CommonCommandMixin, common_command_default_state
+from duel_features import DuelMixin
 #   通用指令混入类：提供 send_and_wait_feedback 等共用方法的基础实现与默认状态
 
-from command_feedback import _handle_telegram_send_protection, send_and_wait_feedback_common
+from command_feedback import _handle_telegram_send_protection, is_retired_auto_command, send_and_wait_feedback_common
 #   指令反馈等待：封装了发送指令、等待回复、超时重试的通用逻辑
 
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
@@ -415,7 +416,7 @@ class AtomicTaskContext:
 # 继承自 CommonCommandMixin（通用指令方法）、ConcubineMixin（侍妾管理方法）和 YinluoMixin（阴罗宗）
 # ============================================================
 
-class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
+class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """星宫副号修仙脚本主类，管理所有自动循环与事件响应。"""
 
     yuanying_main_command = YUANYING_RETREAT_COMMAND
@@ -534,8 +535,11 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             "-1003340352216": "寻真子",
         }
         self.avatar_send_lock = asyncio.Lock()     # 化身操作串行锁
-        self._current_identity = self.state.get("current_identity", "主魂")
-        self._main_confirmed = (self._current_identity == "主魂")  # 启动时若上次为主魂则默认确认，否则强制对齐
+        # A persisted identity can be stale when the Telegram session survives
+        # a process restart.  Require a fresh switch confirmation first.
+        self._persisted_identity = self.state.get("current_identity", "主魂")
+        self._current_identity = ""
+        self._main_confirmed = False
         self._switch_lock = asyncio.Lock()
         self._avatar_loop_count = 0  # 化身循环诊断计数；主魂只等待 avatar_send_lock 的实际占用
         self.command_avatar_map = {}               # msg_id → avatar（命令回复归属）
@@ -635,10 +639,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             "yuanying_out_end_time": "",
             "last_rift_search_time": "",
             "next_rift_search_time": "",
-            "bushi_wentian_date": "",
-            "bushi_wentian_count": 0,
-            "bushi_wentian_exchange_count": 0,
-            "bushi_wentian_kunwu_exchanged": False,
             "nickname": "",                # 化身昵称（Dashboard 显示用）
             "in_deep_meditation": False,   # 是否处于深度闭关中
             "deep_meditation_end_time": "", # 深度闭关结束时间
@@ -647,7 +647,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             "meditation_restart_mode": "",
             "next_meditation_retry_time": "", # 闭关异常/冷却后的重试时间
             "last_tower_date": "",         # 闯塔：记录最后闯塔日期
-            "last_mulan_support_date": "", # 支援慕兰：记录最后跟随闯塔执行日期
+            "last_mulan_support_date": "", # 支援慕兰：记录最后跟随宗门点卯执行日期
             "last_mulan_support_time": "",
             "next_mulan_support_time": "",
             "last_mulan_support_response": "",
@@ -1090,10 +1090,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         today = datetime.now().strftime("%Y-%m-%d")
         if identity == "主魂":
             done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            daily_due = (
-                (".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity))
-                or (".闯塔" not in done and not self.dashboard_command_paused(".闯塔", identity))
-            )
+            daily_due = ".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity)
             if (
                 seconds_until_daily_task_start(datetime.now()) <= 0
                 and daily_due
@@ -1106,13 +1103,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 and not self.dashboard_command_paused(".宗门点卯", identity)
                 and seconds_until_daily_task_start(datetime.now()) <= 0
                 and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
-            ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
-            if (
-                state.get("last_tower_date") != today
-                and not self.dashboard_command_paused(".闯塔", identity)
-                and datetime.now().hour >= 23
-                and not self.daily_one_shot_should_defer(identity, ".闯塔")
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -1384,6 +1374,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         返回:
             根据参数不同，返回回复文本、回复消息对象、发送消息对象或 None。
         """
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         # 整体任务守卫
         current_t = asyncio.current_task()
         while self.should_wait_for_atomic_task(message):
@@ -1561,6 +1554,9 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         带身份感知的指令发送：先切换到目标化身，再发送指令。
         使用 avatar_send_lock 确保同一时间只有一个化身在操作。
         """
+        if is_retired_auto_command(message, actor=self):
+            log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
+            return None
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         # 整体任务守卫
         current_t = asyncio.current_task()
@@ -2933,6 +2929,10 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
             # ---- 控制指令：止/启（仅管理员可触发） ----
             sender_check = await event.get_sender()
+            # 所有主魂/化身 @ 提及先记日志，不能被控制指令、反馈匹配或其他提前返回吞掉。
+            log_mention_if_needed(
+                self, msg, text=text, sender=sender_check, mentions_only=True
+            )
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
             _chat_id_match = (msg.chat_id == self.target_chat_id or msg.chat_id == int(f"-100{self.target_chat_id}"))
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
@@ -2991,7 +2991,8 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
 
             # ---- 第 1 步：精确匹配（回复关系） ----
             is_matched = match_pending_feedback_by_reply(
-                self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[REPLY-FEEDBACK]"
+                self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                label="[REPLY-FEEDBACK]", sender=sender
             )
 
             # ---- 第 2 步：@ 或名字匹配 ----
@@ -3010,6 +3011,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                     log,
                     id_window=30,
                     label="[MENTION-FEEDBACK]",
+                    sender=sender,
                 )
 
             # ---- 第 3 步：宽松匹配（用于 .查看闭关） ----
@@ -3028,6 +3030,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         log,
                         id_window=30,
                         label="[LOOSE-FEEDBACK]",
+                        sender=sender,
                     )
 
             # ---- 第 4 步：非回复消息处理 ----
@@ -3215,14 +3218,13 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         每日任务循环，每天 07:15 开始执行。
         任务列表：
           1. .宗门点卯（签到）
-          2. .闯塔（爬塔战斗）
 
         检测到新的一天时重置任务计数。
         """
         return await self.run_common_daily_tasks_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".宗门点卯", ".闯塔"],
+            [".宗门点卯"],
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
             send_kwargs_func=lambda command: {
@@ -5781,7 +5783,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                         )
                         return False
 
-                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result(
+                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
                         current_msg, sent, idx, timeout_sec=90, poll_sec=3,
                     )
                     if result_msg:
@@ -6012,7 +6014,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 continue
 
             except Exception as e:
-                log.error(f"Avatar [{avatar}] meditation loop error: {e}")
+                log.error(f"Avatar [{avatar}] meditation loop error: {e}", exc_info=True)
             finally:
                 await asyncio.sleep(300)
 
@@ -6023,24 +6025,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             initial_delay=initial_delay,
             sleep_func=scheduler_sleep_seconds,
             handle_insufficient_cultivation=True,
-        )
-
-    # ============================================================
-    # 身外化身：闯塔循环（每日23点执行）
-    # ============================================================
-
-    async def run_avatar_tower_loop(self, avatar, initial_delay=0):
-        """
-        化身每日 23 点自动闯塔任务。
-        每天 23:00 - 23:30 之间随机错开时间执行。
-        """
-        return await self.run_common_avatar_tower_loop(
-            avatar,
-            initial_delay=initial_delay,
-            timeout=90,
-            handle_insufficient_cultivation=True,
-            require_meditation_ready=False,
-            sleep_func=scheduler_sleep_seconds,
         )
 
     async def start(self):
@@ -6106,15 +6090,18 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                     await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令，如共历心劫）
                     is_matched = match_pending_feedback_by_reply(
-                        self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                        self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                        label="[EDITED-FEEDBACK]", sender=sender
                     )
                     if not is_matched:
                         is_matched = match_pending_feedback_by_message_id(
-                            self, msg, text, self.is_loose_meditation_feedback_candidate, log, label="[EDITED-FEEDBACK]"
+                            self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                            label="[EDITED-FEEDBACK]", sender=sender
                         )
                     if not is_matched:
                         is_matched = match_pending_edited_feedback(
-                            self, msg, text, self.is_loose_meditation_feedback_candidate, log, id_window=30
+                            self, msg, text, self.is_loose_meditation_feedback_candidate, log,
+                            id_window=30, sender=sender
                         )
                 await self.maybe_alert_low_price_tianleizhu(msg, text, sender)
                 if is_game_bot_sender(self, sender) and self.should_send_keyword_alert(msg, text):
@@ -6310,11 +6297,12 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
                 log.info("Startup Sync: startup_done released (normal or fallback).")
 
         asyncio.create_task(startup_sync())
+        asyncio.create_task(resume_pending_exchange_events(self))
         asyncio.create_task(periodic_log_prune(LOG_FILE))
         asyncio.create_task(self.run_sub_health_watchdog_loop())
 
         # 启动所有后台循环
-        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())           # 每日任务（点卯/闯塔/传功）
+        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())           # 每日任务（点卯/传功）
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())      # 全天观星监听
         if self.main_star_palace_enabled:
             self.create_scheduler_task("star_attraction", lambda: self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
@@ -6323,7 +6311,7 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
             self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())       # 侍妾管理（继承）
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())   # 野外历练（继承）
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())         # 宗门战（继承）
-        self.create_scheduler_task("bushi_wentian_daily", lambda: self.run_bushi_wentian_daily_loop(initial_delay=30, sleep_func=scheduler_sleep_seconds))
+        self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=45))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())    # dashboard 自定义指令
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         self.create_scheduler_task("ask_dao", lambda: self.run_ask_dao_loop())           # 元婴宗问道
@@ -6335,7 +6323,6 @@ class SubCultivator(CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixi
         for i, avatar_name in enumerate(self.avatars):
             self.create_scheduler_task(f"avatar_loop_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_loop(avatar_name, initial_delay=i * 10))
             self.create_scheduler_task(f"avatar_field_training_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_field_training_loop(avatar_name, initial_delay=i * 10))
-            self.create_scheduler_task(f"avatar_tower_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_tower_loop(avatar_name, initial_delay=i * 20))
             if avatar_name in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_yuanying_rift_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:

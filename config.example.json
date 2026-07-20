@@ -9,8 +9,24 @@
   "monitor": {
     "chat_id": "fanrenxxz",
     "topic_id": null,
-    "xiaohao_visibility_control": true,
-    "xiaohao_visibility_poll_seconds": 60,
+    "restricted_accounts": [
+      {
+        "key": "xiaohao",
+        "label": "Xiaohao",
+        "script": "cultivator_xiaohao.py",
+        "tmux_target": "xiuxian:2",
+        "state_file": "state_xiaohao.json",
+        "poll_seconds": 60
+      },
+      {
+        "key": "waaiging",
+        "label": "Waaiging",
+        "script": "cultivator_waaiging.py",
+        "tmux_target": "xiuxian:3",
+        "state_file": "state_waaiging.json",
+        "poll_seconds": 60
+      }
+    ],
     "keywords": [
       "玄骨上人",
       "极阴祖师",

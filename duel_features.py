@@ -1,0 +1,966 @@
+#!/usr/bin/env python3
+"""Shared two-target duel scheduler used by the main, sub, and xiaohao accounts."""
+
+import asyncio
+import json
+import logging
+import os
+import re
+import sqlite3
+import tempfile
+import time
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows test fallback
+    fcntl = None
+
+
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+DUEL_STATE_FILE = os.path.join(CONFIG_DIR, "duel_state.json")
+DUEL_LOCK_FILE = os.path.join(CONFIG_DIR, "duel_state.lock")
+DUEL_DB_FILE = os.path.join(CONFIG_DIR, "message_events.sqlite3")
+XIAOHAO_STATE_FILE = os.path.join(CONFIG_DIR, "state_xiaohao.json")
+DUEL_INTERVAL_SECONDS = 6 * 60
+DUEL_DAILY_LIMIT = 10
+DUEL_LEASE_SECONDS = 4 * 60
+DUEL_RESULT_WAIT_SECONDS = 35
+DUEL_POLL_SECONDS = 3
+DUEL_RETENTION_DAYS = 30
+DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
+
+DUEL_ACCOUNT_LABELS = {
+    "main": "主号",
+    "sub": "副号",
+    "xiaohao": "小号",
+}
+
+DUEL_QUEUES = {
+    "waaiging": {
+        "label": "Waaiging 队列",
+        "target": "Waaiging",
+        "participants": (
+            {"account": "main", "identity": "无咎子", "username": "wuxinglinggen"},
+            {"account": "main", "identity": "缘生子", "username": "kulipabp"},
+            {"account": "xiaohao", "identity": "素心子", "username": "hajiimiii"},
+            {"account": "xiaohao", "identity": "缘生子", "username": "adai925"},
+        ),
+    },
+    "titan": {
+        "label": "TitanCreeper 队列",
+        "target": "TitanCreeper",
+        "participants": (
+            {"account": "main", "identity": "素缘子", "username": "oldeinstein"},
+            {"account": "sub", "identity": "厚土", "username": "crayonxxin"},
+            {"account": "sub", "identity": "缘生子", "username": "lvdoumiao"},
+            {"account": "sub", "identity": "寻真子", "username": "ding303"},
+        ),
+    },
+}
+
+
+def duel_now():
+    return datetime.now()
+
+
+def duel_time(value=None):
+    return (value or duel_now()).strftime(TIME_FORMAT)
+
+
+def duel_date(value=None):
+    return (value or duel_now()).strftime("%Y-%m-%d")
+
+
+def parse_duel_time(value):
+    try:
+        return datetime.strptime(str(value or ""), TIME_FORMAT)
+    except Exception:
+        return None
+
+
+def duel_participant_key(account, identity):
+    return f"{str(account or '').strip()}|{str(identity or '主魂').strip() or '主魂'}"
+
+
+def duel_participant_config(queue_key, participant_key):
+    for participant in DUEL_QUEUES.get(queue_key, {}).get("participants", ()):
+        if duel_participant_key(participant["account"], participant["identity"]) == participant_key:
+            return dict(participant)
+    return None
+
+
+def _new_participant_state():
+    return {
+        "attempts": 0,
+        "remaining": DUEL_DAILY_LIMIT,
+        "wins": 0,
+        "losses": 0,
+        "status": "ready",
+        "last_attempt_at": "",
+        "last_result": "",
+    }
+
+
+def _new_queue_state(queue_key):
+    return {
+        "enabled": True,
+        "target": DUEL_QUEUES[queue_key]["target"],
+        "cursor": 0,
+        "next_at": "",
+        "last_attempt_at": "",
+        "last_success_at": "",
+        "last_result": "",
+        "in_flight": {},
+        "preparation": {},
+        "participants": {
+            duel_participant_key(item["account"], item["identity"]): _new_participant_state()
+            for item in DUEL_QUEUES[queue_key]["participants"]
+        },
+    }
+
+
+def duel_default_state():
+    return {
+        "version": 1,
+        "enabled": True,
+        "date": duel_date(),
+        "updated_at": duel_time(),
+        "queues": {key: _new_queue_state(key) for key in DUEL_QUEUES},
+    }
+
+
+def _atomic_write_json(path, data):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@contextmanager
+def duel_state_lock():
+    directory = os.path.dirname(DUEL_LOCK_FILE) or "."
+    os.makedirs(directory, exist_ok=True)
+    with open(DUEL_LOCK_FILE, "a+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_duel_state_unlocked():
+    try:
+        with open(DUEL_STATE_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return duel_default_state()
+        return data
+    except Exception:
+        return duel_default_state()
+
+
+def _ensure_duel_state_shape(data, reset_daily=True):
+    if not isinstance(data, dict):
+        data = duel_default_state()
+    data.setdefault("version", 1)
+    data.setdefault("enabled", True)
+    queues = data.setdefault("queues", {})
+    for queue_key, config in DUEL_QUEUES.items():
+        queue = queues.setdefault(queue_key, _new_queue_state(queue_key))
+        queue.setdefault("enabled", True)
+        queue["target"] = config["target"]
+        queue.setdefault("cursor", 0)
+        queue.setdefault("next_at", "")
+        queue.setdefault("last_attempt_at", "")
+        queue.setdefault("last_success_at", "")
+        queue.setdefault("last_result", "")
+        queue.setdefault("in_flight", {})
+        queue.setdefault("preparation", {})
+        participants = queue.setdefault("participants", {})
+        expected_keys = set()
+        for item in config["participants"]:
+            key = duel_participant_key(item["account"], item["identity"])
+            expected_keys.add(key)
+            participant = participants.setdefault(key, _new_participant_state())
+            for field, value in _new_participant_state().items():
+                participant.setdefault(field, value)
+        for key in list(participants):
+            if key not in expected_keys:
+                participants.pop(key, None)
+
+    today = duel_date()
+    if reset_daily and str(data.get("date") or "") != today:
+        data["date"] = today
+        for queue in queues.values():
+            queue["cursor"] = 0
+            queue["next_at"] = ""
+            queue["in_flight"] = {}
+            queue["preparation"] = {}
+            for key in list(queue.get("participants", {})):
+                queue["participants"][key] = _new_participant_state()
+    return data
+
+
+def load_duel_state(write_back=False):
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        if write_back or not os.path.exists(DUEL_STATE_FILE):
+            data["updated_at"] = duel_time()
+            _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def set_duel_control(enabled, queue_key=""):
+    queue_key = str(queue_key or "").strip().lower()
+    if queue_key and queue_key not in DUEL_QUEUES:
+        raise ValueError("unknown duel queue")
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        if queue_key:
+            queue = data["queues"][queue_key]
+            queue["enabled"] = bool(enabled)
+            if enabled:
+                queue["next_at"] = ""
+                queue["last_result"] = "已恢复"
+            else:
+                queue["in_flight"] = {}
+                queue["preparation"] = {}
+                queue["last_result"] = "已暂停"
+        else:
+            data["enabled"] = bool(enabled)
+            if enabled:
+                for queue in data["queues"].values():
+                    queue["next_at"] = ""
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def _lease_active(record, now=None):
+    if not isinstance(record, dict) or not record:
+        return False
+    expires = parse_duel_time(record.get("lease_until"))
+    return bool(expires and expires > (now or duel_now()))
+
+
+def _next_day_time(now=None):
+    now = now or duel_now()
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+    return duel_time(tomorrow)
+
+
+def titan_target_status():
+    result = {
+        "ready": False,
+        "current_identity": "",
+        "beast": "六翼",
+        "beast_status": "",
+        "state_updated_at": "",
+    }
+    try:
+        with open(XIAOHAO_STATE_FILE, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        result["current_identity"] = str(state.get("current_identity") or "")
+        beast_status = ""
+        for beast in state.get("beasts_cache") or []:
+            if str(beast.get("full_name") or "").split("（", 1)[0].strip() == "六翼":
+                beast_status = str(beast.get("status") or "")
+                break
+        if not beast_status and str(state.get("best_beast_name") or "").startswith("六翼"):
+            beast_status = str(state.get("best_beast_status") or "")
+        result["beast_status"] = beast_status
+        result["ready"] = result["current_identity"] == "主魂" and "出战" in beast_status
+        result["state_updated_at"] = duel_time(datetime.fromtimestamp(os.path.getmtime(XIAOHAO_STATE_FILE)))
+    except Exception:
+        pass
+    return result
+
+
+def xiaohao_duel_send_status():
+    """Read the restricted account's persisted Telegram send availability."""
+    result = {
+        "restricted": False,
+        "reason": "",
+        "monitor_status": "unknown",
+        "checked_at": "",
+    }
+    try:
+        with open(XIAOHAO_STATE_FILE, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        stop = state.get("telegram_send_protection_stop") or {}
+        monitor = state.get("telegram_write_permission_monitor") or {}
+        recovered = state.get("telegram_send_protection_last_recovered") or {}
+        result["monitor_status"] = str(monitor.get("status") or "unknown")
+        result["checked_at"] = str(monitor.get("checked_at") or "")
+        if str(stop.get("reason") or "") == "write_restricted":
+            result["restricted"] = True
+            result["reason"] = str(stop.get("error") or stop.get("reason") or "write_restricted")
+            return result
+        if result["monitor_status"] == "blocked":
+            checked_at = parse_duel_time(result["checked_at"])
+            recovered_at = parse_duel_time(recovered.get("recovered_at"))
+            if not recovered_at or not checked_at or recovered_at <= checked_at:
+                result["restricted"] = True
+                result["reason"] = str(monitor.get("reason") or "permission monitor blocked")
+    except Exception:
+        pass
+    return result
+
+
+def _queue_due(queue, now=None, lead_seconds=0):
+    now = now or duel_now()
+    next_at = parse_duel_time(queue.get("next_at"))
+    return not next_at or next_at <= now + timedelta(seconds=max(0, int(lead_seconds or 0)))
+
+
+def claim_titan_preparation(account):
+    if str(account or "") != "xiaohao":
+        return None
+    now = duel_now()
+    if titan_target_status()["ready"]:
+        return None
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        queue = data["queues"]["titan"]
+        if not data.get("enabled") or not queue.get("enabled") or not _queue_due(queue, now, 30):
+            return None
+        if _lease_active(queue.get("in_flight"), now) or _lease_active(queue.get("preparation"), now):
+            return None
+        run_id = uuid.uuid4().hex
+        queue["preparation"] = {
+            "run_id": run_id,
+            "owner": "xiaohao",
+            "started_at": duel_time(now),
+            "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
+        }
+        queue["last_result"] = "正在准备 TitanCreeper"
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return {"queue_key": "titan", "run_id": run_id}
+
+
+def finish_titan_preparation(claim, success, detail=""):
+    if not claim:
+        return
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        queue = data["queues"]["titan"]
+        preparation = queue.get("preparation") or {}
+        if preparation.get("run_id") != claim.get("run_id"):
+            return
+        queue["preparation"] = {}
+        queue["target_ready_at"] = duel_time() if success else ""
+        queue["last_result"] = detail or ("TitanCreeper 已就绪" if success else "TitanCreeper 未就绪")
+        if not success:
+            queue["next_at"] = duel_time(duel_now() + timedelta(seconds=60))
+        _atomic_write_json(DUEL_STATE_FILE, data)
+
+
+def reserve_duel_for_account(account):
+    account = str(account or "").strip()
+    if account not in DUEL_ACCOUNT_LABELS:
+        return None
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        dirty = False
+        if not data.get("enabled"):
+            return None
+        for queue_key, config in DUEL_QUEUES.items():
+            queue = data["queues"][queue_key]
+            if not queue.get("enabled") or not _queue_due(queue, now):
+                continue
+            if _lease_active(queue.get("in_flight"), now) or _lease_active(queue.get("preparation"), now):
+                continue
+            if queue_key == "titan" and not titan_target_status()["ready"]:
+                if queue.get("last_result") != "等待小号主魂与六翼出战":
+                    queue["last_result"] = "等待小号主魂与六翼出战"
+                    dirty = True
+                continue
+
+            participants = list(config["participants"])
+            xiaohao_send = xiaohao_duel_send_status() if queue_key == "waaiging" else {"restricted": False}
+            cursor = int(queue.get("cursor") or 0) % len(participants)
+            selected = None
+            selected_index = None
+            skipped_restricted_xiaohao = False
+            for offset in range(len(participants)):
+                index = (cursor + offset) % len(participants)
+                item = participants[index]
+                key = duel_participant_key(item["account"], item["identity"])
+                pstate = queue["participants"].setdefault(key, _new_participant_state())
+                if int(pstate.get("remaining", DUEL_DAILY_LIMIT) or 0) <= 0:
+                    if pstate.get("status") != "exhausted":
+                        pstate["status"] = "exhausted"
+                        dirty = True
+                    continue
+                if xiaohao_send.get("restricted") and item["account"] == "xiaohao":
+                    skipped_restricted_xiaohao = True
+                    continue
+                selected = item
+                selected_index = index
+                break
+            if selected is None:
+                if skipped_restricted_xiaohao:
+                    queue["next_at"] = duel_time(
+                        now + timedelta(seconds=DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS)
+                    )
+                    queue["last_result"] = "等待小号发送权限恢复"
+                    dirty = True
+                    continue
+                queue["next_at"] = _next_day_time(now)
+                queue["last_result"] = "今日次数均已用尽"
+                dirty = True
+                continue
+            if selected["account"] != account:
+                continue
+
+            key = duel_participant_key(selected["account"], selected["identity"])
+            run_id = uuid.uuid4().hex
+            queue["cursor"] = (selected_index + 1) % len(participants)
+            queue["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
+            queue["last_attempt_at"] = duel_time(now)
+            queue["in_flight"] = {
+                "run_id": run_id,
+                "participant_key": key,
+                "owner": account,
+                "started_at": duel_time(now),
+                "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
+            }
+            pstate = queue["participants"][key]
+            pstate["status"] = "in_flight"
+            pstate["last_attempt_at"] = duel_time(now)
+            data["updated_at"] = duel_time(now)
+            _atomic_write_json(DUEL_STATE_FILE, data)
+            return {
+                "queue_key": queue_key,
+                "run_id": run_id,
+                "participant_key": key,
+                "account": account,
+                "identity": selected["identity"],
+                "challenger_username": selected["username"],
+                "target_username": config["target"],
+                "command": f".斗法 @{config['target']}",
+                "reserved_at": duel_time(now),
+            }
+        if dirty:
+            data["updated_at"] = duel_time(now)
+            _atomic_write_json(DUEL_STATE_FILE, data)
+    return None
+
+
+def finish_duel_reservation(reservation, result):
+    if not reservation:
+        return
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        queue = data["queues"].get(reservation.get("queue_key"), {})
+        in_flight = queue.get("in_flight") or {}
+        if in_flight.get("run_id") != reservation.get("run_id"):
+            return
+        key = reservation["participant_key"]
+        pstate = queue.get("participants", {}).setdefault(key, _new_participant_state())
+        status = str(result.get("status") or "unknown")
+        outcome = str(result.get("outcome") or status)
+        remaining = result.get("remaining")
+        if status == "settled":
+            if remaining is None:
+                remaining = max(0, int(pstate.get("remaining", DUEL_DAILY_LIMIT) or 0) - 1)
+            remaining = max(0, min(DUEL_DAILY_LIMIT, int(remaining)))
+            pstate["remaining"] = remaining
+            pstate["attempts"] = max(int(pstate.get("attempts") or 0), DUEL_DAILY_LIMIT - remaining)
+            if outcome == "胜利":
+                pstate["wins"] = int(pstate.get("wins") or 0) + 1
+            elif outcome == "失败":
+                pstate["losses"] = int(pstate.get("losses") or 0) + 1
+            queue["last_success_at"] = duel_time(now)
+        elif status == "exhausted":
+            pstate["remaining"] = 0
+            pstate["attempts"] = DUEL_DAILY_LIMIT
+        pstate["status"] = "exhausted" if int(pstate.get("remaining", 0) or 0) <= 0 else "ready"
+        pstate["last_result"] = outcome
+        queue["last_result"] = f"{reservation['identity']} · {outcome}"
+        queue["in_flight"] = {}
+        completed_next_at = now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+        reserved_next_at = parse_duel_time(queue.get("next_at"))
+        queue["next_at"] = duel_time(max(completed_next_at, reserved_next_at)) if reserved_next_at else duel_time(completed_next_at)
+        data["updated_at"] = duel_time(now)
+        _atomic_write_json(DUEL_STATE_FILE, data)
+
+
+def _clean_duel_text(text):
+    return str(text or "").replace("**", "").replace("`", "").strip()
+
+
+def parse_duel_amount(value):
+    text = str(value or "").replace(",", "").replace("＋", "+").strip()
+    match = re.search(r"([+-]?\d+(?:\.\d+)?)(万|亿)?", text)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    if match.group(2) == "万":
+        number *= 10000
+    elif match.group(2) == "亿":
+        number *= 100000000
+    return int(round(number))
+
+
+def duel_wait_seconds(text):
+    clean = _clean_duel_text(text)
+    total = 0
+    for value, unit in re.findall(r"(\d+)\s*(小时|分钟|秒)", clean):
+        multiplier = 3600 if unit == "小时" else 60 if unit == "分钟" else 1
+        total += int(value) * multiplier
+    return total
+
+
+def duel_text_is_pending(text):
+    clean = _clean_duel_text(text)
+    if not clean:
+        return False
+    if "正在锁定对手天机" in clean or "天机阁正在推演战局" in clean:
+        return True
+    if "战斗结束" in clean and "正在整理天道战报" in clean:
+        return True
+    return "法宝齐出" in clean and "胜者：" not in clean and "胜负已分" not in clean
+
+
+def duel_text_is_final(text):
+    clean = _clean_duel_text(text)
+    return bool(clean and any(marker in clean for marker in (
+        "胜者：", "胜者:", "胜负已分", "今日神念", "今日剩余神念",
+        "元神尚未平复", "每日可主动斗法", "无力再战",
+        "尚未踏入仙途", "无法再次斗法", "不可斗法", "不能斗法",
+    )) and not duel_text_is_pending(clean))
+
+
+def _duel_user_line_value(clean, username, marker):
+    username = str(username or "").lower().lstrip("@")
+    for line in clean.splitlines():
+        if f"@{username}" not in line.lower() or marker not in line:
+            continue
+        match = re.search(rf"{re.escape(marker)}\s*([+＋-]?\d+(?:\.\d+)?\s*(?:万|亿)?)", line)
+        if match:
+            return parse_duel_amount(match.group(1))
+    return 0
+
+
+def parse_duel_result(text, challenger_username, target_username):
+    clean = _clean_duel_text(text)
+    result = {
+        "status": "unknown",
+        "outcome": "未识别",
+        "winner": "",
+        "loser": "",
+        "remaining": None,
+        "cultivation_delta": 0,
+        "artifact_wear": 0,
+        "wait_seconds": 0,
+        "text": clean,
+    }
+    remaining = re.search(r"今日(?:剩余)?神念\s*[:：]?\s*(\d+)\s*/\s*10", clean)
+    if remaining:
+        result["remaining"] = int(remaining.group(1))
+    if "每日可主动斗法" in clean or "已无力再战" in clean or "神念消耗过剧" in clean:
+        result.update(status="exhausted", outcome="次数用尽", remaining=0)
+        return result
+    if "元神尚未平复" in clean or "无法再次斗法" in clean:
+        result.update(status="cooldown", outcome="目标冷却", wait_seconds=duel_wait_seconds(clean))
+        return result
+    if "尚未踏入仙途" in clean or "不可斗法" in clean or "不能斗法" in clean:
+        result.update(status="unavailable", outcome="目标不可用")
+        return result
+    if duel_text_is_pending(clean):
+        result.update(status="pending", outcome="结算中")
+        return result
+
+    winner = re.search(r"胜者[：:]\s*@([A-Za-z0-9_]+)", clean, re.I)
+    loser = re.search(r"败者[：:]\s*@([A-Za-z0-9_]+)", clean, re.I)
+    if winner:
+        result["winner"] = winner.group(1)
+    if loser:
+        result["loser"] = loser.group(1)
+    challenger = str(challenger_username or "").lower().lstrip("@")
+    if winner:
+        result["status"] = "settled"
+        result["outcome"] = "胜利" if winner.group(1).lower() == challenger else "失败"
+        result["cultivation_delta"] = (
+            _duel_user_line_value(clean, challenger, "净得修为")
+            or _duel_user_line_value(clean, challenger, "损失修为")
+        )
+        if result["outcome"] == "失败" and result["cultivation_delta"] > 0:
+            result["cultivation_delta"] *= -1
+        wear = _duel_user_line_value(clean, challenger, "法宝磨损")
+        result["artifact_wear"] = -abs(wear) if wear else 0
+        return result
+    if not clean:
+        result.update(status="timeout", outcome="无回复")
+    return result
+
+
+def duel_reply_to_message_id(message):
+    reply_to = getattr(message, "reply_to", None)
+    value = getattr(reply_to, "reply_to_msg_id", None) if reply_to is not None else None
+    if value is None:
+        value = getattr(message, "reply_to_msg_id", None)
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+async def wait_for_duel_result(actor, response_msg, command_msg_id=None, timeout=DUEL_RESULT_WAIT_SECONDS):
+    current = response_msg
+    text = getattr(current, "text", "") if current is not None else ""
+    if duel_text_is_final(text):
+        return current, text
+    msg_id = getattr(current, "id", None)
+    if not msg_id:
+        return current, text
+    command_msg_id = command_msg_id or duel_reply_to_message_id(current)
+    deadline = time.monotonic() + max(1, int(timeout or DUEL_RESULT_WAIT_SECONDS))
+    while time.monotonic() < deadline and getattr(actor, "is_running", True):
+        await asyncio.sleep(1)
+        try:
+            fresh = await actor.client.get_messages(actor.target_chat_id, ids=msg_id)
+            if isinstance(fresh, (list, tuple)):
+                fresh = fresh[0] if fresh else None
+            if fresh is not None:
+                current = fresh
+                text = getattr(fresh, "text", "") or text
+        except Exception:
+            pass
+        if duel_text_is_final(text):
+            break
+        if command_msg_id:
+            try:
+                messages = await actor.client.get_messages(
+                    actor.target_chat_id,
+                    limit=40,
+                    min_id=max(0, int(msg_id) - 1),
+                )
+                if not isinstance(messages, (list, tuple)):
+                    messages = [messages] if messages is not None else []
+                for candidate in messages:
+                    candidate_text = getattr(candidate, "text", "") or ""
+                    if duel_reply_to_message_id(candidate) != int(command_msg_id):
+                        continue
+                    if duel_text_is_final(candidate_text):
+                        return candidate, candidate_text
+            except Exception:
+                pass
+    return current, text
+
+
+def ensure_duel_events_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS duel_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            event_date TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            queue_key TEXT NOT NULL,
+            account TEXT NOT NULL,
+            identity TEXT NOT NULL,
+            challenger_username TEXT NOT NULL,
+            target_username TEXT NOT NULL,
+            command TEXT NOT NULL,
+            command_msg_id INTEGER,
+            response_msg_id INTEGER,
+            status TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            winner TEXT,
+            loser TEXT,
+            remaining INTEGER,
+            cultivation_delta INTEGER NOT NULL DEFAULT 0,
+            artifact_wear INTEGER NOT NULL DEFAULT 0,
+            result_text TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_duel_events_date_time ON duel_events(event_date,event_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_duel_events_queue_date ON duel_events(queue_key,event_date,event_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_duel_events_account_identity ON duel_events(account,identity,event_date)")
+
+
+def record_duel_event(reservation, result, command_msg_id=None, response_msg_id=None):
+    now = duel_now()
+    event_key = (
+        f"{reservation['account']}:{int(command_msg_id)}"
+        if command_msg_id is not None
+        else f"lease:{reservation['run_id']}"
+    )
+    conn = sqlite3.connect(DUEL_DB_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        ensure_duel_events_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO duel_events (
+                event_key,event_date,event_time,queue_key,account,identity,
+                challenger_username,target_username,command,command_msg_id,response_msg_id,
+                status,outcome,winner,loser,remaining,cultivation_delta,artifact_wear,
+                result_text,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_key) DO UPDATE SET
+                response_msg_id=excluded.response_msg_id,
+                status=excluded.status,
+                outcome=excluded.outcome,
+                winner=excluded.winner,
+                loser=excluded.loser,
+                remaining=excluded.remaining,
+                cultivation_delta=excluded.cultivation_delta,
+                artifact_wear=excluded.artifact_wear,
+                result_text=excluded.result_text,
+                updated_at=excluded.updated_at
+            """,
+            (
+                event_key, duel_date(now), duel_time(now), reservation["queue_key"],
+                reservation["account"], reservation["identity"],
+                reservation["challenger_username"], reservation["target_username"],
+                reservation["command"], command_msg_id, response_msg_id,
+                result.get("status") or "unknown", result.get("outcome") or "未识别",
+                result.get("winner") or "", result.get("loser") or "", result.get("remaining"),
+                int(result.get("cultivation_delta") or 0), int(result.get("artifact_wear") or 0),
+                result.get("text") or "", duel_time(now), duel_time(now),
+            ),
+        )
+        cutoff = duel_date(now - timedelta(days=DUEL_RETENTION_DAYS))
+        conn.execute("DELETE FROM duel_events WHERE event_date<?", (cutoff,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _duel_event_rows(query_date, limit):
+    if not os.path.exists(DUEL_DB_FILE):
+        return []
+    conn = sqlite3.connect(DUEL_DB_FILE, timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_duel_events_schema(conn)
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM duel_events WHERE event_date=? ORDER BY event_time DESC,id DESC LIMIT ?",
+            (query_date, max(1, min(int(limit or 200), 1000))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def duel_dashboard_payload(date="", limit=200):
+    data = load_duel_state(write_back=False)
+    query_date = str(date or "").strip() or duel_date()
+    titan_status = titan_target_status()
+    queues = []
+    for queue_key, config in DUEL_QUEUES.items():
+        queue_state = data["queues"][queue_key]
+        cursor = int(queue_state.get("cursor") or 0) % len(config["participants"])
+        participant_rows = []
+        for index, participant in enumerate(config["participants"]):
+            key = duel_participant_key(participant["account"], participant["identity"])
+            state = dict(queue_state.get("participants", {}).get(key) or _new_participant_state())
+            participant_rows.append({
+                **participant,
+                "key": key,
+                "account_name": DUEL_ACCOUNT_LABELS.get(participant["account"], participant["account"]),
+                "is_next": index == cursor,
+                **state,
+            })
+        queues.append({
+            "key": queue_key,
+            "label": config["label"],
+            "target": f"@{config['target']}",
+            "enabled": bool(queue_state.get("enabled")),
+            "next_at": queue_state.get("next_at") or "",
+            "last_attempt_at": queue_state.get("last_attempt_at") or "",
+            "last_success_at": queue_state.get("last_success_at") or "",
+            "last_result": queue_state.get("last_result") or "",
+            "in_flight": queue_state.get("in_flight") or {},
+            "participants": participant_rows,
+            "target_status": titan_status if queue_key == "titan" else {"ready": True},
+        })
+    rows = _duel_event_rows(query_date, limit)
+    summary = {
+        "count": len(rows),
+        "wins": sum(1 for row in rows if row.get("outcome") == "胜利"),
+        "losses": sum(1 for row in rows if row.get("outcome") == "失败"),
+        "blocked": sum(1 for row in rows if row.get("status") not in {"settled"}),
+    }
+    return {
+        "enabled": bool(data.get("enabled")),
+        "date": query_date,
+        "interval_seconds": DUEL_INTERVAL_SECONDS,
+        "daily_limit": DUEL_DAILY_LIMIT,
+        "updated_at": data.get("updated_at") or duel_time(),
+        "queues": queues,
+        "rows": rows,
+        "summary": summary,
+    }
+
+
+class DuelMixin:
+    """Actor methods for claiming and executing this account's shared duel turns."""
+
+    def duel_logger(self):
+        logger = getattr(self, "log", None)
+        return logger if logger is not None else logging.getLogger(self.__class__.__name__)
+
+    async def prepare_titan_target_for_duel(self):
+        if str(getattr(self, "account_key", "") or "") != "xiaohao":
+            return False, "仅小号可准备 TitanCreeper"
+        logger = self.duel_logger()
+        status = titan_target_status()
+        if status["ready"]:
+            return True, "TitanCreeper 主魂与六翼已就绪"
+
+        beast_lock = getattr(self, "beast_lock", None)
+
+        async def prepare():
+            focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
+            beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
+            if "出战" not in beast_status:
+                if "放养" in beast_status:
+                    rest_resp = await self.send_and_wait_feedback(
+                        ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
+                    )
+                    rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
+                    rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
+                    if rest_status and hasattr(self, "set_best_beast_status"):
+                        self.set_best_beast_status("六翼", rest_status)
+                    if not rest_status:
+                        return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
+                    await asyncio.sleep(2)
+                deploy_resp = await self.send_and_wait_feedback(
+                    ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
+                )
+                deploy_text = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
+                if not self.is_beast_deploy_success(deploy_text):
+                    if hasattr(self, "record_beast_current_status_response"):
+                        self.record_beast_current_status_response(deploy_text, "六翼", source="斗法准备")
+                    return False, f"六翼出战失败：{deploy_text[:80] or '无回复'}"
+                if hasattr(self, "set_best_beast_status"):
+                    self.set_best_beast_status("六翼", "出战中")
+            if str(getattr(self, "current_identity", "") or "") != "主魂":
+                switch_back = getattr(self, "switch_back_to_main", None)
+                if not callable(switch_back):
+                    return False, "小号缺少主魂切换能力"
+                await switch_back(force=True)
+                if str(getattr(self, "current_identity", "") or "") != "主魂":
+                    return False, "小号主魂切换未确认"
+            ready = titan_target_status()["ready"]
+            return ready, "TitanCreeper 主魂与六翼已就绪" if ready else "小号状态文件尚未确认就绪"
+
+        try:
+            if beast_lock is None:
+                return await prepare()
+            async with beast_lock:
+                return await prepare()
+        except Exception as exc:
+            logger.exception("Duel Titan preparation failed")
+            return False, f"TitanCreeper 准备异常：{exc}"
+
+    async def _run_titan_preparation_if_due(self):
+        claim = claim_titan_preparation(getattr(self, "account_key", ""))
+        if not claim:
+            return False
+        success, detail = await self.prepare_titan_target_for_duel()
+        finish_titan_preparation(claim, success, detail)
+        self.duel_logger().info("Duel Titan preparation: success=%s detail=%s", success, detail)
+        return True
+
+    async def execute_duel_reservation(self, reservation):
+        logger = self.duel_logger()
+        command_msg_id = None
+        response_msg_id = None
+        result = {"status": "error", "outcome": "执行异常", "text": ""}
+        try:
+            logger.info(
+                "Duel turn [%s]: %s/%s -> @%s",
+                reservation["queue_key"], reservation["account"], reservation["identity"],
+                reservation["target_username"],
+            )
+            response_msg = await self.send_and_wait_feedback_identity(
+                reservation["identity"],
+                reservation["command"],
+                timeout=60,
+                max_retries=0,
+                return_response_msg=True,
+                delete_after=False,
+                force_identity_check=True,
+            )
+            command_msg_id = duel_reply_to_message_id(response_msg) or getattr(self, "last_sent_id", None)
+            final_msg, final_text = await wait_for_duel_result(
+                self,
+                response_msg,
+                command_msg_id=command_msg_id,
+            )
+            response_msg_id = getattr(final_msg, "id", None)
+            result = parse_duel_result(
+                final_text,
+                reservation["challenger_username"],
+                reservation["target_username"],
+            )
+            logger.info(
+                "Duel result [%s]: %s/%s outcome=%s remaining=%s",
+                reservation["queue_key"], reservation["account"], reservation["identity"],
+                result.get("outcome"), result.get("remaining"),
+            )
+        except Exception as exc:
+            result = {"status": "error", "outcome": "执行异常", "text": str(exc)}
+            logger.exception("Duel turn crashed: %s", reservation)
+        finally:
+            try:
+                record_duel_event(
+                    reservation,
+                    result,
+                    command_msg_id=command_msg_id,
+                    response_msg_id=response_msg_id,
+                )
+            finally:
+                finish_duel_reservation(reservation, result)
+        return result
+
+    async def run_duel_scheduler(self, initial_delay=20):
+        logger = self.duel_logger()
+        startup_done = getattr(self, "startup_done", None)
+        if startup_done is not None:
+            await startup_done.wait()
+        if initial_delay:
+            await asyncio.sleep(max(0, int(initial_delay)))
+        logger.info("Shared duel scheduler started for account=%s", getattr(self, "account_key", ""))
+        while getattr(self, "is_running", True):
+            try:
+                if str(getattr(self, "account_key", "") or "") == "xiaohao":
+                    if await self._run_titan_preparation_if_due():
+                        await asyncio.sleep(1)
+                reservation = reserve_duel_for_account(getattr(self, "account_key", ""))
+                if reservation:
+                    await self.execute_duel_reservation(reservation)
+                    await asyncio.sleep(1)
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Shared duel scheduler iteration failed")
+            await asyncio.sleep(DUEL_POLL_SECONDS)

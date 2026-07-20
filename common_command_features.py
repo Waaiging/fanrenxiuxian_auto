@@ -10,10 +10,10 @@
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
 
 【阅读导览】
-- common_command_default_state：三套脚本都会合并进去的通用 state 字段。
+- common_command_default_state：所有账号脚本都会合并进去的通用 state 字段。
 - CommonCommandMixin 前半段：解析、状态读写、日报统计、身份暂停。
 - 中段：Dashboard 自定义指令、野外历练、元婴/裂缝/法宝等通用循环。
-- 后半段：黄龙山、卜筮问天、宗门战、主循环辅助。
+- 后半段：黄龙山、宗门战、主循环辅助。
 
 本模块不直接创建 TelegramClient；它假设继承方已经提供 send_and_wait_feedback、
 send_and_wait_feedback_identity、save_state、state、avatars 等能力。
@@ -79,16 +79,6 @@ FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各�
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
 FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 5 * 60  # 空回复短退避，避免 dashboard 长时间显示 0 秒到期
 FIELD_TRAINING_SETTLEMENT_WAIT_SECONDS = 15    # 等待野外历练初始回复编辑为结算
-BUSHI_WENTIAN_COMMAND = ".卜筮问天"
-BUSHI_WENTIAN_EXCHANGE_COMMAND = ".换取"
-BUSHI_WENTIAN_DAILY_LIMIT = 8
-BUSHI_WENTIAN_START_HOUR = 0
-BUSHI_WENTIAN_START_MINUTE = 3
-BUSHI_WENTIAN_START_CATCHUP_SECONDS = 45 * 60
-BUSHI_WENTIAN_SEND_INTERVAL_SECONDS = 3
-BUSHI_WENTIAN_RETRY_SECONDS = 10 * 60
-BUSHI_WENTIAN_ACCOUNT_ORDER = ("main", "sub", "xiaohao")
-BUSHI_WENTIAN_IDENTITY_STAGGER_SECONDS = 60 * 60
 YUANYING_REBIRTH_PENDING_PAUSE_SECONDS = 30 * 60  # 已可夺舍但未重生时，短暂停自动主魂指令
 YUANYING_REBIRTH_WAIT_SECONDS = 365 * 24 * 3600   # 探寻裂缝失败后等待手动 .重生 成功
 YUANYING_OUT_CD_SECONDS = 8 * 3600
@@ -103,12 +93,12 @@ SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
 HUANGLONG_REPORT_TITLE = "黄龙山轮值军报"
 HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
-AVATAR_TOWER_SUPPORT_COMMAND = ".支援慕兰 奇袭"
-AVATAR_TOWER_SUPPORT_RETRY_SECONDS = 10 * 60
+# .支援慕兰 奇袭 is a daily follow-up to .宗门点卯 for each identity.
+MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
+MULAN_SUPPORT_RETRY_SECONDS = 10 * 60
+AVATAR_TOWER_SETTLEMENT_WAIT_SECONDS = 30
+AVATAR_TOWER_SETTLEMENT_TIMEOUT_SECONDS = 45
 TIME_CRITICAL_COMMAND_PREFIXES = (
-    ".灵树灌溉",
-    ".协同守山",
-    ".采摘灵果",
     ".观星",
     ".改换星移",
     ".观命",
@@ -132,10 +122,9 @@ STATE_TIME_COMMAND_MAP = {
     "next_dream_map_time": ".入梦寻图",
     "next_heart_trial_time": ".共历心劫",
     "next_divination_time": ".天机代卜",
-    "next_concubine_voyage_time": ".侍妾远航 冒险",
+    # Route suffix differs by account; match both adventure and moon-palace voyages.
+    "next_concubine_voyage_time": ".侍妾远航",
     "next_concubine_search_time": ".红尘寻缘",
-    "next_tower_time": ".闯塔",
-    "next_mulan_support_time": AVATAR_TOWER_SUPPORT_COMMAND,
     "next_stairs_time": ".登天阶",
     "next_heart_platform_time": ".问心台",
     "nine_heaven_wind_cd_time": ".引九天罡风",
@@ -145,8 +134,6 @@ STATE_TIME_COMMAND_MAP = {
     "next_formation_retry_time": ".启阵",
     "next_force_exit_time": ".强行出关",
     "next_nurture_spirit_time": ".温养器灵 青竹蜂云剑（神雷版）",
-    "next_spirit_tree_irrigation_time": ".灵树灌溉",
-    "next_spirit_tree_guard_time": ".协同守山",
     "next_star_gazing_time": ".观星",
     "pending_star_gazing_target_time": ".观星",
     "pending_star_shift_target_time": ".改换星移",
@@ -161,13 +148,13 @@ STATE_TIME_COMMAND_MAP = {
 }
 LOW_PRIORITY_DAILY_COMMANDS = {
     ".宗门点卯",
-    ".闯塔",
     ".观命",
     ".定命",
-    ".借天门势",
 }
 LOW_PRIORITY_DAILY_DEFER_SECONDS = 5 * 60
 LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS = 5 * 60
+TIANXING_RIFT_PREFIX_COMMANDS = (".推命 探索", ".改命 探索")
+TIANXING_RIFT_PREFIX_DELAY_SECONDS = 3
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
@@ -222,10 +209,6 @@ def common_command_default_state():
     return {
         "last_field_training_time": "",
         "next_field_training_time": "",
-        "bushi_wentian_date": "",
-        "bushi_wentian_count": 0,
-        "bushi_wentian_exchange_count": 0,
-        "bushi_wentian_kunwu_exchanged": False,
         "sect_name": "",
         "sect_war_left": "",
         "sect_war_right": "",
@@ -249,6 +232,11 @@ def common_command_default_state():
         "star_gazing_assigned_time": "",
         "daily_reward_events": [],
         "daily_reward_last_sent_date": "",
+        "last_mulan_support_date": "",
+        "last_mulan_support_time": "",
+        "next_mulan_support_time": "",
+        "last_mulan_support_response": "",
+        "last_mulan_support_error": "",
     }
 
 
@@ -259,7 +247,7 @@ def common_command_default_state():
 class _CommonAtomicTask:
     """共享原子任务门闩。
 
-    多步骤链（如卜筮问天、宗门战、化身任务批次）会短暂占用
+    多步骤链（如宗门战、化身任务批次）会短暂占用
     active_atomic_task，普通发送会等待它释放，避免中途被其他循环切身份。
     """
 
@@ -606,6 +594,7 @@ class CommonCommandMixin:
             "main": "主号",
             "sub": "副号",
             "xiaohao": "小号",
+            "waaiging": "Waaiging",
         }.get(key, key or self.__class__.__name__)
 
     def daily_reward_summary_push_enabled(self):
@@ -2176,11 +2165,8 @@ class CommonCommandMixin:
             "next_rift_search_time": "rift_search",
             "next_dream_map_time": "dream_map",
             "next_heart_trial_time": "heart_trial",
-            "next_tower_time": "tower",
             "next_formation_time": "formation",
             "next_formation_retry_time": "formation",
-            "next_spirit_tree_irrigation_time": "spirit_tree_irrigation",
-            "next_spirit_tree_guard_time": "spirit_tree_guard",
             "next_star_gazing_time": "star_gazing",
             "pending_star_gazing_target_time": "star_gazing",
             "pending_star_shift_target_time": "star_gazing",
@@ -2328,28 +2314,6 @@ class CommonCommandMixin:
                             pass
                     else:
                         candidates.append(0)
-
-            if (
-                (state.get("spirit_tree_guard_pending") or state.get("spirit_tree_invasion_status"))
-                and not self.command_matches_prefix(exclude_command, ".协同守山")
-                and not self.dashboard_command_paused(".协同守山", identity)
-            ):
-                candidates.append(0)
-            if (
-                state.get("spirit_tree_harvest_pending")
-                and not self.command_matches_prefix(exclude_command, ".采摘灵果")
-                and not self.dashboard_command_paused(".采摘灵果", identity)
-            ):
-                candidates.append(0)
-
-        if (
-            hasattr(self, "get_spirit_tree_irrigation_time")
-            and not self.command_matches_prefix(exclude_command, ".灵树灌溉")
-            and not self.dashboard_command_paused(".灵树灌溉", identity)
-        ):
-            value = self.get_spirit_tree_irrigation_time(identity)
-            if value:
-                candidates.append(seconds_until(value) if is_future(value) else 0)
 
         if stale_changed:
             try:
@@ -2693,28 +2657,72 @@ class CommonCommandMixin:
             "force_identity_check": plan.force_identity_check,
             "return_response_msg": plan.return_response_msg,
         }
-        if plan.command == ".探寻裂缝" and self.identity_sect_name(identity) == "天星宗":
-            log = self.common_command_logger()
-            prefix = ".改命 探索"
-            log.info(f"Tianxing rift prefix [{identity}]: sending {prefix} before {plan.command}.")
-            if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-                await self.send_and_wait_feedback_identity(
-                    identity,
-                    prefix,
-                    timeout=60,
-                    max_retries=0,
-                    force_identity_check=True,
-                )
-            else:
-                await self.send_and_wait_feedback(
-                    prefix,
-                    timeout=60,
-                    max_retries=0,
-                )
-            await asyncio.sleep(3)
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
             return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
         return await self.send_and_wait_feedback(plan.command, **kwargs)
+
+    def allow_retired_auto_command(self, command):
+        """Only revive Tianxing exploration commands inside the rift prefix chain."""
+        command = str(command or "").strip()
+        active = str(getattr(self, "_tianxing_rift_prefix_command", "") or "").strip()
+        return bool(active and command == active and command in TIANXING_RIFT_PREFIX_COMMANDS)
+
+    def tianxing_rift_prefix_commands(self, identity="主魂"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        sect = ""
+        resolver = getattr(self, "identity_sect_name", None)
+        if callable(resolver):
+            try:
+                sect = str(resolver(identity) or "").strip()
+            except Exception:
+                sect = ""
+        return TIANXING_RIFT_PREFIX_COMMANDS if sect == "天星宗" else ()
+
+    async def send_tianxing_rift_prefixes(self, identity="主魂"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        prefixes = self.tianxing_rift_prefix_commands(identity)
+        if not prefixes:
+            return True
+        log = self.common_command_logger()
+        for command in prefixes:
+            log.info(f"Tianxing rift prefix [{identity}]: sending {command}.")
+            self._tianxing_rift_prefix_command = command
+            try:
+                if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+                    response = await self.send_and_wait_feedback_identity(
+                        identity,
+                        command,
+                        timeout=60,
+                        max_retries=0,
+                        force_identity_check=True,
+                    )
+                else:
+                    response = await self.send_and_wait_feedback(
+                        command,
+                        timeout=60,
+                        max_retries=0,
+                        force_identity_check=True,
+                    )
+            finally:
+                self._tianxing_rift_prefix_command = ""
+            if not self.timed_command_response_text(response).strip():
+                log.warning(
+                    f"Tianxing rift prefix [{identity}] {command} had no confirmed feedback; "
+                    "blocking .探寻裂缝."
+                )
+                return False
+            await asyncio.sleep(TIANXING_RIFT_PREFIX_DELAY_SECONDS)
+        return True
+
+    async def send_rift_search_plan(self, plan, identity="主魂"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        prefixes = self.tianxing_rift_prefix_commands(identity)
+        if not prefixes:
+            return await self.send_timed_command_plan(plan, identity)
+        async with self.common_atomic_task(f"Tianxing-rift-{identity}"):
+            if not await self.send_tianxing_rift_prefixes(identity):
+                return None
+            return await self.send_timed_command_plan(plan, identity)
 
     def timed_command_response_text(self, resp):
         if hasattr(self, "response_text"):
@@ -2811,7 +2819,7 @@ class CommonCommandMixin:
             return False
 
         self.common_command_logger().info(f"Avatar [{avatar}] rift search due: sending {plan.command}.")
-        resp = await self.send_timed_command_plan(plan, avatar)
+        resp = await self.send_rift_search_plan(plan, avatar)
         resp_text = self.timed_command_response_text(resp)
         if self.is_rift_weakness_response(resp_text):
             await self.stop_for_rift_weakness(resp_text, identity=avatar)
@@ -3425,7 +3433,7 @@ class CommonCommandMixin:
             return wait_time
 
         log.info(f"Rift search due: sending {command}.")
-        resp_msg = await self.send_timed_command_plan(plan, "主魂")
+        resp_msg = await self.send_rift_search_plan(plan, "主魂")
         if resp_msg is None:
             if hasattr(self, "sleep_after_blocked_command") and await self.sleep_after_blocked_command(command, "Rift search"):
                 return 0
@@ -4110,8 +4118,9 @@ class CommonCommandMixin:
             return False
         return True
 
-    def record_avatar_tower_support_response(self, avatar, text, today=None):
-        """Record the follow-up .支援慕兰 奇袭 result for an avatar tower run."""
+    def record_mulan_support_response(self, identity, text, today=None):
+        """Record one identity's .支援慕兰 奇袭 response and retry hint."""
+        identity = str(identity or "主魂").strip() or "主魂"
         today = today or datetime.now().strftime("%Y-%m-%d")
         now = now_str()
         clean = str(text or "").strip()
@@ -4121,14 +4130,21 @@ class CommonCommandMixin:
         }
         log = self.common_command_logger()
 
+        def persist(values):
+            if identity == "主魂":
+                self.state.update(values)
+                self.save_state()
+            else:
+                self.update_avatar_states(identity, values)
+
         if not clean:
             updates.update({
-                "next_mulan_support_time": add_seconds_str(now, AVATAR_TOWER_SUPPORT_RETRY_SECONDS),
+                "next_mulan_support_time": add_seconds_str(now, MULAN_SUPPORT_RETRY_SECONDS),
                 "last_mulan_support_error": "no response",
             })
-            self.update_avatar_states(avatar, updates)
+            persist(updates)
             log.warning(
-                f"Avatar [{avatar}] tower support: no usable response; "
+                f"[{identity}] Mulan support: no usable response; "
                 f"recorded retry hint at {updates['next_mulan_support_time']}."
             )
             return False
@@ -4136,14 +4152,14 @@ class CommonCommandMixin:
         cd = self.parse_wait_time(clean) if hasattr(self, "parse_wait_time") else -1
         cooldown_words = ["冷却", "后再", "尚需", "剩余", "请在", "还需", "稍后"]
         if any(k in clean for k in cooldown_words):
-            retry_seconds = cd if cd and cd > 0 else AVATAR_TOWER_SUPPORT_RETRY_SECONDS
+            retry_seconds = cd if cd and cd > 0 else MULAN_SUPPORT_RETRY_SECONDS
             updates.update({
                 "next_mulan_support_time": add_seconds_str(now, retry_seconds),
                 "last_mulan_support_error": clean[:200],
             })
-            self.update_avatar_states(avatar, updates)
+            persist(updates)
             log.info(
-                f"Avatar [{avatar}] tower support cooling/unavailable; "
+                f"[{identity}] Mulan support cooling/unavailable; "
                 f"next hint at {updates['next_mulan_support_time']}."
             )
             return False
@@ -4154,9 +4170,9 @@ class CommonCommandMixin:
                 "next_mulan_support_time": add_seconds_str(now, 60 * 60),
                 "last_mulan_support_error": clean[:200],
             })
-            self.update_avatar_states(avatar, updates)
+            persist(updates)
             log.info(
-                f"Avatar [{avatar}] tower support unavailable; "
+                f"[{identity}] Mulan support unavailable; "
                 f"next hint at {updates['next_mulan_support_time']}."
             )
             return False
@@ -4166,42 +4182,57 @@ class CommonCommandMixin:
             "next_mulan_support_time": "",
             "last_mulan_support_error": "",
         })
-        self.update_avatar_states(avatar, updates)
+        persist(updates)
         if hasattr(self, "record_daily_reward_event"):
             self.record_daily_reward_event(
-                avatar,
-                AVATAR_TOWER_SUPPORT_COMMAND,
+                identity,
+                MULAN_SUPPORT_COMMAND,
                 clean,
-                source=AVATAR_TOWER_SUPPORT_COMMAND,
+                source=MULAN_SUPPORT_COMMAND,
             )
-        log.info(f"Avatar [{avatar}] tower support recorded for {today}.")
+        log.info(f"[{identity}] Mulan support recorded for {today}.")
         return True
 
-    async def maybe_run_avatar_tower_support(self, avatar, today=None, timeout=60):
-        """Send .支援慕兰 奇袭 once after a successful avatar tower attempt."""
+    async def maybe_run_mulan_support(self, identity="主魂", today=None, timeout=60):
+        """Send .支援慕兰 奇袭 once after that identity's daily check-in."""
+        identity = str(identity or "主魂").strip() or "主魂"
         today = today or datetime.now().strftime("%Y-%m-%d")
-        a_state = self.get_avatar_state(avatar)
+        state = self.state if identity == "主魂" else self.get_avatar_state(identity)
         log = self.common_command_logger()
-        if a_state.get("last_mulan_support_date") == today:
-            log.info(f"Avatar [{avatar}] tower support skipped: already recorded for {today}.")
+        if state.get("last_mulan_support_date") == today:
             return False
-        if (
-            hasattr(self, "dashboard_command_paused")
-            and self.dashboard_command_paused(AVATAR_TOWER_SUPPORT_COMMAND, avatar)
+        retry_at = str(state.get("next_mulan_support_time") or "")
+        if retry_at and is_future(retry_at):
+            return False
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(
+            MULAN_SUPPORT_COMMAND,
+            identity,
         ):
-            log.info(f"Avatar [{avatar}] tower support skipped: dashboard command paused.")
+            log.info(f"[{identity}] Mulan support skipped: dashboard command paused.")
             return False
 
-        resp = await self.send_and_wait_feedback_identity(
-            avatar,
-            AVATAR_TOWER_SUPPORT_COMMAND,
-            timeout=timeout,
-            max_retries=0,
-            force_identity_check=True,
-            suppress_no_response_alert=True,
+        if identity == "主魂":
+            resp = await self.send_and_wait_feedback(
+                MULAN_SUPPORT_COMMAND,
+                timeout=timeout,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        else:
+            resp = await self.send_and_wait_feedback_identity(
+                identity,
+                MULAN_SUPPORT_COMMAND,
+                timeout=timeout,
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        return self.record_mulan_support_response(
+            identity,
+            self.timed_command_response_text(resp),
+            today=today,
         )
-        resp_text = self.timed_command_response_text(resp)
-        return self.record_avatar_tower_support_response(avatar, resp_text, today=today)
 
     async def common_avatar_tower_send(
         self,
@@ -4224,10 +4255,24 @@ class CommonCommandMixin:
         if a_state.get("last_tower_date") == today:
             return False
 
-        resp = await self.send_and_wait_feedback_identity(avatar, ".闯塔", timeout=timeout)
+        # Legacy tower helper retained for state compatibility; retired-command
+        # guards prevent this path from sending in production.
+        resp = await self.send_and_wait_feedback_identity(
+            avatar,
+            ".闯塔",
+            timeout=timeout,
+            return_response_msg=True,
+            delete_after=False,
+        )
         if resp is None:
             log.warning(f"Avatar [{avatar}] tower: switch/send failed. Retrying later.")
             return False
+        resp = await self.wait_for_avatar_tower_settlement(
+            resp,
+            avatar=avatar,
+            timeout_seconds=AVATAR_TOWER_SETTLEMENT_TIMEOUT_SECONDS,
+            minimum_wait_seconds=AVATAR_TOWER_SETTLEMENT_WAIT_SECONDS,
+        )
         resp_text = self.timed_command_response_text(resp)
         if not resp_text:
             log.info(f"Avatar [{avatar}] tower skipped: no usable response.")
@@ -4254,11 +4299,58 @@ class CommonCommandMixin:
 
         self.set_avatar_state(avatar, "last_tower_date", today)
         log.info(f"Avatar [{avatar}] tower completed for {today}.")
-        try:
-            await self.maybe_run_avatar_tower_support(avatar, today=today)
-        except Exception as exc:
-            log.error(f"Avatar [{avatar}] tower support error after tower: {exc}", exc_info=True)
         return True
+
+    async def wait_for_avatar_tower_settlement(
+        self,
+        resp,
+        avatar="主魂",
+        timeout_seconds=AVATAR_TOWER_SETTLEMENT_TIMEOUT_SECONDS,
+        minimum_wait_seconds=AVATAR_TOWER_SETTLEMENT_WAIT_SECONDS,
+        poll_seconds=2,
+    ):
+        """Wait for the bot to edit the initial .闯塔 response into its final battle report."""
+        msg_id = getattr(resp, "id", None)
+        client = getattr(self, "client", None)
+        chat_id = getattr(self, "target_chat_id", None)
+        log = self.common_command_logger()
+        if not msg_id or not client or chat_id is None:
+            log.warning(f"Avatar [{avatar}] tower response has no fetchable message id; waiting {minimum_wait_seconds}s before support.")
+            await asyncio.sleep(max(0, minimum_wait_seconds))
+            return resp
+
+        initial_text = getattr(resp, "text", "") or ""
+        started = time.monotonic()
+        deadline = started + max(float(timeout_seconds), float(minimum_wait_seconds))
+        minimum_deadline = started + max(0, float(minimum_wait_seconds))
+        latest = resp
+
+        # 给机器人至少约 30 秒完成闯塔；期间不发送任何后续支援指令。
+        await asyncio.sleep(max(0, float(minimum_wait_seconds)))
+        while time.monotonic() < deadline:
+            try:
+                updated = await client.get_messages(chat_id, ids=msg_id)
+            except Exception as exc:
+                log.warning(f"Avatar [{avatar}] tower edited-result fetch failed for {msg_id}: {exc}")
+                break
+            if updated:
+                latest = updated
+                updated_text = getattr(updated, "text", "") or ""
+                if updated_text != initial_text or getattr(updated, "edit_date", None):
+                    log.info(f"Avatar [{avatar}] tower edited settlement observed for msg {msg_id}; support may proceed.")
+                    return updated
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(max(0.2, float(poll_seconds)), remaining))
+
+        if time.monotonic() < minimum_deadline:
+            await asyncio.sleep(minimum_deadline - time.monotonic())
+        log.warning(
+            f"Avatar [{avatar}] tower settlement was not observed as edited within "
+            f"{int(timeout_seconds)}s; proceeding with the latest response after the safety wait."
+        )
+        return latest
 
     async def common_avatar_tower_tick(
         self,
@@ -4355,8 +4447,11 @@ class CommonCommandMixin:
         today = datetime.now().strftime("%Y-%m-%d")
         if daily_start_wait_func is not None and daily_start_wait_func(datetime.now()) > 0:
             return False
-        if self.get_avatar_state(avatar).get("last_dianmao_date") == today:
-            return False
+        avatar_state = self.get_avatar_state(avatar)
+        if avatar_state.get("last_dianmao_date") == today:
+            # A check-in is recorded before support so a support timeout never
+            # causes the daily check-in itself to be sent twice.
+            return await self.maybe_run_mulan_support(avatar, today=today)
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(".宗门点卯", avatar):
             return False
         if self.daily_one_shot_should_defer(
@@ -4369,6 +4464,13 @@ class CommonCommandMixin:
         resp_text = self.timed_command_response_text(resp)
         if resp_text:
             self.set_avatar_state(avatar, "last_dianmao_date", today)
+            try:
+                await self.maybe_run_mulan_support(avatar, today=today)
+            except Exception as exc:
+                self.common_command_logger().error(
+                    f"Avatar [{avatar}] Mulan support error after check-in: {exc}",
+                    exc_info=True,
+                )
             return True
         return False
 
@@ -4415,6 +4517,8 @@ class CommonCommandMixin:
                 self.state["date"] = today
                 self.state["done"] = []
                 self.state["sect_skill_count"] = 0
+                self.state["last_dianmao_date"] = ""
+                self.state["last_dianmao_msg_id"] = 0
                 if reset_heart_platform_date and self.state.get("heart_platform_date") != today:
                     self.state["heart_platform_date"] = ""
                 self.save_state()
@@ -4453,8 +4557,27 @@ class CommonCommandMixin:
                         done.append(command)
                     if command == ".宗门点卯":
                         self.state["last_dianmao_msg_id"] = sent_msg.id
+                        self.state["last_dianmao_date"] = today
                     self.save_state()
+                    if command == ".宗门点卯":
+                        try:
+                            await self.maybe_run_mulan_support("主魂", today=today)
+                        except Exception as exc:
+                            log.error(
+                                f"[主魂] Mulan support error after check-in: {exc}",
+                                exc_info=True,
+                            )
                 await asyncio.sleep(5)
+
+            # If support timed out or was cooling down, retry it on a later
+            # daily-loop pass without repeating the already-recorded check-in.
+            if self.state.get("last_dianmao_date") == today or (
+                ".宗门点卯" in done and self.state.get("last_dianmao_msg_id")
+            ):
+                try:
+                    await self.maybe_run_mulan_support("主魂", today=today)
+                except Exception as exc:
+                    log.error(f"[主魂] Mulan support retry error: {exc}", exc_info=True)
 
             if deferred_daily:
                 continue
@@ -5367,342 +5490,6 @@ class CommonCommandMixin:
 
         log.warning(f"[{identity}] field training settlement was not edited within {timeout_seconds}s; using initial response.")
         return resp
-
-    # ---- 卜筮问天 ----
-
-    def _bushi_wentian_state(self, identity="主魂"):
-        identity = str(identity or "").strip() or "主魂"
-        if identity != "主魂" and hasattr(self, "get_avatar_state"):
-            return self.get_avatar_state(identity)
-        return self.state
-
-    def ensure_bushi_wentian_state(self, identity="主魂"):
-        state = self._bushi_wentian_state(identity)
-        today = datetime.now().strftime("%Y-%m-%d")
-        changed = False
-        if state.get("bushi_wentian_date") != today:
-            state["bushi_wentian_date"] = today
-            state["bushi_wentian_count"] = 0
-            state["bushi_wentian_exchange_count"] = 0
-            state["bushi_wentian_kunwu_seen"] = False
-            state["bushi_wentian_kunwu_exchanged"] = False
-            state["bushi_wentian_started_at"] = ""
-            state["bushi_wentian_done_at"] = ""
-            changed = True
-        else:
-            for key, default in (
-                ("bushi_wentian_count", 0),
-                ("bushi_wentian_exchange_count", 0),
-                ("bushi_wentian_kunwu_seen", False),
-                ("bushi_wentian_kunwu_exchanged", False),
-                ("bushi_wentian_started_at", ""),
-                ("bushi_wentian_done_at", ""),
-            ):
-                if key not in state:
-                    if key in ("bushi_wentian_kunwu_seen", "bushi_wentian_kunwu_exchanged"):
-                        state[key] = int(state.get("bushi_wentian_exchange_count", 0) or 0) > 0
-                    else:
-                        state[key] = default
-                    changed = True
-        if changed:
-            self.save_state()
-        return state
-
-    def bushi_wentian_response_text(self, resp):
-        if hasattr(self, "response_text"):
-            return self.response_text(resp)
-        if hasattr(resp, "text"):
-            return resp.text or ""
-        if isinstance(resp, str):
-            return resp
-        return str(resp) if resp else ""
-
-    def is_bushi_wentian_exchange_offer(self, text):
-        clean = str(text or "").replace("**", "")
-        if not clean:
-            return False
-        return (
-            "换取" in clean
-            and "回复本消息" in clean
-            and "消耗" in clean
-            and any(k in clean for k in ["天道示警", "机缘", "逆天之物"])
-        )
-
-    def is_bushi_wentian_kunwu_offer(self, text):
-        clean = str(text or "").replace("**", "")
-        return self.is_bushi_wentian_exchange_offer(clean) and any(k in clean for k in ("昆吾通行令", "昆吾令"))
-
-    def is_bushi_wentian_exchange_success(self, text):
-        clean = str(text or "").replace("**", "")
-        if not clean:
-            return False
-        if any(k in clean for k in ("失败", "超时", "消散", "不足", "无法", "没有")):
-            return False
-        return any(k in clean for k in ("天道认可", "换取成功", "已换取", "收入囊中", "献上祭品"))
-
-    def is_bushi_wentian_daily_limit_response(self, text):
-        clean = str(text or "").replace("**", "")
-        return (
-            "卜筮问天" in clean
-            and "今日" in clean
-            and any(k in clean for k in ["次数", "上限", "明日", "已用尽"])
-        )
-
-    def bushi_wentian_account_index(self):
-        key = actor_account_key(self) or str(getattr(self, "account_key", "") or "").strip()
-        try:
-            return BUSHI_WENTIAN_ACCOUNT_ORDER.index(key)
-        except ValueError:
-            return 0
-
-    def bushi_wentian_identity_index(self, identity="主魂"):
-        identity = str(identity or "").strip() or "主魂"
-        identities = self.bushi_wentian_identities()
-        try:
-            return identities.index(identity)
-        except ValueError:
-            return 0
-
-    def bushi_wentian_identity_offset_seconds(self, identity="主魂"):
-        """Return the deterministic cross-account stagger for an identity."""
-        account_count = max(1, len(BUSHI_WENTIAN_ACCOUNT_ORDER))
-        slot_index = self.bushi_wentian_identity_index(identity) * account_count + self.bushi_wentian_account_index()
-        return int(slot_index * BUSHI_WENTIAN_IDENTITY_STAGGER_SECONDS)
-
-    def bushi_wentian_target_time(self, now=None, identity="主魂"):
-        now = now or datetime.now()
-        base = now.replace(
-            hour=BUSHI_WENTIAN_START_HOUR,
-            minute=BUSHI_WENTIAN_START_MINUTE,
-            second=0,
-            microsecond=0,
-        )
-        return base + timedelta(seconds=self.bushi_wentian_identity_offset_seconds(identity))
-
-    def bushi_wentian_next_start_seconds(self, now=None, identity="主魂"):
-        now = now or datetime.now()
-        target = self.bushi_wentian_target_time(now, identity)
-        if now >= target:
-            target += timedelta(days=1)
-        return max(0, int((target - now).total_seconds()))
-
-    def bushi_wentian_start_window_open(self, now=None, identity="主魂"):
-        now = now or datetime.now()
-        target = self.bushi_wentian_target_time(now, identity)
-        return target <= now <= target + timedelta(seconds=BUSHI_WENTIAN_START_CATCHUP_SECONDS)
-
-    def bushi_wentian_identity_due(self, identity="主魂", now=None):
-        if self.bushi_wentian_identity_done(identity):
-            return False
-        if self.bushi_wentian_identity_started_today(identity):
-            return True
-        return self.bushi_wentian_start_window_open(now, identity)
-
-    def bushi_wentian_next_due_seconds(self, identities=None, now=None):
-        now = now or datetime.now()
-        identities = identities or self.bushi_wentian_identities()
-        tomorrow_targets = []
-        today_targets = []
-        for identity in identities:
-            target = self.bushi_wentian_target_time(now, identity)
-            if not self.bushi_wentian_identity_done(identity):
-                if self.bushi_wentian_identity_started_today(identity):
-                    return 0
-                if target <= now <= target + timedelta(seconds=BUSHI_WENTIAN_START_CATCHUP_SECONDS):
-                    return 0
-                if now < target:
-                    today_targets.append(target)
-            tomorrow_targets.append(self.bushi_wentian_target_time(now + timedelta(days=1), identity))
-        candidates = today_targets or tomorrow_targets
-        if not candidates:
-            return BUSHI_WENTIAN_RETRY_SECONDS
-        return max(0, int((min(candidates) - now).total_seconds()))
-
-    def bushi_wentian_identity_started_today(self, identity="主魂"):
-        state = self.ensure_bushi_wentian_state(identity)
-        today = datetime.now().strftime("%Y-%m-%d")
-        return str(state.get("bushi_wentian_started_at") or "").startswith(today)
-
-    def bushi_wentian_identity_done(self, identity="主魂"):
-        state = self.ensure_bushi_wentian_state(identity)
-        return (
-            int(state.get("bushi_wentian_count", 0) or 0) >= BUSHI_WENTIAN_DAILY_LIMIT
-            or bool(state.get("bushi_wentian_kunwu_seen"))
-            or bool(state.get("bushi_wentian_kunwu_exchanged"))
-        )
-
-    def bushi_wentian_identities(self):
-        identities = ["主魂"]
-        for identity in getattr(self, "avatars", []) or []:
-            identity = str(identity or "").strip()
-            if identity and identity not in identities:
-                identities.append(identity)
-        return identities
-
-    async def send_bushi_wentian_once(self, identity="主魂", reason="daily"):
-        """Send one .卜筮问天 and handle possible .换取 reply."""
-        identity = str(identity or "").strip() or "主魂"
-        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
-            return "paused"
-        state = self.ensure_bushi_wentian_state(identity)
-        if self.bushi_wentian_identity_done(identity):
-            return "done"
-        current_count = int(state.get("bushi_wentian_count", 0) or 0)
-        if current_count >= BUSHI_WENTIAN_DAILY_LIMIT:
-            return "done"
-        if not state.get("bushi_wentian_started_at"):
-            state["bushi_wentian_started_at"] = now_str()
-        state["bushi_wentian_count"] = min(BUSHI_WENTIAN_DAILY_LIMIT, current_count + 1)
-        self.save_state()
-
-        log = self.common_command_logger()
-        log.info(
-            f"[{identity}] Bushi Wentian {reason}: sending {BUSHI_WENTIAN_COMMAND} "
-            f"({state['bushi_wentian_count']}/{BUSHI_WENTIAN_DAILY_LIMIT})."
-        )
-        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-            resp_msg = await self.send_and_wait_feedback_identity(
-                identity,
-                BUSHI_WENTIAN_COMMAND,
-                timeout=90,
-                max_retries=0,
-                force_identity_check=True,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
-            )
-        else:
-            resp_msg = await self.send_and_wait_feedback(
-                BUSHI_WENTIAN_COMMAND,
-                timeout=90,
-                max_retries=0,
-                suppress_no_response_alert=True,
-                return_response_msg=True,
-            )
-
-        text = self.bushi_wentian_response_text(resp_msg)
-        if not text:
-            return "no_response"
-
-        state = self.ensure_bushi_wentian_state(identity)
-        if self.is_bushi_wentian_daily_limit_response(text):
-            state["bushi_wentian_count"] = BUSHI_WENTIAN_DAILY_LIMIT
-            state["bushi_wentian_done_at"] = now_str()
-            self.save_state()
-            return "done"
-
-        is_kunwu_offer = self.is_bushi_wentian_kunwu_offer(text)
-        if is_kunwu_offer:
-            state["bushi_wentian_kunwu_seen"] = True
-            self.save_state()
-        if not self.is_bushi_wentian_exchange_offer(text):
-            if self.bushi_wentian_identity_done(identity):
-                state["bushi_wentian_done_at"] = now_str()
-                self.save_state()
-            return "sent"
-
-        reply_to = getattr(resp_msg, "id", None)
-        if not reply_to:
-            log.warning(f"[{identity}] Bushi Wentian exchange offer has no message id; cannot reply .换取.")
-            return "kunwu_seen" if is_kunwu_offer else "exchange_offer"
-
-        log.info(f"[{identity}] Bushi Wentian exchange offer detected; replying {BUSHI_WENTIAN_EXCHANGE_COMMAND}.")
-        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-            exchange_resp = await self.send_and_wait_feedback_identity(
-                identity,
-                BUSHI_WENTIAN_EXCHANGE_COMMAND,
-                reply_to=reply_to,
-                timeout=60,
-                max_retries=0,
-                force_identity_check=True,
-                suppress_no_response_alert=True,
-            )
-        else:
-            exchange_resp = await self.send_and_wait_feedback(
-                BUSHI_WENTIAN_EXCHANGE_COMMAND,
-                reply_to=reply_to,
-                timeout=60,
-                max_retries=0,
-                suppress_no_response_alert=True,
-            )
-        state = self.ensure_bushi_wentian_state(identity)
-        state["bushi_wentian_exchange_count"] = int(state.get("bushi_wentian_exchange_count", 0) or 0) + 1
-        exchange_text = self.bushi_wentian_response_text(exchange_resp)
-        if is_kunwu_offer and self.is_bushi_wentian_exchange_success(exchange_text):
-            state["bushi_wentian_kunwu_exchanged"] = True
-        if self.bushi_wentian_identity_done(identity):
-            state["bushi_wentian_done_at"] = now_str()
-        self.save_state()
-        return "kunwu_seen" if is_kunwu_offer else "exchange_offer"
-
-    async def maybe_run_bushi_wentian_after_field_training(self, identity="主魂", field_training_text=""):
-        """Deprecated: .卜筮问天 now runs from the daily 00:03 loop."""
-        return False
-
-    async def run_bushi_wentian_daily_for_identity(self, identity="主魂"):
-        identity = str(identity or "").strip() or "主魂"
-        if self.bushi_wentian_identity_done(identity):
-            return "done"
-        if hasattr(self, "identity_pause_seconds") and self.identity_pause_seconds(identity) > 0:
-            return "paused"
-        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(BUSHI_WENTIAN_COMMAND, identity):
-            return "paused"
-
-        async with self.common_atomic_task(f"BushiWentian-{identity}"):
-            while not self.bushi_wentian_identity_done(identity):
-                result = await self.send_bushi_wentian_once(identity, reason="daily")
-                if result in {"paused", "no_response"}:
-                    return result
-                if result in {"done", "kunwu_seen"}:
-                    return result
-                if self.bushi_wentian_identity_done(identity):
-                    return "done"
-                await asyncio.sleep(BUSHI_WENTIAN_SEND_INTERVAL_SECONDS)
-        return "done"
-
-    async def run_bushi_wentian_daily_loop(self, initial_delay=0, sleep_func=None):
-        """Run .卜筮问天 daily with cross-account identity stagger slots."""
-        await self.startup_done.wait()
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-        log = self.common_command_logger()
-        while getattr(self, "is_running", True):
-            try:
-                await self.pause_event.wait()
-                now = datetime.now()
-                identities = self.bushi_wentian_identities()
-                due_identities = [
-                    identity for identity in identities
-                    if self.bushi_wentian_identity_due(identity, now)
-                ]
-                if not due_identities:
-                    wait = self.bushi_wentian_next_due_seconds(identities, now)
-                    log.info(
-                        f"Bushi Wentian daily loop sleeping {int(wait)}s until next staggered slot."
-                    )
-                    await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=1, sleep_func=sleep_func))
-                    continue
-
-                progressed = False
-                for identity in due_identities:
-                    target_time = self.bushi_wentian_target_time(now, identity)
-                    offset = self.bushi_wentian_identity_offset_seconds(identity)
-                    log.info(
-                        f"[{identity}] Bushi Wentian stagger slot due "
-                        f"({dt_to_str(target_time)}, offset {offset}s)."
-                    )
-                    before = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
-                    result = await self.run_bushi_wentian_daily_for_identity(identity)
-                    after = int(self.ensure_bushi_wentian_state(identity).get("bushi_wentian_count", 0) or 0)
-                    progressed = progressed or after > before or result in {"done", "kunwu_seen", "exchange_offer"}
-                wait = self.bushi_wentian_next_due_seconds(identities, datetime.now())
-                if not progressed and wait <= 0:
-                    wait = BUSHI_WENTIAN_RETRY_SECONDS
-                if all(self.bushi_wentian_identity_done(identity) for identity in identities):
-                    wait = self.bushi_wentian_next_due_seconds(identities, datetime.now())
-                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait, minimum=1, sleep_func=sleep_func))
-            except Exception as exc:
-                log.error(f"Bushi Wentian daily loop error: {exc}", exc_info=True)
-                await asyncio.sleep(BUSHI_WENTIAN_RETRY_SECONDS)
 
     # ---- 宗门战 — 辅助方法 ----
 

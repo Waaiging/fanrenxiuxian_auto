@@ -16,10 +16,24 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
+from datetime import datetime, timedelta
 
-from log_utils import COMMAND_CONTROL_FILE, command_send_allowed, format_in_log, is_game_bot_sender, remember_script_send_intent, remember_script_sent_message, schedule_command_auto_delete
+from log_utils import (
+    COMMAND_CONTROL_FILE,
+    command_send_allowed,
+    format_in_log,
+    is_game_bot_sender,
+    meaningful_reply_to_msg_id,
+    record_command_response_for_command_id,
+    record_command_sent,
+    remember_script_send_intent,
+    remember_script_sent_message,
+    schedule_command_auto_delete,
+    send_text_alert,
+)
 
 
 # =====================================================================
@@ -30,6 +44,10 @@ EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
 CONCUBINE_PLACE_COMMAND = ".安置侍妾"
 CONCUBINE_RECALL_COMMAND = ".召回侍妾"
 EXCHANGE_CONCUBINE_DELAY_SECONDS = 5
+EXCHANGE_EVENT_TTL_SECONDS = 10 * 60
+EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS = 20
+EXCHANGE_DELAY_RANGE_SECONDS = (60, 75)
+EXCHANGE_STATE_KEY = "exchange_auto_events"
 MERCHANT_LOOK_COMMAND = ".查看货品"
 MERCHANT_BUY_COMMAND_PREFIX = ".购买商品"
 MERCHANT_PRIORITY_ITEMS = ("掌天瓶的仿制品", "九天息壤", "尘封的储物袋")
@@ -115,6 +133,81 @@ def _mentions_self(actor, msg, text):
 def exchange_command_for_identity(identity):
     """三主魂换功法，所有化身换法宝。"""
     return EXCHANGE_MAIN_COMMAND if (identity or "主魂") == "主魂" else EXCHANGE_AVATAR_COMMAND
+
+
+def is_exchange_teaser_text(text):
+    clean = str(text or "").replace("**", "")
+    return "南陇侯" in clean and "强横神念" in clean
+
+
+def is_exchange_offer_text(text):
+    clean = _normalized_text(str(text or "").replace("**", ""))
+    return "南陇侯" in clean and ".交换" in clean
+
+
+def is_exchange_settlement_text(text):
+    clean = str(text or "").replace("**", "")
+    return (
+        "南陇侯的交易" in clean
+        and "选择将侍妾" in clean
+        and "作为回报" in clean
+    )
+
+
+def _exchange_state(actor):
+    state = getattr(actor, "state", None)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(actor, "state", state)
+    events = state.setdefault(EXCHANGE_STATE_KEY, {})
+    return events if isinstance(events, dict) else {}
+
+
+def _save_exchange_state(actor):
+    events = _exchange_state(actor)
+    if len(events) > 80:
+        for old_key in list(events.keys())[:-50]:
+            events.pop(old_key, None)
+    save_state = getattr(actor, "save_state", None)
+    if callable(save_state):
+        save_state()
+
+
+def _update_exchange_state(actor, event_key, **values):
+    events = _exchange_state(actor)
+    entry = events.get(str(event_key)) if isinstance(events.get(str(event_key)), dict) else {}
+    entry.update(values)
+    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    events[str(event_key)] = entry
+    _save_exchange_state(actor)
+    return entry
+
+
+def _exchange_deadline(entry):
+    try:
+        return datetime.strptime(str(entry.get("deadline_at") or ""), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now()
+
+
+def _exchange_seconds_left(entry):
+    return max(0, int((_exchange_deadline(entry) - datetime.now()).total_seconds()))
+
+
+def _exchange_waiters(actor):
+    waiters = getattr(actor, "_exchange_settlement_waiters", None)
+    if waiters is None:
+        waiters = {}
+        setattr(actor, "_exchange_settlement_waiters", waiters)
+    return waiters
+
+
+def _exchange_step_waiters(actor):
+    waiters = getattr(actor, "_exchange_step_waiters", None)
+    if waiters is None:
+        waiters = {}
+        setattr(actor, "_exchange_step_waiters", waiters)
+    return waiters
 
 
 def is_merchant_event_text(text):
@@ -265,7 +358,7 @@ def _response_id(response):
         return 0
 
 
-async def _send_direct_auto_reply_command(actor, command, reply_to=None):
+async def _send_direct_auto_reply_command(actor, command, reply_to=None, identity=None):
     """发送自动回复辅助指令；用于需要绕过通用自动禁用策略的短流程。"""
     remember_script_send_intent(actor, command)
     sent = await actor.client.send_message(
@@ -275,7 +368,59 @@ async def _send_direct_auto_reply_command(actor, command, reply_to=None):
     )
     remember_script_sent_message(actor, sent)
     schedule_command_auto_delete(actor, sent, text=command, logger=_logger(actor))
+    record_command_sent(
+        actor,
+        sent,
+        command,
+        identity=identity or getattr(actor, "current_identity", "主魂"),
+        source="auto",
+        reply_to=reply_to,
+        logger=_logger(actor),
+    )
     return sent
+
+
+async def _live_reply_target(actor, reply_to):
+    if not reply_to:
+        return None
+    try:
+        msg = await actor.client.get_messages(actor.target_chat_id, ids=reply_to)
+        return reply_to if msg else None
+    except Exception:
+        return None
+
+
+async def _send_direct_with_reply_fallback(actor, command, reply_to=None, identity=None):
+    live_reply = await _live_reply_target(actor, reply_to)
+    try:
+        return await _send_direct_auto_reply_command(
+            actor, command, reply_to=live_reply, identity=identity
+        )
+    except Exception as exc:
+        if live_reply is None:
+            raise
+        _logger(actor).warning(
+            f"Auto exchange reply target {live_reply} became unavailable; retrying {command} without reply: {exc}"
+        )
+        return await _send_direct_auto_reply_command(
+            actor, command, reply_to=None, identity=identity
+        )
+
+
+async def _send_direct_and_wait_reply(actor, command, identity, deadline, reply_to=None):
+    sent = await _send_direct_with_reply_fallback(
+        actor, command, reply_to=reply_to, identity=identity
+    )
+    waiter = {"event": asyncio.Event(), "text": "", "msg": None}
+    _exchange_step_waiters(actor)[getattr(sent, "id", 0)] = waiter
+    seconds_left = max(0, int((deadline - datetime.now()).total_seconds()))
+    try:
+        await asyncio.wait_for(waiter["event"].wait(), timeout=max(1, min(60, seconds_left)))
+    except asyncio.TimeoutError:
+        return sent, "", None
+    finally:
+        _exchange_step_waiters(actor).pop(getattr(sent, "id", 0), None)
+    return sent, waiter.get("text", ""), waiter.get("msg")
 
 
 async def _send_auto_reply_identity_command(
@@ -304,19 +449,28 @@ async def _send_auto_reply_identity_command(
     return await _send_direct_auto_reply_command(actor, command, reply_to=reply_to)
 
 
-async def _run_exchange_reply_sequence(actor, identity, exchange_command, reply_to):
+async def _run_exchange_reply_sequence(actor, identity, exchange_command, reply_to, event_key):
     """南陇侯交换：安置侍妾 -> 交换 -> 召回侍妾，期间避免其它身份命令插队。"""
     current_task = asyncio.current_task()
     claimed_atomic = False
+    entry = _exchange_state(actor).get(str(event_key), {})
+    deadline = _exchange_deadline(entry)
     if hasattr(actor, "active_atomic_task"):
         while actor.active_atomic_task is not None and actor.active_atomic_task != current_task:
+            if datetime.now() >= deadline - timedelta(seconds=EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS):
+                _update_exchange_state(actor, event_key, status="expired_waiting_atomic")
+                return False
             await asyncio.sleep(0.5)
         if actor.active_atomic_task is None:
             actor.active_atomic_task = current_task
             claimed_atomic = True
 
     try:
-        await _send_auto_reply_identity_command(
+        if datetime.now() >= deadline:
+            _update_exchange_state(actor, event_key, status="expired_before_place")
+            return False
+
+        place_resp = await _send_auto_reply_identity_command(
             actor,
             identity,
             CONCUBINE_PLACE_COMMAND,
@@ -324,22 +478,132 @@ async def _run_exchange_reply_sequence(actor, identity, exchange_command, reply_
             max_retries=0,
             suppress_no_response_alert=True,
         )
+        place_text = _response_text(place_resp).replace("**", "")
+        place_ok = bool(place_text) and any(
+            marker in place_text
+            for marker in ("安置", "藏娇阁中已有人居住", "已有人居住")
+        )
+        _update_exchange_state(
+            actor, event_key, place_status="ok" if place_ok else "failed", place_response=place_text[:300]
+        )
+        if not place_ok:
+            await send_text_alert(
+                actor,
+                "南陇侯交换中止",
+                f"身份：{identity}\n步骤：安置侍妾\n回复：{place_text or '无回复'}",
+                logger=_logger(actor),
+            )
+            return False
         await asyncio.sleep(EXCHANGE_CONCUBINE_DELAY_SECONDS)
 
-        await _send_auto_reply_identity_command(
+        if datetime.now() >= deadline - timedelta(seconds=EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS):
+            _update_exchange_state(actor, event_key, status="expired_before_exchange")
+            return False
+
+        settlement_waiter = {"event": asyncio.Event(), "text": "", "msg": None, "command_msg_id": 0}
+        _exchange_waiters(actor)[str(event_key)] = settlement_waiter
+        sent_exchange = await _send_direct_with_reply_fallback(
+            actor, exchange_command, reply_to=reply_to, identity=identity
+        )
+        settlement_waiter["command_msg_id"] = getattr(sent_exchange, "id", 0)
+        _update_exchange_state(
             actor,
-            identity,
-            exchange_command,
-            reply_to=reply_to,
-            timeout=45,
+            event_key,
+            status="exchange_sent",
+            command_msg_id=getattr(sent_exchange, "id", 0),
+            used_reply_to=meaningful_reply_to_msg_id(actor, sent_exchange) or 0,
+        )
+        wait_seconds = max(1, int((deadline - datetime.now()).total_seconds()))
+        try:
+            await asyncio.wait_for(settlement_waiter["event"].wait(), timeout=wait_seconds)
+        except asyncio.TimeoutError:
+            _update_exchange_state(actor, event_key, status="exchange_unconfirmed")
+            await send_text_alert(
+                actor,
+                "南陇侯交换未确认",
+                f"身份：{identity}\n指令：{exchange_command}\n事件截止前未收到南陇侯结算。",
+                logger=_logger(actor),
+            )
+            return False
+        finally:
+            _exchange_waiters(actor).pop(str(event_key), None)
+
+        settlement_text = settlement_waiter.get("text", "")
+        _update_exchange_state(
+            actor, event_key, status="exchange_confirmed", settlement=settlement_text[:500]
         )
         await asyncio.sleep(EXCHANGE_CONCUBINE_DELAY_SECONDS)
 
-        # .召回侍妾在通用自动指令策略里被禁用；这里是南陇侯交换的显式收尾。
-        await _send_direct_auto_reply_command(actor, CONCUBINE_RECALL_COMMAND)
+        if datetime.now() >= deadline:
+            _update_exchange_state(actor, event_key, recall_status="skipped_deadline")
+            return True
+
+        _, recall_text, _ = await _send_direct_and_wait_reply(
+            actor, CONCUBINE_RECALL_COMMAND, identity, deadline
+        )
+        recall_clean = recall_text.replace("**", "")
+        recall_ok = bool(recall_clean) and any(
+            marker in recall_clean for marker in ("召回", "随你一同历练", "状态: 随行中")
+        )
+        _update_exchange_state(
+            actor,
+            event_key,
+            recall_status="ok" if recall_ok else "unconfirmed",
+            recall_response=recall_clean[:300],
+            status="done" if recall_ok else "done_recall_unconfirmed",
+        )
+        if not recall_ok:
+            await send_text_alert(
+                actor,
+                "南陇侯交换召回未确认",
+                f"身份：{identity}\n交换已成功，但召回侍妾未确认：{recall_clean or '无回复'}",
+                logger=_logger(actor),
+            )
+        return True
     finally:
         if claimed_atomic and getattr(actor, "active_atomic_task", None) == current_task:
             actor.active_atomic_task = None
+
+
+def _consume_exchange_step_reply(actor, msg, text, sender):
+    if not is_game_bot_sender(actor, sender):
+        return False
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    waiter = _exchange_step_waiters(actor).get(replied_id)
+    if not waiter:
+        return False
+    waiter["text"] = str(text or "")
+    waiter["msg"] = msg
+    waiter["event"].set()
+    return True
+
+
+def _consume_exchange_settlement(actor, msg, text, sender):
+    if not is_exchange_settlement_text(text) or not is_game_bot_sender(actor, sender):
+        return False
+    identity = _mentions_self(actor, msg, text)
+    if not identity:
+        return False
+    for event_key, waiter in list(_exchange_waiters(actor).items()):
+        entry = _exchange_state(actor).get(str(event_key), {})
+        if entry.get("identity") != identity or waiter["event"].is_set():
+            continue
+        waiter["text"] = str(text or "")
+        waiter["msg"] = msg
+        command_msg_id = waiter.get("command_msg_id") or entry.get("command_msg_id")
+        if command_msg_id:
+            record_command_response_for_command_id(
+                actor,
+                command_msg_id,
+                msg,
+                text=text,
+                status="matched",
+                logger=_logger(actor),
+                sender=sender,
+            )
+        waiter["event"].set()
+        return True
+    return False
 
 
 # =====================================================================
@@ -352,6 +616,12 @@ def is_auto_reply_followup(actor, msg, sender=None):
     通过检查消息的回复目标是否在自动回复已发送列表中。
     如果匹配，则从列表中移除该消息 ID，表示"已消费"。
     """
+    if sender is not None and not is_game_bot_sender(actor, sender):
+        return False
+    if _consume_exchange_step_reply(actor, msg, getattr(msg, "text", "") or "", sender):
+        _logger(actor).info(format_in_log("exchange-step", msg.text or "", sender=sender, msg=msg))
+        return True
+
     replied_id = getattr(getattr(msg, "reply_to", None), "reply_to_msg_id", None)
     if not replied_id:
         return False
@@ -465,16 +735,37 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     text = text if text is not None else (msg.text or "")
     if await maybe_auto_reply_merchant(actor, event, text=text, sender=sender):
         return True
-    if ".交换" not in _normalized_text(text):
-        return False
-        
-    identity = _mentions_self(actor, msg, text)
-    if not identity:
-        return False
 
     if sender is None:
         sender = await event.get_sender()
     if not is_game_bot_sender(actor, sender):
+        return False
+
+    if _consume_exchange_step_reply(actor, msg, text, sender):
+        return True
+    if _consume_exchange_settlement(actor, msg, text, sender):
+        return True
+
+    identity = _mentions_self(actor, msg, text)
+    if is_exchange_teaser_text(text) and identity:
+        teaser_key = f"teaser:{getattr(msg, 'id', 0)}"
+        _update_exchange_state(
+            actor,
+            teaser_key,
+            status="teaser_seen",
+            identity=identity,
+            teaser_msg_id=getattr(msg, "id", 0),
+            teaser_text=str(text or "")[:500],
+            seen_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        _logger(actor).info(
+            f"Auto exchange teaser recorded for {identity} (msg {getattr(msg, 'id', None)})."
+        )
+        return True
+
+    if not is_exchange_offer_text(text):
+        return False
+    if not identity:
         return False
 
     seen_ids = getattr(actor, "exchange_auto_reply_seen_ids", None)
@@ -491,25 +782,93 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     cmd = exchange_command_for_identity(identity)
 
     try:
-        # 主人指令防封安全防线：增加 1 分钟左右的随机延迟，模拟真人行为防封
-        import random
-        delay = random.randint(60, 75)
+        # Persist/claim immediately because the bot may delete the offer before
+        # the human-like delay finishes.
+        event_key = str(getattr(msg, "id", 0))
+        now = datetime.now()
+        delay = random.randint(*EXCHANGE_DELAY_RANGE_SECONDS)
+        _update_exchange_state(
+            actor,
+            event_key,
+            status="claimed",
+            identity=identity,
+            command=cmd,
+            offer_msg_id=getattr(msg, "id", 0),
+            offer_text=str(text or "")[:1000],
+            claimed_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+            deadline_at=(now + timedelta(seconds=EXCHANGE_EVENT_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S"),
+            delay_seconds=delay,
+        )
         _logger(actor).info(
             f"Auto exchange reply triggered for {identity}: {cmd} "
             f"(msg {msg.id}). Waiting {delay}s for safety..."
         )
-        await asyncio.sleep(delay)
+        async def delayed_sequence():
+            try:
+                await asyncio.sleep(delay)
+                completed = await _run_exchange_reply_sequence(
+                    actor, identity, cmd, reply_to=msg.id, event_key=event_key
+                )
+                _identity = getattr(actor, "current_identity", None)
+                _tag = f" [{_identity}]" if _identity else ""
+                _logger(actor).info(
+                    f"OUT{_tag}:\n"
+                    f"{CONCUBINE_PLACE_COMMAND} -> {cmd} -> {CONCUBINE_RECALL_COMMAND} "
+                    f"(exchange event={event_key}, completed={completed})"
+                )
+            except Exception as exc:
+                _update_exchange_state(actor, event_key, status="failed", error=str(exc)[:300])
+                _logger(actor).error(f"Auto exchange sequence failed for message {msg.id}: {exc}", exc_info=True)
+                await send_text_alert(
+                    actor,
+                    "南陇侯交换异常",
+                    f"身份：{identity}\n指令：{cmd}\n异常：{exc}",
+                    logger=_logger(actor),
+                )
 
-        await _run_exchange_reply_sequence(actor, identity, cmd, reply_to=msg.id)
-
-        _identity = getattr(actor, "current_identity", None)
-        _tag = f" [{_identity}]" if _identity else ""
-        _logger(actor).info(
-            f"OUT{_tag}:\n"
-            f"{CONCUBINE_PLACE_COMMAND} -> {cmd} -> {CONCUBINE_RECALL_COMMAND} "
-            f"(exchange reply_to={msg.id})"
-        )
+        task = asyncio.create_task(delayed_sequence())
+        tasks = getattr(actor, "_exchange_auto_tasks", None)
+        if tasks is None:
+            tasks = set()
+            setattr(actor, "_exchange_auto_tasks", tasks)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
         return True
     except Exception as e:
         _logger(actor).error(f"Auto exchange reply failed for message {msg.id}: {e}")
         return True
+
+
+async def resume_pending_exchange_events(actor):
+    """Resume a claimed, not-yet-sent exchange after a short process restart."""
+    startup_done = getattr(actor, "startup_done", None)
+    if startup_done is not None:
+        await startup_done.wait()
+    for event_key, entry in list(_exchange_state(actor).items()):
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        if status == "exchange_sent":
+            # Never resend a possibly successful irreversible exchange.
+            _update_exchange_state(actor, event_key, status="interrupted_after_exchange_send")
+            await send_text_alert(
+                actor,
+                "南陇侯交换需人工确认",
+                f"事件 {event_key} 在交换指令发出后重启，未自动重发以避免重复交换。",
+                logger=_logger(actor),
+            )
+            continue
+        if status != "claimed" or _exchange_seconds_left(entry) <= EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS:
+            continue
+        identity = str(entry.get("identity") or "主魂")
+        command = str(entry.get("command") or exchange_command_for_identity(identity))
+        reply_to = int(entry.get("offer_msg_id") or 0) or None
+        _logger(actor).warning(
+            f"Resuming pending auto exchange event {event_key} for {identity}; "
+            f"{_exchange_seconds_left(entry)}s remain."
+        )
+        asyncio.create_task(
+            _run_exchange_reply_sequence(
+                actor, identity, command, reply_to=reply_to, event_key=event_key
+            )
+        )

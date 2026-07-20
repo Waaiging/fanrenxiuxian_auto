@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 
 from group_visibility_control import (
@@ -7,7 +8,9 @@ from group_visibility_control import (
     normalize_telegram_chat_id,
     telegram_chat_ids_match,
     telegram_group_visibility,
+    telegram_write_permission_status,
     telegram_update_targets_chat,
+    xiaohao_write_restriction_retry_wait,
 )
 
 
@@ -77,6 +80,33 @@ class GroupVisibilityControlTests(unittest.TestCase):
         self.assertTrue(telegram_chat_ids_match(-1002083016447, 2083016447))
         self.assertFalse(telegram_chat_ids_match(-1002083016447, 2083016448))
 
+    def test_write_permission_status_detects_block(self):
+        self.assertEqual(
+            telegram_write_permission_status(SimpleNamespace(is_banned=True, send_messages=True)),
+            ("blocked", "participant is banned"),
+        )
+        self.assertEqual(
+            telegram_write_permission_status(SimpleNamespace(is_banned=False, send_messages=False)),
+            ("blocked", "send_messages is false"),
+        )
+        self.assertEqual(
+            telegram_write_permission_status(SimpleNamespace(is_banned=False, send_messages=True)),
+            ("allowed", "group permissions allow messages"),
+        )
+
+    def test_write_restriction_retry_wait_uses_retry_at(self):
+        state = {
+            "telegram_send_protection_stop": {
+                "reason": "write_restricted",
+                "retry_at": "2026-07-17 12:15:00",
+            }
+        }
+        wait = xiaohao_write_restriction_retry_wait(
+            state,
+            now=datetime(2026, 7, 17, 12, 10, 0),
+        )
+        self.assertEqual(wait, 300)
+
     def test_only_target_channel_updates_trigger_immediate_check(self):
         UpdateChannel = type("UpdateChannel", (), {})
         update = UpdateChannel()
@@ -108,6 +138,22 @@ class GroupVisibilityControlTests(unittest.TestCase):
         self.assertEqual(state["target_group_visibility"], "public")
         self.assertEqual(state["xiaohao_visibility_last_action"], "stopped")
         self.assertEqual(len(saves), 2)
+
+    def test_controller_uses_account_specific_action_keys(self):
+        state = {}
+        controller = TelegramGroupXiaohaoController(
+            FakeClient(SimpleNamespace(username=None, usernames=[])),
+            2083016447,
+            FakeProcessManager(),
+            FakeLogger(),
+            state=state,
+            account_label="Waaiging",
+            state_prefix="waaiging",
+        )
+
+        self.assertEqual(asyncio.run(controller.check_once("fixture")), "private")
+        self.assertEqual(state["waaiging_visibility_last_action"], "started")
+        self.assertNotIn("xiaohao_visibility_last_action", state)
 
 
 if __name__ == "__main__":
