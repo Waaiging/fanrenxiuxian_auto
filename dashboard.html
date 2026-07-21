@@ -230,7 +230,7 @@
         .duel-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
         .duel-toolbar { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border-color); display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
         .duel-global-control { margin-left: auto; display: inline-flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 700; }
-        .duel-global-control input, .duel-queue-toggle input { width: 1rem; height: 1rem; accent-color: var(--success-color); }
+        .duel-global-control input, .duel-queue-toggle input, .duel-participant-toggle input { width: 1rem; height: 1rem; accent-color: var(--success-color); }
         .duel-queue-grid { padding: 1rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; border-bottom: 1px solid var(--border-color); }
         .duel-queue-card { min-width: 0; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0,0,0,0.18); }
         .duel-queue-head { min-height: 3.2rem; padding: 0.7rem 0.8rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border-bottom: 1px solid var(--border-color); }
@@ -239,14 +239,20 @@
         .duel-queue-meta { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.7rem; white-space: normal; }
         .duel-queue-toggle { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-secondary); font-size: 0.7rem; white-space: nowrap; }
         .duel-participants { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .duel-participant { min-width: 0; min-height: 4.3rem; padding: 0.62rem 0.75rem; border-right: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color); }
+        .duel-participant { min-width: 0; min-height: 7.4rem; padding: 0.62rem 0.75rem; border-right: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color); }
         .duel-participant:nth-child(2n) { border-right: none; }
         .duel-participant:nth-last-child(-n+2) { border-bottom: none; }
         .duel-participant.is-next { background: rgba(0,210,255,0.08); box-shadow: inset 3px 0 0 var(--accent-color); }
         .duel-participant.is-exhausted { opacity: 0.54; }
+        .duel-participant.is-paused { opacity: 0.68; }
         .duel-participant-name { color: var(--text-primary); font-size: 0.78rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .duel-participant-user { margin-top: 0.15rem; color: var(--text-secondary); font: 0.68rem 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .duel-participant-state { margin-top: 0.38rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; color: var(--text-secondary); font-size: 0.68rem; }
+        .duel-participant-controls { margin-top: 0.5rem; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.45rem; align-items: center; }
+        .duel-participant-toggle { display: inline-flex; align-items: center; gap: 0.32rem; color: var(--text-secondary); font-size: 0.66rem; font-weight: 700; white-space: nowrap; }
+        .duel-target-input { min-width: 0; width: 100%; height: 1.9rem; padding: 0.3rem 0.45rem; border: 1px solid var(--border-color); border-radius: 6px; background: rgba(0,0,0,0.28); color: var(--text-primary); font: 0.68rem 'JetBrains Mono', monospace; outline: none; }
+        .duel-target-input:focus { border-color: var(--accent-color); box-shadow: 0 0 0 2px var(--accent-glow); }
+        .duel-target-input:disabled { opacity: 0.55; }
         .duel-chances { color: #d1fae5; font-family: 'JetBrains Mono', monospace; font-weight: 800; }
         .duel-target-gate { color: #fbbf24; }
         .duel-target-gate.ready { color: #34d399; }
@@ -1040,6 +1046,7 @@
             <div class="duel-queue-grid" id="duel-queue-grid">
                 <div class="record-empty">加载中...</div>
             </div>
+            <datalist id="duel-target-options"></datalist>
             <div class="duel-table-wrap" id="duel-result-content">
                 <div class="record-empty">加载中...</div>
             </div>
@@ -2637,6 +2644,11 @@
             }
 
             const queueGrid = document.getElementById('duel-queue-grid');
+            const targetOptions = Array.isArray(data.target_options) ? data.target_options : [];
+            const targetList = document.getElementById('duel-target-options');
+            if (targetList) {
+                targetList.innerHTML = targetOptions.map(target => `<option value="${escapeHtml(target)}"></option>`).join('');
+            }
             if (queueGrid) {
                 queueGrid.innerHTML = queues.map(queue => {
                     const gate = queue.target_status || {ready: true};
@@ -2657,19 +2669,26 @@
                             </div>
                             <div class="duel-participants">
                                 ${(queue.participants || []).map(participant => `
-                                    <div class="duel-participant ${participant.is_next ? 'is-next' : ''} ${Number(participant.remaining || 0) <= 0 ? 'is-exhausted' : ''}">
+                                    <div class="duel-participant ${participant.is_next ? 'is-next' : ''} ${Number(participant.remaining || 0) <= 0 ? 'is-exhausted' : ''} ${participant.enabled === false ? 'is-paused' : ''}" data-participant-key="${escapeHtml(participant.key || '')}">
                                         <div class="duel-participant-name">${escapeHtml(participant.account_name || participant.account || '')} · ${escapeHtml(participant.identity || '')}</div>
                                         <div class="duel-participant-user">@${escapeHtml(participant.username || '')}</div>
                                         <div class="duel-participant-state">
                                             <span>${escapeHtml(participant.last_result || (participant.is_next ? '下一位' : '待轮换'))}</span>
                                             <span class="duel-chances">${Number(participant.remaining ?? 10)}/10</span>
                                         </div>
+                                        <div class="duel-participant-controls">
+                                            <label class="duel-participant-toggle">
+                                                <input type="checkbox" ${participant.enabled !== false ? 'checked' : ''} ${duelControlPending ? 'disabled' : ''} onchange="setDuelParticipantControl(this)">
+                                                参与斗法
+                                            </label>
+                                            <input class="duel-target-input" type="text" value="${escapeHtml(participant.target_username || queue.target || '')}" list="duel-target-options" maxlength="64" spellcheck="false" aria-label="挑战对象" ${duelControlPending ? 'disabled' : ''} onchange="setDuelParticipantControl(this)">
+                                        </div>
                                     </div>
                                 `).join('')}
                             </div>
                             <div class="duel-queue-head">
                                 <span class="duel-target-gate ${gate.ready ? 'ready' : ''}">${escapeHtml(gateText)}</span>
-                                <span class="duel-queue-meta">${escapeHtml(queue.target || '')}</span>
+                                <span class="duel-queue-meta">默认目标 ${escapeHtml(queue.target || '')}</span>
                             </div>
                         </article>
                     `;
@@ -2747,6 +2766,40 @@
             } catch (error) {
                 console.error('Duel control failed:', error);
                 alert(`斗法控制失败：${error.message || error}`);
+            } finally {
+                duelControlPending = false;
+                await updateDuelDashboard(true);
+            }
+        }
+
+        async function setDuelParticipantControl(control) {
+            const participantEl = control?.closest('.duel-participant');
+            if (!participantEl || duelControlPending) return;
+            const checkbox = participantEl.querySelector('input[type="checkbox"]');
+            const targetInput = participantEl.querySelector('.duel-target-input');
+            const participantKey = participantEl.dataset.participantKey || '';
+            const target = String(targetInput?.value || '').trim().replace(/^@+/, '');
+            if (!participantKey) {
+                alert('无法识别斗法身份，请刷新页面后重试。');
+                return;
+            }
+            if (!/^[A-Za-z0-9_]{2,64}$/.test(target)) {
+                alert('挑战对象必须是有效的 Telegram 用户名。');
+                targetInput?.focus();
+                return;
+            }
+            duelControlPending = true;
+            try {
+                const response = await fetch(apiUrl('/api/duels/control'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: Boolean(checkbox?.checked), participant: participantKey, target})
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+            } catch (error) {
+                console.error('Duel participant control failed:', error);
+                alert(`身份斗法设置失败：${error.message || error}`);
             } finally {
                 duelControlPending = false;
                 await updateDuelDashboard(true);

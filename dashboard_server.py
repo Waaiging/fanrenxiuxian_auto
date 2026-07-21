@@ -46,7 +46,7 @@ from command_modules import (
     treasure_touch_plan,
     yuanying_out_plan,
 )
-from duel_features import duel_dashboard_payload, set_duel_control
+from duel_features import duel_dashboard_payload, set_duel_control, set_duel_participant_control
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -4256,19 +4256,43 @@ def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate
 
 @app.post("/api/duels/control")
 async def duel_control(payload: dict = Body(...), username: str = Depends(authenticate)):
-    """Pause or resume all duel automation or one target queue."""
+    """Pause or resume all duel automation, a queue, or one identity."""
     queue_key = str(payload.get("queue") or "").strip().lower()
+    participant_key = str(payload.get("participant") or "").strip()
     enabled = bool(payload.get("enabled"))
     try:
-        data = set_duel_control(enabled, queue_key=queue_key)
-    except ValueError:
-        return {"success": False, "msg": "未知斗法队列"}
+        if participant_key:
+            data = set_duel_participant_control(
+                enabled,
+                participant_key,
+                payload.get("target"),
+            )
+        else:
+            data = set_duel_control(enabled, queue_key=queue_key)
+    except ValueError as exc:
+        message = str(exc)
+        if message == "unknown duel participant":
+            message = "未知斗法身份"
+        elif message == "invalid duel target username":
+            message = "挑战对象必须是有效的 Telegram 用户名"
+        else:
+            message = "未知斗法队列"
+        return {"success": False, "msg": message}
     with STATUS_LOCK:
         STATUS_CACHE.clear()
+    participant_state = None
+    if participant_key:
+        for queue in data.get("queues", {}).values():
+            if participant_key in (queue.get("participants") or {}):
+                participant_state = queue["participants"][participant_key]
+                break
     return {
         "success": True,
         "enabled": bool(data.get("enabled")),
         "queue": queue_key,
+        "participant": participant_key,
+        "participant_enabled": bool(participant_state.get("enabled")) if participant_state else None,
+        "target": participant_state.get("target_username", "") if participant_state else None,
         "queue_enabled": (
             bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
             if queue_key else None

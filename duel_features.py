@@ -32,6 +32,7 @@ DUEL_RESULT_WAIT_SECONDS = 35
 DUEL_POLL_SECONDS = 3
 DUEL_RETENTION_DAYS = 30
 DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
+DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
 
 DUEL_ACCOUNT_LABELS = {
     "main": "主号",
@@ -41,7 +42,7 @@ DUEL_ACCOUNT_LABELS = {
 
 DUEL_QUEUES = {
     "waaiging": {
-        "label": "Waaiging 队列",
+        "label": "斗法轮换 A组",
         "target": "Waaiging",
         "participants": (
             {"account": "main", "identity": "无咎子", "username": "wuxinglinggen"},
@@ -51,7 +52,7 @@ DUEL_QUEUES = {
         ),
     },
     "titan": {
-        "label": "TitanCreeper 队列",
+        "label": "斗法轮换 B组",
         "target": "TitanCreeper",
         "participants": (
             {"account": "main", "identity": "素缘子", "username": "oldeinstein"},
@@ -93,8 +94,20 @@ def duel_participant_config(queue_key, participant_key):
     return None
 
 
+def normalize_duel_target(value, fallback=""):
+    """Return a Telegram username without @, or an empty value for the default."""
+    target = str(value or "").strip().lstrip("@").strip()
+    if not target:
+        return ""
+    if not DUEL_TARGET_PATTERN.fullmatch(target):
+        raise ValueError("invalid duel target username")
+    return target
+
+
 def _new_participant_state():
     return {
+        "enabled": True,
+        "target_username": "",
         "attempts": 0,
         "remaining": DUEL_DAILY_LIMIT,
         "wins": 0,
@@ -199,6 +212,11 @@ def _ensure_duel_state_shape(data, reset_daily=True):
             participant = participants.setdefault(key, _new_participant_state())
             for field, value in _new_participant_state().items():
                 participant.setdefault(field, value)
+            participant["enabled"] = bool(participant.get("enabled", True))
+            try:
+                participant["target_username"] = normalize_duel_target(participant.get("target_username"))
+            except ValueError:
+                participant["target_username"] = ""
         for key in list(participants):
             if key not in expected_keys:
                 participants.pop(key, None)
@@ -212,7 +230,11 @@ def _ensure_duel_state_shape(data, reset_daily=True):
             queue["in_flight"] = {}
             queue["preparation"] = {}
             for key in list(queue.get("participants", {})):
-                queue["participants"][key] = _new_participant_state()
+                previous = queue["participants"].get(key) or {}
+                reset_state = _new_participant_state()
+                reset_state["enabled"] = bool(previous.get("enabled", True))
+                reset_state["target_username"] = normalize_duel_target(previous.get("target_username"))
+                queue["participants"][key] = reset_state
     return data
 
 
@@ -246,6 +268,37 @@ def set_duel_control(enabled, queue_key=""):
             if enabled:
                 for queue in data["queues"].values():
                     queue["next_at"] = ""
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def set_duel_participant_control(enabled, participant_key, target_username=None):
+    participant_key = str(participant_key or "").strip()
+    if not participant_key:
+        raise ValueError("missing duel participant")
+    target = None if target_username is None else normalize_duel_target(target_username)
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        found = None
+        for queue_key, config in DUEL_QUEUES.items():
+            if duel_participant_config(queue_key, participant_key):
+                found = (queue_key, config)
+                break
+        if not found:
+            raise ValueError("unknown duel participant")
+        queue_key, config = found
+        queue = data["queues"][queue_key]
+        state = queue["participants"].setdefault(participant_key, _new_participant_state())
+        state["enabled"] = bool(enabled)
+        if target is not None:
+            state["target_username"] = target
+        if not state["enabled"] and (queue.get("in_flight") or {}).get("participant_key") == participant_key:
+            queue["in_flight"] = {}
+            state["status"] = "paused"
+        elif state["enabled"] and state.get("status") == "paused":
+            state["status"] = "ready"
+        queue["next_at"] = ""
         data["updated_at"] = duel_time()
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
@@ -339,6 +392,13 @@ def claim_titan_preparation(account):
         queue = data["queues"]["titan"]
         if not data.get("enabled") or not queue.get("enabled") or not _queue_due(queue, now, 30):
             return None
+        if not any(
+            bool((queue.get("participants", {}).get(duel_participant_key(item["account"], item["identity"])) or {}).get("enabled", True))
+            and int((queue.get("participants", {}).get(duel_participant_key(item["account"], item["identity"])) or {}).get("remaining", DUEL_DAILY_LIMIT) or 0) > 0
+            and (normalize_duel_target((queue.get("participants", {}).get(duel_participant_key(item["account"], item["identity"])) or {}).get("target_username")) or "TitanCreeper").lower() == "titancreeper"
+            for item in DUEL_QUEUES["titan"]["participants"]
+        ):
+            return None
         if _lease_active(queue.get("in_flight"), now) or _lease_active(queue.get("preparation"), now):
             return None
         run_id = uuid.uuid4().hex
@@ -386,12 +446,6 @@ def reserve_duel_for_account(account):
                 continue
             if _lease_active(queue.get("in_flight"), now) or _lease_active(queue.get("preparation"), now):
                 continue
-            if queue_key == "titan" and not titan_target_status()["ready"]:
-                if queue.get("last_result") != "等待小号主魂与六翼出战":
-                    queue["last_result"] = "等待小号主魂与六翼出战"
-                    dirty = True
-                continue
-
             participants = list(config["participants"])
             xiaohao_send = xiaohao_duel_send_status() if queue_key == "waaiging" else {"restricted": False}
             cursor = int(queue.get("cursor") or 0) % len(participants)
@@ -403,6 +457,11 @@ def reserve_duel_for_account(account):
                 item = participants[index]
                 key = duel_participant_key(item["account"], item["identity"])
                 pstate = queue["participants"].setdefault(key, _new_participant_state())
+                if not bool(pstate.get("enabled", True)):
+                    if pstate.get("status") != "paused":
+                        pstate["status"] = "paused"
+                        dirty = True
+                    continue
                 if int(pstate.get("remaining", DUEL_DAILY_LIMIT) or 0) <= 0:
                     if pstate.get("status") != "exhausted":
                         pstate["status"] = "exhausted"
@@ -422,11 +481,25 @@ def reserve_duel_for_account(account):
                     queue["last_result"] = "等待小号发送权限恢复"
                     dirty = True
                     continue
+                if any(not bool(state.get("enabled", True)) for state in queue.get("participants", {}).values()):
+                    queue["next_at"] = ""
+                    queue["last_result"] = "全部可用身份已暂停"
+                    dirty = True
+                    continue
                 queue["next_at"] = _next_day_time(now)
                 queue["last_result"] = "今日次数均已用尽"
                 dirty = True
                 continue
             if selected["account"] != account:
+                continue
+
+            selected_state = queue["participants"].get(duel_participant_key(selected["account"], selected["identity"])) or {}
+            target_username = normalize_duel_target(selected_state.get("target_username")) or config["target"]
+            if queue_key == "titan" and target_username.lower() == "titancreeper" and not titan_target_status()["ready"]:
+                if queue.get("last_result") != "等待小号主魂与六翼出战":
+                    queue["last_result"] = "等待小号主魂与六翼出战"
+                    queue["next_at"] = duel_time(now + timedelta(seconds=60))
+                    dirty = True
                 continue
 
             key = duel_participant_key(selected["account"], selected["identity"])
@@ -453,8 +526,8 @@ def reserve_duel_for_account(account):
                 "account": account,
                 "identity": selected["identity"],
                 "challenger_username": selected["username"],
-                "target_username": config["target"],
-                "command": f".斗法 @{config['target']}",
+                "target_username": target_username,
+                "command": f".斗法 @{target_username}",
                 "reserved_at": duel_time(now),
             }
         if dirty:
@@ -773,18 +846,38 @@ def duel_dashboard_payload(date="", limit=200):
     query_date = str(date or "").strip() or duel_date()
     titan_status = titan_target_status()
     queues = []
+    target_options = sorted({config["target"] for config in DUEL_QUEUES.values()}, key=str.lower)
     for queue_key, config in DUEL_QUEUES.items():
         queue_state = data["queues"][queue_key]
         cursor = int(queue_state.get("cursor") or 0) % len(config["participants"])
+        next_index = None
+        for offset in range(len(config["participants"])):
+            candidate_index = (cursor + offset) % len(config["participants"])
+            candidate = config["participants"][candidate_index]
+            candidate_key = duel_participant_key(candidate["account"], candidate["identity"])
+            candidate_state = queue_state.get("participants", {}).get(candidate_key) or {}
+            if bool(candidate_state.get("enabled", True)) and int(candidate_state.get("remaining", DUEL_DAILY_LIMIT) or 0) > 0:
+                next_index = candidate_index
+                break
         participant_rows = []
+        titan_required = False
         for index, participant in enumerate(config["participants"]):
             key = duel_participant_key(participant["account"], participant["identity"])
             state = dict(queue_state.get("participants", {}).get(key) or _new_participant_state())
+            custom_target = normalize_duel_target(state.get("target_username"))
+            effective_target = custom_target or config["target"]
+            state["enabled"] = bool(state.get("enabled", True))
+            state["target_username"] = effective_target
+            state["target_is_default"] = not bool(custom_target)
+            titan_required = titan_required or (
+                state["enabled"] and int(state.get("remaining", DUEL_DAILY_LIMIT) or 0) > 0
+                and effective_target.lower() == "titancreeper"
+            )
             participant_rows.append({
                 **participant,
                 "key": key,
                 "account_name": DUEL_ACCOUNT_LABELS.get(participant["account"], participant["account"]),
-                "is_next": index == cursor,
+                "is_next": index == next_index,
                 **state,
             })
         queues.append({
@@ -798,7 +891,8 @@ def duel_dashboard_payload(date="", limit=200):
             "last_result": queue_state.get("last_result") or "",
             "in_flight": queue_state.get("in_flight") or {},
             "participants": participant_rows,
-            "target_status": titan_status if queue_key == "titan" else {"ready": True},
+            "target_status": titan_status if queue_key == "titan" and titan_required else {"ready": True},
+            "requires_titan_preparation": queue_key == "titan" and titan_required,
         })
     rows = _duel_event_rows(query_date, limit)
     summary = {
@@ -812,6 +906,7 @@ def duel_dashboard_payload(date="", limit=200):
         "date": query_date,
         "interval_seconds": DUEL_INTERVAL_SECONDS,
         "daily_limit": DUEL_DAILY_LIMIT,
+        "target_options": target_options,
         "updated_at": data.get("updated_at") or duel_time(),
         "queues": queues,
         "rows": rows,
