@@ -646,6 +646,12 @@ def command_response_family(command):
         return "formation"
     if cmd.startswith(".抚摸法宝"):
         return "treasure_touch"
+    if cmd == ".小世界":
+        return "small_world"
+    if cmd == ".显灵":
+        return "manifest"
+    if cmd.startswith(".神迹"):
+        return "miracle"
     if cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰") or cmd.startswith(".掌天瓶"):
         return "star"
     if cmd in {".天阶状态", ".登天阶", ".引九天罡风", ".问心台"}:
@@ -763,6 +769,15 @@ def text_response_family(text):
         return "meditation"
     if "器灵" in clean or "本命法宝" in clean or "青竹蜂云剑" in clean:
         return "treasure_touch"
+    if "显灵" in clean:
+        return "manifest"
+    if any(k in clean for k in ["小世界", "凡人祈愿", "响应祈愿"]):
+        return "small_world"
+    if any(k in clean for k in [
+        "神迹", "布道", "神谕", "香火", "信仰", "愿力", "传道",
+        "凡间方才承受", "需再等待",
+    ]):
+        return "miracle"
     if "修士状态" in clean and "境界" in clean:
         return "status"
     if "天命玉牒" in clean and "修为" in clean:
@@ -873,6 +888,22 @@ def feedback_response_matches_command(command, text):
         return any(k in clean for k in [
             "器灵", "本命法宝", "青竹蜂云剑", "默契", "经验", "互动", "别摸啦",
             "拥有器灵", "名字输入错误", "没有这件",
+        ])
+    if expected == "small_world":
+        return any(k in clean for k in [
+            "小世界", "凡人祈愿", "响应祈愿", "显灵",
+            "冷却", "请在", "后再", "尚未开启", "境界不足", "无法施展",
+        ])
+    if expected == "manifest":
+        return any(k in clean for k in [
+            "显灵", "祈愿", "愿力", "香火", "信仰", "功德", "神性",
+            "冷却", "请在", "后再", "无法", "不可",
+        ])
+    if expected == "miracle":
+        return any(k in clean for k in [
+            "神迹", "布道", "神谕", "香火", "信仰", "愿力", "传道",
+            "凡间方才承受", "需再等待",
+            "冷却", "请在", "后再", "尚未开启", "境界不足", "无法施展",
         ])
     if expected == "star":
         return any(k in clean for k in ["观星台", "引星盘", "牵引星辰", "安抚星辰", "狂暴星力", "星光", "精华"]) or (
@@ -4168,7 +4199,7 @@ def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return False
-    return match_pending_feedback_by_id(
+    matched = match_pending_feedback_by_id(
         actor,
         replied_id,
         msg,
@@ -4179,6 +4210,71 @@ def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=
         reason="reply_to",
         sender=sender,
     )
+    if matched:
+        return True
+
+    # A few game-bot workers occasionally attach a correct result to another
+    # user's command. Recover only the unambiguous case: one pending command,
+    # a fresh response, and a command-specific positive match. Generic loose
+    # matching is deliberately not used here because it can steal other users'
+    # replies.
+    pending = [
+        (mid, evt) for mid, evt in (getattr(actor, "feedback_events", {}) or {}).items()
+        if evt is not None and not evt.is_set()
+    ]
+    if (
+        len(pending) != 1
+        or not is_reply_to_untracked_message(actor, msg)
+        or not _foreign_reply_is_strong_match(actor, pending[0][0], msg, text)
+    ):
+        return False
+    pending_id = pending[0][0]
+    command = (getattr(actor, "feedback_commands", {}) or {}).get(pending_id, "")
+    identity = (getattr(actor, "feedback_identities", {}) or {}).get(pending_id, "主魂") or "主魂"
+    clean_text = str(text or "").strip()
+    if not _verified_game_bot_response(actor, msg=msg, sender=sender):
+        return False
+    if clean_text == str(command or "").strip() or mentions_other_user_for_identity(actor, msg, clean_text, identity):
+        return False
+    if not feedback_response_matches_command(command, clean_text):
+        return False
+    if candidate_fn is not None and not _feedback_candidate_accepts(candidate_fn, command, clean_text):
+        return False
+    if logger:
+        logger.info(
+            f"{label} Recovered foreign reply {getattr(msg, 'id', None)} for [{command}] "
+            f"(quoted untracked id={replied_id})."
+        )
+    return _set_feedback_match(
+        actor, pending_id, msg, clean_text, command, identity,
+        logger=logger, label=label, reason="foreign_reply_recovery", sender=sender,
+    )
+
+
+def _foreign_reply_is_strong_match(actor, pending_id, msg, text):
+    """Whether a wrongly quoted bot reply has a command-specific signature."""
+    command = (getattr(actor, "feedback_commands", {}) or {}).get(pending_id, "")
+    clean = str(text or "").replace("**", "")
+    if not command or not clean:
+        return False
+    sent_ts = (getattr(actor, "feedback_sent_ts", {}) or {}).get(pending_id, 0)
+    if sent_ts and time.monotonic() - sent_ts > 90:
+        return False
+    response_id = _message_id(msg)
+    if response_id is not None and (response_id <= pending_id or response_id - pending_id > 30):
+        return False
+    command = str(command).strip()
+    if command.startswith(".灵兽互动 "):
+        return any(k in clean for k in ("暂时无法互动", "互动", "抚摸", "安抚", "亲密", "羁绊", "心情"))
+    if command.startswith(".灵兽巡游 "):
+        return any(k in clean for k in ("巡游", "无法巡游", "休息状态"))
+    if command.startswith(".灵兽巡边 ") or command in {".巡边归来", ".巡边状态"}:
+        return any(k in clean for k in ("巡边", "巡行", "边境", "还需", "归来", "已有灵兽"))
+    if command.startswith(".灵兽休息 "):
+        return any(k in clean for k in ("召回", "休息", "放养中", "自行归来"))
+    if command.startswith(".侍妾远航") or command == ".远航归来":
+        return any(k in clean for k in ("远航", "航线", "归航", "归来", "远航状态"))
+    return False
 
 
 def match_pending_feedback_by_message_id(actor, msg, text, candidate_fn=None, logger=None, label="[EDITED-FEEDBACK]", sender=None):

@@ -208,6 +208,13 @@ TREASURE_TOUCH_COMMAND = ".抚摸法宝 玄天斩灵剑"  # 抚摸法宝的具�
 WUJIU_TREASURE_TOUCH_COMMAND = ".抚摸法宝 风雷翅"
 NURTURE_SPIRIT_COMMAND = ".温养器灵 斩灵"  # 温养器灵指令
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600        # 抚摸法宝冷却：2 小时
+SMALL_WORLD_COMMAND = ".小世界"
+SMALL_WORLD_MANIFEST_COMMAND = ".显灵"
+SMALL_WORLD_CD_SECONDS = 6 * 3600
+MIRACLE_PREACH_COMMAND = ".神迹 布道"
+MIRACLE_PREACH_CD_SECONDS = 3 * 3600
+SMALL_WORLD_PRAYER_KEYWORDS = ("凡人祈愿", "响应祈愿")
+SMALL_WORLD_RETRY_SECONDS = 10 * 60
 SPIRIT_TREE_AVATAR = "缘生子"
 SPIRIT_TREE_IRRIGATION_COMMAND = ".灵树灌溉"
 SPIRIT_TREE_STATUS_COMMAND = ".灵树状态"
@@ -671,6 +678,14 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             "last_treasure_touch_time": "",                  # 上次抚摸法宝时间
             "next_treasure_touch_time": "",                  # 下次抚摸法宝时间
             "next_nurture_spirit_time": "",                   # 下次温养器灵时间
+            "last_small_world_time": "",
+            "next_small_world_time": "",
+            "last_small_world_response": "",
+            "last_manifest_time": "",
+            "last_manifest_response": "",
+            "last_miracle_preach_time": "",
+            "next_miracle_preach_time": "",
+            "last_miracle_preach_response": "",
             "level": "",
             "current_exp": None,
             "total_exp": None,
@@ -1055,6 +1070,22 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             return "修士状态" in text and "境界" in text
         if command == ".我的灵根":
             return "天命玉牒" in text and "修为" in text
+        if command == SMALL_WORLD_COMMAND:
+            return any(k in text for k in (
+                "小世界", "凡人祈愿", "响应祈愿", "显灵",
+                "冷却", "请在", "后再", "尚未开启", "境界不足", "无法施展",
+            ))
+        if command == SMALL_WORLD_MANIFEST_COMMAND:
+            return any(k in text for k in (
+                "显灵", "祈愿", "愿力", "香火", "信仰", "功德", "神性",
+                "冷却", "请在", "后再", "无法", "不可",
+            ))
+        if command == MIRACLE_PREACH_COMMAND:
+            return any(k in text for k in (
+                "神迹", "布道", "神谕", "香火", "信仰", "愿力", "传道",
+                "凡间方才承受", "需再等待",
+                "冷却", "请在", "后再", "尚未开启", "境界不足", "无法施展",
+            ))
         if main_beast_feedback_candidate(command, text):
             return True
         if command in {SPIRIT_TREE_IRRIGATION_COMMAND, SPIRIT_TREE_STATUS_COMMAND, SPIRIT_TREE_HARVEST_COMMAND, SPIRIT_TREE_GUARD_COMMAND}:
@@ -2176,6 +2207,163 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
             await asyncio.sleep(scheduler_sleep_seconds(wait_time))
 
+    def record_small_world_response(self, resp):
+        """Record the 6-hour small-world schedule without treating unknown replies as success."""
+        text = self.response_text(resp).strip()
+        self.state["last_small_world_response"] = text
+        if not text:
+            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Small world: response missing; retry scheduled in 10 minutes.")
+            return False
+
+        cd = self.parse_wait_time(text)
+        if cd > 0 and any(k in text for k in ("冷却", "后再", "请在", "剩余", "尚需", "还需")):
+            self.state["next_small_world_time"] = add_seconds_str(now_str(), cd)
+            self.save_state()
+            log.info(f"Small world: cooldown from response {cd}s, next at {self.state['next_small_world_time']}.")
+            return False
+
+        if any(k in text for k in ("境界不足", "无法施展", "尚未开启", "未知指令", "不存在")):
+            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Small world: unavailable response; retry scheduled in 10 minutes.")
+            return False
+
+        if not any(k in text for k in ("小世界", "凡人祈愿", "响应祈愿", "祈愿", "显灵")):
+            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Small world: unrecognized response; retry scheduled in 10 minutes.")
+            return False
+
+        now = now_str()
+        self.state["last_small_world_time"] = now
+        self.state["next_small_world_time"] = add_seconds_str(now, SMALL_WORLD_CD_SECONDS)
+        self.save_state()
+        log.info(f"Small world: response recorded, next at {self.state['next_small_world_time']}.")
+        return True
+
+    def record_miracle_preach_response(self, resp):
+        """Record the 3-hour preaching cooldown."""
+        text = self.response_text(resp).strip()
+        self.state["last_miracle_preach_response"] = text
+        if not text:
+            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Miracle preaching: response missing; retry scheduled in 10 minutes.")
+            return False
+
+        cd = self.parse_wait_time(text)
+        if cd > 0 and any(k in text for k in (
+            "冷却", "后再", "请在", "剩余", "尚需", "还需", "需再等待",
+        )):
+            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), cd)
+            self.save_state()
+            log.info(f"Miracle preaching: cooldown from response {cd}s, next at {self.state['next_miracle_preach_time']}.")
+            return False
+
+        if any(k in text for k in ("境界不足", "无法施展", "尚未开启", "未知指令", "不存在")):
+            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Miracle preaching: unavailable response; retry scheduled in 10 minutes.")
+            return False
+
+        if not any(k in text for k in ("神迹", "布道", "香火", "信仰", "愿力", "传道")):
+            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
+            self.save_state()
+            log.warning("Miracle preaching: unrecognized response; retry scheduled in 10 minutes.")
+            return False
+
+        now = now_str()
+        self.state["last_miracle_preach_time"] = now
+        self.state["next_miracle_preach_time"] = add_seconds_str(now, MIRACLE_PREACH_CD_SECONDS)
+        self.save_state()
+        log.info(f"Miracle preaching: response recorded, next at {self.state['next_miracle_preach_time']}.")
+        return True
+
+    async def execute_small_world_once(self):
+        """Run .小世界 and its conditional .显灵 follow-up as one atomic main-soul action."""
+        current_task = asyncio.current_task()
+        while self.should_wait_for_atomic_task(SMALL_WORLD_COMMAND):
+            await asyncio.sleep(0.5)
+        self.active_atomic_task = current_task
+        try:
+            resp = await self.send_and_wait_feedback(
+                SMALL_WORLD_COMMAND,
+                timeout=60,
+                max_retries=1,
+                force_identity_check=True,
+            )
+            text = self.response_text(resp)
+            recorded = self.record_small_world_response(resp)
+            if any(keyword in text for keyword in SMALL_WORLD_PRAYER_KEYWORDS):
+                if self.dashboard_command_paused(SMALL_WORLD_MANIFEST_COMMAND, "主魂"):
+                    log.info("Small world: prayer detected, but .显灵 is paused by dashboard.")
+                else:
+                    manifest_resp = await self.send_and_wait_feedback(
+                        SMALL_WORLD_MANIFEST_COMMAND,
+                        timeout=60,
+                        max_retries=1,
+                        force_identity_check=True,
+                    )
+                    self.state["last_manifest_time"] = now_str()
+                    self.state["last_manifest_response"] = self.response_text(manifest_resp).strip()
+                    self.save_state()
+            return recorded
+        finally:
+            if self.active_atomic_task == current_task:
+                self.active_atomic_task = None
+
+    async def execute_miracle_preach_once(self):
+        """Run the main-soul preaching command once and record its cooldown."""
+        current_task = asyncio.current_task()
+        while self.should_wait_for_atomic_task(MIRACLE_PREACH_COMMAND):
+            await asyncio.sleep(0.5)
+        self.active_atomic_task = current_task
+        try:
+            resp = await self.send_and_wait_feedback(
+                MIRACLE_PREACH_COMMAND,
+                timeout=60,
+                max_retries=1,
+                force_identity_check=True,
+            )
+            return self.record_miracle_preach_response(resp)
+        finally:
+            if self.active_atomic_task == current_task:
+                self.active_atomic_task = None
+
+    async def run_small_world_loop(self):
+        await self.startup_done.wait()
+        while self.is_running:
+            await self._wait_for_main_identity()
+            next_time = self.state.get("next_small_world_time", "")
+            if next_time and is_future(next_time):
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
+                continue
+            if self.dashboard_command_paused(SMALL_WORLD_COMMAND, "主魂"):
+                await self.wait_for_dashboard_command_control_change(300)
+                continue
+            await self.execute_small_world_once()
+            await asyncio.sleep(scheduler_sleep_seconds(
+                seconds_until(self.state.get("next_small_world_time", "")) or SMALL_WORLD_RETRY_SECONDS
+            ))
+
+    async def run_miracle_preach_loop(self):
+        await self.startup_done.wait()
+        while self.is_running:
+            await self._wait_for_main_identity()
+            next_time = self.state.get("next_miracle_preach_time", "")
+            if next_time and is_future(next_time):
+                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
+                continue
+            if self.dashboard_command_paused(MIRACLE_PREACH_COMMAND, "主魂"):
+                await self.wait_for_dashboard_command_control_change(300)
+                continue
+            await self.execute_miracle_preach_once()
+            await asyncio.sleep(scheduler_sleep_seconds(
+                seconds_until(self.state.get("next_miracle_preach_time", "")) or SMALL_WORLD_RETRY_SECONDS
+            ))
+
         # ------------------------------------------------------------------
     # 登天阶循环（主循环之一）
     # ------------------------------------------------------------------
@@ -2356,6 +2544,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             ("next_rift_search_time", ".探寻裂缝", "主魂"),
             ("next_treasure_touch_time", TREASURE_TOUCH_COMMAND, "主魂"),
             ("next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "主魂"),
+            ("next_small_world_time", SMALL_WORLD_COMMAND, "主魂"),
+            ("next_miracle_preach_time", MIRACLE_PREACH_COMMAND, "主魂"),
         ]
         stale = []
         now = datetime.now()
@@ -2371,6 +2561,28 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 continue
             if overdue >= int(overdue_seconds):
                 stale.append((key, command, value, overdue))
+
+        # A due voyage is represented as active=True with an empty next time
+        # after status synchronization. Reconstruct its deadline from the last
+        # departure so a stuck concubine loop cannot remain invisible forever.
+        if (
+            getattr(self, "enable_concubine", True)
+            and self.state.get("concubine_voyage_active")
+            and not self.state_time_command_paused("next_concubine_voyage_time", "主魂")
+            and not self.dashboard_command_paused(".远航归来", "主魂")
+        ):
+            voyage_due = str(self.state.get("next_concubine_voyage_time") or "").strip()
+            if not voyage_due:
+                last_voyage = str(self.state.get("last_concubine_voyage_time") or "").strip()
+                if last_voyage:
+                    voyage_due = add_seconds_str(last_voyage, self.concubine_voyage_cooldown("主魂"))
+            if voyage_due and not is_future(voyage_due):
+                try:
+                    overdue = int((now - str_to_dt(voyage_due)).total_seconds())
+                except Exception:
+                    overdue = 0
+                if overdue >= int(overdue_seconds):
+                    stale.append(("next_concubine_voyage_time", ".远航归来", voyage_due, overdue))
         return stale
 
     async def run_health_watchdog_loop(self):
@@ -4003,6 +4215,13 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
+        # 观星结果窗口很窄，缓存身份可能已被手动操作改变；强制校验时
+        # 即使缓存显示目标身份，也要重新发一次 .切换 以确认机器人当前操控对象。
+        force_fresh_identity_confirm = (
+            force_identity_check
+            and identity in getattr(self, "avatars", [])
+            and str(message or "").strip() == ".观星"
+        )
         # 整体任务守卫
         current_t = asyncio.current_task()
         while self.should_wait_for_atomic_task(message):
@@ -4033,10 +4252,12 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             wait_sec_to_sleep = 0
             switched_this_iteration = False
             async with self.avatar_send_lock:
-                if self.current_identity != identity:
-                    fishing_wait = await self.fishing_switch_wait_or_raise_due(
-                        self.current_identity, target_identity=identity, command=message
-                    )
+                if self.current_identity != identity or force_fresh_identity_confirm:
+                    fishing_wait = 0
+                    if self.current_identity != identity:
+                        fishing_wait = await self.fishing_switch_wait_or_raise_due(
+                            self.current_identity, target_identity=identity, command=message
+                        )
                     if fishing_wait > 0:
                         log.info(
                             f"Avatar switch deferred: {self.current_identity} is fishing; "
@@ -4045,7 +4266,10 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                         should_yield = True
                         wait_sec_to_sleep = fishing_wait
 
-                    wait_sec = self.get_identity_impending_command_wait(self.current_identity)
+                    wait_sec = (
+                        self.get_identity_impending_command_wait(self.current_identity)
+                        if self.current_identity != identity else -1
+                    )
                     if not should_yield and 0 <= wait_sec <= 60 and not high_priority_identity_command:
                         if defer_started_at is None:
                             defer_started_at = time.monotonic()
@@ -4076,7 +4300,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                             skip_bot_activity_wait=True,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
-                        passively_confirmed = self.current_identity == identity
+                        passively_confirmed = self.current_identity == identity and not force_fresh_identity_confirm
                         if passively_confirmed:
                             log.info(f"✅ Avatar switch passively confirmed: now {identity}")
                         if (not passively_confirmed) and (not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity])):
@@ -5219,6 +5443,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
         if self.enable_nurture_spirit:
             self.create_scheduler_task("nurture_spirit", lambda: self.run_nurture_spirit_loop())
+        self.create_scheduler_task("small_world", lambda: self.run_small_world_loop())
+        self.create_scheduler_task("miracle_preach", lambda: self.run_miracle_preach_loop())
 
         # 闭关循环（内部会检查深度闭关状态）
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())

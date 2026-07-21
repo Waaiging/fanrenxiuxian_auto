@@ -1734,10 +1734,6 @@ class ConcubineMixin:
     async def execute_concubine_chain(self):
         """Main-soul bound flow; only main/main ends with the 月殿寻痕 voyage."""
         self.ensure_concubine_state()
-        if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
-            await self.execute_target_concubine_search("主魂")
-            if not self.target_concubine_found("主魂"):
-                return False
         if not self.align_concubine_chain_cooldowns("主魂"):
             return False
         async with _ConcubineAtomicTask(self, "ConcubineChain-主魂"):
@@ -1745,8 +1741,14 @@ class ConcubineMixin:
                 return False
             if hasattr(self, "switch_back_to_main"):
                 await self.switch_back_to_main()
+            # 远航到期是链路的最高优先级。目标侍妾搜索可能长期没有结果，
+            # 不能因此阻塞已经完成 6 小时冷却的主魂远航结算。
             if not await self.execute_concubine_voyage_return("主魂"):
                 return True
+            if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
+                await self.execute_target_concubine_search("主魂")
+                if not self.target_concubine_found("主魂"):
+                    return False
             for task_key in ("divination", "dream"):
                 task = CONCUBINE_TASKS[task_key]
                 if self._concubine_command_paused(task["command"], "主魂"):

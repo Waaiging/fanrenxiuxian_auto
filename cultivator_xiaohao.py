@@ -4318,9 +4318,17 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     def parse_rest_response_status(self, text):
         """解析灵兽休息后的状态"""
         if not text: return ""
-        m = re.search(r"正在[（(]([^）)]+)[）)]", text)
+        clean = str(text).replace("**", "")
+        # 放养中的灵兽被提前召回时，机器人会同时写“召回”和“还需
+        # ...后自行归来”。这不是休息成功，不能让后续巡边/探渊立刻接管。
+        if (
+            "放养中" in clean
+            and ("提前召回" in clean or "自行归来" in clean or "不会结算" in clean)
+        ):
+            return "放养中"
+        m = re.search(r"正在[（(]([^）)]+)[）)]", clean)
         if m: return m.group(1).strip()
-        if any(k in text for k in ["召回", "休养", "休息"]): return "休息中"
+        if any(k in clean for k in ["召回", "休养", "休息"]): return "休息中"
         return ""
 
     def set_next_abyss_not_before(self, target_time):

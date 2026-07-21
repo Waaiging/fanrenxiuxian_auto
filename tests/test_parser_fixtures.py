@@ -7600,6 +7600,46 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertEqual(actor.state["beasts_cache"][2]["status"], "巡边中")
 
+    def test_border_patrol_does_not_dispatch_after_early_pasture_recall(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {
+                    "full_name": "铁甲龟 (之贰)",
+                    "species": "一阶铁甲龟",
+                    "status": "放养中",
+                    "power": 15,
+                    "exp": 90,
+                    "stamina": 100,
+                },
+            ],
+            "best_beast_name": "铁甲龟 (之贰)",
+            "best_beast_status": "放养中",
+            "best_beast_stamina": 100,
+        }
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return (
+                "你已提前召回放养中的灵兽【铁甲龟 (之贰)】。\n"
+                "原本还需 **27分钟18秒** 才会自行归来。\n"
+                "提前召回不会结算放养收获。"
+            )
+
+        async def fake_sleep(*args, **kwargs):
+            return None
+
+        actor.send_and_wait_feedback = fake_send
+
+        with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
+            self.assertFalse(asyncio.run(actor.run_beast_border_patrol()))
+
+        self.assertEqual(sent, [".灵兽休息 铁甲龟 (之贰)"])
+        self.assertEqual(actor.get_cached_beast_by_name("铁甲龟 (之贰)")["status"], "放养中")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 25 * 60)
+
     def test_border_patrol_recalls_low_cached_pastured_beasts_until_one_has_stamina(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
@@ -8138,6 +8178,29 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(len(stale), 1)
         self.assertEqual(stale[0][0], "next_yuanying_out_time")
+
+    def test_main_watchdog_detects_due_active_concubine_voyage_without_next_time(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.account_key = "main"
+        actor.enable_concubine = True
+        actor.state = {
+            "is_paused": False,
+            "identity_pauses": {},
+            "concubine_voyage_active": True,
+            "next_concubine_voyage_time": "",
+            "last_concubine_voyage_time": (
+                datetime.now() - timedelta(hours=8)
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        stale = actor.stale_scheduler_due_items()
+
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0][0], "next_concubine_voyage_time")
+        self.assertEqual(stale[0][1], ".远航归来")
 
     def test_sub_watchdog_detects_stale_scheduler_due_item(self):
         actor = SubCultivator.__new__(SubCultivator)
@@ -8887,6 +8950,65 @@ class ParserFixtureTests(unittest.TestCase):
             ))
         self.assertTrue(actor.feedback_events[1000].is_set())
 
+    def test_pending_feedback_recovers_strong_beast_result_with_wrong_reply_target(self):
+        actor = SimpleNamespace(
+            state_file="state_xiaohao.json",
+            target_chat_id=-100123456,
+            topic_id=None,
+            current_identity="主魂",
+            feedback_events={1000: asyncio.Event()},
+            feedback_commands={1000: ".灵兽互动 大圣"},
+            feedback_identities={1000: "主魂"},
+            feedback_senders={1000: 42},
+            feedback_sent_ts={1000: time.monotonic()},
+            last_feedback_text={},
+            last_feedback_msg={},
+            identity_usernames={"主魂": ["Weeguu"]},
+            avatar_usernames={},
+        )
+        text = "你的灵兽【大圣】正在探险中，暂时无法互动。"
+        msg = DummyMessage(1002, text=text, reply_to_msg_id=999)
+
+        with patch.object(log_utils, "record_command_response_for_command_id", return_value=True):
+            self.assertTrue(log_utils.match_pending_feedback_by_reply(
+                actor,
+                msg,
+                text,
+                candidate_fn=lambda command, body: "互动" in body,
+                sender=SimpleNamespace(username="fanrenxiuxian_bot"),
+            ))
+
+        self.assertTrue(actor.feedback_events[1000].is_set())
+        self.assertEqual(actor.last_feedback_text[1000], text)
+
+    def test_pending_feedback_does_not_recover_unrelated_wrong_reply(self):
+        actor = SimpleNamespace(
+            state_file="state_xiaohao.json",
+            target_chat_id=-100123456,
+            topic_id=None,
+            current_identity="主魂",
+            feedback_events={1000: asyncio.Event()},
+            feedback_commands={1000: ".灵兽互动 大圣"},
+            feedback_identities={1000: "主魂"},
+            feedback_senders={1000: 42},
+            feedback_sent_ts={1000: time.monotonic()},
+            last_feedback_text={},
+            last_feedback_msg={},
+            identity_usernames={"主魂": ["Weeguu"]},
+            avatar_usernames={},
+        )
+        text = "灵兽【铁甲龟】领命前往边境巡行，执行【袭营】。"
+        msg = DummyMessage(1002, text=text, reply_to_msg_id=999)
+
+        self.assertFalse(log_utils.match_pending_feedback_by_reply(
+            actor,
+            msg,
+            text,
+            candidate_fn=lambda command, body: True,
+            sender=SimpleNamespace(username="fanrenxiuxian_bot"),
+        ))
+        self.assertFalse(actor.feedback_events[1000].is_set())
+
     def test_command_ledger_resolves_retry_attempts_and_heart_trial_event_edits(self):
         actor = SimpleNamespace(
             state_file="state_main.json",
@@ -9608,10 +9730,38 @@ class ParserFixtureTests(unittest.TestCase):
         main = DummyConcubine()
         main.account_key = "main"
         self.assertEqual(main.concubine_voyage_command("主魂"), ".侍妾远航 月殿寻痕")
+        self.assertEqual(main.concubine_voyage_cooldown("主魂"), 6 * 3600)
         self.assertIn(
             ".侍妾远航 *",
             log_utils.command_control_candidate_keys(".侍妾远航 月殿寻痕"),
         )
+
+    def test_main_concubine_chain_settles_due_voyage_before_target_search(self):
+        actor = DummyConcubine()
+        actor.account_key = "main"
+        actor.state.update({
+            "concubine_name": "慕沛灵",
+            "target_concubine_found": False,
+            "concubine_voyage_active": True,
+            "next_concubine_voyage_time": "",
+        })
+        calls = []
+        actor.align_concubine_chain_cooldowns = lambda identity="主魂": True
+
+        async def fake_return(identity="主魂", **kwargs):
+            calls.append("return")
+            actor.state["concubine_voyage_active"] = False
+            return True
+
+        async def fake_search(identity="主魂"):
+            calls.append("search")
+            return False
+
+        actor.execute_concubine_voyage_return = fake_return
+        actor.execute_target_concubine_search = fake_search
+
+        self.assertFalse(asyncio.run(actor.execute_concubine_chain()))
+        self.assertEqual(calls, ["return", "search"])
 
     def test_concubine_voyage_start_sends_only_main_main_moon_route(self):
         actor = DummyConcubine()
@@ -12627,6 +12777,197 @@ class ParserFixtureTests(unittest.TestCase):
 
         asyncio.run(actor.run_nurture_spirit_loop())
         self.assertEqual(sent, [])
+
+    def test_small_world_prayer_keywords_trigger_manifest(self):
+        for keyword in intelligent_cultivator.SMALL_WORLD_PRAYER_KEYWORDS:
+            with self.subTest(keyword=keyword):
+                actor = Cultivator.__new__(Cultivator)
+                actor.state = {}
+                actor.active_atomic_task = None
+                actor.save_state = lambda: None
+                actor.dashboard_command_paused = lambda command, identity="": False
+                sent = []
+
+                async def fake_send(command, **kwargs):
+                    sent.append((command, kwargs.get("force_identity_check")))
+                    if command == intelligent_cultivator.SMALL_WORLD_COMMAND:
+                        return f"【小世界】发现{keyword}，可响应祈愿。"
+                    return "显灵成功，愿力已降下。"
+
+                actor.send_and_wait_feedback = fake_send
+
+                self.assertTrue(asyncio.run(actor.execute_small_world_once()))
+                self.assertEqual(sent, [
+                    (intelligent_cultivator.SMALL_WORLD_COMMAND, True),
+                    (intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND, True),
+                ])
+                self.assertTrue(actor.state["last_manifest_time"])
+                remaining = common_seconds_until(actor.state["next_small_world_time"])
+                self.assertGreater(remaining, 5 * 3600 + 50 * 60)
+                self.assertLessEqual(remaining, intelligent_cultivator.SMALL_WORLD_CD_SECONDS)
+
+    def test_small_world_without_prayer_does_not_manifest(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
+        sent = []
+
+        async def fake_send(command, **kwargs):
+            sent.append(command)
+            return "【小世界】天地安宁，暂无祈愿。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_small_world_once()))
+        self.assertEqual(sent, [intelligent_cultivator.SMALL_WORLD_COMMAND])
+        self.assertFalse(actor.state.get("last_manifest_time"))
+
+    def test_small_world_feedback_families_accept_manifest_and_preaching_results(self):
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            intelligent_cultivator.SMALL_WORLD_COMMAND,
+            "【小世界】一名凡人祈愿，等待神明响应。",
+        ))
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND,
+            "愿力汇聚，香火与功德均有所增长。",
+        ))
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            intelligent_cultivator.MIRACLE_PREACH_COMMAND,
+            "【神迹】布道成功，凡人信仰有所增长。",
+        ))
+
+    def test_small_world_explicit_cooldown_and_empty_response_retry(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.save_state = lambda: None
+
+        self.assertFalse(actor.record_small_world_response(
+            "小世界尚在冷却，请在 **2小时15分钟** 后再查看。"
+        ))
+        cooldown = common_seconds_until(actor.state["next_small_world_time"])
+        self.assertGreater(cooldown, 2 * 3600 + 10 * 60)
+        self.assertLessEqual(cooldown, 2 * 3600 + 15 * 60)
+
+        self.assertFalse(actor.record_small_world_response(""))
+        retry = common_seconds_until(actor.state["next_small_world_time"])
+        self.assertGreater(retry, 9 * 60)
+        self.assertLessEqual(retry, intelligent_cultivator.SMALL_WORLD_RETRY_SECONDS)
+
+    def test_miracle_preach_records_three_hour_cooldown(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        sent = []
+
+        async def fake_send(command, **kwargs):
+            sent.append((command, kwargs.get("force_identity_check")))
+            return "【神迹】布道成功，凡人信仰有所增长。"
+
+        actor.send_and_wait_feedback = fake_send
+
+        self.assertTrue(asyncio.run(actor.execute_miracle_preach_once()))
+        self.assertEqual(sent, [(intelligent_cultivator.MIRACLE_PREACH_COMMAND, True)])
+        remaining = common_seconds_until(actor.state["next_miracle_preach_time"])
+        self.assertGreater(remaining, 2 * 3600 + 50 * 60)
+        self.assertLessEqual(remaining, intelligent_cultivator.MIRACLE_PREACH_CD_SECONDS)
+
+    def test_miracle_preach_real_cooldown_reply_is_matched_and_recorded(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.save_state = lambda: None
+        response = "凡间方才承受神谕，需再等待 **2小时21分钟37秒**。"
+
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            intelligent_cultivator.MIRACLE_PREACH_COMMAND,
+            response,
+        ))
+        self.assertFalse(actor.record_miracle_preach_response(response))
+        remaining = common_seconds_until(actor.state["next_miracle_preach_time"])
+        self.assertGreater(remaining, 2 * 3600 + 20 * 60)
+        self.assertLessEqual(remaining, 2 * 3600 + 22 * 60)
+
+    def test_main_watchdog_detects_stale_small_world_and_miracle(self):
+        actor = Cultivator.__new__(Cultivator)
+        overdue = (datetime.now() - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state = {
+            "is_paused": False,
+            "identity_pauses": {},
+            "next_small_world_time": overdue,
+            "next_miracle_preach_time": overdue,
+        }
+        actor.identity_pause_seconds = lambda identity="主魂": 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        stale = actor.stale_scheduler_due_items()
+
+        self.assertEqual(
+            {(item[0], item[1]) for item in stale},
+            {
+                ("next_small_world_time", intelligent_cultivator.SMALL_WORLD_COMMAND),
+                ("next_miracle_preach_time", intelligent_cultivator.MIRACLE_PREACH_COMMAND),
+            },
+        )
+
+    def test_dashboard_shows_small_world_only_for_main_main_soul(self):
+        seen = []
+        target_commands = {
+            intelligent_cultivator.SMALL_WORLD_COMMAND,
+            intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND,
+            intelligent_cultivator.MIRACLE_PREACH_COMMAND,
+        }
+        for account in ("main", "sub", "xiaohao"):
+            for panel in build_command_panels(account, {"avatars": {}}):
+                commands = {row.get("command") for row in panel.get("commands", [])}
+                found = commands & target_commands
+                if found:
+                    seen.append((account, panel.get("identity") or "主魂", found))
+
+        self.assertEqual(seen, [("main", "主魂", target_commands)])
+
+    def test_main_star_gazing_force_check_refreshes_cached_avatar_identity(self):
+        async def run_case():
+            actor = Cultivator.__new__(Cultivator)
+            actor.avatars = ["素缘子"]
+            actor._current_identity = "素缘子"
+            actor._main_confirmed = False
+            actor.state = {"current_identity": "素缘子", "avatars": {"素缘子": {}}}
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.pause_event = asyncio.Event()
+            actor.pause_event.set()
+            actor.active_atomic_task = None
+            actor.is_running = True
+            actor.save_state = lambda: None
+            actor.wait_while_identity_paused = lambda *args, **kwargs: asyncio.sleep(0, result=True)
+            sent = []
+
+            async def fake_raw(command, *args, **kwargs):
+                sent.append(command)
+                if command == ".切换 素缘子":
+                    return "切换成功！你的神念已附着在【素缘子】之上。"
+                return "【观星结果】"
+
+            async def bot_ready(*args, **kwargs):
+                return True
+
+            actor._send_and_wait_feedback_raw = fake_raw
+            with patch.object(intelligent_cultivator, "command_send_precheck", return_value=True), patch.object(
+                intelligent_cultivator, "wait_for_bot_activity_before_send", bot_ready
+            ):
+                response = await actor.send_and_wait_feedback_identity(
+                    "素缘子",
+                    ".观星",
+                    force_identity_check=True,
+                    max_retries=0,
+                )
+            return sent, response
+
+        sent, response = asyncio.run(run_case())
+        self.assertEqual(sent, [".切换 素缘子", ".观星"])
+        self.assertEqual(response, "【观星结果】")
 
     def test_dashboard_removes_luoyun_spirit_tree_commands(self):
         state = {

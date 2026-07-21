@@ -1735,6 +1735,9 @@ def main_soul_panel(account, state):
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
             time_command(state, "next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "温养器灵", waiting="6小时冷却", group="法宝"),
+            time_command(state, "next_small_world_time", ".小世界", "小世界", waiting="6小时冷却", group="化神"),
+            manual_command(".显灵", "显灵", "凡人祈愿时自动响应", "化神"),
+            time_command(state, "next_miracle_preach_time", ".神迹 布道", "神迹 布道", waiting="3小时冷却", group="化神"),
         ])
         rows.extend(meditation_commands(state))
         rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
