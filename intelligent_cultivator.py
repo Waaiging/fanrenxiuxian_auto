@@ -520,6 +520,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         self.lingxiao_enabled = False
         self.enable_treasure_touch = True
         self.enable_nurture_spirit = True
+        self.enable_small_world = True
         self.enable_concubine = True
         self.enable_avatar_tasks = True
         self.enable_spirit_tree = False
@@ -2364,7 +2365,14 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 seconds_until(self.state.get("next_miracle_preach_time", "")) or SMALL_WORLD_RETRY_SECONDS
             ))
 
-        # ------------------------------------------------------------------
+    def start_small_world_scheduler_tasks(self):
+        if not self.enable_small_world:
+            log.info("Small-world / miracle-preaching loops disabled for current account.")
+            return
+        self.create_scheduler_task("small_world", lambda: self.run_small_world_loop())
+        self.create_scheduler_task("miracle_preach", lambda: self.run_miracle_preach_loop())
+
+    # ------------------------------------------------------------------
     # 登天阶循环（主循环之一）
     # ------------------------------------------------------------------
 
@@ -5443,8 +5451,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
         if self.enable_nurture_spirit:
             self.create_scheduler_task("nurture_spirit", lambda: self.run_nurture_spirit_loop())
-        self.create_scheduler_task("small_world", lambda: self.run_small_world_loop())
-        self.create_scheduler_task("miracle_preach", lambda: self.run_miracle_preach_loop())
+        self.start_small_world_scheduler_tasks()
 
         # 闭关循环（内部会检查深度闭关状态）
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())

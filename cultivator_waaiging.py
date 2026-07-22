@@ -76,8 +76,14 @@ class WaaigingCultivator(core.Cultivator):
         # different account's hard-coded commands until they are configured.
         self.enable_treasure_touch = False
         self.enable_nurture_spirit = False
+        self.enable_small_world = False
         disabled_state_changed = False
-        for key in ("next_treasure_touch_time", "next_nurture_spirit_time"):
+        for key in (
+            "next_treasure_touch_time",
+            "next_nurture_spirit_time",
+            "next_small_world_time",
+            "next_miracle_preach_time",
+        ):
             if self.state.get(key):
                 self.state[key] = ""
                 disabled_state_changed = True
@@ -116,6 +122,8 @@ class WaaigingCultivator(core.Cultivator):
             disabled_keys.add("next_treasure_touch_time")
         if not self.enable_nurture_spirit:
             disabled_keys.add("next_nurture_spirit_time")
+        if not self.enable_small_world:
+            disabled_keys.update(("next_small_world_time", "next_miracle_preach_time"))
         return [item for item in stale if item[0] not in disabled_keys]
 
     async def _send_tianxing_prefixes(self, commands, action):

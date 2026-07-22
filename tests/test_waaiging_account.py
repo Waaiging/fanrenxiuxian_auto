@@ -35,6 +35,7 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertFalse(actor.enable_main_beasts)
         self.assertFalse(actor.enable_treasure_touch)
         self.assertFalse(actor.enable_nurture_spirit)
+        self.assertFalse(actor.enable_small_world)
         self.assertTrue(actor.telegram_write_restriction_retry_enabled)
         self.assertEqual(actor.account_sect_name(), "")
 
@@ -43,7 +44,11 @@ class WaaigingAccountTests(unittest.TestCase):
 
         def fake_base_init(actor, session_name):
             actor.mc = {}
-            actor.state = {"avatars": {"无咎子": {}}}
+            actor.state = {
+                "avatars": {"无咎子": {}},
+                "next_small_world_time": "2026-07-22 03:00:00",
+                "next_miracle_preach_time": "2026-07-22 03:10:00",
+            }
             actor.xiaohao_visibility_control_enabled = True
             actor.save_state = lambda: saved.append(dict(actor.state))
 
@@ -57,6 +62,28 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertNotIn("avatars", actor.state)
         self.assertTrue(saved)
         self.assertNotIn("avatars", saved[-1])
+        self.assertEqual(saved[-1]["next_small_world_time"], "")
+        self.assertEqual(saved[-1]["next_miracle_preach_time"], "")
+
+    def test_small_world_scheduler_tasks_are_not_registered_for_waaiging(self):
+        actor = WaaigingCultivator.__new__(WaaigingCultivator)
+        actor.enable_small_world = False
+        registered = []
+        actor.create_scheduler_task = lambda name, factory: registered.append(name)
+
+        actor.start_small_world_scheduler_tasks()
+
+        self.assertEqual(registered, [])
+
+    def test_small_world_scheduler_tasks_remain_registered_for_main(self):
+        actor = intelligent_cultivator.Cultivator.__new__(intelligent_cultivator.Cultivator)
+        actor.enable_small_world = True
+        registered = []
+        actor.create_scheduler_task = lambda name, factory: registered.append(name)
+
+        actor.start_small_world_scheduler_tasks()
+
+        self.assertEqual(registered, ["small_world", "miracle_preach"])
 
     def test_restricted_account_specs_support_both_accounts(self):
         actor = intelligent_cultivator.Cultivator.__new__(intelligent_cultivator.Cultivator)
@@ -94,6 +121,9 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertIn(".野外历练 深入", commands)
         self.assertNotIn(".野外历练", commands)
         self.assertFalse(any(command.startswith(".抚摸法宝") for command in commands))
+        self.assertNotIn(".小世界", commands)
+        self.assertNotIn(".显灵", commands)
+        self.assertNotIn(".神迹 布道", commands)
 
     def test_sect_join_cooldown_and_success_are_persisted(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)
@@ -185,9 +215,12 @@ class WaaigingAccountTests(unittest.TestCase):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)
         actor.enable_treasure_touch = False
         actor.enable_nurture_spirit = False
+        actor.enable_small_world = False
         stale = [
             ("next_treasure_touch_time", ".抚摸法宝 玄天斩灵剑", "2026-07-19 00:00:00", 3600),
             ("next_nurture_spirit_time", ".温养器灵 斩灵", "2026-07-19 00:00:00", 3600),
+            ("next_small_world_time", ".小世界", "2026-07-22 00:00:00", 3600),
+            ("next_miracle_preach_time", ".神迹 布道", "2026-07-22 00:00:00", 3600),
             ("next_rift_search_time", ".探寻裂缝", "2026-07-19 00:00:00", 3600),
         ]
 
