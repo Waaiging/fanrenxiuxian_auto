@@ -88,6 +88,77 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertEqual(result["status"], "exhausted")
         self.assertEqual(result["remaining"], 0)
 
+    def test_busy_target_response_is_final_and_retryable(self):
+        text = "天机繁忙！对方正在进行另一场因果纠缠，请稍候再试。"
+
+        self.assertTrue(duel_features.duel_text_is_final(text))
+        result = duel_features.parse_duel_result(text, "crayonxxin", "Waaiging")
+
+        self.assertEqual(result["status"], "busy")
+        self.assertEqual(result["outcome"], "目标繁忙")
+        self.assertEqual(result["wait_seconds"], duel_features.DUEL_BUSY_RETRY_SECONDS)
+
+    def test_busy_target_does_not_consume_attempt_and_retries_soon(self):
+        reservation = duel_features.reserve_duel_for_account("main")
+        result = duel_features.parse_duel_result(
+            "天机繁忙！对方正在进行另一场因果纠缠，请稍候再试。",
+            reservation["challenger_username"],
+            reservation["target_username"],
+        )
+
+        duel_features.finish_duel_reservation(reservation, result)
+
+        state = duel_features.load_duel_state()
+        queue = state["queues"][reservation["queue_key"]]
+        participant = queue["participants"][reservation["participant_key"]]
+        retry_delay = (duel_features.parse_duel_time(queue["next_at"]) - datetime.now()).total_seconds()
+        self.assertEqual(participant["attempts"], 0)
+        self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT)
+        self.assertEqual(participant["last_result"], "目标繁忙")
+        self.assertGreaterEqual(retry_delay, duel_features.DUEL_BUSY_RETRY_SECONDS - 2)
+        self.assertLessEqual(retry_delay, duel_features.DUEL_BUSY_RETRY_SECONDS)
+
+    def test_escape_result_is_settled_and_consumes_one_attempt(self):
+        text = "面对境界压制，@Ding303 凭借神通侥幸逃脱！(成功率: 16%)"
+        self.assertTrue(duel_features.duel_text_is_final(text))
+        result = duel_features.parse_duel_result(text, "Ding303", "Waaiging")
+        self.assertEqual(result["status"], "settled")
+        self.assertEqual(result["outcome"], "逃脱")
+
+        reservation = duel_features.reserve_duel_for_account("main")
+        duel_features.finish_duel_reservation(reservation, result)
+        participant = duel_features.load_duel_state()["queues"]["waaiging"]["participants"][
+            reservation["participant_key"]
+        ]
+        self.assertEqual(participant["attempts"], 1)
+        self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT - 1)
+
+    def test_same_target_is_blocked_across_queues_after_completion(self):
+        state = duel_features.load_duel_state(write_back=True)
+        titan = state["queues"]["titan"]
+        for key, participant in titan["participants"].items():
+            participant["enabled"] = key == "main|素缘子"
+        titan["participants"]["main|素缘子"]["target_username"] = "Waaiging"
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        first = duel_features.reserve_duel_for_account("main")
+        self.assertEqual(first["queue_key"], "waaiging")
+        duel_features.finish_duel_reservation(first, {
+            "status": "settled", "outcome": "失败", "remaining": 9,
+        })
+
+        state = duel_features.load_duel_state()
+        state["queues"]["titan"]["next_at"] = ""
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        blocked = duel_features.load_duel_state()["queues"]["titan"]
+        self.assertIn("@Waaiging", blocked["last_result"])
+        self.assertGreater(
+            duel_features.parse_duel_time(blocked["next_at"]),
+            datetime.now(),
+        )
+
     def test_finish_reanchors_interval_after_a_delayed_execution(self):
         reservation = duel_features.reserve_duel_for_account("main")
         state = duel_features.load_duel_state()
@@ -128,6 +199,50 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertEqual(message.id, 102)
         self.assertIn("胜者", text)
 
+    def test_final_report_wait_budget_covers_slow_bot_settlement(self):
+        command_id = 200
+        pending = SimpleNamespace(
+            id=201,
+            text="战斗结束，正在整理天道战报...",
+            reply_to=SimpleNamespace(reply_to_msg_id=command_id),
+        )
+        final = SimpleNamespace(
+            id=202,
+            text=FINAL_LOSS,
+            reply_to=SimpleNamespace(reply_to_msg_id=command_id),
+        )
+
+        class Client:
+            def __init__(self):
+                self.polls = 0
+
+            async def get_messages(self, chat_id, **kwargs):
+                if "ids" not in kwargs:
+                    return []
+                self.polls += 1
+                return final if self.polls >= 42 else pending
+
+        async def no_sleep(_seconds):
+            return None
+
+        actor = SimpleNamespace(client=Client(), target_chat_id=-1001, is_running=True)
+        clock = iter(range(1000))
+        with (
+            patch.object(duel_features.asyncio, "sleep", new=no_sleep),
+            patch.object(duel_features.time, "monotonic", side_effect=lambda: next(clock)),
+        ):
+            message, text = asyncio.run(
+                duel_features.wait_for_duel_result(
+                    actor,
+                    pending,
+                    command_msg_id=command_id,
+                    timeout=duel_features.DUEL_RESULT_WAIT_SECONDS,
+                )
+            )
+
+        self.assertEqual(message.id, 202)
+        self.assertIn("胜者", text)
+
     def test_event_recording_is_deduplicated(self):
         reservation = {
             "run_id": "run-1", "queue_key": "waaiging", "account": "main",
@@ -148,6 +263,120 @@ class DuelFeatureTests(unittest.TestCase):
                 "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
             }, handle, ensure_ascii=False)
         self.assertFalse(duel_features.titan_target_status()["ready"])
+
+    def test_titan_gate_accepts_manually_selected_pasture_mode(self):
+        duel_features.set_duel_control(False, "waaiging")
+        duel_features.set_titan_beast_mode("pasture")
+        with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
+            json.dump({
+                "current_identity": "主魂",
+                "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
+            }, handle, ensure_ascii=False)
+
+        status = duel_features.titan_target_status()
+        reservation = duel_features.reserve_duel_for_account("main")
+
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["desired_mode"], "pasture")
+        self.assertEqual(reservation["queue_key"], "titan")
+
+    def test_titan_gate_reports_send_restriction_when_selected_mode_is_not_applied(self):
+        duel_features.set_titan_beast_mode("deploy")
+        with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
+            json.dump({
+                "current_identity": "主魂",
+                "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
+                "telegram_send_protection_stop": {
+                    "reason": "write_restricted",
+                    "error": "CHAT_WRITE_FORBIDDEN",
+                },
+            }, handle, ensure_ascii=False)
+
+        status = duel_features.titan_target_status()
+
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["preparation_blocked"])
+        self.assertEqual(status["preparation_reason"], "小号当前无群组发送权限")
+
+    def test_titan_queue_exposes_send_restriction_in_waiting_result(self):
+        duel_features.set_duel_control(False, "waaiging")
+        duel_features.set_titan_beast_mode("deploy")
+        with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
+            json.dump({
+                "current_identity": "主魂",
+                "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
+                "telegram_send_protection_stop": {
+                    "reason": "write_restricted",
+                    "error": "CHAT_WRITE_FORBIDDEN",
+                },
+            }, handle, ensure_ascii=False)
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        state = duel_features.load_duel_state()
+        self.assertEqual(
+            state["queues"]["titan"]["last_result"],
+            "等待小号群组发送权限恢复后切换六翼出战",
+        )
+
+    def test_titan_preparation_applies_selected_pasture_mode_on_main_soul(self):
+        duel_features.set_titan_beast_mode("pasture")
+        state_path = duel_features.XIAOHAO_STATE_FILE
+
+        class Actor(duel_features.DuelMixin):
+            account_key = "xiaohao"
+            beast_lock = None
+
+            def __init__(self):
+                self.current_identity = "缘生子"
+                self.state = {
+                    "current_identity": self.current_identity,
+                    "best_beast_name": "六翼",
+                    "best_beast_status": "出战中",
+                    "beasts_cache": [{"full_name": "六翼", "status": "出战中"}],
+                }
+                self.sent = []
+                self.save_state()
+
+            def save_state(self):
+                with open(state_path, "w", encoding="utf-8") as handle:
+                    json.dump(self.state, handle, ensure_ascii=False)
+
+            async def switch_back_to_main(self, force=False):
+                self.sent.append("切回主魂")
+                self.current_identity = "主魂"
+                self.state["current_identity"] = "主魂"
+                self.save_state()
+
+            def get_cached_beast_by_name(self, name):
+                return self.state["beasts_cache"][0]
+
+            async def ensure_focus_beast_ready_for_pasture(self):
+                self.sent.append(".灵兽休息 六翼")
+                self.state["best_beast_status"] = "休息中"
+                self.state["beasts_cache"][0]["status"] = "休息中"
+                self.save_state()
+                return True
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return "六翼 等1只灵兽欢快地冲入了万兽谷！它将在4小时后自动归来。"
+
+            @staticmethod
+            def response_text(response):
+                return str(response or "")
+
+            def record_auto_pasture_response(self, *args, **kwargs):
+                self.state["best_beast_status"] = "放养中"
+                self.state["beasts_cache"][0]["status"] = "放养中"
+                self.save_state()
+                return True
+
+        actor = Actor()
+        success, detail = asyncio.run(actor.prepare_titan_target_for_duel())
+
+        self.assertTrue(success, detail)
+        self.assertEqual(actor.sent, ["切回主魂", ".灵兽休息 六翼", ".一键放养"])
+        self.assertIn("六翼已放养", detail)
 
     def test_waaiging_queue_skips_xiaohao_only_while_write_restricted(self):
         state = duel_features.load_duel_state(write_back=True)
@@ -174,6 +403,7 @@ class DuelFeatureTests(unittest.TestCase):
         state = duel_features.load_duel_state()
         state["queues"]["waaiging"]["cursor"] = 2
         state["queues"]["waaiging"]["next_at"] = ""
+        state["target_next_at"] = {}
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
             json.dump({

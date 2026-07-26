@@ -46,7 +46,13 @@ from command_modules import (
     treasure_touch_plan,
     yuanying_out_plan,
 )
-from duel_features import duel_dashboard_payload, set_duel_control, set_duel_participant_control
+from duel_features import (
+    duel_dashboard_payload,
+    set_duel_control,
+    set_duel_participant_control,
+    set_titan_beast_mode,
+    titan_target_status,
+)
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -4256,12 +4262,15 @@ def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate
 
 @app.post("/api/duels/control")
 async def duel_control(payload: dict = Body(...), username: str = Depends(authenticate)):
-    """Pause or resume all duel automation, a queue, or one identity."""
+    """Update duel automation, an identity, or the Titan target beast mode."""
     queue_key = str(payload.get("queue") or "").strip().lower()
     participant_key = str(payload.get("participant") or "").strip()
+    beast_mode = payload.get("beast_mode")
     enabled = bool(payload.get("enabled"))
     try:
-        if participant_key:
+        if beast_mode is not None:
+            data = set_titan_beast_mode(beast_mode)
+        elif participant_key:
             data = set_duel_participant_control(
                 enabled,
                 participant_key,
@@ -4275,6 +4284,8 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
             message = "未知斗法身份"
         elif message == "invalid duel target username":
             message = "挑战对象必须是有效的 Telegram 用户名"
+        elif message == "invalid titan beast mode":
+            message = "小号主魂灵兽状态仅支持出战或放养"
         else:
             message = "未知斗法队列"
         return {"success": False, "msg": message}
@@ -4293,6 +4304,10 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
         "participant": participant_key,
         "participant_enabled": bool(participant_state.get("enabled")) if participant_state else None,
         "target": participant_state.get("target_username", "") if participant_state else None,
+        "beast_mode": data.get("queues", {}).get("titan", {}).get("beast_mode"),
+        "target_status": titan_target_status(
+            data.get("queues", {}).get("titan", {}).get("beast_mode")
+        ) if beast_mode is not None else None,
         "queue_enabled": (
             bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
             if queue_key else None

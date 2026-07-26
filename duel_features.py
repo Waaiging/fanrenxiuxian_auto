@@ -28,11 +28,17 @@ XIAOHAO_STATE_FILE = os.path.join(CONFIG_DIR, "state_xiaohao.json")
 DUEL_INTERVAL_SECONDS = 6 * 60
 DUEL_DAILY_LIMIT = 10
 DUEL_LEASE_SECONDS = 4 * 60
-DUEL_RESULT_WAIT_SECONDS = 35
+DUEL_RESULT_WAIT_SECONDS = 90
 DUEL_POLL_SECONDS = 3
 DUEL_RETENTION_DAYS = 30
 DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
+DUEL_BUSY_RETRY_SECONDS = 60
 DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
+TITAN_BEAST_MODE_DEFAULT = "deploy"
+TITAN_BEAST_MODE_LABELS = {
+    "deploy": "出战",
+    "pasture": "放养",
+}
 
 DUEL_ACCOUNT_LABELS = {
     "main": "主号",
@@ -104,6 +110,15 @@ def normalize_duel_target(value, fallback=""):
     return target
 
 
+def normalize_titan_beast_mode(value):
+    mode = str(value or TITAN_BEAST_MODE_DEFAULT).strip().lower()
+    aliases = {"出战": "deploy", "放养": "pasture"}
+    mode = aliases.get(mode, mode)
+    if mode not in TITAN_BEAST_MODE_LABELS:
+        raise ValueError("invalid titan beast mode")
+    return mode
+
+
 def _new_participant_state():
     return {
         "enabled": True,
@@ -119,7 +134,7 @@ def _new_participant_state():
 
 
 def _new_queue_state(queue_key):
-    return {
+    state = {
         "enabled": True,
         "target": DUEL_QUEUES[queue_key]["target"],
         "cursor": 0,
@@ -134,6 +149,9 @@ def _new_queue_state(queue_key):
             for item in DUEL_QUEUES[queue_key]["participants"]
         },
     }
+    if queue_key == "titan":
+        state["beast_mode"] = TITAN_BEAST_MODE_DEFAULT
+    return state
 
 
 def duel_default_state():
@@ -142,6 +160,7 @@ def duel_default_state():
         "enabled": True,
         "date": duel_date(),
         "updated_at": duel_time(),
+        "target_next_at": {},
         "queues": {key: _new_queue_state(key) for key in DUEL_QUEUES},
     }
 
@@ -192,6 +211,20 @@ def _ensure_duel_state_shape(data, reset_daily=True):
         data = duel_default_state()
     data.setdefault("version", 1)
     data.setdefault("enabled", True)
+    target_next_at = data.setdefault("target_next_at", {})
+    if not isinstance(target_next_at, dict):
+        target_next_at = {}
+        data["target_next_at"] = target_next_at
+    normalized_targets = {}
+    for target, value in target_next_at.items():
+        try:
+            target_key = normalize_duel_target(target).lower()
+        except ValueError:
+            continue
+        ready_at = parse_duel_time(value)
+        if target_key and ready_at:
+            normalized_targets[target_key] = duel_time(ready_at)
+    data["target_next_at"] = normalized_targets
     queues = data.setdefault("queues", {})
     for queue_key, config in DUEL_QUEUES.items():
         queue = queues.setdefault(queue_key, _new_queue_state(queue_key))
@@ -204,6 +237,11 @@ def _ensure_duel_state_shape(data, reset_daily=True):
         queue.setdefault("last_result", "")
         queue.setdefault("in_flight", {})
         queue.setdefault("preparation", {})
+        if queue_key == "titan":
+            try:
+                queue["beast_mode"] = normalize_titan_beast_mode(queue.get("beast_mode"))
+            except ValueError:
+                queue["beast_mode"] = TITAN_BEAST_MODE_DEFAULT
         participants = queue.setdefault("participants", {})
         expected_keys = set()
         for item in config["participants"]:
@@ -304,11 +342,64 @@ def set_duel_participant_control(enabled, participant_key, target_username=None)
         return data
 
 
+def set_titan_beast_mode(mode):
+    mode = normalize_titan_beast_mode(mode)
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        queue = data["queues"]["titan"]
+        queue["beast_mode"] = mode
+        queue["next_at"] = ""
+        queue["target_ready_at"] = ""
+        queue["last_result"] = f"已指定小号主魂六翼{TITAN_BEAST_MODE_LABELS[mode]}"
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
 def _lease_active(record, now=None):
     if not isinstance(record, dict) or not record:
         return False
     expires = parse_duel_time(record.get("lease_until"))
     return bool(expires and expires > (now or duel_now()))
+
+
+def _queue_in_flight_target(queue_key, queue):
+    in_flight = queue.get("in_flight") or {}
+    try:
+        explicit_target = normalize_duel_target(in_flight.get("target_username"))
+    except ValueError:
+        explicit_target = ""
+    if explicit_target:
+        return explicit_target
+    participant_key = str(in_flight.get("participant_key") or "")
+    participant = duel_participant_config(queue_key, participant_key)
+    if not participant:
+        return ""
+    participant_state = (queue.get("participants") or {}).get(participant_key) or {}
+    try:
+        return (
+            normalize_duel_target(participant_state.get("target_username"))
+            or DUEL_QUEUES[queue_key]["target"]
+        )
+    except ValueError:
+        return DUEL_QUEUES[queue_key]["target"]
+
+
+def _target_blocked_until(data, target_username, now=None):
+    now = now or duel_now()
+    target_key = normalize_duel_target(target_username).lower()
+    blocked_until = parse_duel_time((data.get("target_next_at") or {}).get(target_key))
+    for queue_key, queue in (data.get("queues") or {}).items():
+        in_flight = queue.get("in_flight") or {}
+        if not _lease_active(in_flight, now):
+            continue
+        active_target = _queue_in_flight_target(queue_key, queue)
+        if active_target.lower() != target_key:
+            continue
+        lease_until = parse_duel_time(in_flight.get("lease_until"))
+        if lease_until and (blocked_until is None or lease_until > blocked_until):
+            blocked_until = lease_until
+    return blocked_until if blocked_until and blocked_until > now else None
 
 
 def _next_day_time(now=None):
@@ -317,13 +408,33 @@ def _next_day_time(now=None):
     return duel_time(tomorrow)
 
 
-def titan_target_status():
+def _configured_titan_beast_mode():
+    try:
+        data = _read_duel_state_unlocked()
+        return normalize_titan_beast_mode(
+            ((data.get("queues") or {}).get("titan") or {}).get("beast_mode")
+        )
+    except Exception:
+        return TITAN_BEAST_MODE_DEFAULT
+
+
+def titan_target_status(desired_mode=None):
+    try:
+        desired_mode = normalize_titan_beast_mode(
+            desired_mode if desired_mode is not None else _configured_titan_beast_mode()
+        )
+    except ValueError:
+        desired_mode = TITAN_BEAST_MODE_DEFAULT
     result = {
         "ready": False,
         "current_identity": "",
         "beast": "六翼",
         "beast_status": "",
+        "desired_mode": desired_mode,
+        "desired_label": TITAN_BEAST_MODE_LABELS[desired_mode],
         "state_updated_at": "",
+        "preparation_blocked": False,
+        "preparation_reason": "",
     }
     try:
         with open(XIAOHAO_STATE_FILE, "r", encoding="utf-8") as handle:
@@ -337,10 +448,16 @@ def titan_target_status():
         if not beast_status and str(state.get("best_beast_name") or "").startswith("六翼"):
             beast_status = str(state.get("best_beast_status") or "")
         result["beast_status"] = beast_status
-        result["ready"] = result["current_identity"] == "主魂" and "出战" in beast_status
+        desired_status = "出战" if desired_mode == "deploy" else "放养"
+        result["ready"] = result["current_identity"] == "主魂" and desired_status in beast_status
         result["state_updated_at"] = duel_time(datetime.fromtimestamp(os.path.getmtime(XIAOHAO_STATE_FILE)))
     except Exception:
         pass
+    if not result["ready"]:
+        send_status = xiaohao_duel_send_status()
+        if send_status.get("restricted"):
+            result["preparation_blocked"] = True
+            result["preparation_reason"] = "小号当前无群组发送权限"
     return result
 
 
@@ -385,11 +502,11 @@ def claim_titan_preparation(account):
     if str(account or "") != "xiaohao":
         return None
     now = duel_now()
-    if titan_target_status()["ready"]:
-        return None
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
         queue = data["queues"]["titan"]
+        if titan_target_status(queue.get("beast_mode"))["ready"]:
+            return None
         if not data.get("enabled") or not queue.get("enabled") or not _queue_due(queue, now, 30):
             return None
         if not any(
@@ -451,6 +568,8 @@ def reserve_duel_for_account(account):
             cursor = int(queue.get("cursor") or 0) % len(participants)
             selected = None
             selected_index = None
+            selected_target = ""
+            blocked_targets = []
             skipped_restricted_xiaohao = False
             for offset in range(len(participants)):
                 index = (cursor + offset) % len(participants)
@@ -470,8 +589,14 @@ def reserve_duel_for_account(account):
                 if xiaohao_send.get("restricted") and item["account"] == "xiaohao":
                     skipped_restricted_xiaohao = True
                     continue
+                target_username = normalize_duel_target(pstate.get("target_username")) or config["target"]
+                blocked_until = _target_blocked_until(data, target_username, now)
+                if blocked_until:
+                    blocked_targets.append((blocked_until, target_username))
+                    continue
                 selected = item
                 selected_index = index
+                selected_target = target_username
                 break
             if selected is None:
                 if skipped_restricted_xiaohao:
@@ -479,6 +604,12 @@ def reserve_duel_for_account(account):
                         now + timedelta(seconds=DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS)
                     )
                     queue["last_result"] = "等待小号发送权限恢复"
+                    dirty = True
+                    continue
+                if blocked_targets:
+                    blocked_until, target_username = min(blocked_targets, key=lambda item: item[0])
+                    queue["next_at"] = duel_time(blocked_until)
+                    queue["last_result"] = f"等待 @{target_username} 可再次斗法"
                     dirty = True
                     continue
                 if any(not bool(state.get("enabled", True)) for state in queue.get("participants", {}).values()):
@@ -493,11 +624,25 @@ def reserve_duel_for_account(account):
             if selected["account"] != account:
                 continue
 
-            selected_state = queue["participants"].get(duel_participant_key(selected["account"], selected["identity"])) or {}
-            target_username = normalize_duel_target(selected_state.get("target_username")) or config["target"]
-            if queue_key == "titan" and target_username.lower() == "titancreeper" and not titan_target_status()["ready"]:
-                if queue.get("last_result") != "等待小号主魂与六翼出战":
-                    queue["last_result"] = "等待小号主魂与六翼出战"
+            target_username = selected_target
+            if (
+                queue_key == "titan"
+                and target_username.lower() == "titancreeper"
+            ):
+                titan_status = titan_target_status(queue.get("beast_mode"))
+                if titan_status["ready"]:
+                    titan_status = None
+            else:
+                titan_status = None
+            if titan_status is not None:
+                desired_label = TITAN_BEAST_MODE_LABELS[queue.get("beast_mode", TITAN_BEAST_MODE_DEFAULT)]
+                waiting_result = (
+                    f"等待小号群组发送权限恢复后切换六翼{desired_label}"
+                    if titan_status.get("preparation_blocked")
+                    else f"等待小号主魂与六翼{desired_label}"
+                )
+                if queue.get("last_result") != waiting_result:
+                    queue["last_result"] = waiting_result
                     queue["next_at"] = duel_time(now + timedelta(seconds=60))
                     dirty = True
                 continue
@@ -507,12 +652,16 @@ def reserve_duel_for_account(account):
             queue["cursor"] = (selected_index + 1) % len(participants)
             queue["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
             queue["last_attempt_at"] = duel_time(now)
+            data.setdefault("target_next_at", {})[target_username.lower()] = duel_time(
+                now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+            )
             queue["in_flight"] = {
                 "run_id": run_id,
                 "participant_key": key,
                 "owner": account,
                 "started_at": duel_time(now),
                 "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
+                "target_username": target_username,
             }
             pstate = queue["participants"][key]
             pstate["status"] = "in_flight"
@@ -569,9 +718,28 @@ def finish_duel_reservation(reservation, result):
         pstate["last_result"] = outcome
         queue["last_result"] = f"{reservation['identity']} · {outcome}"
         queue["in_flight"] = {}
-        completed_next_at = now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+        retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else DUEL_INTERVAL_SECONDS
+        if status == "cooldown":
+            retry_seconds = max(retry_seconds, int(result.get("wait_seconds") or 0))
+        completed_next_at = now + timedelta(seconds=retry_seconds)
         reserved_next_at = parse_duel_time(queue.get("next_at"))
-        queue["next_at"] = duel_time(max(completed_next_at, reserved_next_at)) if reserved_next_at else duel_time(completed_next_at)
+        if status == "busy":
+            queue["next_at"] = duel_time(completed_next_at)
+        else:
+            queue["next_at"] = (
+                duel_time(max(completed_next_at, reserved_next_at))
+                if reserved_next_at else duel_time(completed_next_at)
+            )
+        target_key = normalize_duel_target(reservation.get("target_username")).lower()
+        target_next_at = data.setdefault("target_next_at", {})
+        reserved_target_next_at = parse_duel_time(target_next_at.get(target_key))
+        if status == "busy":
+            target_next_at[target_key] = duel_time(completed_next_at)
+        else:
+            target_next_at[target_key] = (
+                duel_time(max(completed_next_at, reserved_target_next_at))
+                if reserved_target_next_at else duel_time(completed_next_at)
+            )
         data["updated_at"] = duel_time(now)
         _atomic_write_json(DUEL_STATE_FILE, data)
 
@@ -619,6 +787,7 @@ def duel_text_is_final(text):
         "胜者：", "胜者:", "胜负已分", "今日神念", "今日剩余神念",
         "元神尚未平复", "每日可主动斗法", "无力再战",
         "尚未踏入仙途", "无法再次斗法", "不可斗法", "不能斗法",
+        "天机繁忙", "因果纠缠", "侥幸逃脱",
     )) and not duel_text_is_pending(clean))
 
 
@@ -654,6 +823,15 @@ def parse_duel_result(text, challenger_username, target_username):
         return result
     if "元神尚未平复" in clean or "无法再次斗法" in clean:
         result.update(status="cooldown", outcome="目标冷却", wait_seconds=duel_wait_seconds(clean))
+        return result
+    if "天机繁忙" in clean or "因果纠缠" in clean:
+        result.update(status="busy", outcome="目标繁忙", wait_seconds=DUEL_BUSY_RETRY_SECONDS)
+        return result
+    escaped = re.search(r"@([A-Za-z0-9_]+)[^\n]*侥幸逃脱", clean, re.I)
+    if escaped:
+        result["status"] = "settled"
+        challenger = str(challenger_username or "").lower().lstrip("@")
+        result["outcome"] = "逃脱" if escaped.group(1).lower() == challenger else "目标逃脱"
         return result
     if "尚未踏入仙途" in clean or "不可斗法" in clean or "不能斗法" in clean:
         result.update(status="unavailable", outcome="目标不可用")
@@ -844,7 +1022,8 @@ def _duel_event_rows(query_date, limit):
 def duel_dashboard_payload(date="", limit=200):
     data = load_duel_state(write_back=False)
     query_date = str(date or "").strip() or duel_date()
-    titan_status = titan_target_status()
+    titan_mode = data["queues"]["titan"].get("beast_mode", TITAN_BEAST_MODE_DEFAULT)
+    titan_status = titan_target_status(titan_mode)
     queues = []
     target_options = sorted({config["target"] for config in DUEL_QUEUES.values()}, key=str.lower)
     for queue_key, config in DUEL_QUEUES.items():
@@ -891,7 +1070,7 @@ def duel_dashboard_payload(date="", limit=200):
             "last_result": queue_state.get("last_result") or "",
             "in_flight": queue_state.get("in_flight") or {},
             "participants": participant_rows,
-            "target_status": titan_status if queue_key == "titan" and titan_required else {"ready": True},
+            "target_status": titan_status if queue_key == "titan" else {"ready": True},
             "requires_titan_preparation": queue_key == "titan" and titan_required,
         })
     rows = _duel_event_rows(query_date, limit)
@@ -927,35 +1106,11 @@ class DuelMixin:
         logger = self.duel_logger()
         status = titan_target_status()
         if status["ready"]:
-            return True, "TitanCreeper 主魂与六翼已就绪"
+            return True, f"TitanCreeper 主魂与六翼已{status['desired_label']}"
 
         beast_lock = getattr(self, "beast_lock", None)
 
         async def prepare():
-            focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
-            beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
-            if "出战" not in beast_status:
-                if "放养" in beast_status:
-                    rest_resp = await self.send_and_wait_feedback(
-                        ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
-                    )
-                    rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
-                    rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
-                    if rest_status and hasattr(self, "set_best_beast_status"):
-                        self.set_best_beast_status("六翼", rest_status)
-                    if not rest_status:
-                        return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
-                    await asyncio.sleep(2)
-                deploy_resp = await self.send_and_wait_feedback(
-                    ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
-                )
-                deploy_text = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
-                if not self.is_beast_deploy_success(deploy_text):
-                    if hasattr(self, "record_beast_current_status_response"):
-                        self.record_beast_current_status_response(deploy_text, "六翼", source="斗法准备")
-                    return False, f"六翼出战失败：{deploy_text[:80] or '无回复'}"
-                if hasattr(self, "set_best_beast_status"):
-                    self.set_best_beast_status("六翼", "出战中")
             if str(getattr(self, "current_identity", "") or "") != "主魂":
                 switch_back = getattr(self, "switch_back_to_main", None)
                 if not callable(switch_back):
@@ -963,8 +1118,70 @@ class DuelMixin:
                 await switch_back(force=True)
                 if str(getattr(self, "current_identity", "") or "") != "主魂":
                     return False, "小号主魂切换未确认"
-            ready = titan_target_status()["ready"]
-            return ready, "TitanCreeper 主魂与六翼已就绪" if ready else "小号状态文件尚未确认就绪"
+
+            desired = titan_target_status()
+            if desired["ready"]:
+                return True, f"TitanCreeper 主魂与六翼已{desired['desired_label']}"
+
+            focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
+            beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
+            last_response = ""
+            if desired["desired_mode"] == "deploy":
+                if "出战" not in beast_status:
+                    if "放养" in beast_status:
+                        rest_resp = await self.send_and_wait_feedback(
+                            ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
+                        )
+                        rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
+                        rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
+                        if rest_status and hasattr(self, "set_best_beast_status"):
+                            self.set_best_beast_status("六翼", rest_status)
+                        if not rest_status:
+                            return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
+                        await asyncio.sleep(2)
+                    deploy_resp = await self.send_and_wait_feedback(
+                        ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
+                    )
+                    last_response = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
+                    if not self.is_beast_deploy_success(last_response):
+                        if hasattr(self, "record_beast_current_status_response"):
+                            self.record_beast_current_status_response(last_response, "六翼", source="斗法准备")
+                        return False, f"六翼出战失败：{last_response[:80] or '无回复'}"
+                    if hasattr(self, "set_best_beast_status"):
+                        self.set_best_beast_status("六翼", "出战中")
+            elif "放养" not in beast_status:
+                prepare_pasture = getattr(self, "ensure_focus_beast_ready_for_pasture", None)
+                if not callable(prepare_pasture) or not await prepare_pasture():
+                    return False, "六翼暂时无法放养"
+                focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
+                beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
+                if "放养" not in beast_status:
+                    cache = list(self.state.get("beasts_cache") or [])
+                    best_name = str(self.state.get("best_beast_name") or "六翼")
+                    best_status = str(self.state.get("best_beast_status") or beast_status)
+                    pasture_resp = await self.send_and_wait_feedback(
+                        ".一键放养", timeout=60, max_retries=0, force_identity_check=True
+                    )
+                    last_response = self.response_text(pasture_resp) if hasattr(self, "response_text") else str(pasture_resp or "")
+                    if hasattr(self, "record_auto_pasture_response"):
+                        self.record_auto_pasture_response(
+                            last_response,
+                            cache,
+                            best_name,
+                            best_status,
+                        )
+                    elif hasattr(self, "is_pasture_success") and self.is_pasture_success(last_response):
+                        if hasattr(self, "set_best_beast_status"):
+                            self.set_best_beast_status("六翼", "放养中")
+
+            current = titan_target_status()
+            if current["ready"]:
+                return True, f"TitanCreeper 主魂与六翼已{current['desired_label']}"
+            actual = current.get("beast_status") or "状态未知"
+            detail = f"六翼未达到{current['desired_label']}状态（当前：{actual}）"
+            if last_response:
+                detail = f"{detail}：{last_response[:80]}"
+            return False, detail
 
         try:
             if beast_lock is None:

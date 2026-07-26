@@ -62,6 +62,22 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(participant["target_username"], "RememberMe")
         self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT)
 
+    def test_titan_beast_mode_is_persisted_and_survives_daily_reset(self):
+        duel_features.set_titan_beast_mode("pasture")
+
+        state = duel_features.load_duel_state()
+        self.assertEqual(state["queues"]["titan"]["beast_mode"], "pasture")
+        self.assertIn("六翼放养", state["queues"]["titan"]["last_result"])
+
+        state["queues"]["titan"]["next_at"] = "2099-01-01 00:00:00"
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+        state = duel_features.set_titan_beast_mode("pasture")
+        self.assertEqual(state["queues"]["titan"]["next_at"], "")
+
+        state["date"] = "2000-01-01"
+        reset = duel_features._ensure_duel_state_shape(state)
+        self.assertEqual(reset["queues"]["titan"]["beast_mode"], "pasture")
+
     def test_dashboard_payload_returns_identity_controls(self):
         duel_features.set_duel_participant_control(False, "main|无咎子", "DashboardTarget")
 
@@ -77,9 +93,23 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(row["target_username"], "DashboardTarget")
         self.assertIn("Waaiging", payload["target_options"])
 
+    def test_dashboard_payload_returns_titan_beast_mode(self):
+        duel_features.set_titan_beast_mode("放养")
+
+        payload = duel_features.duel_dashboard_payload()
+        titan = next(queue for queue in payload["queues"] if queue["key"] == "titan")
+
+        self.assertEqual(titan["target_status"]["desired_mode"], "pasture")
+        self.assertEqual(titan["target_status"]["desired_label"], "放养")
+        self.assertIn("preparation_blocked", titan["target_status"])
+
     def test_invalid_target_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "invalid duel target username"):
             duel_features.set_duel_participant_control(True, "main|无咎子", "bad target!")
+
+    def test_invalid_titan_beast_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid titan beast mode"):
+            duel_features.set_titan_beast_mode("rest")
 
 
 if __name__ == "__main__":

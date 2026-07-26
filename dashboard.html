@@ -256,6 +256,17 @@
         .duel-chances { color: #d1fae5; font-family: 'JetBrains Mono', monospace; font-weight: 800; }
         .duel-target-gate { color: #fbbf24; }
         .duel-target-gate.ready { color: #34d399; }
+        .duel-target-gate.blocked { color: #f87171; }
+        .duel-queue-foot { min-height: 3.2rem; padding: 0.65rem 0.8rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border-top: 1px solid var(--border-color); }
+        .duel-gate-stack { min-width: 0; display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
+        .duel-beast-control { display: inline-flex; align-items: center; gap: 0.45rem; }
+        .duel-beast-name { color: var(--text-secondary); font-size: 0.68rem; white-space: nowrap; }
+        .duel-beast-modes { display: inline-flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; background: rgba(0,0,0,0.24); }
+        .duel-beast-mode { min-width: 3.8rem; height: 1.8rem; padding: 0 0.48rem; display: inline-flex; align-items: center; justify-content: center; gap: 0.28rem; border: 0; border-right: 1px solid var(--border-color); border-radius: 0; background: transparent; color: var(--text-secondary); font-size: 0.68rem; font-weight: 800; cursor: pointer; }
+        .duel-beast-mode:last-child { border-right: 0; }
+        .duel-beast-mode svg { width: 0.78rem; height: 0.78rem; }
+        .duel-beast-mode.is-active { background: rgba(91,184,255,0.16); color: #bae6fd; }
+        .duel-beast-mode:disabled { cursor: wait; opacity: 0.55; }
         .duel-table-wrap { max-height: 430px; overflow: auto; }
         .duel-table { min-width: 1080px; }
         .duel-result { display: inline-flex; align-items: center; justify-content: center; min-width: 4rem; border-radius: 999px; padding: 0.16rem 0.46rem; font-size: 0.7rem; font-weight: 900; white-space: nowrap; }
@@ -321,6 +332,7 @@
             .log-filter-summary { text-align: left; min-width: 0; }
             .duel-queue-grid { grid-template-columns: 1fr; }
             .duel-global-control { margin-left: 0; }
+            .duel-queue-foot { align-items: flex-start; flex-direction: column; }
             .log-search-row { flex-wrap: wrap; }
             .log-search-row .log-input { flex-basis: 100%; }
             .command-row { grid-template-columns: 1fr auto; gap: 0.5rem 0.65rem; font-size: 0.88rem; }
@@ -2652,9 +2664,24 @@
             if (queueGrid) {
                 queueGrid.innerHTML = queues.map(queue => {
                     const gate = queue.target_status || {ready: true};
+                    const beastMode = gate.desired_mode === 'pasture' ? 'pasture' : 'deploy';
+                    const gateBlocked = Boolean(!gate.ready && gate.preparation_blocked);
                     const gateText = queue.key === 'titan'
-                        ? (gate.ready ? `主魂 · ${gate.beast || '六翼'}出战` : `${gate.current_identity || '身份未知'} · ${gate.beast_status || '六翼未就绪'}`)
+                        ? (gate.ready
+                            ? `实际 · 主魂 · ${gate.beast || '六翼'}${gate.desired_label || '出战'}`
+                            : (gateBlocked
+                                ? `小号无发送权限 · ${gate.beast || '六翼'}${gate.beast_status || '状态未知'}`
+                                : `实际 · ${gate.current_identity || '身份未知'} · ${gate.beast || '六翼'}${gate.beast_status || '状态未知'}`))
                         : '目标可挑战';
+                    const beastControl = queue.key === 'titan' ? `
+                        <div class="duel-beast-control">
+                            <span class="duel-beast-name">目标 · 小号主魂 · ${escapeHtml(gate.beast || '六翼')}</span>
+                            <div class="duel-beast-modes" role="group" aria-label="小号主魂灵兽状态">
+                                <button class="duel-beast-mode ${beastMode === 'deploy' ? 'is-active' : ''}" type="button" aria-pressed="${beastMode === 'deploy'}" title="指定出战" ${duelControlPending ? 'disabled' : ''} onclick="setDuelBeastMode('deploy')"><i data-lucide="swords" aria-hidden="true"></i>出战</button>
+                                <button class="duel-beast-mode ${beastMode === 'pasture' ? 'is-active' : ''}" type="button" aria-pressed="${beastMode === 'pasture'}" title="指定放养" ${duelControlPending ? 'disabled' : ''} onclick="setDuelBeastMode('pasture')"><i data-lucide="sprout" aria-hidden="true"></i>放养</button>
+                            </div>
+                        </div>
+                    ` : '';
                     return `
                         <article class="duel-queue-card">
                             <div class="duel-queue-head">
@@ -2686,8 +2713,11 @@
                                     </div>
                                 `).join('')}
                             </div>
-                            <div class="duel-queue-head">
-                                <span class="duel-target-gate ${gate.ready ? 'ready' : ''}">${escapeHtml(gateText)}</span>
+                            <div class="duel-queue-foot">
+                                <div class="duel-gate-stack">
+                                    <span class="duel-target-gate ${gate.ready ? 'ready' : ''} ${gateBlocked ? 'blocked' : ''}" title="${escapeHtml(gate.preparation_reason || '')}">${escapeHtml(gateText)}</span>
+                                    ${beastControl}
+                                </div>
                                 <span class="duel-queue-meta">默认目标 ${escapeHtml(queue.target || '')}</span>
                             </div>
                         </article>
@@ -2766,6 +2796,27 @@
             } catch (error) {
                 console.error('Duel control failed:', error);
                 alert(`斗法控制失败：${error.message || error}`);
+            } finally {
+                duelControlPending = false;
+                await updateDuelDashboard(true);
+            }
+        }
+
+        async function setDuelBeastMode(mode) {
+            if (duelControlPending || !['deploy', 'pasture'].includes(mode)) return;
+            duelControlPending = true;
+            renderDuelDashboard();
+            try {
+                const response = await fetch(apiUrl('/api/duels/control'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({beast_mode: mode})
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+            } catch (error) {
+                console.error('Duel beast mode control failed:', error);
+                alert(`小号主魂灵兽设置失败：${error.message || error}`);
             } finally {
                 duelControlPending = false;
                 await updateDuelDashboard(true);
