@@ -837,6 +837,7 @@ def text_response_family(text):
         "每日献祭", "九幽煞气", "血洗功成", "血洗山林",
         "魔影", "魔域裂隙", "召唤成功", "镇压成功",
         "囚禁魂魄", "被强行打入", "煞气不足", "化功为煞",
+        "刚施展过此术", "经脉尚在恢复", "转化失败", "煞气反噬",
         "幡魂谱系精进",
     ]):
         return "yinluo"
@@ -1001,13 +1002,21 @@ def feedback_response_matches_command(command, text):
             "赠送成功", "成功赠送", "已赠送", "送出了", "赠予",
         ])
     if expected == "yinluo":
+        cmd = str(command or "").strip()
+        convert_markers = [
+            "化功为煞", "转化成功", "转化失败", "开始运转魔功",
+            "煞气池增加了", "刚施展过此术", "经脉尚在恢复", "煞气反噬",
+        ]
+        if cmd.startswith(".化功为煞"):
+            return any(k in clean for k in convert_markers)
+        if any(k in clean for k in convert_markers):
+            return False
         return any(k in clean for k in [
             "阴罗幡", "阴罗宗", "阴罗本幡", "血煞幡", "炼化槽",
             "每日献祭", "九幽煞气", "今日已献祭",
             "血洗功成", "血洗山林", "山林的生灵尚未恢复",
             "魔影", "魔域裂隙", "召唤成功", "镇压成功",
             "被强行打入", "煞气不足", "魂魄袋中没有",
-            "化功为煞", "转化成功", "开始运转魔功",
             "安抚成功", "收取成功", "幡魂谱系精进",
             "升级成功", "缺少材料",
         ])

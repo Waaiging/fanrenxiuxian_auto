@@ -21,6 +21,7 @@ YINLUO_MASTER_COMMAND = ".我的阴罗幡"
 YINLUO_SOUL = "凶兽戾魄"
 YINLUO_REFINE_COST_SHA = 1000
 YINLUO_CONVERT_COMMAND = ".化功为煞 10000"
+YINLUO_CONVERT_FAILURE_RETRY_SECONDS = 60 * 60  # 明确转化失败后固定等待 1 小时
 YINLUO_RETRY_SECONDS = 10 * 60              # 未知/短失败的保守重试间隔
 YINLUO_SYNC_SECONDS = 30 * 60               # 状态缓存最多 30 分钟刷新一次
 YINLUO_IMPENDING_GUARD_SECONDS = 120        # 到点前 2 分钟阻止其他流程抢身份
@@ -244,11 +245,21 @@ def parse_yinluo_convert(text):
         return {"matched": True, "status": "success", "sha_gain": int(success.group(1)), "cooldown_seconds": 0}
     if "开始运转魔功" in clean:
         return {"matched": True, "status": "pending", "sha_gain": 0, "cooldown_seconds": 0}
-    cooldown_seconds = _parse_duration_seconds(clean)
-    if cooldown_seconds > 0 and any(key in clean for key in ("失败", "冷却", "请在", "后再", "尚需", "无法", "修为不足")):
+
+    # 只解析明确的重试时间，避免把“15分钟内闭关收益降低”等反噬时长当成冷却。
+    cooldown = re.search(r"请在\s*([^后\n]+?)\s*后(?:再试|重试|再来|再行)", clean)
+    cooldown_seconds = _parse_duration_seconds(cooldown.group(1)) if cooldown else 0
+    if cooldown_seconds > 0:
         return {"matched": True, "status": "cooldown", "sha_gain": 0, "cooldown_seconds": cooldown_seconds}
-    if "修为不足" in clean or "无法" in clean or "失败" in clean:
-        return {"matched": True, "status": "blocked", "sha_gain": 0, "cooldown_seconds": 3600}
+    if any(key in clean for key in ("转化失败", "化功为煞失败", "煞气反噬")):
+        return {
+            "matched": True,
+            "status": "failed",
+            "sha_gain": 0,
+            "cooldown_seconds": YINLUO_CONVERT_FAILURE_RETRY_SECONDS,
+        }
+    if "修为不足" in clean or "无法" in clean:
+        return {"matched": True, "status": "blocked", "sha_gain": 0, "cooldown_seconds": YINLUO_CONVERT_FAILURE_RETRY_SECONDS}
     return {"matched": False, "status": "", "sha_gain": 0, "cooldown_seconds": 0}
 
 
@@ -560,11 +571,11 @@ class YinluoMixin:
         if parsed.get("status") == "pending":
             self.yinluo_set_status(identity, "convert_pending", "等待化功为煞结算", 60, text)
             return True
-        if parsed.get("status") in ("cooldown", "blocked"):
-            wait = max(60, int(parsed.get("cooldown_seconds") or 3600))
+        if parsed.get("status") in ("cooldown", "failed", "blocked"):
+            wait = max(60, int(parsed.get("cooldown_seconds") or YINLUO_CONVERT_FAILURE_RETRY_SECONDS))
             self.yinluo_set_status(identity, "convert_failed", f"化功为煞失败，{wait}秒后重试", wait, text)
             return False
-        self.yinluo_set_status(identity, "convert_failed", "化功为煞回复未识别", 3600, text)
+        self.yinluo_set_status(identity, "convert_failed", "化功为煞回复未识别", YINLUO_CONVERT_FAILURE_RETRY_SECONDS, text)
         return False
 
     async def yinluo_imprison_fierce_soul(self, identity):

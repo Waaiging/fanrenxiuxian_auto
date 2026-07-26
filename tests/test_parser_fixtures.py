@@ -4496,6 +4496,30 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(convert_cd["status"], "cooldown")
         self.assertEqual(convert_cd["cooldown_seconds"], 3723)
 
+        convert_failure = parse_yinluo_convert(
+            "【转化失败·反噬】\n"
+            "魔功失控，你消耗的 10000 点修为尽数逸散！\n"
+            "你受到了【煞气反噬】，15分钟内闭关修炼收益大幅降低！"
+        )
+        self.assertTrue(convert_failure["matched"])
+        self.assertEqual(convert_failure["status"], "failed")
+        self.assertEqual(convert_failure["cooldown_seconds"], 3600)
+
+        convert_short_cd = parse_yinluo_convert(
+            "你刚施展过此术，经脉尚在恢复，请在 43分钟18秒 后再试。"
+        )
+        self.assertTrue(convert_short_cd["matched"])
+        self.assertEqual(convert_short_cd["status"], "cooldown")
+        self.assertEqual(convert_short_cd["cooldown_seconds"], 2598)
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            YINLUO_CONVERT_COMMAND,
+            "你刚施展过此术，经脉尚在恢复，请在 43分钟18秒 后再试。",
+        ))
+        self.assertFalse(log_utils.feedback_response_matches_command(
+            ".每日献祭",
+            "你刚施展过此术，经脉尚在恢复，请在 43分钟18秒 后再试。",
+        ))
+
         imprison = parse_yinluo_imprison("一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
         self.assertEqual(imprison["status"], "success")
         self.assertEqual(imprison["slot"], 1)
@@ -4672,7 +4696,14 @@ class ParserFixtureTests(unittest.TestCase):
                 if command == ".囚禁魂魄 1 凶兽戾魄":
                     return DummyMessage(601, text="煞气不足，无法囚禁魂魄。")
                 if command == YINLUO_CONVERT_COMMAND:
-                    return DummyMessage(602, text="化功为煞失败，魔功反噬尚需调息，请在 **1小时** 后再试。")
+                    return DummyMessage(
+                        602,
+                        text=(
+                            "【转化失败·反噬】\n"
+                            "魔功失控，你消耗的 10000 点修为尽数逸散！\n"
+                            "你受到了【煞气反噬】，15分钟内闭关修炼收益大幅降低！"
+                        ),
+                    )
                 raise AssertionError(f"unexpected command: {command}")
 
             def identity_pause_seconds(self, identity):
