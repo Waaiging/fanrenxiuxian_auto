@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -84,11 +84,23 @@ def _decimal_text(value: Any) -> str:
     return "0" if text in {"-0", ""} else text
 
 
+def _delay_text(value: Any) -> str:
+    try:
+        delay = Decimal(str(value if value is not None else "0"))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("invalid delay seconds") from None
+    if not delay.is_finite() or delay < 0 or delay > Decimal("300"):
+        raise ValueError("invalid delay seconds")
+    text = format(delay.normalize(), "f")
+    return "0" if text in {"-0", ""} else text
+
+
 def default_red_packet_settings() -> dict[str, Any]:
     return {
         "enabled": False,
         "accounts": [],
         "minimum_amount": "0",
+        "delay_seconds": "0",
         "updated_at": "",
         "updated_by": "",
     }
@@ -106,6 +118,7 @@ def normalize_red_packet_settings(data: Any) -> dict[str, Any]:
             "enabled": bool(source.get("enabled")),
             "accounts": normalized_accounts,
             "minimum_amount": _decimal_text(source.get("minimum_amount", "0")),
+            "delay_seconds": _delay_text(source.get("delay_seconds", "0")),
             "updated_at": str(source.get("updated_at") or ""),
             "updated_by": str(source.get("updated_by") or ""),
         }
@@ -125,6 +138,7 @@ def save_red_packet_settings(
     enabled: bool,
     accounts: list[str],
     minimum_amount: Any,
+    delay_seconds: Any = "0",
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     data = normalize_red_packet_settings(
@@ -132,6 +146,7 @@ def save_red_packet_settings(
             "enabled": enabled,
             "accounts": accounts,
             "minimum_amount": minimum_amount,
+            "delay_seconds": delay_seconds,
             "updated_at": _now_text(),
             "updated_by": updated_by,
         }
@@ -396,6 +411,7 @@ class RedPacketMonitor:
         button_texts = [item["text"] for item in button_metadata]
         amount = extract_red_packet_amount(message_text, button_texts)
         minimum = Decimal(settings["minimum_amount"])
+        delay_seconds = Decimal(settings.get("delay_seconds", "0"))
         if amount is None:
             self._write_status(
                 last_seen_at=_now_text(),
@@ -459,6 +475,61 @@ class RedPacketMonitor:
 
         self._inflight.add(message_id)
         try:
+            if delay_seconds > 0:
+                scheduled_at = (datetime.now() + timedelta(seconds=float(delay_seconds))).strftime(
+                    TIME_FORMAT
+                )
+                self._write_status(
+                    last_seen_at=_now_text(),
+                    last_message_id=message_id,
+                    last_amount=format(amount, "f"),
+                    last_minimum_amount=format(minimum, "f"),
+                    last_delay_seconds=format(delay_seconds, "f"),
+                    last_scheduled_click_at=scheduled_at,
+                    last_source=source,
+                    last_action="waiting_delay",
+                    last_error="",
+                )
+                self.log.info(
+                    "[%s] Red packet %s waiting %ss before click: amount=%s minimum=%s",
+                    self.account,
+                    message_id,
+                    delay_seconds,
+                    amount,
+                    minimum,
+                )
+                await asyncio.sleep(float(delay_seconds))
+
+                current_settings = load_red_packet_settings()
+                current_minimum = Decimal(current_settings["minimum_amount"])
+                cancel_reason = ""
+                if not current_settings["enabled"]:
+                    cancel_reason = "自动抢红包已关闭"
+                elif self.account not in current_settings["accounts"]:
+                    cancel_reason = "账号已取消参与"
+                elif amount < current_minimum:
+                    cancel_reason = "金额低于最新最低金额"
+                if cancel_reason:
+                    self._remember(message_id)
+                    self._write_status(
+                        last_seen_at=_now_text(),
+                        last_message_id=message_id,
+                        last_amount=format(amount, "f"),
+                        last_minimum_amount=format(current_minimum, "f"),
+                        last_delay_seconds=format(delay_seconds, "f"),
+                        last_source=source,
+                        last_action="delay_cancelled",
+                        last_error=cancel_reason,
+                    )
+                    self.log.info(
+                        "[%s] Red packet %s cancelled after delay: %s",
+                        self.account,
+                        message_id,
+                        cancel_reason,
+                    )
+                    return
+                minimum = current_minimum
+
             result = await asyncio.wait_for(button.click(), timeout=12)
             result_message = str(getattr(result, "message", "") or "")
             self._remember(message_id)
@@ -468,6 +539,7 @@ class RedPacketMonitor:
                 last_message_id=message_id,
                 last_amount=format(amount, "f"),
                 last_minimum_amount=format(minimum, "f"),
+                last_delay_seconds=format(delay_seconds, "f"),
                 last_source=source,
                 last_action="clicked",
                 last_button_type=button_type,
@@ -475,11 +547,12 @@ class RedPacketMonitor:
                 last_error="",
             )
             self.log.warning(
-                "[%s] Red packet %s clicked: amount=%s minimum=%s result=%s",
+                "[%s] Red packet %s clicked: amount=%s minimum=%s delay=%ss result=%s",
                 self.account,
                 message_id,
                 amount,
                 minimum,
+                delay_seconds,
                 result_message or "callback sent",
             )
         except Exception as exc:
@@ -488,6 +561,7 @@ class RedPacketMonitor:
                 last_message_id=message_id,
                 last_amount=format(amount, "f"),
                 last_minimum_amount=format(minimum, "f"),
+                last_delay_seconds=format(delay_seconds, "f"),
                 last_source=source,
                 last_action="click_error",
                 last_button_type=button_type,

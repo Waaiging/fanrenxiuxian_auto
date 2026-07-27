@@ -935,7 +935,7 @@
         }
         .red-packet-controls {
             display: grid;
-            grid-template-columns: minmax(9rem, 0.7fr) minmax(10rem, 0.8fr) minmax(18rem, 1.5fr) auto;
+            grid-template-columns: minmax(9rem, 0.7fr) minmax(9rem, 0.8fr) minmax(9rem, 0.8fr) minmax(18rem, 1.5fr) auto;
             align-items: end;
             gap: 0.7rem;
             padding: 0.8rem 0.85rem;
@@ -1195,6 +1195,10 @@
                 <label class="red-packet-field">
                     最低金额
                     <input id="red-packet-minimum" type="number" min="0" step="0.01" value="0" oninput="markRedPacketSettingsDirty()">
+                </label>
+                <label class="red-packet-field">
+                    领取延迟（秒）
+                    <input id="red-packet-delay" type="number" min="0" max="300" step="0.1" value="0" oninput="markRedPacketSettingsDirty()">
                 </label>
                 <div class="red-packet-field">
                     参与账号
@@ -3223,6 +3227,8 @@
                 clicked: '已点击',
                 below_minimum: '金额不足',
                 amount_unknown: '金额未识别',
+                waiting_delay: '延时等待',
+                delay_cancelled: '延时已取消',
                 unsupported_button: '按钮不支持',
                 click_error: '点击失败',
                 install_error: '接入失败'
@@ -3238,14 +3244,17 @@
             const summary = document.getElementById('red-packet-summary');
             if (summary && !redPacketSettingsDirty) {
                 const topic = accounts.map(item => item.status?.topic_id).find(Boolean);
-                summary.innerText = `${enabled ? '已启用' : '已关闭'} · ${selected.size} 个账号${topic ? ` · 话题 ${topic}` : ''}`;
+                const delay = String(settings.delay_seconds ?? '0');
+                summary.innerText = `${enabled ? '已启用' : '已关闭'} · ${selected.size} 个账号 · 延迟 ${delay} 秒${topic ? ` · 话题 ${topic}` : ''}`;
             }
 
             if (!redPacketSettingsDirty) {
                 const enabledInput = document.getElementById('red-packet-enabled');
                 const minimumInput = document.getElementById('red-packet-minimum');
+                const delayInput = document.getElementById('red-packet-delay');
                 if (enabledInput) enabledInput.checked = enabled;
                 if (minimumInput) minimumInput.value = String(settings.minimum_amount ?? '0');
+                if (delayInput) delayInput.value = String(settings.delay_seconds ?? '0');
                 const controls = document.getElementById('red-packet-account-controls');
                 if (controls) {
                     controls.innerHTML = accounts.map(item => `
@@ -3266,6 +3275,8 @@
                     const action = redPacketActionLabel(state.last_action);
                     const amount = state.last_amount !== null && state.last_amount !== undefined
                         ? String(state.last_amount) : '---';
+                    const delay = state.last_delay_seconds !== null && state.last_delay_seconds !== undefined
+                        ? `${state.last_delay_seconds} 秒` : '---';
                     const detail = state.last_error || state.last_result || '---';
                     const updated = state.last_click_at || state.last_seen_at || state.updated_at || '---';
                     return `
@@ -3277,6 +3288,7 @@
                             <div class="red-packet-status-lines">
                                 <div class="red-packet-status-line"><span>状态</span><span>${escapeHtml(action)}</span></div>
                                 <div class="red-packet-status-line"><span>金额</span><span>${escapeHtml(amount)}</span></div>
+                                <div class="red-packet-status-line"><span>延迟</span><span>${escapeHtml(delay)}</span></div>
                                 <div class="red-packet-status-line"><span>时间</span><span>${escapeHtml(updated)}</span></div>
                                 <div class="red-packet-status-line"><span>结果</span><span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></div>
                             </div>
@@ -3312,6 +3324,7 @@
             if (redPacketSavePending) return;
             const enabled = Boolean(document.getElementById('red-packet-enabled')?.checked);
             const minimumAmount = document.getElementById('red-packet-minimum')?.value || '0';
+            const delaySeconds = document.getElementById('red-packet-delay')?.value || '0';
             const accounts = Array.from(document.querySelectorAll('#red-packet-account-controls input[type="checkbox"]:checked'))
                 .map(input => input.value);
             redPacketSavePending = true;
@@ -3320,7 +3333,7 @@
                 const response = await fetch(apiUrl('/api/red-packets'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({enabled, accounts, minimum_amount: minimumAmount})
+                    body: JSON.stringify({enabled, accounts, minimum_amount: minimumAmount, delay_seconds: delaySeconds})
                 });
                 const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
                 if (!response.ok || data.success === false) {

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import red_packet_features
 
@@ -42,12 +42,23 @@ class RedPacketFeatureTests(unittest.TestCase):
             enabled=True,
             accounts=["xiaohao", "unknown", "main"],
             minimum_amount="1.2500",
+            delay_seconds="2.500",
             updated_by="tester",
         )
 
         self.assertEqual(saved["accounts"], ["main", "xiaohao"])
         self.assertEqual(saved["minimum_amount"], "1.25")
+        self.assertEqual(saved["delay_seconds"], "2.5")
         self.assertEqual(red_packet_features.load_red_packet_settings(), saved)
+
+    def test_settings_reject_invalid_delay(self):
+        with self.assertRaisesRegex(ValueError, "invalid delay seconds"):
+            red_packet_features.save_red_packet_settings(
+                enabled=True,
+                accounts=["main"],
+                minimum_amount="1",
+                delay_seconds="300.1",
+            )
 
     def test_extract_amount_from_labeled_and_currency_text(self):
         self.assertEqual(
@@ -201,6 +212,78 @@ class RedPacketFeatureTests(unittest.TestCase):
             asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
 
         self.assertEqual(button.clicks, 1)
+
+    def test_matching_amount_waits_for_configured_delay(self):
+        class FakeButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-delayed"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+
+        button = FakeButton()
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        settings = {
+            "enabled": True,
+            "accounts": ["main"],
+            "minimum_amount": "10",
+            "delay_seconds": "2.5",
+        }
+        sleep_mock = AsyncMock()
+        with (
+            patch.object(red_packet_features, "load_red_packet_settings", return_value=settings),
+            patch.object(red_packet_features.asyncio, "sleep", sleep_mock),
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        sleep_mock.assert_awaited_once_with(2.5)
+        self.assertEqual(button.clicks, 1)
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "clicked")
+        self.assertEqual(status["last_delay_seconds"], "2.5")
+
+    def test_delay_cancels_when_switch_is_disabled(self):
+        class FakeButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-cancel"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+
+        button = FakeButton()
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        enabled = {
+            "enabled": True,
+            "accounts": ["main"],
+            "minimum_amount": "10",
+            "delay_seconds": "3",
+        }
+        disabled = {**enabled, "enabled": False}
+        with (
+            patch.object(
+                red_packet_features,
+                "load_red_packet_settings",
+                side_effect=[enabled, disabled],
+            ),
+            patch.object(red_packet_features.asyncio, "sleep", new=AsyncMock()),
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        self.assertEqual(button.clicks, 0)
+        self.assertIn(100, monitor._handled_set)
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "delay_cancelled")
+        self.assertEqual(status["last_error"], "自动抢红包已关闭")
 
     def test_unknown_amount_status_keeps_message_diagnostics(self):
         button = SimpleNamespace(
