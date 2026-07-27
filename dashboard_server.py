@@ -4270,7 +4270,7 @@ def red_packets(username: str = Depends(authenticate)):
 
 @app.post("/api/red-packets")
 async def red_packet_control(payload: dict = Body(...), username: str = Depends(authenticate)):
-    """Update the global switch, accounts, minimum amount, and click delay."""
+    """Update red-packet accounts, amount, delay, and active schedule."""
     accounts = payload.get("accounts")
     if not isinstance(accounts, list):
         return {"success": False, "msg": "账号列表格式错误"}
@@ -4281,6 +4281,9 @@ async def red_packet_control(payload: dict = Body(...), username: str = Depends(
                 accounts=accounts,
                 minimum_amount=payload.get("minimum_amount", "0"),
                 delay_seconds=payload.get("delay_seconds", "0"),
+                schedule_enabled=bool(payload.get("schedule_enabled")),
+                schedule_start=payload.get("schedule_start", "00:00"),
+                schedule_end=payload.get("schedule_end", "00:00"),
                 updated_by=username,
             )
     except ValueError as exc:
@@ -4288,6 +4291,8 @@ async def red_packet_control(payload: dict = Body(...), username: str = Depends(
             message = "启用抢红包时至少选择一个账号"
         elif str(exc) == "invalid delay seconds":
             message = "领取延迟必须是 0 到 300 秒之间的有效数字"
+        elif str(exc) == "invalid schedule time":
+            message = "生效时段必须是有效的 24 小时时间"
         else:
             message = "最低金额必须是有效的非负数"
         return {"success": False, "msg": message}

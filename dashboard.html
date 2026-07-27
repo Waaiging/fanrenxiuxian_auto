@@ -935,7 +935,7 @@
         }
         .red-packet-controls {
             display: grid;
-            grid-template-columns: minmax(9rem, 0.7fr) minmax(9rem, 0.8fr) minmax(9rem, 0.8fr) minmax(18rem, 1.5fr) auto;
+            grid-template-columns: minmax(8rem, 0.6fr) minmax(8rem, 0.7fr) minmax(8rem, 0.7fr) minmax(17rem, 1.25fr) minmax(18rem, 1.5fr) auto;
             align-items: end;
             gap: 0.7rem;
             padding: 0.8rem 0.85rem;
@@ -948,7 +948,8 @@
             color: var(--text-secondary);
             font-size: 0.66rem;
         }
-        .red-packet-field input[type="number"] {
+        .red-packet-field input[type="number"],
+        .red-packet-field input[type="time"] {
             width: 100%;
             min-width: 0;
             height: 2rem;
@@ -958,6 +959,24 @@
             color: var(--text-primary);
             padding: 0 0.55rem;
         }
+        .red-packet-time-controls {
+            display: grid;
+            grid-template-columns: auto minmax(5.2rem, 1fr) auto minmax(5.2rem, 1fr);
+            align-items: center;
+            gap: 0.35rem;
+            min-height: 2rem;
+        }
+        .red-packet-schedule-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            color: var(--text-primary);
+            font-size: 0.68rem;
+            white-space: nowrap;
+        }
+        .red-packet-schedule-toggle input { width: 1rem; height: 1rem; accent-color: #22c55e; }
+        .red-packet-time-separator { color: var(--text-secondary); font-size: 0.64rem; }
+        .red-packet-field input:disabled { opacity: 0.5; cursor: not-allowed; }
         .red-packet-global,
         .red-packet-account-option {
             display: inline-flex;
@@ -1200,6 +1219,15 @@
                     领取延迟（秒）
                     <input id="red-packet-delay" type="number" min="0" max="300" step="0.1" value="0" oninput="markRedPacketSettingsDirty()">
                 </label>
+                <div class="red-packet-field">
+                    <span>生效时段</span>
+                    <div class="red-packet-time-controls">
+                        <label class="red-packet-schedule-toggle"><input id="red-packet-schedule-enabled" type="checkbox" onchange="updateRedPacketScheduleInputs(); markRedPacketSettingsDirty()">限定</label>
+                        <input id="red-packet-schedule-start" type="time" value="00:00" aria-label="开始时间" oninput="markRedPacketSettingsDirty()">
+                        <span class="red-packet-time-separator">至</span>
+                        <input id="red-packet-schedule-end" type="time" value="00:00" aria-label="结束时间" oninput="markRedPacketSettingsDirty()">
+                    </div>
+                </div>
                 <div class="red-packet-field">
                     参与账号
                     <div class="red-packet-account-controls" id="red-packet-account-controls"></div>
@@ -3221,12 +3249,22 @@
             if (summary) summary.innerText = '设置未保存';
         }
 
+        function updateRedPacketScheduleInputs() {
+            const enabled = Boolean(document.getElementById('red-packet-schedule-enabled')?.checked);
+            const start = document.getElementById('red-packet-schedule-start');
+            const end = document.getElementById('red-packet-schedule-end');
+            if (start) start.disabled = !enabled;
+            if (end) end.disabled = !enabled;
+        }
+
         function redPacketActionLabel(action) {
             return ({
                 listening: '监听中',
                 clicked: '已点击',
+                claim_rejected: '领取未受理',
                 below_minimum: '金额不足',
                 amount_unknown: '金额未识别',
+                outside_schedule: '不在时段',
                 waiting_delay: '延时等待',
                 delay_cancelled: '延时已取消',
                 unsupported_button: '按钮不支持',
@@ -3245,16 +3283,26 @@
             if (summary && !redPacketSettingsDirty) {
                 const topic = accounts.map(item => item.status?.topic_id).find(Boolean);
                 const delay = String(settings.delay_seconds ?? '0');
-                summary.innerText = `${enabled ? '已启用' : '已关闭'} · ${selected.size} 个账号 · 延迟 ${delay} 秒${topic ? ` · 话题 ${topic}` : ''}`;
+                const schedule = settings.schedule_enabled
+                    ? `${settings.schedule_start || '00:00'}-${settings.schedule_end || '00:00'}`
+                    : '全天';
+                summary.innerText = `${enabled ? '已启用' : '已关闭'} · ${selected.size} 个账号 · 延迟 ${delay} 秒 · ${schedule}${topic ? ` · 话题 ${topic}` : ''}`;
             }
 
             if (!redPacketSettingsDirty) {
                 const enabledInput = document.getElementById('red-packet-enabled');
                 const minimumInput = document.getElementById('red-packet-minimum');
                 const delayInput = document.getElementById('red-packet-delay');
+                const scheduleEnabledInput = document.getElementById('red-packet-schedule-enabled');
+                const scheduleStartInput = document.getElementById('red-packet-schedule-start');
+                const scheduleEndInput = document.getElementById('red-packet-schedule-end');
                 if (enabledInput) enabledInput.checked = enabled;
                 if (minimumInput) minimumInput.value = String(settings.minimum_amount ?? '0');
                 if (delayInput) delayInput.value = String(settings.delay_seconds ?? '0');
+                if (scheduleEnabledInput) scheduleEnabledInput.checked = Boolean(settings.schedule_enabled);
+                if (scheduleStartInput) scheduleStartInput.value = String(settings.schedule_start || '00:00');
+                if (scheduleEndInput) scheduleEndInput.value = String(settings.schedule_end || '00:00');
+                updateRedPacketScheduleInputs();
                 const controls = document.getElementById('red-packet-account-controls');
                 if (controls) {
                     controls.innerHTML = accounts.map(item => `
@@ -3277,8 +3325,10 @@
                         ? String(state.last_amount) : '---';
                     const delay = state.last_delay_seconds !== null && state.last_delay_seconds !== undefined
                         ? `${state.last_delay_seconds} 秒` : '---';
-                    const detail = state.last_error || state.last_result || '---';
-                    const updated = state.last_click_at || state.last_seen_at || state.updated_at || '---';
+                    const claimed = state.last_claimed_amount !== null && state.last_claimed_amount !== undefined
+                        ? `${state.last_claimed_amount} ${state.last_claimed_currency || ''}`.trim() : '---';
+                    const detail = state.last_notification_error || state.last_error || state.last_result || '---';
+                    const updated = state.last_notification_at || state.last_click_at || state.last_seen_at || state.updated_at || '---';
                     return `
                         <div class="red-packet-status-item">
                             <div class="red-packet-status-head">
@@ -3288,6 +3338,7 @@
                             <div class="red-packet-status-lines">
                                 <div class="red-packet-status-line"><span>状态</span><span>${escapeHtml(action)}</span></div>
                                 <div class="red-packet-status-line"><span>金额</span><span>${escapeHtml(amount)}</span></div>
+                                <div class="red-packet-status-line"><span>到账</span><span>${escapeHtml(claimed)}</span></div>
                                 <div class="red-packet-status-line"><span>延迟</span><span>${escapeHtml(delay)}</span></div>
                                 <div class="red-packet-status-line"><span>时间</span><span>${escapeHtml(updated)}</span></div>
                                 <div class="red-packet-status-line"><span>结果</span><span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></div>
@@ -3325,6 +3376,9 @@
             const enabled = Boolean(document.getElementById('red-packet-enabled')?.checked);
             const minimumAmount = document.getElementById('red-packet-minimum')?.value || '0';
             const delaySeconds = document.getElementById('red-packet-delay')?.value || '0';
+            const scheduleEnabled = Boolean(document.getElementById('red-packet-schedule-enabled')?.checked);
+            const scheduleStart = document.getElementById('red-packet-schedule-start')?.value || '00:00';
+            const scheduleEnd = document.getElementById('red-packet-schedule-end')?.value || '00:00';
             const accounts = Array.from(document.querySelectorAll('#red-packet-account-controls input[type="checkbox"]:checked'))
                 .map(input => input.value);
             redPacketSavePending = true;
@@ -3333,7 +3387,15 @@
                 const response = await fetch(apiUrl('/api/red-packets'), {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({enabled, accounts, minimum_amount: minimumAmount, delay_seconds: delaySeconds})
+                    body: JSON.stringify({
+                        enabled,
+                        accounts,
+                        minimum_amount: minimumAmount,
+                        delay_seconds: delaySeconds,
+                        schedule_enabled: scheduleEnabled,
+                        schedule_start: scheduleStart,
+                        schedule_end: scheduleEnd
+                    })
                 });
                 const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
                 if (!response.ok || data.success === false) {

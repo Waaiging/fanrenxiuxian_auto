@@ -24,6 +24,8 @@ RED_PACKET_ANCHOR_MESSAGE_ID = 458347
 RED_PACKET_LINK = f"https://t.me/{RED_PACKET_CHAT}/{RED_PACKET_ANCHOR_MESSAGE_ID}"
 RED_PACKET_BUTTON_TEXT = "抢红包"
 RED_PACKET_BUTTON_TEXTS = (RED_PACKET_BUTTON_TEXT, "抢")
+RED_PACKET_NOTIFY_TARGET = "Waaiging"
+RED_PACKET_RECEIPT_BOT_IDS = {7900199668, 8547797815, 8757550896}
 RED_PACKET_ACCOUNT_NAMES = {
     "main": "主号",
     "sub": "副号",
@@ -32,7 +34,9 @@ RED_PACKET_ACCOUNT_NAMES = {
 }
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_HANDLED_MESSAGE_IDS = 200
+MAX_NOTIFIED_RECEIPT_IDS = 200
 MAX_DIAGNOSTIC_TEXT_LENGTH = 2000
+PENDING_CLAIM_TTL_SECONDS = 120
 
 _AMOUNT_TOKEN = r"(?<![0-9])([0-9]+(?:[,.\s][0-9]{3})*(?:\.[0-9]+)?)(?![0-9])"
 _CURRENCY_CODE = r"(?:USDT|USDC|LDC|CNY|RMB|USD|TRX|TON|BNB|ETH|BTC|SOL|DOGE|EUR|GBP|HKD|TWD|JPY|U|元|块|币)(?![A-Za-z])"
@@ -50,6 +54,15 @@ _AMOUNT_PATTERNS = tuple(
         rf"{_AMOUNT_TOKEN}\s*{_CURRENCY_CODE}",
     )
 )
+_CLAIM_RECEIPT_PATTERN = re.compile(
+    r"🧧\s*恭喜\s+(?P<name>.+?)\s+抢到\s+"
+    r"(?P<amount>[0-9]+(?:\.[0-9]+)?)\s+"
+    r"(?P<currency>[A-Za-z0-9]+)\s*[！!]",
+    re.IGNORECASE,
+)
+_TIME_PATTERN = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+_REJECTED_CLICK_MARKERS = ("已抢完", "已经抢", "抢过", "失败", "过期", "无效")
+_RECEIPT_BOT_USERNAME_PATTERN = re.compile(r"^hantianz+_bot$", re.IGNORECASE)
 
 
 def _now_text() -> str:
@@ -95,12 +108,64 @@ def _delay_text(value: Any) -> str:
     return "0" if text in {"-0", ""} else text
 
 
+def _time_text(value: Any) -> str:
+    text = str(value if value is not None else "").strip()
+    if not _TIME_PATTERN.fullmatch(text):
+        raise ValueError("invalid schedule time")
+    return text
+
+
+def _identity_key(value: Any) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).strip().lstrip("@").casefold()
+
+
+def extract_claim_receipt(text: str) -> dict[str, Any] | None:
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    match = _CLAIM_RECEIPT_PATTERN.search(normalized)
+    if not match:
+        return None
+    try:
+        amount = Decimal(match.group("amount"))
+    except (InvalidOperation, ValueError):
+        return None
+    return {
+        "name": match.group("name").strip(),
+        "amount": amount,
+        "currency": match.group("currency").upper(),
+    }
+
+
+def is_within_red_packet_schedule(
+    settings: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if not bool(settings.get("schedule_enabled")):
+        return True
+    start_text = _time_text(settings.get("schedule_start", "00:00"))
+    end_text = _time_text(settings.get("schedule_end", "00:00"))
+    current = now or datetime.now()
+    current_minutes = current.hour * 60 + current.minute
+    start_hour, start_minute = (int(part) for part in start_text.split(":"))
+    end_hour, end_minute = (int(part) for part in end_text.split(":"))
+    start = start_hour * 60 + start_minute
+    end = end_hour * 60 + end_minute
+    if start == end:
+        return True
+    if start < end:
+        return start <= current_minutes < end
+    return current_minutes >= start or current_minutes < end
+
+
 def default_red_packet_settings() -> dict[str, Any]:
     return {
         "enabled": False,
         "accounts": [],
         "minimum_amount": "0",
         "delay_seconds": "0",
+        "schedule_enabled": False,
+        "schedule_start": "00:00",
+        "schedule_end": "00:00",
         "updated_at": "",
         "updated_by": "",
     }
@@ -119,6 +184,9 @@ def normalize_red_packet_settings(data: Any) -> dict[str, Any]:
             "accounts": normalized_accounts,
             "minimum_amount": _decimal_text(source.get("minimum_amount", "0")),
             "delay_seconds": _delay_text(source.get("delay_seconds", "0")),
+            "schedule_enabled": bool(source.get("schedule_enabled")),
+            "schedule_start": _time_text(source.get("schedule_start", "00:00")),
+            "schedule_end": _time_text(source.get("schedule_end", "00:00")),
             "updated_at": str(source.get("updated_at") or ""),
             "updated_by": str(source.get("updated_by") or ""),
         }
@@ -139,6 +207,9 @@ def save_red_packet_settings(
     accounts: list[str],
     minimum_amount: Any,
     delay_seconds: Any = "0",
+    schedule_enabled: bool = False,
+    schedule_start: Any = "00:00",
+    schedule_end: Any = "00:00",
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     data = normalize_red_packet_settings(
@@ -147,6 +218,9 @@ def save_red_packet_settings(
             "accounts": accounts,
             "minimum_amount": minimum_amount,
             "delay_seconds": delay_seconds,
+            "schedule_enabled": schedule_enabled,
+            "schedule_start": schedule_start,
+            "schedule_end": schedule_end,
             "updated_at": _now_text(),
             "updated_by": updated_by,
         }
@@ -251,6 +325,7 @@ def red_packet_dashboard_payload() -> dict[str, Any]:
             "link": RED_PACKET_LINK,
             "button_text": RED_PACKET_BUTTON_TEXT,
             "button_texts": list(RED_PACKET_BUTTON_TEXTS),
+            "notify_target": f"@{RED_PACKET_NOTIFY_TARGET}",
         },
         "accounts": [
             {
@@ -277,8 +352,13 @@ class RedPacketMonitor:
         self.topic_id: int | None = None
         self.anchor_buttons: list[dict[str, Any]] = []
         self.anchor_missing = False
+        self.notify_entity = None
+        self.self_names: set[str] = set()
         self._handled: list[int] = []
         self._handled_set: set[int] = set()
+        self._notified_receipts: list[int] = []
+        self._notified_receipt_set: set[int] = set()
+        self._pending_claims: list[dict[str, Any]] = []
         self._inflight: set[int] = set()
         self._load_handled()
 
@@ -295,6 +375,16 @@ class RedPacketMonitor:
             if message_id not in self._handled_set:
                 self._handled.append(message_id)
                 self._handled_set.add(message_id)
+        receipt_values = status.get("notified_receipt_ids") if isinstance(status, dict) else []
+        if isinstance(receipt_values, list):
+            for value in receipt_values[-MAX_NOTIFIED_RECEIPT_IDS:]:
+                try:
+                    receipt_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if receipt_id not in self._notified_receipt_set:
+                    self._notified_receipts.append(receipt_id)
+                    self._notified_receipt_set.add(receipt_id)
 
     def _remember(self, message_id: int) -> None:
         if message_id in self._handled_set:
@@ -304,6 +394,35 @@ class RedPacketMonitor:
         while len(self._handled) > MAX_HANDLED_MESSAGE_IDS:
             old = self._handled.pop(0)
             self._handled_set.discard(old)
+
+    def _remember_receipt(self, message_id: int) -> None:
+        if message_id in self._notified_receipt_set:
+            return
+        self._notified_receipts.append(message_id)
+        self._notified_receipt_set.add(message_id)
+        while len(self._notified_receipts) > MAX_NOTIFIED_RECEIPT_IDS:
+            old = self._notified_receipts.pop(0)
+            self._notified_receipt_set.discard(old)
+
+    def _purge_pending_claims(self) -> None:
+        cutoff = datetime.now() - timedelta(seconds=PENDING_CLAIM_TTL_SECONDS)
+        self._pending_claims = [
+            claim for claim in self._pending_claims if claim.get("created_at") >= cutoff
+        ]
+
+    def _register_pending_claim(self, message_id: int, amount: Decimal) -> dict[str, Any]:
+        self._purge_pending_claims()
+        pending = {
+            "message_id": message_id,
+            "packet_amount": format(amount, "f"),
+            "created_at": datetime.now(),
+        }
+        self._pending_claims.append(pending)
+        return pending
+
+    def _remove_pending_claim(self, pending: dict[str, Any]) -> None:
+        if pending in self._pending_claims:
+            self._pending_claims.remove(pending)
 
     def _write_status(self, **updates: Any) -> None:
         status = load_red_packet_status(self.account)
@@ -318,6 +437,7 @@ class RedPacketMonitor:
                 "anchor_buttons": self.anchor_buttons,
                 "anchor_missing": self.anchor_missing,
                 "handled_message_ids": self._handled,
+                "notified_receipt_ids": self._notified_receipts,
                 "updated_at": _now_text(),
             }
         )
@@ -352,6 +472,26 @@ class RedPacketMonitor:
                 self.anchor_buttons = red_packet_button_metadata(anchor)
             if not self.topic_id:
                 raise RuntimeError("target topic id could not be resolved from the anchor message")
+            me = await self.client.get_me()
+            identity_values = [
+                getattr(me, "username", ""),
+                getattr(me, "first_name", ""),
+                " ".join(
+                    part
+                    for part in [getattr(me, "first_name", ""), getattr(me, "last_name", "")]
+                    if part
+                ),
+            ]
+            self.self_names = {_identity_key(value) for value in identity_values if value}
+            try:
+                self.notify_entity = await self.client.get_entity(RED_PACKET_NOTIFY_TARGET)
+            except Exception as exc:
+                self.log.warning(
+                    "[%s] Red-packet notification target @%s could not be resolved: %s",
+                    self.account,
+                    RED_PACKET_NOTIFY_TARGET,
+                    exc,
+                )
         except Exception as exc:
             self._write_status(listening=False, last_action="install_error", last_error=str(exc))
             self.log.error("[%s] Red-packet monitor setup failed: %s", self.account, exc)
@@ -359,6 +499,7 @@ class RedPacketMonitor:
 
         @self.client.on(events.NewMessage(chats=self.entity))
         async def new_message_handler(event: Any) -> None:
+            await self.process_receipt(event.message)
             await self.process_message(event.message, source="new")
 
         @self.client.on(events.MessageEdited(chats=self.entity))
@@ -381,6 +522,79 @@ class RedPacketMonitor:
         if message_id == self.topic_id:
             return True
         return message_topic_id(message) == self.topic_id
+
+    async def process_receipt(self, message: Any) -> None:
+        if not self._is_target_topic(message):
+            return
+        receipt = extract_claim_receipt(
+            getattr(message, "raw_text", "") or getattr(message, "text", "") or ""
+        )
+        if receipt is None or _identity_key(receipt["name"]) not in self.self_names:
+            return
+        sender_id = int(getattr(message, "sender_id", 0) or 0)
+        trusted_sender = sender_id in RED_PACKET_RECEIPT_BOT_IDS
+        if not trusted_sender and hasattr(message, "get_sender"):
+            try:
+                sender = await message.get_sender()
+                sender_username = str(getattr(sender, "username", "") or "")
+                trusted_sender = bool(_RECEIPT_BOT_USERNAME_PATTERN.fullmatch(sender_username))
+            except Exception:
+                trusted_sender = False
+        if not trusted_sender:
+            return
+        message_id = int(getattr(message, "id", 0) or 0)
+        if not message_id or message_id in self._notified_receipt_set:
+            return
+        self._purge_pending_claims()
+        if not self._pending_claims:
+            return
+        pending = self._pending_claims.pop(0)
+        self._remember_receipt(message_id)
+        amount_text = format(receipt["amount"], "f")
+        currency = receipt["currency"]
+        notification = (
+            "🧧 自动抢红包成功\n"
+            f"账号：{RED_PACKET_ACCOUNT_NAMES[self.account]}\n"
+            f"金额：{amount_text} {currency}"
+        )
+        target = self.notify_entity or RED_PACKET_NOTIFY_TARGET
+        last_error = ""
+        for attempt, retry_delay in enumerate((0, 2, 5), start=1):
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+            try:
+                await asyncio.wait_for(self.client.send_message(target, notification), timeout=12)
+                self._write_status(
+                    last_claimed_amount=amount_text,
+                    last_claimed_currency=currency,
+                    last_claim_receipt_id=message_id,
+                    last_claim_message_id=pending["message_id"],
+                    last_notification_at=_now_text(),
+                    last_notification_error="",
+                )
+                self.log.warning(
+                    "[%s] Red-packet claim notification sent: amount=%s %s receipt=%s",
+                    self.account,
+                    amount_text,
+                    currency,
+                    message_id,
+                )
+                return
+            except Exception as exc:
+                last_error = str(exc)
+                self.log.warning(
+                    "[%s] Red-packet notification attempt %s failed: %s",
+                    self.account,
+                    attempt,
+                    exc,
+                )
+        self._write_status(
+            last_claimed_amount=amount_text,
+            last_claimed_currency=currency,
+            last_claim_receipt_id=message_id,
+            last_claim_message_id=pending["message_id"],
+            last_notification_error=last_error,
+        )
 
     async def process_message(self, message: Any, *, source: str) -> None:
         if not self._is_target_topic(message):
@@ -405,6 +619,26 @@ class RedPacketMonitor:
             return
         settings = load_red_packet_settings()
         if not settings["enabled"] or self.account not in settings["accounts"]:
+            return
+        if not is_within_red_packet_schedule(settings):
+            self._remember(message_id)
+            self._write_status(
+                last_seen_at=_now_text(),
+                last_message_id=message_id,
+                last_amount=None,
+                last_source=source,
+                last_action="outside_schedule",
+                last_schedule_start=settings["schedule_start"],
+                last_schedule_end=settings["schedule_end"],
+                last_error="",
+            )
+            self.log.info(
+                "[%s] Red packet %s skipped outside schedule %s-%s",
+                self.account,
+                message_id,
+                settings["schedule_start"],
+                settings["schedule_end"],
+            )
             return
 
         message_text = str(getattr(message, "raw_text", "") or getattr(message, "text", "") or "")
@@ -509,6 +743,8 @@ class RedPacketMonitor:
                     cancel_reason = "账号已取消参与"
                 elif amount < current_minimum:
                     cancel_reason = "金额低于最新最低金额"
+                elif not is_within_red_packet_schedule(current_settings):
+                    cancel_reason = "当前时间已超出生效时段"
                 if cancel_reason:
                     self._remember(message_id)
                     self._write_status(
@@ -530,8 +766,16 @@ class RedPacketMonitor:
                     return
                 minimum = current_minimum
 
-            result = await asyncio.wait_for(button.click(), timeout=12)
+            pending_claim = self._register_pending_claim(message_id, amount)
+            try:
+                result = await asyncio.wait_for(button.click(), timeout=12)
+            except Exception:
+                self._remove_pending_claim(pending_claim)
+                raise
             result_message = str(getattr(result, "message", "") or "")
+            rejected = any(marker in result_message for marker in _REJECTED_CLICK_MARKERS)
+            if rejected:
+                self._remove_pending_claim(pending_claim)
             self._remember(message_id)
             self._write_status(
                 last_seen_at=_now_text(),
@@ -541,7 +785,7 @@ class RedPacketMonitor:
                 last_minimum_amount=format(minimum, "f"),
                 last_delay_seconds=format(delay_seconds, "f"),
                 last_source=source,
-                last_action="clicked",
+                last_action="claim_rejected" if rejected else "clicked",
                 last_button_type=button_type,
                 last_result=result_message,
                 last_error="",
