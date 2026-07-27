@@ -326,9 +326,31 @@ class MainBeastMixin:
         self.main_beast_logger().info("Main beast roster synced from Mini App: %s beasts", len(beasts))
         return True
 
+    def normalize_main_beast_roster_quota(self):
+        today = beast_now().strftime("%Y-%m-%d")
+        if self.state.get("beast_roster_auto_query_date") == today:
+            return False
+        self.state["beast_roster_auto_query_date"] = today
+        self.state["beast_roster_auto_query_count"] = 0
+        return True
+
+    def main_beast_roster_quota_reset_time(self):
+        tomorrow = (beast_now() + timedelta(days=1)).replace(
+            hour=0,
+            minute=5,
+            second=0,
+            microsecond=0,
+        )
+        return beast_time(tomorrow)
+
     async def update_main_beast_cache(self, force=False):
         settings = self.main_beast_miniapp_settings()
         cache = list(self.state.get("beasts_cache") or [])
+        trusted_cache = bool(
+            cache
+            and self.state.get("beast_roster_last_source") == "miniapp"
+            and not self.state.get("beast_miniapp_last_error")
+        )
         next_check = self.state.get("next_beast_status_check_time", "")
         if not settings["enabled"]:
             self.state["last_beast_roster_query_result"] = "miniapp_not_configured"
@@ -339,12 +361,20 @@ class MainBeastMixin:
                 "Main beast Mini App sync is not configured; deprecated .我的灵兽 will not be sent."
             )
             return False
+        quota_changed = self.normalize_main_beast_roster_quota()
         if not force and next_check and beast_time_is_future(next_check):
-            return bool(
-                cache
-                and self.state.get("beast_roster_last_source") == "miniapp"
-                and not self.state.get("beast_miniapp_last_error")
-            )
+            if quota_changed:
+                self.main_beast_save()
+            return trusted_cache
+
+        automatic_count = int(self.state.get("beast_roster_auto_query_count") or 0)
+        if not force and automatic_count >= ROSTER_DAILY_LIMIT:
+            self.state["next_beast_status_check_time"] = self.main_beast_roster_quota_reset_time()
+            self.main_beast_save()
+            return trusted_cache
+        if not force:
+            automatic_count += 1
+            self.state["beast_roster_auto_query_count"] = automatic_count
 
         self.state["beast_miniapp_last_attempt_time"] = beast_time()
         self.state["last_beast_roster_query_result"] = "miniapp_fetching"
@@ -370,7 +400,11 @@ class MainBeastMixin:
                     exc_info=True,
                 )
             self.record_main_beast_miniapp_snapshot(snapshot)
-            self.state["next_beast_status_check_time"] = beast_add_seconds(settings["refresh_seconds"])
+            self.state["next_beast_status_check_time"] = (
+                self.main_beast_roster_quota_reset_time()
+                if not force and automatic_count >= ROSTER_DAILY_LIMIT
+                else beast_add_seconds(settings["refresh_seconds"])
+            )
             self.main_beast_save()
             return True
         except MiniAppBeastError as exc:
@@ -382,7 +416,11 @@ class MainBeastMixin:
             self.main_beast_logger().exception("Main beast Mini App sync failed")
         self.state["last_beast_roster_query_result"] = "miniapp_error"
         self.state["beast_miniapp_last_error"] = error
-        self.state["next_beast_status_check_time"] = beast_add_seconds(settings["retry_seconds"])
+        self.state["next_beast_status_check_time"] = (
+            self.main_beast_roster_quota_reset_time()
+            if not force and automatic_count >= ROSTER_DAILY_LIMIT
+            else beast_add_seconds(settings["retry_seconds"])
+        )
         self.main_beast_save()
         self.main_beast_logger().warning(
             "Main beast Mini App sync failed (%s); stale roster will not be used for a new beast action.",

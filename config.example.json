@@ -10,7 +10,7 @@
     "enabled": false,
     "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=YOUR_FIXED_DWELLING_TOKEN",
     "bot_username": "fanrenxiuxian_bot",
-    "refresh_seconds": 300,
+    "refresh_seconds": 1800,
     "retry_seconds": 300,
     "timeout_seconds": 20
   },

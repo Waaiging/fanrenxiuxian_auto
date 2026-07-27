@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import intelligent_cultivator
@@ -176,6 +177,76 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertEqual(self.actor.state["beasts_cache"][0]["full_name"], "新灵狐")
         self.assertEqual(self.actor.state["beast_roster_last_source"], "miniapp")
         self.assertEqual(self.actor.state["beast_miniapp_last_error"], "")
+        self.assertEqual(self.actor.state["beast_roster_auto_query_count"], 0)
+
+    def test_automatic_miniapp_sync_is_limited_to_twice_per_day(self):
+        self.actor.config = {
+            "miniapp_beast": {
+                "enabled": True,
+                "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture",
+                "refresh_seconds": 1800,
+            }
+        }
+        snapshot = {
+            "spirit_token": "spiritbeast_fixture",
+            "player": {},
+            "beasts": [{
+                "full_name": "新灵狐",
+                "status": "休息中",
+                "species": "1阶灵狐",
+                "tier": 1,
+                "power": 30,
+                "stamina": 92,
+            }],
+        }
+        fetch = AsyncMock(return_value=snapshot)
+        with patch("main_beast_features.fetch_miniapp_beast_snapshot", new=fetch):
+            self.actor.state["next_beast_status_check_time"] = ""
+            self.assertTrue(asyncio.run(self.actor.update_main_beast_cache()))
+            self.actor.state["next_beast_status_check_time"] = ""
+            self.assertTrue(asyncio.run(self.actor.update_main_beast_cache()))
+            self.actor.state["next_beast_status_check_time"] = ""
+            self.assertTrue(asyncio.run(self.actor.update_main_beast_cache()))
+
+        self.assertEqual(fetch.await_count, 2)
+        self.assertEqual(self.actor.state["beast_roster_auto_query_count"], 2)
+        reset = datetime.strptime(
+            self.actor.state["next_beast_status_check_time"],
+            "%Y-%m-%d %H:%M:%S",
+        )
+        self.assertEqual((reset.hour, reset.minute), (0, 5))
+
+    def test_automatic_miniapp_quota_resets_on_a_new_day(self):
+        self.actor.config = {
+            "miniapp_beast": {
+                "enabled": True,
+                "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture",
+            }
+        }
+        self.actor.state.update({
+            "beast_roster_auto_query_date": "2000-01-01",
+            "beast_roster_auto_query_count": 2,
+            "next_beast_status_check_time": "",
+        })
+        snapshot = {
+            "spirit_token": "spiritbeast_fixture",
+            "player": {},
+            "beasts": [{
+                "full_name": "新灵狐",
+                "status": "休息中",
+                "species": "1阶灵狐",
+                "tier": 1,
+                "power": 30,
+                "stamina": 92,
+            }],
+        }
+        with patch(
+            "main_beast_features.fetch_miniapp_beast_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ) as fetch:
+            self.assertTrue(asyncio.run(self.actor.update_main_beast_cache()))
+        fetch.assert_awaited_once()
+        self.assertEqual(self.actor.state["beast_roster_auto_query_count"], 1)
 
     def test_failed_miniapp_sync_never_reuses_stale_roster_for_actions(self):
         self.actor.config = {

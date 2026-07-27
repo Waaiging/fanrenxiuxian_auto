@@ -17,7 +17,7 @@ from telethon.tl.functions.messages import RequestMainWebViewRequest
 
 
 DEFAULT_BOT_USERNAME = "fanrenxiuxian_bot"
-DEFAULT_REFRESH_SECONDS = 5 * 60
+DEFAULT_REFRESH_SECONDS = 30 * 60
 DEFAULT_RETRY_SECONDS = 5 * 60
 REFRESH_REQUEST_FILE = "miniapp_beast_refresh_request.json"
 SESSION_CACHE_FILE = "miniapp_beast_session.json"
