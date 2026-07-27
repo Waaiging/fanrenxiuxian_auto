@@ -67,6 +67,38 @@ class RedPacketFeatureTests(unittest.TestCase):
 
     def test_extract_amount_does_not_treat_packet_count_as_amount(self):
         self.assertIsNone(red_packet_features.extract_red_packet_amount("红包数量：50\n快来领取"))
+        self.assertIsNone(red_packet_features.extract_red_packet_amount("红包数量：50 users"))
+
+    def test_extract_amount_from_money_icon_and_full_width_digits(self):
+        self.assertEqual(
+            red_packet_features.extract_red_packet_amount("红包来啦\n💰：１２．５０ USDT\n数量：5"),
+            Decimal("12.50"),
+        )
+
+    def test_extract_amount_from_currency_symbol_or_button(self):
+        self.assertEqual(
+            red_packet_features.extract_red_packet_amount("新红包", ["抢 ￥18.8"]),
+            Decimal("18.8"),
+        )
+        self.assertEqual(
+            red_packet_features.extract_red_packet_amount("新红包", ["抢 20 USDT"]),
+            Decimal("20"),
+        )
+
+    def test_extract_amount_from_total_and_count_label(self):
+        self.assertEqual(
+            red_packet_features.extract_red_packet_amount("总金额 / 份数：30.5 / 10"),
+            Decimal("30.5"),
+        )
+
+    def test_red_packet_button_accepts_short_and_decorated_labels(self):
+        short = SimpleNamespace(text="抢")
+        decorated = SimpleNamespace(text="🧧 抢红包")
+        self.assertIs(red_packet_features.red_packet_button(SimpleNamespace(buttons=[[short]])), short)
+        self.assertIs(
+            red_packet_features.red_packet_button(SimpleNamespace(buttons=[[decorated]])),
+            decorated,
+        )
 
     def test_topic_id_prefers_reply_to_top_id(self):
         message = SimpleNamespace(
@@ -145,6 +177,54 @@ class RedPacketFeatureTests(unittest.TestCase):
         status = red_packet_features.load_red_packet_status("main")
         self.assertEqual(status["last_action"], "clicked")
         self.assertEqual(status["last_result"], "领取成功")
+
+    def test_short_claim_button_clicks(self):
+        class FakeButton:
+            text = "抢"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-short"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+
+        button = FakeButton()
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        with patch.object(
+            red_packet_features,
+            "load_red_packet_settings",
+            return_value={"enabled": True, "accounts": ["main"], "minimum_amount": "10"},
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        self.assertEqual(button.clicks, 1)
+
+    def test_unknown_amount_status_keeps_message_diagnostics(self):
+        button = SimpleNamespace(
+            text="抢红包",
+            url="",
+            button=type("KeyboardButtonCallback", (), {"data": b"claim:opaque"})(),
+        )
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        message = self._message(button)
+        message.raw_text = "红包数量：5"
+        message.text = message.raw_text
+        with patch.object(
+            red_packet_features,
+            "load_red_packet_settings",
+            return_value={"enabled": True, "accounts": ["main"], "minimum_amount": "10"},
+        ):
+            asyncio.run(monitor.process_message(message, source="new"))
+
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "amount_unknown")
+        self.assertEqual(status["last_message_text"], "红包数量：5")
+        self.assertEqual(status["last_buttons"][0]["text"], "抢红包")
+        self.assertEqual(status["last_buttons"][0]["data_text"], "claim:opaque")
 
 
 if __name__ == "__main__":

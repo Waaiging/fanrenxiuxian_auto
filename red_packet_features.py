@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -22,6 +23,7 @@ RED_PACKET_CHAT = "ja_netfilter_group"
 RED_PACKET_ANCHOR_MESSAGE_ID = 458347
 RED_PACKET_LINK = f"https://t.me/{RED_PACKET_CHAT}/{RED_PACKET_ANCHOR_MESSAGE_ID}"
 RED_PACKET_BUTTON_TEXT = "抢红包"
+RED_PACKET_BUTTON_TEXTS = (RED_PACKET_BUTTON_TEXT, "抢")
 RED_PACKET_ACCOUNT_NAMES = {
     "main": "主号",
     "sub": "副号",
@@ -30,15 +32,22 @@ RED_PACKET_ACCOUNT_NAMES = {
 }
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_HANDLED_MESSAGE_IDS = 200
+MAX_DIAGNOSTIC_TEXT_LENGTH = 2000
 
-_AMOUNT_TOKEN = r"([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)"
-_CURRENCY = r"(?:USDT|LDC|CNY|RMB|USD|TRX|TON|U|元)"
+_AMOUNT_TOKEN = r"(?<![0-9])([0-9]+(?:[,.\s][0-9]{3})*(?:\.[0-9]+)?)(?![0-9])"
+_CURRENCY_CODE = r"(?:USDT|USDC|LDC|CNY|RMB|USD|TRX|TON|BNB|ETH|BTC|SOL|DOGE|EUR|GBP|HKD|TWD|JPY|U|元|块|币)(?![A-Za-z])"
+_CURRENCY_SYMBOL = r"(?:[¥￥$€£₽₿])"
+_CURRENCY = rf"(?:{_CURRENCY_CODE}|{_CURRENCY_SYMBOL})"
 _AMOUNT_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        rf"(?:红包总金额|红包金额|总金额|总额|金额|单包金额|单个金额|每份)\s*[：:=]?\s*(?:[¥￥$]\s*)?{_AMOUNT_TOKEN}\s*{_CURRENCY}?",
-        rf"(?:红包|🧧)[^\n\r]{{0,28}}?(?:[¥￥$]\s*)?{_AMOUNT_TOKEN}\s*{_CURRENCY}",
-        rf"(?:[¥￥$]\s*)?{_AMOUNT_TOKEN}\s*{_CURRENCY}[^\n\r]{{0,28}}?(?:红包|🧧)",
+        rf"(?:红包总金额|红包金额|总金额|总额|金额|单包金额|单个金额|每份|每个)\s*(?:[/|]\s*[^\n\r：:=]{{0,16}})?\s*[：:=]?\s*(?:{_CURRENCY_SYMBOL}\s*)?{_AMOUNT_TOKEN}\s*(?:{_CURRENCY_CODE})?",
+        rf"(?:💰|💵|💴|💶|💷|💸)\s*(?:金额\s*)?[：:=]?\s*(?:{_CURRENCY_SYMBOL}\s*)?{_AMOUNT_TOKEN}\s*(?:{_CURRENCY_CODE})?",
+        rf"(?:红包|🧧)[^\n\r]{{0,40}}?{_CURRENCY_SYMBOL}\s*{_AMOUNT_TOKEN}",
+        rf"(?:红包|🧧)[^\n\r]{{0,40}}?(?:{_CURRENCY_SYMBOL}\s*)?{_AMOUNT_TOKEN}\s*{_CURRENCY_CODE}",
+        rf"(?:{_CURRENCY_SYMBOL}\s*)?{_AMOUNT_TOKEN}\s*{_CURRENCY_CODE}[^\n\r]{{0,40}}?(?:红包|🧧)",
+        rf"{_CURRENCY_SYMBOL}\s*{_AMOUNT_TOKEN}",
+        rf"{_AMOUNT_TOKEN}\s*{_CURRENCY_CODE}",
     )
 )
 
@@ -137,12 +146,14 @@ def extract_red_packet_amount(text: str, button_texts: list[str] | None = None) 
     combined = "\n".join(
         part for part in [str(text or ""), *(str(item or "") for item in (button_texts or []))] if part
     )
+    combined = unicodedata.normalize("NFKC", combined)
     for pattern in _AMOUNT_PATTERNS:
         match = pattern.search(combined)
         if not match:
             continue
         try:
-            return Decimal(match.group(1).replace(",", ""))
+            amount_text = re.sub(r"[,\s]", "", match.group(1))
+            return Decimal(amount_text)
         except (InvalidOperation, ValueError):
             continue
     return None
@@ -164,15 +175,21 @@ def message_topic_id(message: Any, *, root_fallback: bool = False) -> int | None
 
 
 def red_packet_button(message: Any) -> Any | None:
+    short = None
     partial = None
     for row in getattr(message, "buttons", None) or []:
         for button in row:
             text = str(getattr(button, "text", "") or "").strip()
-            if text == RED_PACKET_BUTTON_TEXT:
+            normalized = re.sub(r"[\s\ufe0f🧧🎁🎉]", "", text).strip(
+                "[]【】()（）<>《》:：!！.-_"
+            )
+            if normalized == RED_PACKET_BUTTON_TEXT:
                 return button
-            if RED_PACKET_BUTTON_TEXT in text and partial is None:
+            if normalized == "抢" and short is None:
+                short = button
+            if RED_PACKET_BUTTON_TEXT in normalized and partial is None:
                 partial = button
-    return partial
+    return short or partial
 
 
 def red_packet_button_metadata(message: Any) -> list[dict[str, Any]]:
@@ -180,12 +197,20 @@ def red_packet_button_metadata(message: Any) -> list[dict[str, Any]]:
     for row in getattr(message, "buttons", None) or []:
         for button in row:
             raw = getattr(button, "button", None)
+            data = getattr(raw, "data", None)
+            data_bytes = bytes(data) if isinstance(data, (bytes, bytearray)) else b""
+            try:
+                data_text = data_bytes.decode("utf-8")[:256] if data_bytes else ""
+            except UnicodeDecodeError:
+                data_text = ""
             rows.append(
                 {
                     "text": str(getattr(button, "text", "") or ""),
                     "type": type(raw).__name__ if raw is not None else type(button).__name__,
                     "url": str(getattr(button, "url", "") or ""),
-                    "has_data": bool(getattr(raw, "data", None)),
+                    "has_data": bool(data),
+                    "data_hex": data_bytes[:128].hex(),
+                    "data_text": data_text,
                 }
             )
     return rows
@@ -210,6 +235,7 @@ def red_packet_dashboard_payload() -> dict[str, Any]:
             "anchor_message_id": RED_PACKET_ANCHOR_MESSAGE_ID,
             "link": RED_PACKET_LINK,
             "button_text": RED_PACKET_BUTTON_TEXT,
+            "button_texts": list(RED_PACKET_BUTTON_TEXTS),
         },
         "accounts": [
             {
@@ -344,8 +370,19 @@ class RedPacketMonitor:
     async def process_message(self, message: Any, *, source: str) -> None:
         if not self._is_target_topic(message):
             return
+        button_metadata = red_packet_button_metadata(message)
         button = red_packet_button(message)
         if button is None:
+            claim_like = [item for item in button_metadata if "抢" in item["text"]]
+            if claim_like:
+                settings = load_red_packet_settings()
+                if settings["enabled"] and self.account in settings["accounts"]:
+                    self.log.warning(
+                        "[%s] Claim-like buttons were not recognized: message=%s buttons=%s",
+                        self.account,
+                        getattr(message, "id", None),
+                        claim_like,
+                    )
             return
 
         message_id = int(getattr(message, "id", 0) or 0)
@@ -355,8 +392,9 @@ class RedPacketMonitor:
         if not settings["enabled"] or self.account not in settings["accounts"]:
             return
 
-        button_texts = [item["text"] for item in red_packet_button_metadata(message)]
-        amount = extract_red_packet_amount(getattr(message, "raw_text", "") or getattr(message, "text", ""), button_texts)
+        message_text = str(getattr(message, "raw_text", "") or getattr(message, "text", "") or "")
+        button_texts = [item["text"] for item in button_metadata]
+        amount = extract_red_packet_amount(message_text, button_texts)
         minimum = Decimal(settings["minimum_amount"])
         if amount is None:
             self._write_status(
@@ -365,9 +403,17 @@ class RedPacketMonitor:
                 last_amount=None,
                 last_source=source,
                 last_action="amount_unknown",
+                last_message_text=message_text[:MAX_DIAGNOSTIC_TEXT_LENGTH],
+                last_buttons=button_metadata,
                 last_error="无法从红包消息中解析金额",
             )
-            self.log.warning("[%s] Red packet %s skipped: amount unknown", self.account, message_id)
+            self.log.warning(
+                "[%s] Red packet %s skipped: amount unknown text=%r buttons=%s",
+                self.account,
+                message_id,
+                message_text[:MAX_DIAGNOSTIC_TEXT_LENGTH],
+                button_metadata,
+            )
             return
         if amount < minimum:
             self._remember(message_id)
