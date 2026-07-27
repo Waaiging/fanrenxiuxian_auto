@@ -54,6 +54,7 @@ from duel_features import (
     titan_target_status,
 )
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
+from miniapp_beast import write_refresh_request
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -793,6 +794,41 @@ def watch_command(command, label=None, detail="同步/记录回复", group=""):
 
 def manual_command(command, label=None, detail="按需发送", group=""):
     return command_row(command, label, "按需", "manual", detail=detail, group=group, actionable=False)
+
+
+def miniapp_beast_sync_command(state):
+    last_sync = str(state.get("beast_miniapp_last_sync_time") or "").strip()
+    last_attempt = str(state.get("beast_miniapp_last_attempt_time") or "").strip()
+    error = clean_custom_text(state.get("beast_miniapp_last_error") or "", 80)
+    count = len(state.get("beasts_cache") or [])
+    if error:
+        status = "同步异常"
+        tone = "paused"
+        detail = f"{error} · 保留缓存 {count} 只"
+    elif last_sync:
+        status = "已同步"
+        tone = "active"
+        detail = f"Mini App 实时缓存 {count} 只"
+    elif last_attempt:
+        status = "等待同步"
+        tone = "cooldown"
+        detail = "已提交 Mini App 同步，等待接口返回"
+    else:
+        status = "待同步"
+        tone = "unknown"
+        detail = "从固定 Mini App 入口读取灵兽状态"
+    row = command_row(
+        "miniapp:spirit-beast",
+        "万兽谷同步",
+        status,
+        tone,
+        at=last_sync or last_attempt,
+        detail=detail,
+        group="灵兽",
+        actionable=False,
+    )
+    row["dashboard_action"] = "miniapp-beast-refresh"
+    return row
 
 
 def flow_command(command, label=None, detail="流程内自动发送", group=""):
@@ -1755,7 +1791,7 @@ def main_soul_panel(account, state):
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
         rows.extend([
-            manual_command(".我的灵兽", "我的灵兽", "查询主号灵兽缓存", "灵兽"),
+            miniapp_beast_sync_command(state),
             (
                 command_row(
                     ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -1801,7 +1837,15 @@ def main_soul_panel(account, state):
         ])
         rows.extend(soul_curse_publisher_commands(state, account=account))
         rows.extend([
-            manual_command(".我的灵兽", "我的灵兽", "查询灵兽状态", "灵兽"),
+            command_row(
+                "miniapp:spirit-beast:xiaohao",
+                "万兽谷同步",
+                "需独立入口",
+                "unknown",
+                detail="固定入口与 Telegram 账号绑定，未配置前不发送废弃的 .我的灵兽",
+                group="灵兽",
+                actionable=False,
+            ),
             (
                 command_row(
                     ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -4391,6 +4435,24 @@ async def clear_status(job_id: str, username: str = Depends(authenticate)):
         job = CLEAR_JOBS.get(job_id)
         if not job: return {"success": False, "status": "missing", "msg": "未找到清屏任务。"}
         return dict(job)
+
+
+@app.post("/api/beast-miniapp/refresh")
+async def refresh_beast_miniapp(payload: dict = Body(default={}), username: str = Depends(authenticate)):
+    """Ask the running main account to refresh its Mini App beast roster."""
+    account = str(payload.get("account") or "main").strip()
+    if account != "main":
+        return {"success": False, "msg": "当前仅主号配置了万兽谷固定入口"}
+    request = write_refresh_request(CONFIG_DIR, requested_by=username)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "msg": "已提交万兽谷同步，主号将在 30 秒内处理",
+        "request_id": request.get("request_id"),
+        "requested_at": request.get("requested_at"),
+    }
+
 
 @app.post("/api/command-control")
 async def set_command_control(payload: dict = Body(...), username: str = Depends(authenticate)):

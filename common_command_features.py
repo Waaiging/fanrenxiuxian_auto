@@ -2199,7 +2199,10 @@ class CommonCommandMixin:
             except Exception:
                 pass
 
-            for key, command in STATE_TIME_COMMAND_MAP.items():
+            for key in STATE_TIME_COMMAND_MAP:
+                command = self.state_time_command_for_key(key)
+                if not command:
+                    continue
                 if self.is_low_priority_daily_command(command):
                     continue
                 if not self.priority_due_key_enabled(identity, key):

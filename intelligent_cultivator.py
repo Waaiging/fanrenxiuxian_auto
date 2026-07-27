@@ -474,6 +474,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             return TREASURE_TOUCH_COMMAND
         if key == "next_nurture_spirit_time":
             return NURTURE_SPIRIT_COMMAND
+        if key == "next_beast_status_check_time":
+            return None
         return CommonCommandMixin.state_time_command_for_key(self, key)
 
     def __init__(self, session_name='telegram_cli_session'):
@@ -5470,6 +5472,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=35))
         if self.enable_main_beasts:
+            self.create_scheduler_task("main_beast_miniapp", lambda: self.run_main_beast_miniapp_timer())
             self.create_scheduler_task("main_beast_hunt", lambda: self.run_main_beast_hunt_timer())
             self.create_scheduler_task("main_beast_action", lambda: self.run_main_beast_action_timer())
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())

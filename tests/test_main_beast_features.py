@@ -1,8 +1,9 @@
+import asyncio
 import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import intelligent_cultivator
 from dashboard_server import build_command_panels
@@ -47,6 +48,8 @@ ROSTER = """
 class DummyMainBeast(MainBeastMixin):
     def __init__(self):
         self.state = main_beast_default_state()
+        self.config = {}
+        self.client = object()
         self.saved = 0
 
     def save_state(self):
@@ -141,6 +144,72 @@ class MainBeastFeatureTests(unittest.TestCase):
         }.issubset(commands))
         self.assertNotIn(".登天阶", commands)
         self.assertNotIn(".引九天罡风", commands)
+        self.assertNotIn(".我的灵兽", commands)
+        miniapp = next(item for item in panel["commands"] if item["command"] == "miniapp:spirit-beast")
+        self.assertEqual(miniapp["dashboard_action"], "miniapp-beast-refresh")
+
+    def test_miniapp_sync_replaces_deprecated_roster_command(self):
+        self.actor.config = {
+            "miniapp_beast": {
+                "enabled": True,
+                "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture",
+            }
+        }
+        snapshot = {
+            "spirit_token": "spiritbeast_fixture",
+            "player": {"daoName": "测试"},
+            "beasts": [{
+                "id": 1,
+                "full_name": "新灵狐",
+                "status": "休息中",
+                "species": "1阶灵狐",
+                "tier": 1,
+                "level": 4,
+                "power": 30,
+                "stamina": 92,
+                "exp": 12,
+            }],
+        }
+        with patch("main_beast_features.fetch_miniapp_beast_snapshot", new=AsyncMock(return_value=snapshot)) as fetch:
+            self.assertTrue(asyncio.run(self.actor.update_main_beast_cache(force=True)))
+        fetch.assert_awaited_once()
+        self.assertEqual(self.actor.state["beasts_cache"][0]["full_name"], "新灵狐")
+        self.assertEqual(self.actor.state["beast_roster_last_source"], "miniapp")
+        self.assertEqual(self.actor.state["beast_miniapp_last_error"], "")
+
+    def test_failed_miniapp_sync_never_reuses_stale_roster_for_actions(self):
+        self.actor.config = {
+            "miniapp_beast": {
+                "enabled": True,
+                "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture",
+            }
+        }
+        self.actor.state.update({
+            "beasts_cache": [{"full_name": "旧灵兽", "stamina": 100}],
+            "beast_roster_last_source": "miniapp",
+            "beast_miniapp_last_error": "external_action_unavailable",
+            "next_beast_status_check_time": "2999-01-01 00:00:00",
+        })
+        with patch("main_beast_features.fetch_miniapp_beast_snapshot", new=AsyncMock()) as fetch:
+            self.assertFalse(asyncio.run(self.actor.update_main_beast_cache()))
+        fetch.assert_not_awaited()
+
+    def test_disabled_miniapp_never_falls_back_to_cached_roster(self):
+        self.actor.config = {}
+        self.actor.state.update({
+            "beasts_cache": [{"full_name": "旧灵兽", "stamina": 100}],
+            "next_beast_status_check_time": "2999-01-01 00:00:00",
+        })
+        self.assertFalse(asyncio.run(self.actor.update_main_beast_cache()))
+        self.assertEqual(self.actor.state["beast_miniapp_last_error"], "miniapp_not_configured")
+
+    def test_deprecated_roster_deadline_is_not_priority_work_for_main(self):
+        actor = intelligent_cultivator.Cultivator.__new__(intelligent_cultivator.Cultivator)
+        actor.state = {"next_beast_status_check_time": "2000-01-01 00:00:00"}
+        actor.avatars = []
+        actor.identity_pause_seconds = lambda identity: 0
+        actor.state_time_command_paused = lambda key, identity="": False
+        self.assertFalse(actor.priority_due_work_summary())
 
     def test_main_account_initializes_wanling_runtime_and_migrates_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:

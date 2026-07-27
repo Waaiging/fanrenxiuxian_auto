@@ -4,10 +4,21 @@
 import asyncio
 import hashlib
 import logging
+import os
 import random
 import re
 import time
 from datetime import datetime, timedelta
+
+from miniapp_beast import (
+    DEFAULT_REFRESH_SECONDS,
+    DEFAULT_RETRY_SECONDS,
+    MiniAppBeastError,
+    fetch_miniapp_beast_snapshot,
+    read_cached_spirit_token,
+    read_refresh_request,
+    write_cached_spirit_token,
+)
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -82,11 +93,17 @@ def main_beast_default_state():
         "best_beast_stamina": -1,
         "beasts_cache": [],
         "beast_roster_updated_at": "",
+        "beast_roster_last_source": "",
         "beast_roster_auto_query_date": "",
         "beast_roster_auto_query_count": 0,
         "next_beast_status_check_time": "",
         "last_beast_roster_query_result": "",
         "last_beast_roster_response_excerpt": "",
+        "beast_miniapp_last_attempt_time": "",
+        "beast_miniapp_last_sync_time": "",
+        "beast_miniapp_last_error": "",
+        "beast_miniapp_sync_count": 0,
+        "beast_miniapp_refresh_request_id": "",
     }
 
 
@@ -116,6 +133,11 @@ class MainBeastMixin:
     def initialize_main_beast_runtime(self):
         self.beast_lock = asyncio.Lock()
         self.beast_wakeup = asyncio.Event()
+        settings = self.main_beast_miniapp_settings()
+        self._miniapp_beast_token = read_cached_spirit_token(
+            self.main_beast_config_dir(),
+            settings["entry_url"],
+        ) if settings["enabled"] else ""
 
     def main_beast_logger(self):
         return logging.getLogger("MainBeast")
@@ -240,6 +262,7 @@ class MainBeastMixin:
             return False
         self.state["beasts_cache"] = beasts
         self.state["beast_roster_updated_at"] = beast_time()
+        self.state["beast_roster_last_source"] = source or "reply"
         self.state["last_beast_roster_query_result"] = "parsed"
         self.update_main_best_beast()
         active_patrol = next((item for item in beasts if "巡边" in str(item.get("status") or "")), None)
@@ -249,32 +272,146 @@ class MainBeastMixin:
         self.main_beast_logger().info("Main beast roster synced from %s: %s beasts", source or "reply", len(beasts))
         return True
 
-    def normalize_main_beast_roster_quota(self):
-        today = beast_now().strftime("%Y-%m-%d")
-        if self.state.get("beast_roster_auto_query_date") != today:
-            self.state["beast_roster_auto_query_date"] = today
-            self.state["beast_roster_auto_query_count"] = 0
+    def main_beast_miniapp_settings(self):
+        config = getattr(self, "config", {}) or {}
+        settings = config.get("miniapp_beast") or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        entry_url = str(settings.get("entry_url") or "").strip()
+        enabled = bool(settings.get("enabled", bool(entry_url))) and bool(entry_url)
+        try:
+            refresh_seconds = max(60, int(settings.get("refresh_seconds") or DEFAULT_REFRESH_SECONDS))
+        except (TypeError, ValueError):
+            refresh_seconds = DEFAULT_REFRESH_SECONDS
+        try:
+            retry_seconds = max(60, int(settings.get("retry_seconds") or DEFAULT_RETRY_SECONDS))
+        except (TypeError, ValueError):
+            retry_seconds = DEFAULT_RETRY_SECONDS
+        try:
+            timeout = max(5, min(60, int(settings.get("timeout_seconds") or 20)))
+        except (TypeError, ValueError):
+            timeout = 20
+        return {
+            "enabled": enabled,
+            "entry_url": entry_url,
+            "bot_username": str(settings.get("bot_username") or "fanrenxiuxian_bot").strip(),
+            "refresh_seconds": refresh_seconds,
+            "retry_seconds": retry_seconds,
+            "timeout": timeout,
+        }
 
-    async def update_main_beast_cache(self):
-        self.normalize_main_beast_roster_quota()
+    def main_beast_config_dir(self):
+        state_file = str(getattr(self, "state_file", "") or "").strip()
+        if state_file:
+            return os.path.dirname(os.path.abspath(state_file))
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def record_main_beast_miniapp_snapshot(self, snapshot):
+        beasts = list((snapshot or {}).get("beasts") or [])
+        if not beasts:
+            raise MiniAppBeastError("beast_roster_empty")
+        self.state["beasts_cache"] = beasts
+        self.state["beast_roster_updated_at"] = beast_time()
+        self.state["beast_roster_last_source"] = "miniapp"
+        self.state["last_beast_roster_query_result"] = "parsed"
+        self.state["last_beast_roster_response_excerpt"] = ""
+        self.state["beast_miniapp_last_sync_time"] = beast_time()
+        self.state["beast_miniapp_last_error"] = ""
+        self.state["beast_miniapp_sync_count"] = int(self.state.get("beast_miniapp_sync_count") or 0) + 1
+        self.update_main_best_beast()
+        active_patrol = next((item for item in beasts if "巡边" in str(item.get("status") or "")), None)
+        if active_patrol:
+            self.state["beast_border_patrol_name"] = active_patrol.get("full_name", "")
+        self.main_beast_save()
+        self.main_beast_logger().info("Main beast roster synced from Mini App: %s beasts", len(beasts))
+        return True
+
+    async def update_main_beast_cache(self, force=False):
+        settings = self.main_beast_miniapp_settings()
         cache = list(self.state.get("beasts_cache") or [])
         next_check = self.state.get("next_beast_status_check_time", "")
-        if cache and next_check and beast_time_is_future(next_check):
-            return True
-        count = int(self.state.get("beast_roster_auto_query_count") or 0)
-        if count >= ROSTER_DAILY_LIMIT:
-            return bool(cache)
-        self.state["beast_roster_auto_query_count"] = count + 1
+        if not settings["enabled"]:
+            self.state["last_beast_roster_query_result"] = "miniapp_not_configured"
+            self.state["beast_miniapp_last_error"] = "miniapp_not_configured"
+            self.state["next_beast_status_check_time"] = beast_add_seconds(settings["retry_seconds"])
+            self.main_beast_save()
+            self.main_beast_logger().warning(
+                "Main beast Mini App sync is not configured; deprecated .我的灵兽 will not be sent."
+            )
+            return False
+        if not force and next_check and beast_time_is_future(next_check):
+            return bool(
+                cache
+                and self.state.get("beast_roster_last_source") == "miniapp"
+                and not self.state.get("beast_miniapp_last_error")
+            )
+
+        self.state["beast_miniapp_last_attempt_time"] = beast_time()
+        self.state["last_beast_roster_query_result"] = "miniapp_fetching"
         self.main_beast_save()
-        response = await self.send_and_wait_feedback(".我的灵兽", timeout=60, max_retries=0)
-        text = self.main_beast_response_text(response)
-        if self.record_main_beast_roster(text, source="auto .我的灵兽"):
-            self.state["next_beast_status_check_time"] = beast_add_seconds(30 * 60)
+        try:
+            snapshot = await fetch_miniapp_beast_snapshot(
+                self.client,
+                settings["entry_url"],
+                cached_spirit_token=getattr(self, "_miniapp_beast_token", ""),
+                bot_username=settings["bot_username"],
+                timeout=settings["timeout"],
+            )
+            self._miniapp_beast_token = str(snapshot.get("spirit_token") or "")
+            try:
+                write_cached_spirit_token(
+                    self.main_beast_config_dir(),
+                    settings["entry_url"],
+                    self._miniapp_beast_token,
+                )
+            except Exception:
+                self.main_beast_logger().warning(
+                    "Main beast Mini App token cache could not be persisted; continuing with memory cache.",
+                    exc_info=True,
+                )
+            self.record_main_beast_miniapp_snapshot(snapshot)
+            self.state["next_beast_status_check_time"] = beast_add_seconds(settings["refresh_seconds"])
             self.main_beast_save()
             return True
-        self.state["next_beast_status_check_time"] = beast_add_seconds(30 * 60)
+        except MiniAppBeastError as exc:
+            self._miniapp_beast_token = ""
+            error = exc.code
+        except Exception as exc:
+            self._miniapp_beast_token = ""
+            error = type(exc).__name__.lower()
+            self.main_beast_logger().exception("Main beast Mini App sync failed")
+        self.state["last_beast_roster_query_result"] = "miniapp_error"
+        self.state["beast_miniapp_last_error"] = error
+        self.state["next_beast_status_check_time"] = beast_add_seconds(settings["retry_seconds"])
         self.main_beast_save()
-        return bool(cache)
+        self.main_beast_logger().warning(
+            "Main beast Mini App sync failed (%s); stale roster will not be used for a new beast action.",
+            error,
+        )
+        return False
+
+    async def run_main_beast_miniapp_timer(self):
+        await self.startup_done.wait()
+        self.main_beast_logger().info("Main beast Mini App roster scheduler started")
+        while self.is_running:
+            try:
+                request = read_refresh_request(self.main_beast_config_dir())
+                request_id = str(request.get("request_id") or "")
+                last_request_id = str(self.state.get("beast_miniapp_refresh_request_id") or "")
+                manual_refresh = bool(request_id and request_id != last_request_id)
+                next_check = self.state.get("next_beast_status_check_time", "")
+                due = not self.state.get("beasts_cache") or not next_check or not beast_time_is_future(next_check)
+                if (manual_refresh or due) and not self.avatar_send_lock.locked():
+                    async with self.beast_lock:
+                        if manual_refresh:
+                            self.state["beast_miniapp_refresh_request_id"] = request_id
+                            self.main_beast_save()
+                        await self.update_main_beast_cache(force=manual_refresh)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.main_beast_logger().exception("Main beast Mini App roster iteration failed")
+            await asyncio.sleep(30)
 
     def main_beast_candidates(self, action):
         cache = list(self.state.get("beasts_cache") or [])
@@ -634,7 +771,7 @@ class MainBeastMixin:
             response = await self.send_and_wait_feedback(".巡边归来", timeout=60, max_retries=0)
             if not self.record_main_patrol_response(active_name, self.main_beast_response_text(response), returning=True):
                 return False
-        if not self.state.get("beasts_cache") and not await self.update_main_beast_cache():
+        if not await self.update_main_beast_cache():
             self.schedule_main_beast_retry("next_beast_border_patrol_time", 30 * 60)
             return False
         attempted = set()

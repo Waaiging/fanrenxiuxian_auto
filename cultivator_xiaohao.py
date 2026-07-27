@@ -4988,6 +4988,15 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     async def update_beast_cache(self):
         """按自定义防刷屏标准刷新灵兽缓存；自动 .我的灵兽 每天最多 2 次。"""
+        config = getattr(self, "config", {}) or {}
+        if not bool(config.get("legacy_beast_roster_command_enabled", False)):
+            self.state["last_beast_roster_query_result"] = "miniapp_required"
+            self.state["next_beast_status_check_time"] = add_seconds_str(now_str(), 1800)
+            self.save_state()
+            log.warning(
+                "Beast Cache: .我的灵兽 has moved to Mini App; deprecated command will not be sent."
+            )
+            return False
         if self.normalize_beast_roster_auto_query_quota():
             self.save_state()
         cache = self.state.get("beasts_cache", []) or []

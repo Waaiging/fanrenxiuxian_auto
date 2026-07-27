@@ -6975,6 +6975,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_auto_beast_roster_refresh_counts_and_parses_response(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.config = {"legacy_beast_roster_command_enabled": True}
         today = datetime.now().strftime("%Y-%m-%d")
         actor.state = {
             "beasts_cache": [],
@@ -7010,6 +7011,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_auto_beast_roster_daily_cap_uses_cached_roster(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.config = {"legacy_beast_roster_command_enabled": True}
         today = datetime.now().strftime("%Y-%m-%d")
         actor.state = {
             "beast_roster_auto_query_date": today,
@@ -7033,6 +7035,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_auto_beast_roster_daily_cap_without_cache_defers(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.config = {"legacy_beast_roster_command_enabled": True}
         today = datetime.now().strftime("%Y-%m-%d")
         actor.state = {
             "beast_roster_auto_query_date": today,
@@ -7049,6 +7052,21 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertFalse(asyncio.run(actor.update_beast_cache()))
         self.assertEqual(actor.state["last_beast_roster_query_result"], "daily_limit")
+        self.assertGreater(common_seconds_until(actor.state["next_beast_status_check_time"]), 0)
+
+    def test_deprecated_beast_roster_command_is_disabled_by_default(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.config = {}
+        actor.state = {"beasts_cache": [{"full_name": "六翼"}]}
+        actor.save_state = lambda: None
+
+        async def fail_send(*args, **kwargs):
+            raise AssertionError("deprecated .我的灵兽 must not be sent")
+
+        actor.send_and_wait_feedback = fail_send
+
+        self.assertFalse(asyncio.run(actor.update_beast_cache()))
+        self.assertEqual(actor.state["last_beast_roster_query_result"], "miniapp_required")
         self.assertGreater(common_seconds_until(actor.state["next_beast_status_check_time"]), 0)
 
     def test_beast_candidate_protects_low_stamina_focus_beast(self):

@@ -29,6 +29,8 @@ soul_curse_commissions.json
 bot_activity_shared.json
 red_packet_settings.json
 red_packet_status_*.json
+miniapp_beast_session.json
+miniapp_beast_refresh_request.json
 star_gazing_events.jsonl
 star_gazing_events.lock
 duel_state.json

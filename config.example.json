@@ -6,6 +6,14 @@
     "telegram_cli_session"
   ],
   "files_directory": "./",
+  "miniapp_beast": {
+    "enabled": false,
+    "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=YOUR_FIXED_DWELLING_TOKEN",
+    "bot_username": "fanrenxiuxian_bot",
+    "refresh_seconds": 300,
+    "retry_seconds": 300,
+    "timeout_seconds": 20
+  },
   "monitor": {
     "chat_id": "fanrenxxz",
     "topic_id": null,

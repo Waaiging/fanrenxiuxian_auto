@@ -141,6 +141,10 @@
         .command-toggle.paused { background: rgba(239,68,68,0.24); border-color: rgba(248,113,113,0.45); }
         .command-toggle.paused::after { left: 0.18rem; background: #fecaca; }
         .command-toggle.updating { opacity: 0.58; cursor: wait; }
+        .command-action-button { width: 1.9rem; height: 1.9rem; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(0,210,255,0.3); border-radius: 6px; background: rgba(0,210,255,0.08); color: var(--accent-color); cursor: pointer; }
+        .command-action-button:hover { background: rgba(0,210,255,0.16); }
+        .command-action-button:disabled { opacity: 0.5; cursor: wait; }
+        .command-action-button svg { width: 0.9rem; height: 0.9rem; }
         .command-bait-select { height: 1.55rem; border: 1px solid rgba(255,255,255,0.14); background: rgba(15,23,42,0.92); color: var(--text-primary); border-radius: 6px; padding: 0 0.38rem; font-size: 0.72rem; outline: none; }
         .command-bait-select:disabled { opacity: 0.58; cursor: wait; }
         .command-delete { border: 1px solid rgba(239,68,68,0.38); background: rgba(239,68,68,0.12); color: #fecaca; border-radius: 6px; padding: 0.22rem 0.42rem; font-size: 0.7rem; cursor: pointer; }
@@ -1330,6 +1334,7 @@
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
         const commandPausePending = {};
+        const dashboardActionPending = {};
 
         function apiUrl(path) {
             return new URL(path, window.location.origin).toString();
@@ -2218,11 +2223,24 @@
                 const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
                 const isNextDue = dueKey && commandItemKey(item) === dueKey;
                 const baitOptions = Array.isArray(item.bait_options) ? item.bait_options : [];
+                const dashboardAction = String(item.dashboard_action || '');
+                const actionKey = `${account}:${dashboardAction}`;
+                const actionPending = Boolean(dashboardActionPending[actionKey]);
                 const baitSelect = baitOptions.length ? `
                     <select class="command-bait-select" ${pending ? 'disabled' : ''} title="选择鱼饵" onchange="setFishingAutoBait('${escapeJs(panelKey)}', this.value)">
                         ${baitOptions.map(bait => `<option value="${escapeHtml(bait)}" ${bait === item.bait_value ? 'selected' : ''}>${escapeHtml(bait)}</option>`).join('')}
                     </select>
                 ` : '';
+                const controlHtml = dashboardAction === 'miniapp-beast-refresh' ? `
+                    <button class="command-action-button" ${actionPending ? 'disabled' : ''} onclick="refreshMiniappBeasts('${escapeJs(account)}', this)" title="立即同步万兽谷" aria-label="立即同步万兽谷">
+                        <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                    </button>
+                    <span>${actionPending ? '已提交' : '刷新'}</span>
+                ` : `
+                    ${baitSelect}
+                    <button class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
+                    <span>${pending ? '处理中' : controlLabel}</span>
+                `;
                 return `
                     <div class="command-row tone-${tone} ${isNextDue ? 'next-due' : ''}">
                         <div class="command-main">
@@ -2231,9 +2249,7 @@
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
                         <div class="command-control" title="${escapeHtml(controlTitle)}">
-                            ${baitSelect}
-                            <button class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
-                            <span>${pending ? '处理中' : controlLabel}</span>
+                            ${controlHtml}
                         </div>
                     </div>
                 `;
@@ -2334,12 +2350,14 @@
                 ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份没有可显示的冷却或每日任务。</div>'}
                 ${renderIdentityCommandRecords(data.account, panel.identity || '主魂')}
             `;
+            refreshIcons();
         }
 
         function showCommandModal(panelKey) {
             commandModalKey = panelKey;
             renderCommandModal(panelKey);
             document.getElementById('commandModalOverlay').classList.add('show');
+            refreshIcons();
         }
 
         function closeCommandModal() {
@@ -3203,6 +3221,35 @@
             } finally {
                 fishingAutoHomePending = false;
                 renderFishingAutoSummary(lastFishingAutoSummary || {});
+            }
+        }
+
+        async function refreshMiniappBeasts(account, button) {
+            const key = `${account}:miniapp-beast-refresh`;
+            if (dashboardActionPending[key]) return;
+            dashboardActionPending[key] = true;
+            if (button) button.disabled = true;
+            if (commandModalKey) renderCommandModal(commandModalKey);
+            try {
+                const response = await fetch(apiUrl('/api/beast-miniapp/refresh'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({account})
+                });
+                const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+                if (!response.ok || data.success === false) {
+                    alert(data.msg || `同步请求失败：HTTP ${response.status}`);
+                    return;
+                }
+                setTimeout(() => updateStatus(), 1000);
+            } catch (error) {
+                console.error('Mini App beast refresh failed:', error);
+                alert('万兽谷同步请求失败。');
+            } finally {
+                window.setTimeout(() => {
+                    dashboardActionPending[key] = false;
+                    if (commandModalKey) renderCommandModal(commandModalKey);
+                }, 1500);
             }
         }
 
