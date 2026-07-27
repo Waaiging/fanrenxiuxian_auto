@@ -2,8 +2,10 @@ import asyncio
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from group_visibility_control import (
+    TmuxXiaohaoProcessManager,
     TelegramGroupXiaohaoController,
     normalize_telegram_chat_id,
     telegram_chat_ids_match,
@@ -154,6 +156,26 @@ class GroupVisibilityControlTests(unittest.TestCase):
         self.assertEqual(asyncio.run(controller.check_once("fixture")), "private")
         self.assertEqual(state["waaiging_visibility_last_action"], "started")
         self.assertNotIn("xiaohao_visibility_last_action", state)
+
+    def test_public_group_starts_red_packet_standby_when_game_script_is_stopped(self):
+        manager = TmuxXiaohaoProcessManager(
+            "/tmp/deploy",
+            FakeLogger(),
+            "/tmp/deploy/venv/bin/python",
+            script="cultivator_xiaohao.py",
+            tmux_target="xiuxian:2",
+            fallback_script="red_packet_account.py",
+            fallback_account="xiaohao",
+        )
+        with (
+            patch.object(manager, "process_pids", AsyncMock(return_value=[])),
+            patch.object(manager, "fallback_process_pids", AsyncMock(return_value=[])),
+            patch.object(manager, "_start_fallback", AsyncMock(return_value=True)) as start_fallback,
+        ):
+            action = asyncio.run(manager.ensure_running(False))
+
+        self.assertEqual(action, "already_stopped")
+        start_fallback.assert_awaited_once()
 
 
 if __name__ == "__main__":

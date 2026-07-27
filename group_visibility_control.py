@@ -187,6 +187,8 @@ class TmuxXiaohaoProcessManager:
         tmux_target=XIAOHAO_TMUX_TARGET,
         state_file=None,
         account_label="Xiaohao",
+        fallback_script=None,
+        fallback_account=None,
     ):
         self.deploy_dir = os.path.abspath(deploy_dir)
         self.logger = logger
@@ -195,6 +197,8 @@ class TmuxXiaohaoProcessManager:
         self.tmux_target = tmux_target
         self.state_file = state_file
         self.account_label = str(account_label or script)
+        self.fallback_script = str(fallback_script or "").strip()
+        self.fallback_account = str(fallback_account or "").strip()
         self.last_defer_seconds = 0
         self._lock = asyncio.Lock()
 
@@ -234,6 +238,35 @@ class TmuxXiaohaoProcessManager:
     async def process_pids(self):
         return await asyncio.to_thread(self._process_pids_sync)
 
+    def _fallback_process_pids_sync(self):
+        if not self.fallback_script or not self.fallback_account:
+            return []
+        result = subprocess.run(
+            ["pgrep", "-af", self.fallback_script],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(str(result.stderr or result.stdout or "pgrep failed").strip())
+        account_arg = f"--account {self.fallback_account}"
+        pids = []
+        for line in str(result.stdout or "").splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            pid_text, command = parts
+            if self.fallback_script not in command or account_arg not in command or "python" not in command:
+                continue
+            try:
+                pids.append(int(pid_text))
+            except ValueError:
+                continue
+        return pids
+
+    async def fallback_process_pids(self):
+        return await asyncio.to_thread(self._fallback_process_pids_sync)
+
     async def _wait_for_running(self, expected, timeout=12):
         deadline = time.monotonic() + max(1, timeout)
         while time.monotonic() < deadline:
@@ -265,6 +298,33 @@ class TmuxXiaohaoProcessManager:
         if not await self._wait_for_running(True):
             raise RuntimeError(f"{self.account_label} did not start within 12 seconds")
 
+    async def _start_fallback(self):
+        if not self.fallback_script or not self.fallback_account:
+            return False
+        run_command = (
+            f"cd {shlex.quote(self.deploy_dir)} && "
+            f"exec {shlex.quote(self.python_executable)} {shlex.quote(self.fallback_script)} "
+            f"--account {shlex.quote(self.fallback_account)}"
+        )
+        tmux_command = f"bash -lc {shlex.quote(run_command)}"
+        await asyncio.to_thread(
+            self._run_tmux_sync,
+            ["respawn-window", "-k", "-t", self.tmux_target, tmux_command],
+        )
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if await self.fallback_process_pids():
+                return True
+            await asyncio.sleep(0.5)
+        raise RuntimeError(f"{self.account_label} red-packet standby did not start within 12 seconds")
+
+    async def _ensure_fallback(self):
+        if not self.fallback_script or not self.fallback_account:
+            return False
+        if await self.fallback_process_pids():
+            return False
+        return await self._start_fallback()
+
     async def _stop(self):
         await asyncio.to_thread(
             self._run_tmux_sync,
@@ -291,12 +351,15 @@ class TmuxXiaohaoProcessManager:
                     return "already_running"
                 self.last_defer_seconds = await asyncio.to_thread(self._write_restriction_retry_wait_sync)
                 if self.last_defer_seconds > 0:
+                    await self._ensure_fallback()
                     return "deferred_write_restricted"
                 await self._start()
                 return "started"
             if not running:
+                await self._ensure_fallback()
                 return "already_stopped"
             await self._stop()
+            await self._ensure_fallback()
             return "stopped"
 
 

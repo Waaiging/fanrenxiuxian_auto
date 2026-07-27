@@ -63,6 +63,7 @@ if hasattr(time, 'tzset'):
 from datetime import datetime, timedelta
 
 from telethon import TelegramClient, events
+from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 from common_command_features import CommonCommandMixin, common_command_default_state
 from duel_features import DuelMixin
@@ -7676,6 +7677,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
         log.info(f"XiaoHao Login: {self.my_info.first_name}")
+        await install_red_packet_monitor(self.client, self.account_key, logger=log)
         @self.client.on(events.NewMessage(chats=self.target_chat_id))
         async def h(e): await self.handle_game_response(e)
         @self.client.on(events.MessageEdited(chats=self.target_chat_id))

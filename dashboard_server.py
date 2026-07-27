@@ -53,6 +53,7 @@ from duel_features import (
     set_titan_beast_mode,
     titan_target_status,
 )
+from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -122,6 +123,7 @@ CLEAR_JOBS = {}                          # 清屏任务状态
 CLEAR_LOCK = threading.Lock()            # 清屏任务锁
 COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
+RED_PACKET_CONTROL_LOCK = threading.Lock()  # 抢红包设置锁
 STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前端轮询时反复读大日志
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
@@ -4258,6 +4260,35 @@ def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate
     except Exception:
         safe_limit = 200
     return duel_dashboard_payload(date=date, limit=safe_limit)
+
+
+@app.get("/api/red-packets")
+def red_packets(username: str = Depends(authenticate)):
+    """Return shared red-packet settings and per-account listener status."""
+    return red_packet_dashboard_payload()
+
+
+@app.post("/api/red-packets")
+async def red_packet_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Update the global switch, participating accounts, and minimum amount."""
+    accounts = payload.get("accounts")
+    if not isinstance(accounts, list):
+        return {"success": False, "msg": "账号列表格式错误"}
+    try:
+        with RED_PACKET_CONTROL_LOCK:
+            settings = save_red_packet_settings(
+                enabled=bool(payload.get("enabled")),
+                accounts=accounts,
+                minimum_amount=payload.get("minimum_amount", "0"),
+                updated_by=username,
+            )
+    except ValueError as exc:
+        if str(exc) == "at least one account is required":
+            message = "启用抢红包时至少选择一个账号"
+        else:
+            message = "最低金额必须是有效的非负数"
+        return {"success": False, "msg": message}
+    return {"success": True, "settings": settings, "updated_by": username}
 
 
 @app.post("/api/duels/control")

@@ -928,9 +928,123 @@
         }
         .record-header { padding: 0.72rem 0.85rem; }
         .record-title { font-size: 0.84rem; }
+        .red-packet-section {
+            border-radius: 8px;
+            background: var(--card-bg);
+            overflow: hidden;
+        }
+        .red-packet-controls {
+            display: grid;
+            grid-template-columns: minmax(9rem, 0.7fr) minmax(10rem, 0.8fr) minmax(18rem, 1.5fr) auto;
+            align-items: end;
+            gap: 0.7rem;
+            padding: 0.8rem 0.85rem;
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .red-packet-field {
+            display: grid;
+            gap: 0.35rem;
+            color: var(--text-secondary);
+            font-size: 0.66rem;
+        }
+        .red-packet-field input[type="number"] {
+            width: 100%;
+            min-width: 0;
+            height: 2rem;
+            border: 1px solid #303943;
+            border-radius: 5px;
+            background: #11161b;
+            color: var(--text-primary);
+            padding: 0 0.55rem;
+        }
+        .red-packet-global,
+        .red-packet-account-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.42rem;
+            color: var(--text-primary);
+            font-size: 0.72rem;
+        }
+        .red-packet-global { min-height: 2rem; }
+        .red-packet-global input,
+        .red-packet-account-option input { width: 1rem; height: 1rem; accent-color: #22c55e; }
+        .red-packet-account-controls {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            min-height: 2rem;
+            align-items: center;
+            gap: 0.35rem;
+        }
+        .red-packet-save {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.35rem;
+            height: 2rem;
+            border: 1px solid #2f6f51;
+            border-radius: 5px;
+            background: #173426;
+            color: #86efac;
+            padding: 0 0.8rem;
+            cursor: pointer;
+            font-size: 0.7rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .red-packet-save:disabled { opacity: 0.55; cursor: wait; }
+        .red-packet-save svg { width: 0.82rem; height: 0.82rem; }
+        .red-packet-status-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.5rem;
+            padding: 0.8rem 0.85rem;
+        }
+        .red-packet-status-item {
+            min-width: 0;
+            border: 1px solid #29323a;
+            border-radius: 6px;
+            background: #11161b;
+            padding: 0.65rem;
+        }
+        .red-packet-status-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.45rem;
+            margin-bottom: 0.5rem;
+        }
+        .red-packet-status-name { color: var(--text-primary); font-size: 0.74rem; font-weight: 700; }
+        .red-packet-status-badge {
+            color: #9ca3af;
+            border: 1px solid #374151;
+            border-radius: 4px;
+            padding: 0.12rem 0.3rem;
+            font-size: 0.56rem;
+            white-space: nowrap;
+        }
+        .red-packet-status-badge.active { color: #86efac; border-color: #2f6f51; background: #14291f; }
+        .red-packet-status-lines { display: grid; gap: 0.3rem; }
+        .red-packet-status-line {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+            font-size: 0.61rem;
+        }
+        .red-packet-status-line span:last-child {
+            color: #cbd5e1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: right;
+        }
 
         @media (max-width: 1280px) {
             .account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .red-packet-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .red-packet-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 720px) {
             header { min-height: 54px; }
@@ -945,6 +1059,10 @@
             .workspace-tabs { overflow-x: auto; }
             .workspace-tab { flex: 0 0 auto; }
             .avatar-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .red-packet-controls { grid-template-columns: 1fr; align-items: stretch; }
+            .red-packet-account-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .red-packet-status-grid { grid-template-columns: 1fr; }
+            .red-packet-save { width: 100%; }
         }
     </style>
 </head>
@@ -972,6 +1090,7 @@
             <button class="workspace-tab is-active" type="button" data-workspace-target="records" aria-selected="true" onclick="setWorkspaceView('records', this)"><i data-lucide="list-checks" aria-hidden="true"></i>指令记录</button>
             <button class="workspace-tab" type="button" data-workspace-target="rewards" aria-selected="false" onclick="setWorkspaceView('rewards', this)"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>周期收益</button>
             <button class="workspace-tab" type="button" data-workspace-target="duels" aria-selected="false" onclick="setWorkspaceView('duels', this)"><i data-lucide="swords" aria-hidden="true"></i>斗法</button>
+            <button class="workspace-tab" type="button" data-workspace-target="red-packets" aria-selected="false" onclick="setWorkspaceView('red-packets', this)"><i data-lucide="gift" aria-hidden="true"></i>抢红包</button>
             <button class="workspace-tab" type="button" data-workspace-target="logs" aria-selected="false" onclick="setWorkspaceView('logs', this)"><i data-lucide="scroll-text" aria-hidden="true"></i>运行日志</button>
         </nav>
         <section class="workspace-view is-active command-record-section" data-workspace-view="records">
@@ -1063,6 +1182,30 @@
                 <div class="record-empty">加载中...</div>
             </div>
         </section>
+        <section class="workspace-view red-packet-section" data-workspace-view="red-packets">
+            <div class="record-header">
+                <div class="record-title">红包监听</div>
+                <div class="record-summary" id="red-packet-summary">加载中...</div>
+            </div>
+            <div class="red-packet-controls">
+                <label class="red-packet-field">
+                    总开关
+                    <span class="red-packet-global"><input id="red-packet-enabled" type="checkbox" onchange="markRedPacketSettingsDirty()">自动抢红包</span>
+                </label>
+                <label class="red-packet-field">
+                    最低金额
+                    <input id="red-packet-minimum" type="number" min="0" step="0.01" value="0" oninput="markRedPacketSettingsDirty()">
+                </label>
+                <div class="red-packet-field">
+                    参与账号
+                    <div class="red-packet-account-controls" id="red-packet-account-controls"></div>
+                </div>
+                <button class="red-packet-save" id="red-packet-save" type="button" onclick="saveRedPacketSettings()"><i data-lucide="save" aria-hidden="true"></i>保存</button>
+            </div>
+            <div class="red-packet-status-grid" id="red-packet-status-grid">
+                <div class="record-empty">加载中...</div>
+            </div>
+        </section>
         <div class="workspace-view log-section" data-workspace-view="logs">
             <div class="log-header">
                 <div class="log-tab active" onclick="switchLog(event, 'main')">主号日志</div>
@@ -1115,14 +1258,16 @@
             logs: 10000,
             commandRecords: 60000,
             dailyRewards: 60000,
-            duels: 15000
+            duels: 15000,
+            redPackets: 10000
         };
         const pollBusy = {
             status: false,
             logs: false,
             commandRecords: false,
             dailyRewards: false,
-            duels: false
+            duels: false,
+            redPackets: false
         };
         let logState = {
             lines: [],
@@ -1146,6 +1291,9 @@
         let dailyRewardUpdatedAt = '';
         let duelDashboardData = {enabled: false, queues: [], rows: [], summary: {}};
         let duelControlPending = false;
+        let redPacketDashboardData = {settings: {}, accounts: []};
+        let redPacketSettingsDirty = false;
+        let redPacketSavePending = false;
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
@@ -1173,6 +1321,7 @@
             if (target === 'logs') updateLogs(true);
             if (target === 'rewards') updateDailyRewardLog(true);
             if (target === 'duels') updateDuelDashboard(true);
+            if (target === 'red-packets') updateRedPacketDashboard(true);
             if (trigger) trigger.blur();
             refreshIcons();
         }
@@ -3062,6 +3211,134 @@
             }
         }
 
+        function markRedPacketSettingsDirty() {
+            redPacketSettingsDirty = true;
+            const summary = document.getElementById('red-packet-summary');
+            if (summary) summary.innerText = '设置未保存';
+        }
+
+        function redPacketActionLabel(action) {
+            return ({
+                listening: '监听中',
+                clicked: '已点击',
+                below_minimum: '金额不足',
+                amount_unknown: '金额未识别',
+                unsupported_button: '按钮不支持',
+                click_error: '点击失败',
+                install_error: '接入失败'
+            })[String(action || '')] || '等待红包';
+        }
+
+        function renderRedPacketDashboard(data) {
+            redPacketDashboardData = data || {settings: {}, accounts: []};
+            const settings = redPacketDashboardData.settings || {};
+            const accounts = Array.isArray(redPacketDashboardData.accounts) ? redPacketDashboardData.accounts : [];
+            const selected = new Set(Array.isArray(settings.accounts) ? settings.accounts : []);
+            const enabled = Boolean(settings.enabled);
+            const summary = document.getElementById('red-packet-summary');
+            if (summary && !redPacketSettingsDirty) {
+                const topic = accounts.map(item => item.status?.topic_id).find(Boolean);
+                summary.innerText = `${enabled ? '已启用' : '已关闭'} · ${selected.size} 个账号${topic ? ` · 话题 ${topic}` : ''}`;
+            }
+
+            if (!redPacketSettingsDirty) {
+                const enabledInput = document.getElementById('red-packet-enabled');
+                const minimumInput = document.getElementById('red-packet-minimum');
+                if (enabledInput) enabledInput.checked = enabled;
+                if (minimumInput) minimumInput.value = String(settings.minimum_amount ?? '0');
+                const controls = document.getElementById('red-packet-account-controls');
+                if (controls) {
+                    controls.innerHTML = accounts.map(item => `
+                        <label class="red-packet-account-option">
+                            <input type="checkbox" value="${escapeHtml(item.key)}" ${selected.has(item.key) ? 'checked' : ''} onchange="markRedPacketSettingsDirty()">
+                            ${escapeHtml(item.name)}
+                        </label>
+                    `).join('');
+                }
+            }
+
+            const statusGrid = document.getElementById('red-packet-status-grid');
+            if (statusGrid) {
+                statusGrid.innerHTML = accounts.map(item => {
+                    const state = item.status || {};
+                    const isSelected = selected.has(item.key);
+                    const active = enabled && isSelected && Boolean(state.listening);
+                    const action = redPacketActionLabel(state.last_action);
+                    const amount = state.last_amount !== null && state.last_amount !== undefined
+                        ? String(state.last_amount) : '---';
+                    const detail = state.last_error || state.last_result || '---';
+                    const updated = state.last_click_at || state.last_seen_at || state.updated_at || '---';
+                    return `
+                        <div class="red-packet-status-item">
+                            <div class="red-packet-status-head">
+                                <span class="red-packet-status-name">${escapeHtml(item.name)}</span>
+                                <span class="red-packet-status-badge ${active ? 'active' : ''}">${active ? '参与中' : (state.listening ? '待命' : '未接入')}</span>
+                            </div>
+                            <div class="red-packet-status-lines">
+                                <div class="red-packet-status-line"><span>状态</span><span>${escapeHtml(action)}</span></div>
+                                <div class="red-packet-status-line"><span>金额</span><span>${escapeHtml(amount)}</span></div>
+                                <div class="red-packet-status-line"><span>时间</span><span>${escapeHtml(updated)}</span></div>
+                                <div class="red-packet-status-line"><span>结果</span><span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></div>
+                            </div>
+                        </div>
+                    `;
+                }).join('') || '<div class="record-empty">暂无账号状态。</div>';
+            }
+            const saveButton = document.getElementById('red-packet-save');
+            if (saveButton) saveButton.disabled = redPacketSavePending;
+            refreshIcons();
+        }
+
+        async function updateRedPacketDashboard(force = false) {
+            if (document.hidden || pollBusy.redPackets) return;
+            const view = document.querySelector('[data-workspace-view="red-packets"]');
+            if (!force && view && !view.classList.contains('is-active')) return;
+            pollBusy.redPackets = true;
+            try {
+                const response = await fetch(apiUrl('/api/red-packets'), {cache: 'no-store'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+                renderRedPacketDashboard(data);
+            } catch (error) {
+                console.error('Red-packet dashboard update failed:', error);
+                const summary = document.getElementById('red-packet-summary');
+                if (summary) summary.innerText = '加载失败';
+            } finally {
+                pollBusy.redPackets = false;
+            }
+        }
+
+        async function saveRedPacketSettings() {
+            if (redPacketSavePending) return;
+            const enabled = Boolean(document.getElementById('red-packet-enabled')?.checked);
+            const minimumAmount = document.getElementById('red-packet-minimum')?.value || '0';
+            const accounts = Array.from(document.querySelectorAll('#red-packet-account-controls input[type="checkbox"]:checked'))
+                .map(input => input.value);
+            redPacketSavePending = true;
+            renderRedPacketDashboard(redPacketDashboardData);
+            try {
+                const response = await fetch(apiUrl('/api/red-packets'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled, accounts, minimum_amount: minimumAmount})
+                });
+                const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+                if (!response.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${response.status}`);
+                    return;
+                }
+                redPacketSettingsDirty = false;
+                await updateRedPacketDashboard(true);
+            } catch (error) {
+                console.error('Red-packet settings save failed:', error);
+                alert('抢红包设置保存失败。');
+            } finally {
+                redPacketSavePending = false;
+                const saveButton = document.getElementById('red-packet-save');
+                if (saveButton) saveButton.disabled = false;
+            }
+        }
+
         async function updateStatus() {
             if (document.hidden || pollBusy.status) return;
             pollBusy.status = true;
@@ -3540,6 +3817,7 @@
         setInterval(updateCommandRecords, POLL_INTERVALS.commandRecords);
         setInterval(updateDailyRewardLog, POLL_INTERVALS.dailyRewards);
         setInterval(updateDuelDashboard, POLL_INTERVALS.duels);
+        setInterval(updateRedPacketDashboard, POLL_INTERVALS.redPackets);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
         });
@@ -3553,6 +3831,7 @@
             updateCommandRecords();
             updateDailyRewardLog(true);
             updateDuelDashboard(true);
+            updateRedPacketDashboard(true);
             updateLogs(true);
         });
         selectedDailyRewardDate();
@@ -3561,6 +3840,7 @@
         updateCommandRecords();
         updateDailyRewardLog();
         updateDuelDashboard();
+        updateRedPacketDashboard();
         updateLogKindButtons();
         loadLogTags(currentLogAccount);
         updateLogs();

@@ -27,6 +27,8 @@ command_controls.json
 dashboard_commands.json
 soul_curse_commissions.json
 bot_activity_shared.json
+red_packet_settings.json
+red_packet_status_*.json
 star_gazing_events.jsonl
 star_gazing_events.lock
 duel_state.json
