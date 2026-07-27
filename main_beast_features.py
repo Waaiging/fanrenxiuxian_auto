@@ -19,6 +19,7 @@ from miniapp_beast import (
     read_refresh_request,
     write_cached_spirit_token,
 )
+from miniapp_beast_contract import MiniAppBeastContractWorker
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -138,6 +139,10 @@ class MainBeastMixin:
             self.main_beast_config_dir(),
             settings["entry_url"],
         ) if settings["enabled"] else ""
+        self._miniapp_beast_contract = MiniAppBeastContractWorker.from_actor(
+            self,
+            logger=self.main_beast_logger(),
+        )
 
     def main_beast_logger(self):
         return logging.getLogger("MainBeast")
@@ -902,7 +907,6 @@ class MainBeastMixin:
                     due_abyss = self.main_beast_due("next_abyss_time", "last_abyss_time", ABYSS_CD_SECONDS)
                     due_patrol = self.main_beast_due("next_beast_border_patrol_time", "last_beast_border_patrol_time", BORDER_PATROL_CD_SECONDS)
                     due_pasture = self.main_beast_due("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS)
-                    due_interaction = self.main_beast_due("next_beast_interaction_time", "last_beast_interaction_time", INTERACTION_CD_SECONDS)
                     if due_abyss and not self.main_beast_action_paused(".探渊 <灵兽>"):
                         await self.execute_main_beast_abyss()
                         await asyncio.sleep(2)
@@ -913,28 +917,11 @@ class MainBeastMixin:
                         response = await self.send_and_wait_feedback(".一键放养", timeout=60, max_retries=0)
                         self.record_main_pasture_response(self.main_beast_response_text(response))
                         await asyncio.sleep(2)
-                    if due_interaction and not self.main_beast_action_paused(".灵兽互动 <重点灵兽>"):
-                        focus = self.main_beast_interaction_target()
-                        if focus:
-                            status = str(focus.get("status") or "")
-                            if "放养" in status:
-                                next_pasture = self.state.get("next_pasture_time", "")
-                                self.state["next_beast_interaction_time"] = next_pasture if beast_time_is_future(next_pasture) else beast_add_seconds(30 * 60)
-                                self.main_beast_save()
-                            elif any(marker in status for marker in ("探险", "巡边", "巡游", "偷菜")):
-                                self.schedule_main_beast_retry("next_beast_interaction_time")
-                            else:
-                                name = focus.get("full_name", "")
-                                suffix = " 安抚" if any(marker in status for marker in ("受伤", "重伤", "治疗")) else ""
-                                response = await self.send_and_wait_feedback(f".灵兽互动 {name}{suffix}", timeout=60, max_retries=1)
-                                self.record_main_interaction_response(name, self.main_beast_response_text(response))
-                        else:
-                            self.schedule_main_beast_retry("next_beast_interaction_time", 30 * 60)
                 future_times = [
                     beast_seconds_until(self.state.get(key))
                     for key in (
                         "next_abyss_time", "next_beast_border_patrol_time",
-                        "next_pasture_time", "next_beast_interaction_time",
+                        "next_pasture_time",
                     )
                     if beast_time_is_future(self.state.get(key))
                 ]

@@ -12789,9 +12789,10 @@ class ParserFixtureTests(unittest.TestCase):
             ".寻觅灵兽",
             ".探渊 <灵兽>",
             ".一键放养",
-            ".灵兽互动 <重点灵兽>",
+            "miniapp:spirit-beast-contract",
             ".灵兽巡边 <灵兽> 袭营",
         }.issubset(commands))
+        self.assertNotIn(".灵兽互动 <重点灵兽>", commands)
         self.assertFalse({
             ".灵树状态",
             ".灵树灌溉",

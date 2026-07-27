@@ -389,6 +389,33 @@ class MiniAppDwellingTransport:
                 "raw": payload,
             }
 
+    async def spirit_beast_interaction(
+        self,
+        identity: str,
+        beast_id: int,
+        interaction: str = "安抚",
+    ) -> dict[str, Any]:
+        if interaction != "安抚":
+            raise MiniAppBeastError("spirit_beast_interaction_not_allowed")
+        try:
+            beast_id = int(beast_id)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("spirit_beast_id_invalid") from exc
+        if beast_id <= 0:
+            raise MiniAppBeastError("spirit_beast_id_invalid")
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "spirit_beast",
+                "spiritbeast_",
+                "/api/miniapp/xianxia-spirit-beast/action",
+                payload={
+                    "action": "interact",
+                    "beastId": beast_id,
+                    "interaction": interaction,
+                },
+            )
+
     async def sect_farm_snapshot(self, identity: str) -> dict[str, Any]:
         async with self._lock:
             return await self._external_request_unlocked(

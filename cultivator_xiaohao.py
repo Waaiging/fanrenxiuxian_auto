@@ -78,6 +78,7 @@ from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from group_visibility_control import run_telegram_write_permission_monitor
+from miniapp_beast_contract import MiniAppBeastContractWorker
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
@@ -1535,7 +1536,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             "next_steal_time",
             "next_beast_status_check_time",
             "next_pasture_time",
-            "next_beast_interaction_time",
             "next_beast_cruise_time",
             "next_beast_border_patrol_time",
             "next_treasure_touch_time",
@@ -2402,7 +2402,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             ("next_field_training_time", self.field_training_command, "主魂"),
             ("next_yuanying_out_time", ".元婴出窍", "主魂"),
             ("next_rift_search_time", ".探寻裂缝", "主魂"),
-            ("next_beast_interaction_time", BEAST_INTERACTION_COMMAND, "主魂"),
             ("next_beast_cruise_time", BEAST_CRUISE_COMMAND, "主魂"),
             ("next_beast_border_patrol_time", ".灵兽巡边", "主魂"),
         )
@@ -2910,7 +2909,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         target_time = self.pasture_block_until()
         self.set_best_beast_status(beast_name, "放养中")
         for key in (
-            "next_beast_interaction_time",
             "next_beast_cruise_time",
             "next_beast_status_check_time",
             "next_pasture_time",
@@ -2927,7 +2925,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         """六翼放养中只暂停六翼自己的动作，其他灵兽仍可补位执行。"""
         target_time = self.pasture_block_until()
         self.set_best_beast_status(BEAST_FOCUS_NAME, "放养中")
-        for key in ("next_beast_interaction_time", "next_pasture_time"):
+        for key in ("next_pasture_time",):
             self.set_state_time_not_before(key, target_time)
         log.info(
             f"Focus beast personal actions deferred until {target_time}: {BEAST_FOCUS_NAME} is pastured"
@@ -7042,11 +7040,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                     self.state["next_pasture_time"] = add_seconds_str(now_str(), 600)
                     self.save_state()
                     need_pasture = False
-                last_interaction = self.state.get("last_beast_interaction_time", "")
-                next_interaction = self.state.get("next_beast_interaction_time", "")
-                need_interaction = not next_interaction or not is_future(next_interaction)
-                if need_interaction and last_interaction:
-                    need_interaction = not is_future(add_seconds_str(last_interaction, BEAST_INTERACTION_CD_SECONDS))
+                need_interaction = False  # Replaced by HTTP-only all-beast contract soothing.
                 last_cruise = self.state.get("last_beast_cruise_time", "")
                 next_cruise = self.state.get("next_beast_cruise_time", "")
                 need_cruise = not next_cruise or not is_future(next_cruise)
@@ -7064,13 +7058,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                         self.beast_action_wait_seconds("next_abyss_time", "last_abyss_time", 21600),
                         self.beast_action_wait_seconds("next_steal_time", "last_steal_time", 14400),
                         self.beast_action_wait_seconds("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS),
-                        self.beast_action_wait_seconds("next_beast_interaction_time", "last_beast_interaction_time", BEAST_INTERACTION_CD_SECONDS),
                         self.beast_action_wait_seconds("next_beast_border_patrol_time", "last_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS),
                         self.beast_action_wait_seconds("next_beast_cruise_time", "last_beast_cruise_time", BEAST_CRUISE_CD_SECONDS),
                     ):
                         if wait > 0:
                             next_waits.append(wait)
-                    for next_time in (next_abyss, next_steal, next_pasture, next_interaction, next_patrol, next_cruise):
+                    for next_time in (next_abyss, next_steal, next_pasture, next_patrol, next_cruise):
                         if next_time and is_future(next_time):
                             next_waits.append(seconds_until(next_time))
                     if next_waits: sleep_for = max(30, min(next_waits) + random.randint(10, 30))
@@ -7682,6 +7675,10 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     async def start(self):
         """脚本入口：连接 Telegram、注册事件处理器、启动所有循环"""
         await self.client.start()
+        self._miniapp_beast_contract = MiniAppBeastContractWorker.from_actor(
+            self,
+            logger=log,
+        )
         self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
@@ -7820,6 +7817,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())
         self.create_scheduler_task("beast_hunt", lambda: self.run_beast_hunt_timer())
         self.create_scheduler_task("beast_action", lambda: self.run_beast_action_timer())
+        if self._miniapp_beast_contract.enabled:
+            self.create_scheduler_task(
+                "beast_contract",
+                lambda: self._miniapp_beast_contract.run(),
+            )
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())

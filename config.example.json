@@ -12,7 +12,11 @@
     "bot_username": "fanrenxiuxian_bot",
     "refresh_seconds": 1800,
     "retry_seconds": 300,
-    "timeout_seconds": 20
+    "timeout_seconds": 20,
+    "contract_interaction_enabled": true,
+    "contract_interaction_seconds": 7200,
+    "contract_interaction_retry_seconds": 300,
+    "contract_interaction_delay_seconds": 1
   },
   "restricted_miniapp": {
     "enabled": true,

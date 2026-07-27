@@ -141,8 +141,9 @@ class MainBeastFeatureTests(unittest.TestCase):
         commands = {item["command"] for item in panel["commands"]}
         self.assertTrue({
             ".寻觅灵兽", ".探渊 <灵兽>", ".一键放养",
-            ".灵兽互动 <重点灵兽>", ".灵兽巡边 <灵兽> 袭营",
+            "miniapp:spirit-beast-contract", ".灵兽巡边 <灵兽> 袭营",
         }.issubset(commands))
+        self.assertNotIn(".灵兽互动 <重点灵兽>", commands)
         self.assertNotIn(".登天阶", commands)
         self.assertNotIn(".引九天罡风", commands)
         self.assertNotIn(".我的灵兽", commands)

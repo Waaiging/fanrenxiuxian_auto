@@ -831,6 +831,46 @@ def miniapp_beast_sync_command(state):
     return row
 
 
+def miniapp_beast_contract_command(state):
+    last_completed = str(state.get("beast_contract_interaction_last_completed_time") or "").strip()
+    last_attempt = str(state.get("beast_contract_interaction_last_attempt_time") or "").strip()
+    next_time = str(state.get("beast_contract_interaction_next_time") or "").strip()
+    error = clean_custom_text(state.get("beast_contract_interaction_last_error") or "", 120)
+    results = state.get("beast_contract_interaction_results") or {}
+    succeeded = sum(
+        1 for item in results.values()
+        if isinstance(item, dict) and item.get("status") == "success"
+    ) if isinstance(results, dict) else 0
+    total = int(state.get("beast_contract_roster_count") or len(state.get("beasts_cache") or []))
+    if error:
+        status = "部分失败"
+        tone = "paused"
+        detail = f"{error} · 5 分钟后仅重试失败灵兽"
+    elif last_completed:
+        status = "已完成"
+        tone = "active"
+        detail = f"每 2 小时 · 最近覆盖 {succeeded}/{total} 只"
+    elif last_attempt:
+        status = "执行中"
+        tone = "cooldown"
+        detail = f"已处理 {succeeded}/{total} 只"
+    else:
+        status = "等待首次执行"
+        tone = "unknown"
+        detail = "Mini App 逐只执行灵契互动·安抚"
+    return command_row(
+        "miniapp:spirit-beast-contract",
+        "灵契互动·安抚",
+        status,
+        tone,
+        at=next_time or last_completed or last_attempt,
+        detail=detail,
+        group="灵兽",
+        actionable=False,
+        schedule_type="cooldown",
+    )
+
+
 def flow_command(command, label=None, detail="流程内自动发送", group=""):
     return command_row(command, label, "流程内", "flow", detail=detail, group=group, actionable=False)
 
@@ -1792,6 +1832,7 @@ def main_soul_panel(account, state):
         ])
         rows.extend([
             miniapp_beast_sync_command(state),
+            miniapp_beast_contract_command(state),
             (
                 command_row(
                     ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -1802,7 +1843,6 @@ def main_soul_panel(account, state):
             ),
             time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
             time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
-            time_command(state, "next_beast_interaction_time", ".灵兽互动 <重点灵兽>", "灵兽互动", group="灵兽"),
             time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
             manual_command(".巡边状态", "巡边状态", group="灵兽"),
             manual_command(".巡边归来", "巡边归来", group="灵兽"),
@@ -1854,6 +1894,7 @@ def main_soul_panel(account, state):
                 group="灵兽",
                 actionable=False,
             ))
+            rows.append(miniapp_beast_contract_command(state))
             unsupported_detail = "公开群受限；万兽谷 Mini App 未提供这项旧指令接口"
             for command, label in (
                 (".寻觅灵兽", "寻觅灵兽"),
@@ -1863,7 +1904,6 @@ def main_soul_panel(account, state):
                 (".灵兽偷菜", "灵兽偷菜"),
                 (".探渊 <灵兽>", "探渊"),
                 (".一键放养", "一键放养"),
-                (".灵兽互动 <灵兽>", "灵兽互动"),
                 (".灵兽巡边 <灵兽> 袭营", "灵兽巡边"),
                 (".巡边状态", "巡边状态"),
                 (".巡边归来", "巡边归来"),
@@ -1889,6 +1929,7 @@ def main_soul_panel(account, state):
                     group="灵兽",
                     actionable=False,
                 ),
+                miniapp_beast_contract_command(state),
                 (
                     command_row(
                         ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -1903,7 +1944,6 @@ def main_soul_panel(account, state):
                 time_command(state, "next_steal_time", ".灵兽偷菜", "灵兽偷菜", group="灵兽"),
                 time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
                 time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
-                time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
                 time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
                 manual_command(".巡边状态", "巡边状态", group="灵兽"),
                 manual_command(".巡边归来", "巡边归来", group="灵兽"),

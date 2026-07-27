@@ -20,6 +20,7 @@ from concubine_features import (
     seconds_until,
 )
 from miniapp_beast import MiniAppBeastError
+from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_dwelling import (
     MiniAppCommandResponse,
     MiniAppDwellingTransport,
@@ -93,6 +94,11 @@ class RestrictedMiniAppWorker:
             str(beast_settings.get("entry_url") or ""),
             bot_username=str(beast_settings.get("bot_username") or "fanrenxiuxian_bot"),
             timeout=int(beast_settings.get("timeout_seconds") or 20),
+            logger=self.log,
+        )
+        self.beast_contract = MiniAppBeastContractWorker(
+            actor,
+            self.transport,
             logger=self.log,
         )
         self._tasks: list[asyncio.Task[Any]] = []
@@ -187,6 +193,8 @@ class RestrictedMiniAppWorker:
                 self._spawn("star_farm", self.run_star_farm_loop())
             if self.beast_enabled:
                 self._spawn("beast_sync", self.run_beast_sync_loop())
+            if self.beast_contract.enabled:
+                self._spawn("beast_contract", self.beast_contract.run())
         elif self.account == "waaiging":
             self._spawn("destiny", self.actor.run_tianxing_destiny_loop())
 
