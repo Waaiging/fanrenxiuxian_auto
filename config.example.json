@@ -14,6 +14,15 @@
     "retry_seconds": 300,
     "timeout_seconds": 20
   },
+  "restricted_miniapp": {
+    "enabled": true,
+    "status_refresh_seconds": 1800,
+    "auth_refresh_seconds": 21600,
+    "beast_sync_enabled": true,
+    "beast_sync_seconds": 43200,
+    "star_farm_enabled": true,
+    "star_refresh_seconds": 600
+  },
   "monitor": {
     "chat_id": "fanrenxxz",
     "topic_id": null,

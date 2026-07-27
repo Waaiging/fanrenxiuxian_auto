@@ -1,54 +1,74 @@
 #!/usr/bin/env python3
-"""Run only the red-packet listener for a restricted Telegram account."""
+"""Run red-packet and Mini App automation for a write-restricted account."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
-from pathlib import Path
-
-from telethon import TelegramClient
 
 from red_packet_features import install_red_packet_monitor
+from restricted_miniapp_worker import RestrictedMiniAppWorker
 
 
-CONFIG_DIR = Path(__file__).resolve().parent
 ACCOUNT_SESSIONS = {
-    "xiaohao": ("config.json", "xiaohao_session"),
-    "waaiging": ("config.json", "waaiging_session"),
+    "xiaohao": "xiaohao_session",
+    "waaiging": "waaiging_session",
 }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Restricted-account red-packet listener")
+    parser = argparse.ArgumentParser(description="Restricted-account Mini App worker")
     parser.add_argument("--account", required=True, choices=sorted(ACCOUNT_SESSIONS))
     return parser.parse_args()
 
 
-async def run(account: str) -> None:
-    config_name, session_name = ACCOUNT_SESSIONS[account]
-    with (CONFIG_DIR / config_name).open("r", encoding="utf-8") as handle:
-        config = json.load(handle)
+def build_actor(account: str):
+    session_name = ACCOUNT_SESSIONS[account]
+    if account == "xiaohao":
+        from cultivator_xiaohao import CultivatorXiaoHao
 
+        return CultivatorXiaoHao(session_name=session_name)
+    if account == "waaiging":
+        from cultivator_waaiging import WaaigingCultivator
+
+        return WaaigingCultivator(session_name=session_name)
+    raise ValueError(f"Unsupported restricted account: {account}")
+
+
+async def run(account: str) -> None:
     logger = logging.getLogger(f"red_packet.{account}")
-    client = TelegramClient(
-        str(CONFIG_DIR / session_name),
-        config["api_id"],
-        config["api_hash"],
-    )
+    actor = build_actor(account)
+    client = actor.client
     monitor = None
+    miniapp_worker = None
     await client.connect()
     try:
         if not await client.is_user_authorized():
             raise RuntimeError(f"Telegram session for {account} is not authorized")
+        actor.my_info = await client.get_me()
         monitor = await install_red_packet_monitor(client, account, logger=logger)
         if not monitor.topic_id:
             raise RuntimeError(f"red-packet monitor for {account} was not installed")
-        logger.warning("[%s] Restricted account entered red-packet standby mode", account)
+        miniapp_worker = RestrictedMiniAppWorker(actor, account, logger=logger)
+        try:
+            await miniapp_worker.start()
+        except Exception as exc:
+            actor.state["restricted_miniapp_active"] = False
+            actor.state["restricted_miniapp_last_error"] = (
+                getattr(exc, "code", "") or type(exc).__name__.lower()
+            )
+            actor.save_state()
+            logger.error(
+                "[%s] Mini App scheduler failed to start; red-packet listener remains active",
+                account,
+                exc_info=True,
+            )
+        logger.warning("[%s] Restricted account entered Mini App standby mode", account)
         await client.run_until_disconnected()
     finally:
+        if miniapp_worker is not None:
+            await miniapp_worker.stop()
         if monitor is not None:
             monitor.mark_stopped("standby_stopped")
         await client.disconnect()

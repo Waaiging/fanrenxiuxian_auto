@@ -32,6 +32,10 @@ RED_PACKET_ACCOUNT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
+RESTRICTED_MINIAPP_STATE_FILES = {
+    "xiaohao": "state_xiaohao.json",
+    "waaiging": "state_waaiging.json",
+}
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_HANDLED_MESSAGE_IDS = 200
 MAX_NOTIFIED_RECEIPT_IDS = 200
@@ -315,6 +319,23 @@ def load_red_packet_status(account: str) -> dict[str, Any]:
     return _read_json(_status_path(account))
 
 
+def load_restricted_miniapp_status(account: str) -> dict[str, Any]:
+    filename = RESTRICTED_MINIAPP_STATE_FILES.get(account)
+    if not filename:
+        return {}
+    state = _read_json(CONFIG_DIR / filename)
+    return {
+        "active": bool(state.get("restricted_miniapp_active")),
+        "started_at": str(state.get("restricted_miniapp_started_at") or ""),
+        "last_sync_time": str(state.get("restricted_miniapp_last_sync_time") or ""),
+        "last_command": str(state.get("restricted_miniapp_last_command") or ""),
+        "last_command_at": str(state.get("restricted_miniapp_last_command_at") or ""),
+        "last_error": str(state.get("restricted_miniapp_last_error") or ""),
+        "identity_count": int(state.get("restricted_miniapp_identity_count") or 0),
+        "beast_sync_time": str(state.get("beast_miniapp_last_sync_time") or ""),
+    }
+
+
 def red_packet_dashboard_payload() -> dict[str, Any]:
     settings = load_red_packet_settings()
     return {
@@ -333,6 +354,7 @@ def red_packet_dashboard_payload() -> dict[str, Any]:
                 "name": name,
                 "selected": key in settings["accounts"],
                 "status": load_red_packet_status(key),
+                "miniapp": load_restricted_miniapp_status(key),
             }
             for key, name in RED_PACKET_ACCOUNT_NAMES.items()
         ],

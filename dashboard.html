@@ -3365,6 +3365,7 @@
             if (statusGrid) {
                 statusGrid.innerHTML = accounts.map(item => {
                     const state = item.status || {};
+                    const miniapp = item.miniapp || {};
                     const isSelected = selected.has(item.key);
                     const active = enabled && isSelected && Boolean(state.listening);
                     const action = redPacketActionLabel(state.last_action);
@@ -3376,6 +3377,9 @@
                         ? `${state.last_claimed_amount} ${state.last_claimed_currency || ''}`.trim() : '---';
                     const detail = state.last_notification_error || state.last_error || state.last_result || '---';
                     const updated = state.last_notification_at || state.last_click_at || state.last_seen_at || state.updated_at || '---';
+                    const miniappText = miniapp.active
+                        ? `运行中 · ${Number(miniapp.identity_count || 0)} 身份`
+                        : (miniapp.last_error ? `异常：${miniapp.last_error}` : '未运行');
                     return `
                         <div class="red-packet-status-item">
                             <div class="red-packet-status-head">
@@ -3389,6 +3393,7 @@
                                 <div class="red-packet-status-line"><span>延迟</span><span>${escapeHtml(delay)}</span></div>
                                 <div class="red-packet-status-line"><span>时间</span><span>${escapeHtml(updated)}</span></div>
                                 <div class="red-packet-status-line"><span>结果</span><span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></div>
+                                <div class="red-packet-status-line"><span>Mini App</span><span title="${escapeHtml(miniapp.last_command || miniapp.last_error || '')}">${escapeHtml(miniappText)}</span></div>
                             </div>
                         </div>
                     `;

@@ -1823,6 +1823,7 @@ def main_soul_panel(account, state):
     elif account == "xiaohao":
         hunt_stopped = bool(state.get("beast_hunt_stopped"))
         hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
+        restricted_miniapp = bool(state.get("restricted_miniapp_active"))
         rows.extend([
             daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -1836,36 +1837,78 @@ def main_soul_panel(account, state):
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
         rows.extend(soul_curse_publisher_commands(state, account=account))
-        rows.extend([
-            command_row(
+        if restricted_miniapp:
+            beast_sync = str(state.get("beast_miniapp_last_sync_time") or "")
+            beast_error = clean_custom_text(state.get("beast_miniapp_last_error") or "", 80)
+            beast_count = len(state.get("beasts_cache") or [])
+            rows.append(command_row(
                 "miniapp:spirit-beast:xiaohao",
                 "万兽谷同步",
-                "需独立入口",
-                "unknown",
-                detail="固定入口与 Telegram 账号绑定，未配置前不发送废弃的 .我的灵兽",
+                "异常" if beast_error else ("已同步" if beast_sync else "等待同步"),
+                "error" if beast_error else ("done" if beast_sync else "pending"),
+                detail=(
+                    f"Mini App 错误：{beast_error}"
+                    if beast_error
+                    else f"每天两次 · {beast_count} 只 · {beast_sync or '尚未完成首次同步'}"
+                ),
                 group="灵兽",
                 actionable=False,
-            ),
-            (
+            ))
+            unsupported_detail = "公开群受限；万兽谷 Mini App 未提供这项旧指令接口"
+            for command, label in (
+                (".寻觅灵兽", "寻觅灵兽"),
+                (".放生 <灵兽>", "放生灵兽"),
+                (".灵兽休息 <灵兽>", "灵兽休息"),
+                (".灵兽出战 <灵兽>", "灵兽出战"),
+                (".灵兽偷菜", "灵兽偷菜"),
+                (".探渊 <灵兽>", "探渊"),
+                (".一键放养", "一键放养"),
+                (".灵兽互动 <灵兽>", "灵兽互动"),
+                (".灵兽巡边 <灵兽> 袭营", "灵兽巡边"),
+                (".巡边状态", "巡边状态"),
+                (".巡边归来", "巡边归来"),
+                (".灵兽巡游 <灵兽>", "灵兽巡游"),
+            ):
+                rows.append(command_row(
+                    command,
+                    label,
+                    "Mini App 不支持",
+                    "done",
+                    detail=unsupported_detail,
+                    group="灵兽",
+                    actionable=False,
+                ))
+        else:
+            rows.extend([
                 command_row(
-                    ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
-                    detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False
-                )
-                if hunt_stopped
-                else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
-            ),
-            manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
-            manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
-            manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
-            time_command(state, "next_steal_time", ".灵兽偷菜", "灵兽偷菜", group="灵兽"),
-            time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
-            time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
-            time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
-            time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
-            manual_command(".巡边状态", "巡边状态", group="灵兽"),
-            manual_command(".巡边归来", "巡边归来", group="灵兽"),
-            time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
-        ])
+                    "miniapp:spirit-beast:xiaohao",
+                    "万兽谷同步",
+                    "需独立入口",
+                    "unknown",
+                    detail="固定入口与 Telegram 账号绑定，未配置前不发送废弃的 .我的灵兽",
+                    group="灵兽",
+                    actionable=False,
+                ),
+                (
+                    command_row(
+                        ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
+                        detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False
+                    )
+                    if hunt_stopped
+                    else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
+                ),
+                manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
+                manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
+                manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
+                time_command(state, "next_steal_time", ".灵兽偷菜", "灵兽偷菜", group="灵兽"),
+                time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
+                time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
+                time_command(state, "next_beast_interaction_time", ".灵兽互动 六翼 / 安抚", "灵兽互动", group="灵兽"),
+                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+                manual_command(".巡边状态", "巡边状态", group="灵兽"),
+                manual_command(".巡边归来", "巡边归来", group="灵兽"),
+                time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
+            ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "waaiging":
         sect_joined = bool(state.get("sect_join_confirmed"))
