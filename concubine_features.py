@@ -3,8 +3,7 @@
 
 提供 ConcubineMixin 混入类，封装所有与侍妾（道侣）相关的操作：
   1. 入梦寻图 —— 虚天残图/苍坤残图线索收集
-  2. 共历心劫 —— 三轮抉择（稳/狠/骗），侍妾连携
-  3. 天机代卜 —— 侍妾代卜避劫，提升闭关收益
+  2. 天机代卜 —— 侍妾代卜避劫，提升闭关收益
 
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
 """
@@ -39,8 +38,8 @@ CONCUBINE_VOYAGE_RETURN_COMMAND = ".远航归来"
 CONCUBINE_VOYAGE_CD_SECONDS = 12 * 3600
 MAIN_SOUL_CONCUBINE_VOYAGE_CD_SECONDS = 6 * 3600
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
-CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "heart_trial", "voyage")
-CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream", "heart_trial")
+CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "voyage")
+CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream")
 TARGET_CONCUBINE_NAME = "南宫婉"
 CONCUBINE_SEARCH_COMMAND = ".红尘寻缘"
 CONCUBINE_DISMISS_COMMAND = ".遣散侍妾"
@@ -1685,52 +1684,6 @@ class ConcubineMixin:
             await self.send_and_wait_feedback_identity(avatar, ".拼图", timeout=60)
         return ok
 
-    async def execute_avatar_heart_trial_via_status(self, avatar):
-        """Query .我的侍妾 for an avatar and run the script-specific heart trial flow."""
-        task = CONCUBINE_TASKS["heart_trial"]
-        if self._concubine_command_paused(task["command"], avatar):
-            return True
-        if self.concubine_voyage_block_until(avatar):
-            self.defer_concubine_task_until_voyage("heart_trial", avatar)
-            return False
-        if not self._concubine_task_due("heart_trial", avatar):
-            return True
-        status_msg = await self.send_and_wait_feedback_identity(
-            avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
-        )
-        status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else str(status_msg) if isinstance(status_msg, str) else ""
-        if not status_text:
-            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
-            return False
-        if not self.concubine_status_matches_identity(status_text, avatar):
-            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 30))
-            return False
-        if any(k in status_text for k in ["还没有侍妾", "尚无侍妾", "没有侍妾"]):
-            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 24 * 3600))
-            return False
-        voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
-        if voyage_block_until:
-            self.set_avatar_state(avatar, task["state_key"], voyage_block_until)
-            return False
-        clean_status = status_text.replace("**", "")
-        heart_match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
-        if heart_match:
-            val = heart_match.group(1).strip()
-            if not any(k in val for k in ["无", "可用", "可施展", "已就绪"]):
-                cd = self.parse_wait_time(val) if hasattr(self, "parse_wait_time") else parse_duration_seconds(val)
-                self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), (cd if cd > 0 else 1800) + CONCUBINE_GRACE_SECONDS))
-                return False
-        if not (status_msg and hasattr(status_msg, "id")):
-            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
-            return False
-        if not hasattr(self, "execute_avatar_heart_trial"):
-            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
-            return False
-        result = await self.execute_avatar_heart_trial(avatar, status_msg)
-        if result is False:
-            return False
-        return self._concubine_task_ready_for_voyage("heart_trial", avatar)
-
     async def execute_concubine_chain(self):
         """Main-soul bound flow; only main/main ends with the 月殿寻痕 voyage."""
         self.ensure_concubine_state()
@@ -1760,23 +1713,10 @@ class ConcubineMixin:
                     log.info(f"Concubine chain [主魂]: {task['label']} not completed; continuing to voyage check.")
                     continue
                 await asyncio.sleep(3)
-            if (
-                self._concubine_task_due("heart_trial", "主魂")
-                and not self._concubine_command_paused(CONCUBINE_TASKS["heart_trial"]["command"], "主魂")
-            ):
-                if self._concubine_command_paused(".我的侍妾", "主魂"):
-                    log.info("Concubine chain [主魂]: .我的侍妾 paused; deferring heart trial status check.")
-                    self.defer_concubine_task("heart_trial", 6 * 3600)
-                    return True
-                await self.execute_heart_trial()
-                if not self._concubine_task_ready_for_voyage("heart_trial", "主魂"):
-                    log.info("Concubine chain [主魂]: heart trial not completed; continuing to voyage check.")
-                else:
-                    await asyncio.sleep(3)
             await self.execute_concubine_voyage_start("主魂")
             return True
 
-    async def execute_avatar_concubine_chain(self, avatar, send_with_cultivation_check=None, heart_trial_executor=None):
+    async def execute_avatar_concubine_chain(self, avatar, send_with_cultivation_check=None):
         """Avatar bound flow; voyage is disabled while other concubine tasks remain active."""
         avatar = avatar or "主魂"
         if self.target_concubine_enabled(avatar) and not self.target_concubine_found(avatar):
@@ -1800,16 +1740,6 @@ class ConcubineMixin:
                     log.info(f"Concubine chain [{avatar}]: {CONCUBINE_TASKS[task_key]['label']} not completed; continuing to voyage check.")
                     continue
                 await asyncio.sleep(3)
-            if self._concubine_task_due("heart_trial", avatar):
-                if heart_trial_executor:
-                    await heart_trial_executor(avatar)
-                    heart_ok = self._concubine_task_ready_for_voyage("heart_trial", avatar)
-                else:
-                    heart_ok = await self.execute_avatar_heart_trial_via_status(avatar)
-                if not heart_ok:
-                    log.info(f"Concubine chain [{avatar}]: heart trial not completed; continuing to voyage check.")
-                else:
-                    await asyncio.sleep(3)
             await self.execute_concubine_voyage_start(
                 avatar,
                 send_with_cultivation_check=send_with_cultivation_check,
@@ -2166,193 +2096,6 @@ class ConcubineMixin:
         )
         return cd > 0
 
-    async def execute_heart_trial(self):
-        """
-        共历心劫完整流程。
-
-        步骤：
-        1. 查询侍妾状态（.我的侍妾）
-        2. 发送.共历心劫
-        3. 如果游戏机器人要求回复到侍妾消息，尝试3次
-        4. 依次发送三轮.稳 (稳/稳/稳 策略)
-        5. 每轮等待结果确认
-        6. 结算后记录冷却
-        """
-        task = CONCUBINE_TASKS["heart_trial"]
-        log.info("Concubine: starting .共历心劫 flow via .我的侍妾")
-        if self._concubine_command_paused(".我的侍妾", "主魂"):
-            log.info("Concubine 共历心劫: .我的侍妾 paused; deferring status check.")
-            self.defer_concubine_task("heart_trial", 6 * 3600)
-            return
-        if self._concubine_command_paused(task["command"], "主魂"):
-            log.info("Concubine 共历心劫: .共历心劫 paused; deferring flow.")
-            self.defer_concubine_task("heart_trial", 6 * 3600)
-            return
-        # 每条命令前确保身份对齐（防止化身协程在间隙抢走身份）
-        if hasattr(self, 'switch_back_to_main'):
-            await self.switch_back_to_main()
-        status_msg = await self.send_and_wait_feedback(
-            ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
-        )
-        if not status_msg:
-            log.warning("Concubine 共历心劫: missing .我的侍妾 status message.")
-            self.defer_concubine_task("heart_trial")
-            return
-
-        if hasattr(status_msg, "id"):
-            self.state["last_concubine_status_msg_id"] = status_msg.id
-
-        status_text = status_msg.text or ""
-        if status_text and not self.concubine_status_matches_identity(status_text, "主魂"):
-            log.warning("Concubine 共历心劫: mismatched .我的侍妾 status; retrying later.")
-            self.defer_concubine_task("heart_trial", 30)
-            return
-        if not self.parse_concubine_status(status_text) and status_text:
-            notify_unrecognized_response(self, ".我的侍妾", status_text, log, "共历心劫前状态")
-            self.defer_concubine_task("heart_trial")
-            return
-        if self.state.get(task["state_key"]) and is_future(self.state[task["state_key"]]):
-            log.info(f"Concubine 共历心劫: still on CD until {self.state[task['state_key']]}")
-            return
-        if self.concubine_voyage_block_until("主魂"):
-            self.defer_concubine_task_until_voyage("heart_trial", "主魂")
-            return
-
-        trial_msg = None
-        trial_text = ""
-        for attempt in range(1, 4):
-            log.info(f"Concubine 共历心劫: replying .共历心劫 to .我的侍妾 status message ({attempt}/3).")
-            # 每次发送前确保身份对齐
-            if hasattr(self, 'switch_back_to_main'):
-                await self.switch_back_to_main()
-            trial_msg = await self.send_and_wait_feedback(
-                task["command"], reply_to=status_msg.id,
-                timeout=90, return_response_msg=True, delete_after=False,
-            )
-            trial_text = (trial_msg.text or "") if trial_msg else ""
-            if not self.heart_trial_requires_reply_target(trial_text):
-                break
-            log.warning("Concubine 共历心劫: bot did not accept the reply target; retrying.")
-            if attempt < 3:
-                status_msg = await self.send_and_wait_feedback(
-                    ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
-                )
-                if not status_msg:
-                    break
-                await asyncio.sleep(3)
-
-        if not trial_msg:
-            log.warning("Concubine 共历心劫: missing .共历心劫 response message.")
-            self.defer_concubine_task("heart_trial")
-            return
-
-        if any(k in trial_text for k in ["冷却", "后再", "尚未"]):
-            self.record_concubine_cd("heart_trial", trial_text)
-            return
-        if self.concubine_response_indicates_active_voyage(trial_text):
-            self.defer_concubine_task_until_voyage("heart_trial", "主魂")
-            return
-        if self.heart_trial_terminal_failure(trial_text):
-            if not await self.refresh_heart_trial_cooldown_after_uncertain("共历心劫终止返回"):
-                self.defer_concubine_task("heart_trial", 600)
-            return
-        if self.heart_trial_requires_reply_target(trial_text):
-            log.warning("Concubine 共历心劫: bot still requires reply target.")
-            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫回复目标")
-            self.defer_concubine_task("heart_trial", 600)
-            return
-        if not self.heart_trial_round_prompt(trial_text, 1):
-            log.warning("Concubine 共历心劫: response did not start round 1.")
-            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫开局")
-            self.defer_concubine_task("heart_trial", 600)
-            return
-        if not self.is_known_concubine_response("heart_trial", trial_text):
-            log.warning("Concubine 共历心劫: unrecognized trial response.")
-            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫")
-            self.defer_concubine_task("heart_trial")
-            return
-
-        # 三轮心劫循环（每轮发.稳）
-        current_msg = trial_msg
-        # 发 .稳 前确保身份对齐
-        if hasattr(self, 'switch_back_to_main'):
-            await self.switch_back_to_main()
-        async with _ConcubineAtomicTask(self, "HeartTrial-主魂"):
-            async with self.cmd_lock:
-                for idx in range(1, 4):
-                    confirmed = False
-                    current_text = ""
-                    for attempt in range(1, 4):
-                        try:
-                            pause_event = getattr(self, "pause_event", None)
-                            if pause_event is not None:
-                                await pause_event.wait()
-                            if not await wait_for_bot_activity_before_send(self, ".稳", log):
-                                return
-                            if not command_send_allowed(self, ".稳", log):
-                                return
-                            remember_script_send_intent(self, ".稳")
-                            sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
-                            remember_script_sent_message(self, sent)
-                            record_command_sent(
-                                self,
-                                sent,
-                                ".稳",
-                                identity=getattr(self, "current_identity", "主魂"),
-                                source="auto",
-                                reply_to=current_msg.id,
-                                logger=log,
-                            )
-                            schedule_command_auto_delete(self, sent, text=".稳", logger=log)
-                            _identity = getattr(self, "current_identity", None)
-                            _tag = f" [{_identity}]" if _identity else ""
-                            log.info(f"🟢 OUT{_tag}:\n.稳 ({idx}/3, try {attempt}/3)")
-                        except Exception as e:
-                            log.error(f"Concubine 共历心劫: failed to send .稳 ({idx}/3): {e}")
-                            return
-
-                        result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
-                            current_msg, sent, idx, timeout_sec=90, poll_sec=3,
-                        )
-                        if result_msg:
-                            current_msg = result_msg
-                            await log_incoming_message(self, f".稳 {idx}/3 try {attempt}/3", current_text, msg=result_msg, logger=log)
-                            if self.heart_trial_settled(current_text):
-                                self.record_concubine_cd("heart_trial")
-                                return
-                            if confirmed:
-                                break
-                            if self.heart_trial_terminal_failure(current_text):
-                                if not await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮终止返回"):
-                                    self.defer_concubine_task("heart_trial", 600)
-                                return
-                            if self.heart_trial_round_prompt(current_text, idx):
-                                if attempt < 3:
-                                    log.warning(f"Concubine 共历心劫: still on round {idx}; retrying.")
-                                    await asyncio.sleep(3)
-                                    continue
-                                if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮"):
-                                    return
-                            log.warning(f"Concubine 共历心劫: .稳 ({idx}/3) did not confirm.")
-                            notify_unrecognized_response(self, ".稳", current_text, log, f"共历心劫第{idx}轮")
-                            self.defer_concubine_task("heart_trial", 600)
-                            return
-                        log.warning(f"Concubine 共历心劫: missing edit after .稳 ({idx}/3, try {attempt}/3).")
-                        if attempt < 3:
-                            await asyncio.sleep(3)
-                            continue
-                        if await self.refresh_heart_trial_cooldown_after_uncertain(f".稳 第{idx}轮无编辑"):
-                            return
-                        self.defer_concubine_task("heart_trial", 600)
-                        return
-
-                    if not confirmed:
-                        return
-
-        self.record_concubine_cd("heart_trial")
-
-    # ---- 主循环 ----
-
     async def run_target_concubine_loop(self, initial_delay=0):
         """主号主魂/无咎子寻找指定侍妾；找到前不跑普通侍妾链。"""
         await self.startup_done.wait()
@@ -2394,12 +2137,13 @@ class ConcubineMixin:
     async def run_concubine_loop(self):
         """
         侍妾功能主循环。
-        固定批次：远航归来 → 天机代卜 → 入梦寻图 → 共历心劫 → 主号主魂月殿寻痕。
+        固定批次：远航归来 → 天机代卜 → 入梦寻图 → 主号主魂月殿寻痕。
         全部有冷却时等待最短的冷却时间。
         """
         await self.startup_done.wait()
         await asyncio.sleep(random.randint(20, 60))
-        await self.sync_concubine_status_if_needed()
+        if str(getattr(self, "account_key", "") or "") != "sub":
+            await self.sync_concubine_status_if_needed()
 
         while self.is_running:
             self.ensure_concubine_state()
@@ -2412,10 +2156,11 @@ class ConcubineMixin:
                     continue
 
                 waits = [
-                    seconds_until(self.state.get(task["state_key"], ""))
-                    for task_key, task in CONCUBINE_TASKS.items()
+                    seconds_until(self.state.get(CONCUBINE_TASKS[task_key]["state_key"], ""))
+                    for task_key in CONCUBINE_CHAIN_TASK_KEYS
                     if self.concubine_task_enabled(task_key, "主魂")
-                    if self.state.get(task["state_key"], "") and is_future(self.state[task["state_key"]])
+                    if self.state.get(CONCUBINE_TASKS[task_key]["state_key"], "")
+                    and is_future(self.state[CONCUBINE_TASKS[task_key]["state_key"]])
                 ]
                 if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
                     target_state = self.ensure_target_concubine_state("主魂")

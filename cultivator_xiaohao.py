@@ -65,7 +65,7 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
-from common_command_features import CommonCommandMixin, common_command_default_state
+from common_command_features import CommonCommandMixin, MULAN_SUPPORT_COMMAND, common_command_default_state
 from duel_features import DuelMixin
 from command_feedback import (
     _handle_telegram_send_protection,
@@ -1514,7 +1514,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         
         keys_to_check = [
             "next_meditation_retry_time",
-            "next_field_training_time",
             "next_star_palace_time",
             "next_star_gazing_time",
             "pending_star_gazing_target_time",
@@ -1527,16 +1526,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             "next_formation_retry_time",
             "next_force_exit_time",
             "next_dream_map_time",
-            "next_heart_trial_time",
             "next_divination_time",
             "next_concubine_voyage_time",
             "next_stairs_time",
             "next_heart_time",
             "next_heart_platform_time",
-            "next_steal_time",
             "next_beast_status_check_time",
-            "next_pasture_time",
-            "next_beast_cruise_time",
             "next_beast_border_patrol_time",
             "next_treasure_touch_time",
             "next_yuanying_out_time",
@@ -1574,6 +1569,9 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 and not state.get("concubine_voyage_active")
             ):
                 continue
+            mapped_command = self.state_time_command_for_key(k)
+            if mapped_command and self.retired_auto_command_for_identity(mapped_command, identity):
+                continue
             if self.state_time_command_paused(k, identity):
                 continue
             t_str = state.get(k, "")
@@ -1593,21 +1591,27 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 min_wait = 0
                 
         if identity == "主魂":
-            done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            daily_due = ".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity)
+            support_retry = str(state.get("next_mulan_support_time") or "")
+            support_due = (
+                state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
+                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not (support_retry and is_future(support_retry))
+            )
             if (
                 seconds_until_daily_task_start(datetime.now()) <= 0
-                and daily_due
-                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+                and support_due
+                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
             ):
                 min_wait = min(min_wait, 0)
 
+        support_retry = str(state.get("next_mulan_support_time") or "")
         if (
             identity in self.avatars
-            and state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d")
-            and not self.dashboard_command_paused(".宗门点卯", identity)
+            and state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
+            and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+            and not (support_retry and is_future(support_retry))
             and seconds_until_daily_task_start(datetime.now()) <= 0
-            and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+            and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
         ):
             min_wait = min(min_wait, 0)
 
@@ -1700,7 +1704,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         """
         带身份感知的物理串行发送管线。
         """
-        if is_retired_auto_command(message, actor=self):
+        if is_retired_auto_command(message, actor=self, identity=identity):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
@@ -2040,7 +2044,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         发送指令并等待回复（带 avatar_send_lock 保护）。
         所有主魂业务通过此方法发送。如果当前身份不是主魂，自动切回主魂再发送。
         """
-        if is_retired_auto_command(message, actor=self):
+        if is_retired_auto_command(message, actor=self, identity="主魂"):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
         # 整体任务独占锁守卫
@@ -2202,19 +2206,13 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     # ---- 每日任务 ----
 
-    async def run_daily_tasks(self):
-        """
-        每日任务循环：
-        1. 宗门点卯
-        """
-        return await self.run_common_daily_tasks_loop(
+    async def run_daily_support_tasks(self):
+        """每天 07:00 后执行仍有效的慕兰支援。"""
+        return await self.run_common_mulan_support_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".宗门点卯"],
             pre_loop_func=lambda: self.sleep_if_main_soul_paused("Daily tasks"),
             sleep_func=scheduler_sleep_seconds,
-            send_kwargs_func=lambda command: {"return_msg": True},
-            mark_done_before_send=False,
         )
 
     def _stale_fishing_active_identities(self, overdue_seconds=60):
@@ -2399,10 +2397,8 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if self.state.get("is_paused") or self.main_soul_pause_seconds() > 0:
             return []
         specs = (
-            ("next_field_training_time", self.field_training_command, "主魂"),
             ("next_yuanying_out_time", ".元婴出窍", "主魂"),
             ("next_rift_search_time", ".探寻裂缝", "主魂"),
-            ("next_beast_cruise_time", BEAST_CRUISE_COMMAND, "主魂"),
             ("next_beast_border_patrol_time", ".灵兽巡边", "主魂"),
         )
         stale = []
@@ -2909,7 +2905,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         target_time = self.pasture_block_until()
         self.set_best_beast_status(beast_name, "放养中")
         for key in (
-            "next_beast_cruise_time",
             "next_beast_status_check_time",
             "next_pasture_time",
         ):
@@ -6935,78 +6930,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 })
                 await asyncio.sleep(60)
 
-    async def run_beast_hunt_timer(self):
-        """
-        寻觅灵兽主循环。
-        策略：
-        1. 保持最多10只灵兽
-        2. 第10只为风雀时停止狩猎
-        3. 满10只时放生第10只（最低战力）再继续狩猎
-        4. 不主动刷新灵兽面板；灵兽缓存只在探渊前更新
-        """
-        await self.startup_done.wait()
-        while self.is_running:
-            if await self.sleep_if_main_soul_paused("Beast hunt loop"):
-                continue
-            if self.state.get("beast_hunt_stopped"):
-                log.info(f"Hunt Loop: stopped ({self.state.get('beast_hunt_stopped_reason', '')}).")
-                await asyncio.sleep(scheduler_sleep_seconds(24 * 3600)); continue
-            next_hunt = self.state.get("next_hunt_time", "")
-            if next_hunt and is_future(next_hunt):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_hunt) + random.randint(10, 30))); continue
-            last_run = self.state.get("last_hunt_time", "")
-            if last_run and is_future(add_seconds_str(last_run, HUNT_CD_SECONDS)):
-                await asyncio.sleep(scheduler_sleep_seconds(seconds_until(add_seconds_str(last_run, HUNT_CD_SECONDS)) + random.randint(10, 30))); continue
-            async with self.beast_lock:
-                next_hunt = self.state.get("next_hunt_time", ""); last_run = self.state.get("last_hunt_time", "")
-                if next_hunt and is_future(next_hunt): continue
-                if last_run and is_future(add_seconds_str(last_run, HUNT_CD_SECONDS)): continue
-                cache = list(self.state.get("beasts_cache", []))
-                if self.should_stop_hunt_by_tenth_beast(cache): continue
-                if len(cache) >= 10:
-                    last_rel = self.state.get("last_release_beast_time", "2000-01-01 00:00:00")
-                    if (datetime.now() - str_to_dt(last_rel)).total_seconds() > 600:
-                        release_target = self.tenth_beast(cache)
-                        if not release_target: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS); self.save_state(); continue
-                        rel_resp = await self.send_and_wait_feedback(f".放生 {release_target['full_name']}")
-                        if rel_resp and any(k in rel_resp for k in ["解除", "放生", "回归"]):
-                            self.state["last_release_beast_time"] = now_str()
-                            self.state["beasts_cache"] = [b for b in cache if b.get("full_name") != release_target.get("full_name")]
-                            self.save_state()
-                            await asyncio.sleep(3)
-                        elif rel_resp and self.is_no_such_beast_response(rel_resp):
-                            self.state["beasts_cache"] = [b for b in cache if b.get("full_name") != release_target.get("full_name")]
-                            self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
-                            self.save_state()
-                        else:
-                            if rel_resp: notify_unrecognized_response(self, f".放生 {release_target['full_name']}", rel_resp, log, "寻觅前放生第十只")
-                            self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
-                            self.save_state()
-                    else: log.warning("Hunt: Release safety lock active, skipping release.")
-                    if len(self.state.get("beasts_cache", [])) >= 10: log.warning("Hunt: Still >= 10 after release; skipping .寻觅灵兽."); await asyncio.sleep(300); continue
-                resp = await self.send_and_wait_feedback(".寻觅灵兽")
-                if resp:
-                    cd = self.parse_wait_time(resp)
-                    if self.is_beast_bag_full_response(resp):
-                        log.warning("Hunt: Beast bag is full. Retry later; beast cache refresh is limited to abyss precheck.")
-                        self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
-                    elif cd > 0: self.state["last_hunt_time"] = add_seconds_str(now_str(), cd - HUNT_CD_SECONDS); self.state["next_hunt_time"] = add_seconds_str(now_str(), cd)
-                    elif any(k in resp for k in ["成功", "出发", "抓到", "寻觅", "搜寻"]):
-                        self.state["last_hunt_time"] = now_str(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_CD_SECONDS)
-                        if self.is_wind_sparrow(resp): self.stop_beast_hunt("寻觅到了风雀")
-                    else: notify_unrecognized_response(self, ".寻觅灵兽", resp, log, "寻觅灵兽"); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
-                    self.save_state()
-                else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS); self.save_state()
-            await asyncio.sleep(60)
-
-    # ---- 主循环：灵兽行动（探渊 + 偷菜 + 互动/巡边/巡游） ----
+    # ---- 主循环：仍保留的群内灵兽巡边 ----
 
     async def run_beast_action_timer(self):
         """
-        灵兽行动主循环。
-        按优先级执行：探渊(6h) → 偷菜(4h) → 六翼放养恢复 → 灵兽巡边(75min) → 常规一键放养(4h) → 灵兽互动(90min) → 灵兽巡游(120min)。
-        探渊、偷菜首选六翼；巡边始终排除六翼，改由其他可用灵兽执行。
-        六翼体力低于50时仍优先放养保护，不参与偷菜/巡游/探渊。
+        仅保留 Mini App 暂未提供接口的灵兽巡边群指令。
         """
         await self.startup_done.wait()
         while self.is_running:
@@ -7020,138 +6948,19 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             sleep_for = 600
             async with self.beast_lock:
                 self.repair_overdue_beast_border_patrol_schedule()
-                last_abyss = self.state.get("last_abyss_time", "")
-                next_abyss = self.state.get("next_abyss_time", "")
-                need_abyss = self.beast_action_due("next_abyss_time", "last_abyss_time", 21600)
-                last_steal = self.state.get("last_steal_time", "")
-                next_steal = self.state.get("next_steal_time", "")
-                need_steal = self.beast_action_due("next_steal_time", "last_steal_time", 14400)
-                last_pasture = self.state.get("last_pasture_time", "")
-                next_pasture = self.state.get("next_pasture_time", "")
-                need_pasture = not next_pasture or not is_future(next_pasture)
-                need_focus_after_abyss_pasture = self.focus_pasture_after_abyss_due()
-                if need_focus_after_abyss_pasture:
-                    need_pasture = True
-                if need_pasture and last_pasture:
-                    need_pasture = not is_future(add_seconds_str(last_pasture, PASTURE_CD_SECONDS))
-                    if need_focus_after_abyss_pasture:
-                        need_pasture = True
-                if need_pasture and self.has_pending_pasture_return() and not need_focus_after_abyss_pasture:
-                    self.state["next_pasture_time"] = add_seconds_str(now_str(), 600)
-                    self.save_state()
-                    need_pasture = False
-                need_interaction = False  # Replaced by HTTP-only all-beast contract soothing.
-                last_cruise = self.state.get("last_beast_cruise_time", "")
-                next_cruise = self.state.get("next_beast_cruise_time", "")
-                need_cruise = not next_cruise or not is_future(next_cruise)
-                if need_cruise and last_cruise:
-                    need_cruise = not is_future(add_seconds_str(last_cruise, BEAST_CRUISE_CD_SECONDS))
                 last_patrol = self.state.get("last_beast_border_patrol_time", "")
                 next_patrol = self.state.get("next_beast_border_patrol_time", "")
                 need_patrol = not next_patrol or not is_future(next_patrol)
                 if need_patrol and last_patrol:
                     need_patrol = not is_future(add_seconds_str(last_patrol, BEAST_BORDER_PATROL_CD_SECONDS))
-                due_any = need_abyss or need_steal or need_pasture or need_interaction or need_patrol or need_cruise
-                if not due_any:
-                    next_waits = []
-                    for wait in (
-                        self.beast_action_wait_seconds("next_abyss_time", "last_abyss_time", 21600),
-                        self.beast_action_wait_seconds("next_steal_time", "last_steal_time", 14400),
-                        self.beast_action_wait_seconds("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS),
-                        self.beast_action_wait_seconds("next_beast_border_patrol_time", "last_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS),
-                        self.beast_action_wait_seconds("next_beast_cruise_time", "last_beast_cruise_time", BEAST_CRUISE_CD_SECONDS),
-                    ):
-                        if wait > 0:
-                            next_waits.append(wait)
-                    for next_time in (next_abyss, next_steal, next_pasture, next_patrol, next_cruise):
-                        if next_time and is_future(next_time):
-                            next_waits.append(seconds_until(next_time))
-                    if next_waits: sleep_for = max(30, min(next_waits) + random.randint(10, 30))
-                else: sleep_for = 30
-                cache = list(self.state.get("beasts_cache", []))
-                if due_any:
-                    focus_low = self.focus_beast_low_stamina(cache)
-                    if focus_low and need_pasture and not need_patrol:
-                        log.info(f"Beast focus protection: {BEAST_FOCUS_NAME} stamina below {BEAST_FOCUS_PROTECT_STAMINA}; pasture first.")
-                        await self.execute_focus_low_stamina_pasture(cache)
-                        need_pasture = False
-                        await asyncio.sleep(3)
-                    if need_abyss or need_steal:
-                        if cache:
-                            if need_abyss:
-                                await self.execute_abyss_with_fallback(defer_focus_pasture=need_steal)
-                                await asyncio.sleep(3)
-                            if need_steal:
-                                await self.execute_steal_with_candidate(cache)
-                                await asyncio.sleep(3)
-                        else:
-                            log.warning("Beast action due but cache is empty; scheduling abyss/steal retry.")
-                            if need_abyss: await self.execute_abyss_with_fallback(defer_focus_pasture=need_steal)
-                            if need_steal:
-                                refreshed_cache = list(self.state.get("beasts_cache", []))
-                                if refreshed_cache:
-                                    await self.execute_steal_with_candidate(refreshed_cache)
-                                    await asyncio.sleep(3)
-                                else:
-                                    self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
-                                    self.save_state()
-                    if self.focus_pasture_after_abyss_due():
-                        log.info(f"Beast focus recovery: priority work finished; pasturing {BEAST_FOCUS_NAME} before patrol.")
-                        await self.attempt_focus_pasture_after_priority_action(BEAST_FOCUS_NAME, "abyss/steal")
-                        need_pasture = False
-                        await asyncio.sleep(3)
-                    if need_patrol:
-                        async with AtomicTaskContext(self, "BeastBorderPatrol"):
-                            log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
-                            await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
-                            self.save_state()
-                        await asyncio.sleep(3)
-                    if need_pasture:
-                        focus_after_abyss_attempt = self.focus_pasture_after_abyss_due()
-                        best_name_for_pasture = self.state.get("best_beast_name", "")
-                        best_status_for_pasture = self.state.get("best_beast_status", "")
-                        if await self.ensure_focus_beast_ready_for_pasture():
-                            f_resp = await self.send_and_wait_feedback(".一键放养")
-                            pasture_handled = self.record_auto_pasture_response(
-                                f_resp, cache, best_name_for_pasture, best_status_for_pasture
-                            )
-                            if focus_after_abyss_attempt:
-                                self.record_focus_pasture_after_abyss_attempt(f_resp, pasture_handled)
-                        else:
-                            log.warning(f"Pasture skipped: {BEAST_FOCUS_NAME} could not be prepared for resting pasture.")
-                            if focus_after_abyss_attempt:
-                                self.schedule_focus_pasture_after_abyss(
-                                    BEAST_FOCUS_NAME,
-                                    retry_seconds=BEAST_ACTION_RETRY_SECONDS,
-                                )
-                        await asyncio.sleep(3)
-                    if need_interaction:
-                        focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
-                        focus_status = (focus or {}).get("status", "")
-                        if self.is_pastured_status(focus_status):
-                            self.defer_beast_actions_while_pastured(BEAST_FOCUS_NAME, "interaction precheck")
-                        elif any(k in focus_status for k in ["探险", "偷菜", "巡游", "巡边"]):
-                            retry_time = self.state.get("next_beast_status_check_time", "")
-                            retry_seconds = int(seconds_until(retry_time)) if retry_time and is_future(retry_time) else BEAST_ACTION_RETRY_SECONDS
-                            log.info(f"Beast interaction deferred: {BEAST_FOCUS_NAME} status is {focus_status}, retry in {retry_seconds}s.")
-                            self.schedule_beast_action_retry("next_beast_interaction_time", max(60, retry_seconds))
-                        else:
-                            interaction_command = self.beast_interaction_command_for_status(focus_status)
-                            log.info(f"Beast interaction due: sending {interaction_command} (status={focus_status or '未知'}).")
-                            i_resp = await self.send_and_wait_feedback(interaction_command, timeout=60, max_retries=1)
-                            self.record_beast_interaction_response(i_resp, interaction_command)
-                            self.save_state()
-                        await asyncio.sleep(3)
-                    if need_cruise:
-                        async with AtomicTaskContext(self, "BeastCruise"):
-                            cruise_beast = self.select_beast_for_cruise(self.state.get("beasts_cache", []))
-                            if cruise_beast and await self.prepare_focus_beast_for_cruise(cruise_beast):
-                                await self.run_focus_beast_cruise(cruise_beast.get("full_name") or BEAST_FOCUS_NAME)
-                                self.save_state()
-                            elif not cruise_beast:
-                                log.info("Beast cruise skipped: no suitable beast candidate.")
-                                self.schedule_beast_action_retry("next_beast_cruise_time", 1800)
-                        await asyncio.sleep(3)
+                if need_patrol:
+                    async with AtomicTaskContext(self, "BeastBorderPatrol"):
+                        log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
+                        await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
+                        self.save_state()
+                    sleep_for = 30
+                elif next_patrol and is_future(next_patrol):
+                    sleep_for = max(30, seconds_until(next_patrol) + random.randint(10, 30))
             await self.sleep_beast_action(sleep_for)
 
     # ---- 闭关循环 ----
@@ -7400,28 +7209,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.set_avatar_state(avatar, "meditation_restart_pending", True)
         return 600
 
-
-    # ---- 身外化身：分身野外历练循环 ----
-
-    async def run_avatar_field_training_loop(self, avatar, initial_delay=0):
-        """
-        分身野外历练独立循环。
-        对指定分身定时发送 .野外历练 指令。
-        每个分身有独立的冷却状态，存储在 state.avatars[avatar] 中。
-        """
-        return await self.run_common_avatar_field_training_loop(
-            avatar,
-            initial_delay=initial_delay,
-            sleep_func=scheduler_sleep_seconds,
-            handle_insufficient_cultivation=False,
-        )
-
     # ============================================================
     # 化身日常与星宫相关循环
     # ============================================================
 
-    async def _avatar_daily_checkin(self, avatar):
-        return await self.common_avatar_daily_checkin(
+    async def _avatar_mulan_support(self, avatar):
+        return await self.common_avatar_mulan_support(
             avatar,
             daily_start_wait_func=seconds_until_daily_task_start,
         )
@@ -7448,170 +7241,8 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             log.error(f"Avatar {avatar} delayed_force_exit error: {e}")
             self.set_avatar_state(avatar, "next_force_exit_time", "")
 
-    def heart_trial_anchor_lost(self, text):
-        clean = str(text or "").replace("**", "")
-        return "心劫锚点已散" in clean or "需重新引动天劫" in clean
-
-    async def execute_avatar_heart_trial_flow(self, avatar, send_with_cultivation_check):
-        """
-        化身共历心劫原子流程：
-        .我的侍妾 -> .共历心劫 -> .稳 x3 必须连续执行，避免身份切换打散回复锚点。
-        """
-        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
-            forced_exit = False
-            for flow_attempt in range(1, 3):
-                status_msg = await self.send_and_wait_feedback_identity(
-                    avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False
-                )
-                status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else str(status_msg) if isinstance(status_msg, str) else ""
-                if status_text and not self.concubine_status_matches_identity(status_text, avatar):
-                    log.warning(f"Avatar {avatar} 共历心劫: mismatched .我的侍妾 status; retrying.")
-                    if flow_attempt < 2:
-                        await asyncio.sleep(2)
-                        continue
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
-                    return
-                if status_text and "还没有侍妾" in status_text:
-                    log.info(f"Avatar {avatar} has no concubine. Disabling heart trial for 24 hours.")
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 24 * 3600))
-                    return
-
-                if status_text:
-                    voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
-                    if voyage_block_until:
-                        self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
-                        log.info(f"Avatar {avatar} heart trial blocked by active voyage until {voyage_block_until}.")
-                        return
-                    clean_status = status_text.replace("**", "")
-                    match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
-                    if match:
-                        val = match.group(1).strip()
-                        if not any(k in val for k in ["无", "可用", "可施展", "已就绪"]):
-                            cd = getattr(self, "parse_wait_time", lambda x: 0)(val)
-                            if cd > 0:
-                                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), cd + 60))
-                                log.info(f"Avatar {avatar} parsed heart trial CD from status: {cd}s.")
-                                return
-
-                if not (status_msg and hasattr(status_msg, "id")):
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 600))
-                    return
-
-                resp_msg, step_forced_exit = await send_with_cultivation_check(
-                    ".共历心劫", reply_to=status_msg.id, return_response_msg=True
-                )
-                forced_exit = forced_exit or step_forced_exit
-                if resp_msg == "PAUSE_1H":
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 3600))
-                    break
-
-                resp_str = getattr(resp_msg, "text", "") if hasattr(resp_msg, "text") else str(resp_msg) if isinstance(resp_msg, str) else ""
-                if resp_str and "冷却" in resp_str:
-                    cd = self.parse_wait_time(resp_str)
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), cd if cd > 0 else 1800))
-                    break
-                if self.concubine_response_indicates_active_voyage(resp_str):
-                    block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
-                    self.set_avatar_state(avatar, "next_heart_trial_time", block_until)
-                    log.info(f"Avatar {avatar} heart trial blocked by active voyage until {block_until}.")
-                    break
-                if self.heart_trial_requires_reply_target(resp_str):
-                    log.warning(f"Avatar {avatar} 共历心劫: bot still requires reply target (attempt {flow_attempt}/2).")
-                    if flow_attempt < 2:
-                        await asyncio.sleep(3)
-                        continue
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 600))
-                    break
-                if not (resp_str and "第一轮" in resp_str):
-                    log.warning(f"Avatar {avatar} 共历心劫: response did not start round 1: {resp_str[:120]}")
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 600))
-                    break
-
-                current_msg = resp_msg
-                trial_failed = False
-                anchor_lost = False
-                async with self.avatar_send_lock:
-                    for idx in range(1, 4):
-                        confirmed = False
-                        current_text = getattr(current_msg, "text", "") if hasattr(current_msg, "text") else ""
-                        for attempt in range(1, 4):
-                            try:
-                                await self.pause_event.wait()
-                                if not await wait_for_bot_activity_before_send(self, ".稳", log):
-                                    trial_failed = True
-                                    break
-                                if not command_send_allowed(self, ".稳", log):
-                                    trial_failed = True
-                                    break
-                                remember_script_send_intent(self, ".稳")
-                                sent = await self.client.send_message(self.target_chat_id, ".稳", reply_to=current_msg.id)
-                                await record_telegram_send_success(self, logger=log)
-                                remember_script_sent_message(self, sent)
-                                record_command_sent(self, sent, ".稳", identity=avatar, source="auto", reply_to=current_msg.id, logger=log)
-                                schedule_command_auto_delete(self, sent, text=".稳", logger=log)
-                                log.info(f"🟢 OUT [{avatar}]:\n.稳 ({idx}/3, try {attempt}/3)")
-
-                                result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
-                                    current_msg, sent, idx, timeout_sec=90, poll_sec=3,
-                                )
-                                if result_msg:
-                                    current_msg = result_msg
-                                    await log_incoming_message(self, f".稳 {idx}/3 try {attempt}/3 ({avatar})", current_text, msg=result_msg, logger=log)
-
-                                if self.heart_trial_anchor_lost(current_text):
-                                    log.warning(f"Avatar {avatar} 共历心劫: anchor lost at round {idx}, will re-init trial.")
-                                    anchor_lost = True
-                                    trial_failed = True
-                                    break
-                                if self.heart_trial_settled(current_text):
-                                    confirmed = True
-                                    break
-                                if self.heart_trial_round_confirmed(current_text, idx):
-                                    confirmed = True
-                                    break
-                                if self.heart_trial_round_prompt(current_text, idx) and attempt < 3:
-                                    await asyncio.sleep(3)
-                                    continue
-                            except Exception as e:
-                                log.error(f"Avatar {avatar} 共历心劫: failed to send .稳 ({idx}/3): {e}")
-                                await _handle_telegram_send_protection(
-                                    self, ".稳", e, logger=log, identity=avatar
-                                )
-                                trial_failed = True
-                                break
-
-                            if not confirmed:
-                                break
-
-                        if trial_failed:
-                            break
-                        if self.heart_trial_settled(current_text):
-                            break
-                        if not confirmed:
-                            log.warning(f"Avatar {avatar} 共历心劫: round {idx} did not confirm.")
-                            trial_failed = True
-                            break
-
-                if anchor_lost and flow_attempt < 2:
-                    await asyncio.sleep(3)
-                    continue
-                if trial_failed:
-                    if anchor_lost:
-                        await self.sync_avatar_heart_trial_cooldown_after_failure(
-                            avatar, "anchor lost after retry"
-                        )
-                    else:
-                        self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 600))
-                else:
-                    self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 10 * 3600))
-                break
-
-            if forced_exit:
-                deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
-                await self.record_avatar_deep_meditation_start(avatar, self.response_text(deep_resp))
-
     async def run_avatar_star_palace_loop(self, avatar, initial_delay=0):
-        """化身日常循环：点卯、侍妾链与心劫；星辰牵引由独立循环处理。"""
+        """化身日常循环：慕兰支援与仍有效的侍妾链。"""
         await self.startup_done.wait()  # 新增：等待启动对账完成，杜绝死锁
         self._avatar_loop_count += 1
         if initial_delay > 0:
@@ -7645,17 +7276,13 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 # --- 周天星斗大阵 ---
                 # 小号星宫分身不再主动启阵，只实时助阵副号三分身的邀请。
 
-                # --- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ---
+                # --- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 侍妾远航 ---
                 await self.execute_avatar_concubine_chain(
                     avatar,
                     send_with_cultivation_check=send_with_cultivation_check,
-                    heart_trial_executor=lambda name: self.execute_avatar_heart_trial_flow(
-                        name, send_with_cultivation_check
-                    ),
                 )
 
-                # --- 宗门点卯（每日一次，低优先级，放在本轮最后） ---
-                await self._avatar_daily_checkin(avatar)
+                await self._avatar_mulan_support(avatar)
 
             except Exception as e:
                 log.error(f"Error in avatar {avatar} daily avatar loop: {e}", exc_info=True)
@@ -7736,7 +7363,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             await self.handle_pasture_return_event(e)
 
         async def startup_sync():
-            """启动后对账：同步狩猎/探渊/闭关状态，避免重启后丢失进度"""
+            """启动后对账闭关与仍保留的灵兽巡边状态。"""
             await asyncio.sleep(25)
             log.info("Startup Sync: Smart check for stale data...")
             
@@ -7754,36 +7381,8 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 self.startup_done.set()
                 return
             await asyncio.sleep(3)
-            
             async with self.beast_lock:
-                focus = self.get_cached_beast_by_name(BEAST_FOCUS_NAME)
-                focus_status = (focus or {}).get("status", "") or self.state.get("best_beast_status", "")
-                focus_name = (focus or {}).get("full_name") or self.state.get("best_beast_name", "") or BEAST_FOCUS_NAME
-                if self.is_pastured_status(focus_status):
-                    self.defer_beast_actions_while_pastured(focus_name, "startup persisted pastured status")
-                if self.state.get("beast_hunt_stopped"): log.info(f"Startup Sync: Hunt stopped ({self.state.get('beast_hunt_stopped_reason', '')}).")
-                elif self.should_stop_hunt_by_tenth_beast(self.state.get("beasts_cache", [])): log.info("Startup Sync: Hunt stopped by cached 10th beast.")
-                else:
-                    next_hunt = self.state.get("next_hunt_time", "")
-                    if next_hunt and is_future(next_hunt): log.info(f"Startup Sync: Hunt deferred until {next_hunt}.")
-                    else:
-                        last_hunt = self.state.get("last_hunt_time", "")
-                        if last_hunt and is_future(add_seconds_str(last_hunt, HUNT_CD_SECONDS)): log.info(f"Startup Sync: Local hunt time valid. Skipping.")
-                        else:
-                            resp = await self.send_and_wait_feedback(".寻觅灵兽")
-                            if resp:
-                                cd = self.parse_wait_time(resp)
-                                if self.is_beast_bag_full_response(resp): self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FULL_RETRY_SECONDS)
-                                elif cd > 0: self.state["last_hunt_time"] = add_seconds_str(now_str(), cd - HUNT_CD_SECONDS); self.state["next_hunt_time"] = add_seconds_str(now_str(), cd)
-                                elif any(k in resp for k in ["成功", "出发", "抓到", "寻觅", "搜寻"]): self.state["last_hunt_time"] = now_str(); self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_CD_SECONDS)
-                                else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
-                            else: self.state["next_hunt_time"] = add_seconds_str(now_str(), HUNT_FAIL_RETRY_SECONDS)
-                last_abyss = self.state.get("last_abyss_time", "")
-                if last_abyss:
-                    self.state["next_abyss_time"] = add_seconds_str(last_abyss, 6*3600); self.save_state()
-                    if is_future(self.state["next_abyss_time"]): log.info(f"Startup Sync: Abyss in progress, next at {self.state['next_abyss_time']}.")
-                    else:
-                        await self.execute_abyss_with_fallback()
+                self.repair_overdue_beast_border_patrol_schedule()
             if self.ensure_meditation_guard_from_end_time(self.state):
                 self.save_state()
             guard_wait = self.meditation_guard_wait_seconds_for_state(self.state)
@@ -7814,8 +7413,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         asyncio.create_task(self.run_health_watchdog_loop())
 
         # 启动所有定时任务
-        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())
-        self.create_scheduler_task("beast_hunt", lambda: self.run_beast_hunt_timer())
+        self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
         self.create_scheduler_task("beast_action", lambda: self.run_beast_action_timer())
         if self._miniapp_beast_contract.enabled:
             self.create_scheduler_task(
@@ -7824,7 +7422,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             )
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
-        self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=25))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
@@ -7835,13 +7432,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=100, sleep_func=scheduler_sleep_seconds))
 
-        # 身外化身：为每个分身启动独立的闭关+历练循环
+        # 身外化身：为每个分身启动独立闭关及宗门能力循环。
         for avatar in self.avatars:
             self.create_scheduler_task(f"avatar_meditation_{avatar}", lambda avatar=avatar: self.run_avatar_meditation_loop(avatar, initial_delay=0))
-            self.create_scheduler_task(f"avatar_field_training_{avatar}", lambda avatar=avatar: self.run_avatar_field_training_loop(avatar, initial_delay=0))
             if avatar in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar}", lambda avatar=avatar: self.run_avatar_yuanying_rift_loop(avatar, initial_delay=0))
-            # 所有分身都启动此循环，内含对星宫指令的身份判定，问心子借此执行入梦和心劫
+            # 所有分身都启动此循环，内含对宗门指令的身份判定。
             self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))

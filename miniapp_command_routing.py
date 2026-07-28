@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Hybrid command routing: Mini App first for supported commands, group fallback.
+"""Hybrid command routing: supported commands are Mini App-only.
 
 Used by non-restricted accounts (main/sub). Commands accepted by
 ``miniapp_command_allowed`` are executed through the Mini App dwelling
 transport for every identity (no ``.切换`` round-trip needed — the transport
-addresses identities by playerId). Anything else, and any Mini App failure,
-falls back to the original Telegram group send path.
+addresses identities by playerId). Unsupported commands keep the original
+Telegram group path. A supported command never falls back to the group when
+Mini App initialization or execution fails.
 """
 
 from __future__ import annotations
@@ -83,8 +84,20 @@ class MiniAppCommandRouter:
             self.log.warning("Mini App route state save failed", exc_info=True)
 
     async def install(self) -> bool:
+        self._orig_send = self.actor.send_and_wait_feedback
+        self._orig_send_identity = getattr(self.actor, "send_and_wait_feedback_identity", None)
+        self.actor.send_and_wait_feedback = self._send_main
+        if self._orig_send_identity is not None:
+            self.actor.send_and_wait_feedback_identity = self._send_identity
         if not self.enabled:
-            self.log.info("Mini App command routing disabled for %s", self.account)
+            self._record(
+                miniapp_route_active=False,
+                miniapp_route_last_error="route_disabled",
+            )
+            self.log.error(
+                "Mini App command routing disabled for %s; supported commands are blocked",
+                self.account,
+            )
             return False
         try:
             await self.transport.initialize()
@@ -94,16 +107,11 @@ class MiniAppCommandRouter:
             self.enabled = False
             self._record(miniapp_route_active=False, miniapp_route_last_error=code)
             self.log.error(
-                "Mini App command routing setup failed (%s); all commands stay on the group path",
+                "Mini App command routing setup failed (%s); supported commands are blocked",
                 code,
                 exc_info=True,
             )
             return False
-        self._orig_send = self.actor.send_and_wait_feedback
-        self._orig_send_identity = getattr(self.actor, "send_and_wait_feedback_identity", None)
-        self.actor.send_and_wait_feedback = self._send_main
-        if self._orig_send_identity is not None:
-            self.actor.send_and_wait_feedback_identity = self._send_identity
         known = sorted(
             name
             for name in ["主魂", *(getattr(self.actor, "avatars", []) or [])]
@@ -168,14 +176,6 @@ class MiniAppCommandRouter:
         ids = self.transport.identity_player_ids
         return key in ids or key.casefold() in ids
 
-    def _should_route(self, identity: str, command: str, kwargs: dict[str, Any]) -> bool:
-        if not self.enabled or not miniapp_command_allowed(command):
-            return False
-        # Replies target a concrete group message; those flows must stay there.
-        if kwargs.get("reply_to") is not None:
-            return False
-        return self._identity_routable(identity)
-
     async def _maybe_refresh_auth(self) -> None:
         if (datetime.now() - self._last_auth_refresh).total_seconds() < self.auth_refresh_seconds:
             return
@@ -205,8 +205,41 @@ class MiniAppCommandRouter:
         kwargs: dict[str, Any],
     ) -> Any:
         command = normalize_miniapp_command(message)
-        if not self._should_route(identity, command, kwargs):
+        if not miniapp_command_allowed(command):
             return await fallback(message, *args, **kwargs)
+        if kwargs.get("reply_to") is not None:
+            self._record(
+                miniapp_route_last_error="reply_target_not_supported",
+                miniapp_route_last_error_at=_now_text(),
+            )
+            self.log.error(
+                "Mini App-only command blocked because it requires a group reply target [%s] %s",
+                identity,
+                command,
+            )
+            return None
+        if not self.enabled:
+            self._record(
+                miniapp_route_last_error="route_unavailable",
+                miniapp_route_last_error_at=_now_text(),
+            )
+            self.log.error(
+                "Mini App-only command blocked while route is unavailable [%s] %s",
+                identity,
+                command,
+            )
+            return None
+        if not self._identity_routable(identity):
+            self._record(
+                miniapp_route_last_error="identity_unavailable",
+                miniapp_route_last_error_at=_now_text(),
+            )
+            self.log.error(
+                "Mini App-only command blocked for unknown identity [%s] %s",
+                identity,
+                command,
+            )
+            return None
         if hasattr(self.actor, "dashboard_command_paused") and self.actor.dashboard_command_paused(
             command,
             identity,
@@ -237,12 +270,12 @@ class MiniAppCommandRouter:
                 miniapp_route_last_error_at=_now_text(),
             )
             self.log.warning(
-                "Mini App command failed [%s] %s (%s); falling back to the group",
+                "Mini App command failed [%s] %s (%s); group fallback is disabled",
                 identity,
                 command,
                 code,
             )
-            return await fallback(message, *args, **kwargs)
+            return None
         if kwargs.get("return_response_msg") or kwargs.get("return_msg"):
             return response
         return response.text

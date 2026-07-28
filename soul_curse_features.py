@@ -43,7 +43,6 @@ SOUL_CURSE_PUBLISHERS = {
         "assistant_identity": YINLUO_IDENTITY,
         "visit_minute": 0,
         "wanying_greeting_enabled": True,
-        "co_study_enabled": True,
         "shared": False,
     },
     "xiaohao": {
@@ -801,30 +800,8 @@ class SoulCurseMixin:
             self.record_soul_curse_wanying_greeting_response(self.soul_curse_response_text(resp), profile)
         return 5
 
-    async def soul_curse_maybe_co_study(self, profile):
-        if not self.soul_curse_main_extra_enabled(profile, "co_study_enabled"):
-            return 600
-        state = self.get_soul_curse_state()
-        if self.soul_curse_command_paused(SOUL_CURSE_CO_STUDY_COMMAND, "主魂"):
-            return 300
-        next_time = state.get("next_co_study_time", "")
-        if next_time and is_future(next_time):
-            return seconds_until(next_time)
-        if self.identity_pause_seconds("主魂") > 0:
-            return 300
-        async with self.soul_curse_atomic_task("SoulCurseCoStudy"):
-            resp = await self.soul_curse_send_main(SOUL_CURSE_CO_STUDY_COMMAND, timeout=60)
-            self.record_soul_curse_co_study_response(self.soul_curse_response_text(resp))
-        return 5
-
     async def soul_curse_main_extra_tick(self, profile):
-        waits = []
-        for runner in (self.soul_curse_maybe_wanying_greeting, self.soul_curse_maybe_co_study):
-            wait = await runner(profile)
-            if wait <= 10:
-                return max(5, wait)
-            waits.append(wait)
-        return min(waits or [600])
+        return await self.soul_curse_maybe_wanying_greeting(profile)
 
     async def soul_curse_maybe_visit(self, profile):
         state = self.get_soul_curse_state()

@@ -10,6 +10,7 @@ from miniapp_dwelling import (
     miniapp_command_allowed,
 )
 from miniapp_command_routing import MiniAppCommandRouter
+from dashboard_server import apply_command_execution_channels
 from restricted_miniapp_worker import RestrictedMiniAppWorker, _periodic_wait_seconds
 
 
@@ -39,6 +40,7 @@ START = {
 class FakeLogger:
     def __init__(self):
         self.info_messages = []
+        self.warning_messages = []
         self.error_messages = []
 
     @staticmethod
@@ -48,7 +50,10 @@ class FakeLogger:
     def info(self, message, *args):
         self.info_messages.append(self._format(message, args))
 
-    def error(self, message, *args):
+    def warning(self, message, *args, **kwargs):
+        self.warning_messages.append(self._format(message, args))
+
+    def error(self, message, *args, **kwargs):
         self.error_messages.append(self._format(message, args))
 
 
@@ -67,6 +72,20 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".定命 紫微",
             ".推命 闭关",
             ".改命 探索",
+            ".问道",
+            ".我的阴罗幡",
+            ".每日献祭",
+            ".血洗山林",
+            ".召唤魔影",
+            ".召回魔影",
+            ".一键收取精华",
+            ".化功为煞 10000",
+            ".囚禁魂魄 1 凶兽戾魄",
+            ".安抚幡灵 1",
+            ".接取解咒委托 19",
+            ".辨认咒纹 @Weeguu",
+            ".借幡镇魂 @Weeguu",
+            ".剥离咒源 @Weeguu",
         ):
             self.assertTrue(miniapp_command_allowed(command), command)
         for command in (
@@ -78,6 +97,90 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".定命 不存在",
         ):
             self.assertFalse(miniapp_command_allowed(command), command)
+
+    def test_dashboard_labels_ask_dao_and_yinluo_commands_as_miniapp_only(self):
+        commands = (
+            ".问道",
+            ".我的阴罗幡",
+            ".每日献祭",
+            ".召回魔影",
+            ".囚禁魂魄 <槽位> 凶兽戾魄",
+            ".辨认咒纹 @Weeguu",
+            ".借幡镇魂 @Weeguu",
+            ".剥离咒源 @Weeguu",
+        )
+        panel = {"commands": [{"command": command} for command in commands]}
+
+        apply_command_execution_channels(panel, root_state={"miniapp_route_active": False})
+
+        for row in panel["commands"]:
+            self.assertEqual(row["execution_channel"], "miniapp", row["command"])
+            self.assertIn("不回退群内", row["execution_channel_detail"])
+
+    def test_router_install_failure_blocks_supported_commands_without_group_fallback(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {}
+                self.avatars = []
+                self.group_sent = []
+
+            async def send_and_wait_feedback(self, command, *args, **kwargs):
+                self.group_sent.append(command)
+                return f"group:{command}"
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        router = MiniAppCommandRouter(actor, "main", logger=FakeLogger())
+        router.transport.initialize = AsyncMock(side_effect=MiniAppBeastError("fixture_failure"))
+
+        installed = asyncio.run(router.install())
+        blocked = asyncio.run(actor.send_and_wait_feedback(".问道"))
+        group_only = asyncio.run(actor.send_and_wait_feedback(".洞府"))
+
+        self.assertFalse(installed)
+        self.assertIsNone(blocked)
+        self.assertEqual(group_only, "group:.洞府")
+        self.assertEqual(actor.group_sent, [".洞府"])
+
+    def test_parameterized_yinluo_command_routes_through_miniapp_only(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {"avatars": {"缘生子": {}}}
+                self.avatars = ["缘生子"]
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def save_state(self):
+                pass
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+        actor = Actor()
+        router = MiniAppCommandRouter(actor, "sub", logger=FakeLogger())
+        router.transport.identity_player_ids = {"主魂": 100, "缘生子": -200}
+        router.transport.command = AsyncMock(
+            return_value=SimpleNamespace(text="借幡镇魂完成", payload={})
+        )
+        fallback = AsyncMock(return_value="group fallback")
+
+        response = asyncio.run(
+            router._route("缘生子", ".借幡镇魂 @Weeguu", fallback, (), {})
+        )
+
+        self.assertEqual(response, "借幡镇魂完成")
+        router.transport.command.assert_awaited_once_with(
+            ".借幡镇魂 @Weeguu",
+            identity="缘生子",
+        )
+        fallback.assert_not_awaited()
 
     def test_identity_mapping_and_command_routes(self):
         calls = []

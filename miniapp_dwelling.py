@@ -50,6 +50,25 @@ EXACT_COMMANDS = {
     # cloud-stairs scheduler even though it is not exposed as a primary action.
     ".天阶状态",
     ".观命",
+    ".问道",
+    ".我的阴罗幡",
+    ".每日献祭",
+    ".血洗山林",
+    ".召唤魔影",
+    ".召回魔影",
+    ".一键收取精华",
+    ".辨认咒纹",
+    ".借幡镇魂",
+    ".剥离咒源",
+}
+PREFIX_COMMANDS = {
+    ".化功为煞",
+    ".囚禁魂魄",
+    ".安抚幡灵",
+    ".接取解咒委托",
+    ".辨认咒纹",
+    ".借幡镇魂",
+    ".剥离咒源",
 }
 
 
@@ -81,6 +100,8 @@ def miniapp_command_allowed(command: str) -> bool:
     if len(parts) != 2:
         return False
     name, argument = parts
+    if name in PREFIX_COMMANDS:
+        return bool(argument.strip())
     if name == ".定命":
         return argument in DESTINY_CHOICES
     if name in {".推命", ".改命"}:

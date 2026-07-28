@@ -118,7 +118,7 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertNotIn(".推命 探索", commands)
         self.assertNotIn(".改命 探索", commands)
         self.assertIn(".探寻裂缝", commands)
-        self.assertIn(".野外历练 深入", commands)
+        self.assertNotIn(".野外历练 深入", commands)
         self.assertNotIn(".野外历练", commands)
         self.assertFalse(any(command.startswith(".抚摸法宝") for command in commands))
         self.assertNotIn(".小世界", commands)
@@ -209,7 +209,7 @@ class WaaigingAccountTests(unittest.TestCase):
             ".改命 探索",
         ):
             self.assertTrue(command_feedback.is_retired_auto_command(command))
-        self.assertFalse(command_feedback.is_retired_auto_command(".宗门点卯"))
+        self.assertTrue(command_feedback.is_retired_auto_command(".宗门点卯"))
 
     def test_watchdog_ignores_disabled_waaiging_treasure_tasks(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)

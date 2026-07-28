@@ -66,6 +66,7 @@ from command_modules import (
     yuanying_command_for_identity,
     yuanying_out_plan,
 )
+from command_feedback import is_retired_auto_command
 
 
 # =====================================================================
@@ -93,7 +94,7 @@ SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
 HUANGLONG_REPORT_TITLE = "黄龙山轮值军报"
 HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
-# .支援慕兰 奇袭 is a daily follow-up to .宗门点卯 for each identity.
+# .支援慕兰 奇袭 is an independent daily command for each identity.
 MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
 MULAN_SUPPORT_RETRY_SECONDS = 10 * 60
 AVATAR_TOWER_SETTLEMENT_WAIT_SECONDS = 30
@@ -150,6 +151,7 @@ STATE_TIME_COMMAND_MAP = {
 }
 LOW_PRIORITY_DAILY_COMMANDS = {
     ".宗门点卯",
+    MULAN_SUPPORT_COMMAND,
     ".观命",
     ".定命",
 }
@@ -2133,6 +2135,14 @@ class CommonCommandMixin:
     def state_time_command_for_key(self, key):
         return STATE_TIME_COMMAND_MAP.get(str(key or ""))
 
+    def retired_auto_command_for_identity(self, command, identity="主魂"):
+        """Return whether a legacy schedule must be ignored for this identity."""
+        return is_retired_auto_command(
+            command,
+            actor=self,
+            identity=str(identity or "主魂").strip() or "主魂",
+        )
+
     def command_matches_prefix(self, command, prefix):
         command = str(command or "").strip()
         prefix = str(prefix or "").strip()
@@ -2202,6 +2212,8 @@ class CommonCommandMixin:
             for key in STATE_TIME_COMMAND_MAP:
                 command = self.state_time_command_for_key(key)
                 if not command:
+                    continue
+                if self.retired_auto_command_for_identity(command, identity):
                     continue
                 if self.is_low_priority_daily_command(command):
                     continue
@@ -2290,6 +2302,8 @@ class CommonCommandMixin:
             for key, value in state.items():
                 command = self.state_time_command_for_key(key)
                 if not command or not self.time_critical_identity_command(command):
+                    continue
+                if self.retired_auto_command_for_identity(command, identity):
                     continue
                 if exclude_command and self.command_matches_prefix(exclude_command, command):
                     continue
@@ -4199,7 +4213,7 @@ class CommonCommandMixin:
         return True
 
     async def maybe_run_mulan_support(self, identity="主魂", today=None, timeout=60):
-        """Send .支援慕兰 奇袭 once after that identity's daily check-in."""
+        """Send the independent daily .支援慕兰 奇袭 command once per identity."""
         identity = str(identity or "主魂").strip() or "主魂"
         today = today or datetime.now().strftime("%Y-%m-%d")
         state = self.state if identity == "主魂" else self.get_avatar_state(identity)
@@ -4214,6 +4228,12 @@ class CommonCommandMixin:
             identity,
         ):
             log.info(f"[{identity}] Mulan support skipped: dashboard command paused.")
+            return False
+        if self.daily_one_shot_should_defer(
+            identity,
+            MULAN_SUPPORT_COMMAND,
+            logger=log,
+        ):
             return False
 
         if identity == "主魂":
@@ -4478,6 +4498,58 @@ class CommonCommandMixin:
                 )
             return True
         return False
+
+    async def common_avatar_mulan_support(self, avatar, daily_start_wait_func=None):
+        """Run the remaining avatar daily support command without sect check-in."""
+        if daily_start_wait_func is not None and daily_start_wait_func(datetime.now()) > 0:
+            return False
+        return await self.maybe_run_mulan_support(
+            avatar,
+            today=datetime.now().strftime("%Y-%m-%d"),
+        )
+
+    async def run_common_mulan_support_loop(
+        self,
+        daily_start_wait_func,
+        daily_start_label_func,
+        pre_loop_func=None,
+        sleep_func=None,
+    ):
+        """Run the valid daily Mulan support command after retired check-in removal."""
+        await self.startup_done.wait()
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            if pre_loop_func is not None:
+                should_continue = await pre_loop_func()
+                if should_continue:
+                    continue
+
+            now = datetime.now()
+            daily_wait = daily_start_wait_func(now)
+            if daily_wait > 0:
+                next_run = now + timedelta(seconds=daily_wait)
+                log.info(
+                    f"Daily Mulan support waits until {daily_start_label_func()}. "
+                    f"Next check at {dt_to_str(next_run)}."
+                )
+                await asyncio.sleep(
+                    self.common_scheduler_sleep_seconds(
+                        daily_wait + random.randint(0, 30),
+                        sleep_func=sleep_func,
+                    )
+                )
+                continue
+
+            try:
+                await self.maybe_run_mulan_support(
+                    "主魂",
+                    today=now.strftime("%Y-%m-%d"),
+                )
+            except Exception as exc:
+                log.error(f"[主魂] Mulan support loop error: {exc}", exc_info=True)
+            await asyncio.sleep(
+                self.common_scheduler_sleep_seconds(600, sleep_func=sleep_func)
+            )
 
     async def run_common_daily_tasks_loop(
         self,

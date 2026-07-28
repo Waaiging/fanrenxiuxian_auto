@@ -54,7 +54,42 @@ RETIRED_AUTO_COMMAND_PREFIXES = (
     ".协同守山",
     ".推命 探索",
     ".改命 探索",
+    ".宗门点卯",
+    ".野外历练",
+    ".共历心劫",
+    ".稳",
 )
+RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY = {
+    ("main", "主魂"): (
+        ".温养器灵",
+        ".同参封魂",
+        ".探渊",
+        ".灵兽探渊",
+        ".一键放养",
+    ),
+    ("sub", "主魂"): (
+        ".宗门战况",
+        ".参战",
+        ".安置侍妾",
+        ".我的侍妾",
+    ),
+    ("sub", "缘生子"): (
+        ".强行出关",
+    ),
+    ("sub", "寻真子"): (
+        ".启阵",
+        ".观星",
+        ".改换星移",
+    ),
+    ("xiaohao", "主魂"): (
+        ".寻觅灵兽",
+        ".灵兽偷菜",
+        ".探渊",
+        ".灵兽探渊",
+        ".一键放养",
+        ".灵兽巡游",
+    ),
+}
 
 REPEATED_RESPONSE_GUARD_WINDOW_SECONDS = 3 * 60
 REPEATED_RESPONSE_GUARD_LIMIT = 3
@@ -117,11 +152,19 @@ def _normalize_repeated_response_text(text):
     return clean[:500]
 
 
-def is_retired_auto_command(message, actor=None):
+def is_retired_auto_command(message, actor=None, identity=None):
     command = str(message or "").strip()
     retired = any(
         command == prefix or command.startswith(f"{prefix} ")
         for prefix in RETIRED_AUTO_COMMAND_PREFIXES
+    )
+    account = str(getattr(actor, "account_key", "") or "").strip()
+    identity = str(
+        identity or getattr(actor, "current_identity", "") or "主魂"
+    ).strip() or "主魂"
+    retired = retired or any(
+        command == prefix or command.startswith(f"{prefix} ")
+        for prefix in RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY.get((account, identity), ())
     )
     return retired and not actor_allows_retired_auto_command(actor, command)
 

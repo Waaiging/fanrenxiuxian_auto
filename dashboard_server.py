@@ -182,7 +182,7 @@ STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "sub": {"厚土", "缘生子", "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
-SUB_STAR_PALACE_AVATARS = {"厚土", "寻真子"}
+SUB_STAR_PALACE_AVATARS = {"厚土"}
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
 
 ACCOUNT_PROFILE_USERNAMES = {
@@ -628,21 +628,19 @@ def apply_command_execution_channels(panel, root_state=None):
         command = normalize_miniapp_command(row.get("command", ""))
         miniapp_only = command.startswith("miniapp:")
         miniapp_capable = miniapp_command_allowed(command)
-        if miniapp_only or (miniapp_active and miniapp_capable):
+        if miniapp_only or miniapp_capable:
             row["execution_channel"] = "miniapp"
             if miniapp_only:
                 row["execution_channel_detail"] = "仅通过 Mini App 执行"
             elif restricted_active:
                 row["execution_channel_detail"] = "当前受限模式，仅通过 Mini App 执行"
+            elif route_active:
+                row["execution_channel_detail"] = "Mini App 固定执行"
             else:
-                row["execution_channel_detail"] = "优先通过 Mini App 执行；失败时回退群内"
+                row["execution_channel_detail"] = "Mini App 固定执行；路由当前不可用时阻止发送，不回退群内"
         else:
             row["execution_channel"] = "group"
-            row["execution_channel_detail"] = (
-                "当前 Mini App 路由未启用，使用群指令"
-                if miniapp_capable
-                else "Mini App 不支持，继续在群内发送"
-            )
+            row["execution_channel_detail"] = "Mini App 不支持，继续在群内发送"
     return panel
 
 
@@ -812,7 +810,7 @@ def mulan_support_daily_command(state):
         MULAN_SUPPORT_COMMAND,
         "支援慕兰 奇袭",
         date_key="last_mulan_support_date",
-        detail="随宗门点卯执行",
+        detail="每日独立执行",
         group="每日",
     )
 
@@ -1564,17 +1562,6 @@ def soul_curse_publisher_commands(state, account=None):
                 group="南宫婉",
             )
         rows.append(wanying_row)
-        rows.append(time_command(
-            curse,
-            "next_co_study_time",
-            SOUL_CURSE_CO_STUDY_COMMAND,
-            "同参封魂",
-            waiting="8小时冷却",
-            ready="可同参",
-            missing="可同参",
-            detail=detail,
-            group="南宫婉",
-        ))
     rows.extend([infer_row, protect_row, publish_row])
     return rows
 
@@ -1762,15 +1749,13 @@ def target_concubine_detail(state):
     return " · ".join(pieces)
 
 
-def concubine_commands(state, include_divination=True, include_voyage=False):
-    rows = [
-        manual_command(".我的侍妾", "我的侍妾", "查询侍妾/冷却", "侍妾"),
-        time_command(state, "next_dream_map_time", ".入梦寻图", "入梦寻图", group="侍妾"),
-        time_command(state, "next_heart_trial_time", ".共历心劫", "共历心劫", group="侍妾"),
-        flow_command(".稳", "稳", "必须 reply 共历心劫回合消息", "侍妾"),
-    ]
+def concubine_commands(state, include_divination=True, include_voyage=False, include_status=True):
+    rows = []
+    if include_status:
+        rows.append(manual_command(".我的侍妾", "我的侍妾", "查询侍妾/冷却", "侍妾"))
+    rows.append(time_command(state, "next_dream_map_time", ".入梦寻图", "入梦寻图", group="侍妾"))
     if include_voyage:
-        rows.insert(2, time_command(
+        rows.append(time_command(
             state, "next_concubine_voyage_time", ".侍妾远航 月殿寻痕", "侍妾远航",
             waiting="6小时冷却", detail=concubine_voyage_detail(state), group="侍妾",
         ))
@@ -1843,17 +1828,14 @@ def main_soul_panel(account, state):
         hunt_stopped = bool(state.get("beast_hunt_stopped"))
         hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         rows.extend([
-            daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
-            time_command(state, "next_nurture_spirit_time", NURTURE_SPIRIT_COMMAND, "温养器灵", waiting="6小时冷却", group="法宝"),
             time_command(state, "next_small_world_time", ".小世界", "小世界", waiting="6小时冷却", group="化神"),
             manual_command(".显灵", "显灵", "凡人祈愿时自动响应", "化神"),
             time_command(state, "next_miracle_preach_time", ".神迹 布道", "神迹 布道", waiting="3小时冷却", group="化神"),
         ])
         rows.extend(meditation_commands(state))
-        rows.append(time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
         rows.extend(soul_curse_publisher_commands(state, account=account))
         rows.extend(sect_war_commands(state))
         rows.extend([
@@ -1870,8 +1852,6 @@ def main_soul_panel(account, state):
                 if hunt_stopped
                 else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
             ),
-            time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
-            time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
             time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
             manual_command(".巡边状态", "巡边状态", group="灵兽"),
             manual_command(".巡边归来", "巡边归来", group="灵兽"),
@@ -1879,26 +1859,23 @@ def main_soul_panel(account, state):
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "sub":
         rows.extend([
-            daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             yuanying_retreat_command(state),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
-            time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
             time_command(state, "next_ask_dao_time", ASK_DAO_COMMAND, "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
         ])
-        rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
-        rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
-        rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
+        rows.extend(concubine_commands(
+            state,
+            include_divination=True,
+            include_voyage=concubine_voyage_enabled(account, "主魂"),
+            include_status=False,
+        ))
     elif account == "xiaohao":
-        hunt_stopped = bool(state.get("beast_hunt_stopped"))
-        hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         restricted_miniapp = bool(state.get("restricted_miniapp_active"))
         rows.extend([
-            daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             time_command(state, "next_treasure_touch_time", SUB_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
-            time_command(state, "next_field_training_time", MAIN_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -1926,17 +1903,12 @@ def main_soul_panel(account, state):
             rows.append(miniapp_beast_contract_command(state))
             unsupported_detail = "公开群受限；万兽谷 Mini App 未提供这项旧指令接口"
             for command, label in (
-                (".寻觅灵兽", "寻觅灵兽"),
                 (".放生 <灵兽>", "放生灵兽"),
                 (".灵兽休息 <灵兽>", "灵兽休息"),
                 (".灵兽出战 <灵兽>", "灵兽出战"),
-                (".灵兽偷菜", "灵兽偷菜"),
-                (".探渊 <灵兽>", "探渊"),
-                (".一键放养", "一键放养"),
                 (".灵兽巡边 <灵兽> 袭营", "灵兽巡边"),
                 (".巡边状态", "巡边状态"),
                 (".巡边归来", "巡边归来"),
-                (".灵兽巡游 <灵兽>", "灵兽巡游"),
             ):
                 rows.append(command_row(
                     command,
@@ -1959,24 +1931,12 @@ def main_soul_panel(account, state):
                     actionable=False,
                 ),
                 miniapp_beast_contract_command(state),
-                (
-                    command_row(
-                        ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
-                        detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False
-                    )
-                    if hunt_stopped
-                    else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
-                ),
                 manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
                 manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
                 manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
-                time_command(state, "next_steal_time", ".灵兽偷菜", "灵兽偷菜", group="灵兽"),
-                time_command(state, "next_abyss_time", ".探渊 <灵兽>", "探渊", group="灵兽"),
-                time_command(state, "next_pasture_time", ".一键放养", "一键放养", group="灵兽"),
                 time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
                 manual_command(".巡边状态", "巡边状态", group="灵兽"),
                 manual_command(".巡边归来", "巡边归来", group="灵兽"),
-                time_command(state, "next_beast_cruise_time", ".灵兽巡游 <灵兽>", "灵兽巡游", group="灵兽"),
             ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "waaiging":
@@ -2005,10 +1965,8 @@ def main_soul_panel(account, state):
                     group="天星宗",
                 )
             ),
-            daily_done_command(state, ".宗门点卯", "宗门点卯", done_command=".宗门点卯", group="每日"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
-            time_command(state, "next_field_training_time", DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND, "野外历练 深入", group="通用"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -2029,7 +1987,6 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
-            time_command(state, "next_field_training_time", WUJIUZI_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
             daily_done_command(
@@ -2041,8 +1998,6 @@ def lingxiao_avatar_commands(name, state, root_state=None):
                 group="每日",
             ),
         ])
-    else:
-        rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     if name == "缘生子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -2076,17 +2031,13 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             ),
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
-    rows.extend([
-        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
-        mulan_support_daily_command(state),
-    ])
+    rows.append(mulan_support_daily_command(state))
     return rows
 
 
 def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
-    rows.append(time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"))
     if name == YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state))
@@ -2095,7 +2046,7 @@ def star_avatar_commands(name, state):
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
-    rows.extend(meditation_commands(state, include_force_exit=True))
+    rows.extend(meditation_commands(state, include_force_exit=(name != "缘生子")))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
@@ -2104,10 +2055,7 @@ def star_avatar_commands(name, state):
             time_command(state, "pending_star_gazing_target_time", ".观星", "待观星", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
             time_command(state, "pending_star_shift_target_time", ".改换星移 @Gamling33", "改换星移", waiting="已排程", ready="监听中", missing="监听中", group="星宫"),
         ])
-    rows.extend([
-        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
-        mulan_support_daily_command(state),
-    ])
+    rows.append(mulan_support_daily_command(state))
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
     return rows
 
@@ -2116,10 +2064,6 @@ def xiaohao_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
-    rows.extend([
-        time_command(state, "next_field_training_time", DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, "野外历练", group="通用"),
-        daily_done_command(state, ".宗门点卯", "宗门点卯", date_key="last_dianmao_date", group="每日"),
-    ])
     if name == "缘生子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -4524,7 +4468,7 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
         elif message == "invalid duel target username":
             message = "挑战对象必须是有效的 Telegram 用户名"
         elif message == "invalid titan beast mode":
-            message = "小号主魂灵兽状态仅支持出战或放养"
+            message = "小号主魂灵兽状态仅支持出战"
         else:
             message = "未知斗法队列"
         return {"success": False, "msg": message}

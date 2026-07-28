@@ -174,7 +174,7 @@ STAR_PRE_APPEASE_LEAD_SECONDS = 60                 # 收集前 1 分钟安抚
 STAR_STATUS_RETRY_SECONDS = 10 * 60                # 观星台异常时 10 分钟后复查
 STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60          # 强行出关后仍修为不足，1 小时后重试
 STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 miniapp，脚本不再发送
-AVATAR_FORMATION_AVATARS = {"厚土", "寻真子"}  # 阵法仍保留；已转入阴罗宗的缘生子不再启阵/助阵
+AVATAR_FORMATION_AVATARS = {"厚土"}
 
 # -- 星辰安抚 --
 STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机器人每 6 小时可安抚一次）
@@ -195,7 +195,7 @@ STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异�
 # 以上关键字表示 Good 级别的观星结果，只有 Good 才触发观星和改换星移
 STAR_GAZING_FATE_RE = re.compile(r"【((?:Good|Bad|Neutral)\s*-\s*[^】]+)】")
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59  # 活跃抢占期缩短为 59 秒。超过这个时间收到消息直接排期到下一轮
-STAR_GAZING_ROTATING_AVATARS = ["厚土", "寻真子"]  # 观星轮换化身列表：每次 Good 事件只派一个星宫化身
+STAR_GAZING_ROTATING_AVATARS = ["厚土"]
 
 
 def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
@@ -1079,7 +1079,10 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 continue
             if key == "deep_meditation_end_time" and not state.get("in_deep_meditation"):
                 continue
-            if key not in watch_keys and not self.state_time_command_for_key(key):
+            mapped_command = self.state_time_command_for_key(key)
+            if key not in watch_keys and not mapped_command:
+                continue
+            if mapped_command and self.retired_auto_command_for_identity(mapped_command, identity):
                 continue
             if self.state_time_command_paused(key, identity):
                 continue
@@ -1091,20 +1094,26 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
 
         today = datetime.now().strftime("%Y-%m-%d")
         if identity == "主魂":
-            done = set(state.get("done", [])) if isinstance(state.get("done"), list) else set()
-            daily_due = ".宗门点卯" not in done and not self.dashboard_command_paused(".宗门点卯", identity)
+            support_retry = str(state.get("next_mulan_support_time") or "")
+            support_due = (
+                state.get("last_mulan_support_date") != today
+                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not (support_retry and is_future(support_retry))
+            )
             if (
                 seconds_until_daily_task_start(datetime.now()) <= 0
-                and daily_due
-                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+                and support_due
+                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
         elif identity in self.avatars:
+            support_retry = str(state.get("next_mulan_support_time") or "")
             if (
-                state.get("last_dianmao_date") != today
-                and not self.dashboard_command_paused(".宗门点卯", identity)
+                state.get("last_mulan_support_date") != today
+                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not (support_retry and is_future(support_retry))
                 and seconds_until_daily_task_start(datetime.now()) <= 0
-                and not self.daily_one_shot_should_defer(identity, ".宗门点卯")
+                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
             ):
                 min_wait = 0 if min_wait is None else min(min_wait, 0)
             if (
@@ -1376,7 +1385,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         返回:
             根据参数不同，返回回复文本、回复消息对象、发送消息对象或 None。
         """
-        if is_retired_auto_command(message, actor=self):
+        if is_retired_auto_command(message, actor=self, identity="主魂"):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
         # 整体任务守卫
@@ -1556,7 +1565,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         带身份感知的指令发送：先切换到目标化身，再发送指令。
         使用 avatar_send_lock 确保同一时间只有一个化身在操作。
         """
-        if is_retired_auto_command(message, actor=self):
+        if is_retired_auto_command(message, actor=self, identity=identity):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
@@ -2052,6 +2061,21 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
     def clear_star_gazing_round_claim(self):
         """清除账号级观星轮次占用。"""
         self.common_clear_star_gazing_round_claim()
+
+    def clear_retired_star_gazing_avatar_schedule(self):
+        """Drop restored gazing/shift work assigned to an avatar no longer in rotation."""
+        pending_avatar = str(self.state.get("star_gazing_claimed_avatar") or "").strip()
+        if not pending_avatar or pending_avatar in STAR_GAZING_ROTATING_AVATARS:
+            return False
+        log.info(
+            f"Star gazing: clearing retired avatar schedule for {pending_avatar}; "
+            f"active rotation is {STAR_GAZING_ROTATING_AVATARS}."
+        )
+        self.clear_pending_star_shift()
+        self.clear_star_gazing_round_claim()
+        self.state["next_star_gazing_time"] = ""
+        self.save_state()
+        return True
 
     def clear_stale_star_gazing_claim_before_manifest(self, manifest_dt, sender_info="", text_preview=""):
         """Clear an old claimed .观星 round before scheduling the current manifest."""
@@ -2979,9 +3003,8 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             await self.maybe_alert_low_price_tianleizhu(msg, text, sender)
             if is_game_bot_sender(self, sender) and self.should_send_keyword_alert(msg, text):
                 await self.send_keyword_alert(msg, text, title="副号关键词提醒")
-            # 被动记录野外历练和宗门战消息
+            # 保留历史野外历练结果的被动账本同步。
             self.maybe_record_field_training_passive(msg, text)
-            self.maybe_handle_sect_war_message(msg, text, sender)
 
             # 如果这条消息属于自动回复链中的后续消息，交给自动回复模块处理
             if is_auto_reply_followup(self, msg, sender=sender):
@@ -3124,7 +3147,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         if self.state.get("is_paused") or self.identity_pause_seconds("主魂") > 0:
             return []
         specs = [
-            ("next_field_training_time", getattr(self, "field_training_command", ".野外历练 谨慎"), "主魂"),
             ("next_yuanying_out_time", YUANYING_RETREAT_COMMAND, "主魂"),
             ("next_rift_search_time", ".探寻裂缝", "主魂"),
             ("next_ask_dao_time", ASK_DAO_COMMAND, "主魂"),
@@ -3215,25 +3237,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 log.error(f"Sub watchdog loop error: {exc}", exc_info=True)
             await asyncio.sleep(60)
 
-    async def run_daily_tasks(self):
-        """
-        每日任务循环，每天 07:15 开始执行。
-        任务列表：
-          1. .宗门点卯（签到）
-
-        检测到新的一天时重置任务计数。
-        """
-        return await self.run_common_daily_tasks_loop(
+    async def run_daily_support_tasks(self):
+        """每天 07:15 后执行仍有效的慕兰支援。"""
+        return await self.run_common_mulan_support_loop(
             seconds_until_daily_task_start,
             daily_task_start_label,
-            [".宗门点卯"],
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
-            send_kwargs_func=lambda command: {
-                "return_sent": True,
-                "delete_after": command != ".宗门点卯",
-            },
-            mark_done_before_send=False,
         )
 
     def maybe_record_main_yuanying_retreat_settlement_reply(self, msg, text, source="message"):
@@ -3492,6 +3502,8 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
           3. 等待期间不阻塞显化事件监听（由 handle_game_response 处理）。
         """
         await self.startup_done.wait()
+
+        self.clear_retired_star_gazing_avatar_schedule()
 
         # ---- 启动恢复：检查待执行的改换星移 ----
         pending_date = self.state.get("pending_star_shift_date", "")
@@ -3998,10 +4010,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             await asyncio.sleep(5)
             # 重试一次牵引
             resp = await self.send_and_wait_feedback(STAR_ATTRACTION_COMMAND)
-            if resp and any(
-                k in resp for k in ["牵引", "凝聚", "成功", "开始", "天雷星", "引星盘"]
-            ):
-                await self.place_concubine_in_cave("Star attraction restarted after forced exit")
             # 补票：重新开启深度闭关
             log.info("Restarting deep meditation after forced exit...")
             med_resp = await self.send_and_wait_feedback(".深度闭关")
@@ -4027,7 +4035,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 f"Star attraction started with Tianlei Star, next at "
                 f"{self.state['next_star_attraction_time']}."
             )
-            await self.place_concubine_in_cave("Star attraction started")
         else:
             if resp:
                 notify_unrecognized_response(
@@ -4118,35 +4125,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         self.state["concubine_recalled_time"] = ""
         self.save_state()
 
-    async def place_concubine_in_cave(self, reason, force=False):
-        """
-        将侍妾安置回洞府。
-        如果侍妾已在洞府且没有活跃的召回标志位且不是强制，则跳过。
-
-        参数:
-            reason: 安置原因（仅日志）。
-            force: 是否强制安置（无视已有状态）。
-        """
-        if not self.main_concubine_enabled:
-            log.info(f"{reason}: main concubine flow disabled; skipping .安置侍妾.")
-            for key in self.concubine_recall_flags():
-                self.state[key] = False
-            self.state["concubine_recalled_time"] = ""
-            self.save_state()
-            return
-        has_recall_flag = any(self.state.get(k) for k in self.concubine_recall_flags())
-        if self.state.get("concubine_placed_in_cave") and not has_recall_flag and not force:
-            return
-
-        log.info(f"{reason}: sending .安置侍妾.")
-        await self.send_and_wait_feedback(".安置侍妾")
-        self.state["concubine_placed_in_cave"] = True
-        self.state["last_concubine_place_time"] = now_str()
-        self.state["concubine_recalled_time"] = ""
-        for key in self.concubine_recall_flags():
-            self.state[key] = False
-        self.save_state()
-
     async def maybe_send_daily_greeting_after_recall(self):
         """
         在召回侍妾后，如果今天是第一次召回，发送每日问安。
@@ -4174,18 +4152,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             if ".每日问安" not in done:
                 done.append(".每日问安")
             self.save_state()
-
-    async def ensure_concubine_home_default(self, reason):
-        """
-        确保侍妾回到洞府（默认状态）。
-        如果当前有活跃事件需要侍妾在外，则跳过。
-        """
-        if self.should_keep_concubine_recalled_now():
-            log.info(
-                f"{reason}: keeping concubine recalled for an active event window."
-            )
-            return
-        await self.place_concubine_in_cave(reason)
 
     async def meditation_wait_with_concubine_recall(self, end_time, label="Meditation"):
         """
@@ -4247,7 +4213,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             )
         )
         self.save_state()
-        await self.place_concubine_in_cave(place_reason)
         return True
 
     # ============================================================
@@ -4354,9 +4319,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                             f"Star attraction cooldown active after collection, "
                             f"waiting {int(attr_wait)}s."
                         )
-                        await self.place_concubine_in_cave(
-                            "Star collection complete; attraction on cooldown"
-                        )
                         next_wait = min(
                             STAR_CALM_INTERVAL_SECONDS,
                             int(attr_wait) + random.randint(5, 15),
@@ -4366,14 +4328,10 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                         if "修为不足" in attr_resp:
                             next_wait = 1800
                         else:
-                            await self.place_concubine_in_cave("Star collection complete")
                             performed_action = True
                 elif collect_resp:
                     notify_unrecognized_response(
                         self, ".收集精华", collect_resp, log, "收集精华"
-                    )
-                    await self.place_concubine_in_cave(
-                        "Star collection skipped after unknown response"
                     )
                     next_wait = 600
             elif pending_cd > 0:
@@ -5648,195 +5606,8 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         )
         return cd > 0
 
-    async def execute_avatar_heart_trial(self, avatar, status_msg):
-        """
-        化身版共历心劫完整流程。
-
-        步骤：
-        1. 回复 .共历心劫 到侍妾状态消息
-        2. 等待第1轮提示
-        3. 依次发送3轮 .稳（每轮等待结果确认）
-        4. 结算后记录冷却
-
-        调用前必须已经切换到目标化身身份。
-
-        返回：
-            True  — 心劫完成（3轮结束或已结算）
-            False — 心劫失败（需重试或跳过）
-        """
-        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
-            status_text = getattr(status_msg, "text", "") if hasattr(status_msg, "text") else ""
-            if status_text and not self.concubine_status_matches_identity(status_text, avatar):
-                log.warning(f"Avatar [{avatar}] heart trial: mismatched .我的侍妾 status; retry soon.")
-                self.set_avatar_state(avatar, "next_heart_trial_time", add_seconds_str(now_str(), 30))
-                return False
-            voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
-            if voyage_block_until:
-                self.set_avatar_state(avatar, "next_heart_trial_time", voyage_block_until)
-                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {voyage_block_until}.")
-                return True
-            # 1. 回复 .共历心劫 到侍妾状态消息
-            log.info(f"Avatar [{avatar}] heart trial: replying .共历心劫 to status msg")
-            trial_resp = await self.send_and_wait_feedback_identity(
-                avatar, ".共历心劫", reply_to=status_msg.id,
-                timeout=90, return_response_msg=True, delete_after=False,
-            )
-            trial_text = getattr(trial_resp, "text", "") if hasattr(trial_resp, "text") else ""
-            if not trial_resp or not trial_text:
-                log.warning(f"Avatar [{avatar}] heart trial: empty .共历心劫 response")
-                return False
-
-            # ---- 修为不足处理：强行出关 → 重试 → 2小时后再试 ----
-            if "修为不足" in trial_text:
-                # 定义重试函数
-                async def retry_heart_trial():
-                    status_msg_retry = await self.send_and_wait_feedback_identity(
-                        avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
-                    )
-                    if status_msg_retry and hasattr(status_msg_retry, "id"):
-                        return await self.send_and_wait_feedback_identity(
-                            avatar, ".共历心劫", reply_to=status_msg_retry.id,
-                            timeout=90, return_response_msg=True, delete_after=False,
-                        )
-                    return None
-
-                success, trial_text = await self.handle_修为不足(avatar, retry_heart_trial, cooldown_key="next_heart_trial_time")
-                if not success:
-                    return False
-                # 成功了，trial_text 已更新，继续下面的流程
-
-            # 检查冷却/错误
-            if any(k in trial_text for k in ["冷却", "后再", "尚未"]):
-                cd = self.parse_wait_time(trial_text)
-                self.set_avatar_state(avatar, "next_heart_trial_time",
-                                      add_seconds_str(now_str(), cd if cd > 0 else 3600))
-                log.info(f"Avatar [{avatar}] heart trial on cooldown.")
-                return True  # 不算失败，只是冷却中
-            if self.concubine_response_indicates_active_voyage(trial_text):
-                block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
-                self.set_avatar_state(avatar, "next_heart_trial_time", block_until)
-                log.info(f"Avatar [{avatar}] heart trial blocked by active voyage until {block_until}.")
-                return True
-
-            # 检查是否要求回复目标
-            if self.heart_trial_requires_reply_target(trial_text):
-                log.warning(f"Avatar [{avatar}] heart trial: bot requires reply target, retrying once")
-                # 重新查侍妾状态再试一次
-                status_msg2 = await self.send_and_wait_feedback_identity(
-                    avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
-                )
-                if status_msg2 and hasattr(status_msg2, "id"):
-                    await asyncio.sleep(3)
-                    trial_resp = await self.send_and_wait_feedback_identity(
-                        avatar, ".共历心劫", reply_to=status_msg2.id,
-                        timeout=90, return_response_msg=True, delete_after=False,
-                    )
-                    trial_text = getattr(trial_resp, "text", "") if hasattr(trial_resp, "text") else ""
-                    if not trial_resp or self.heart_trial_requires_reply_target(trial_text):
-                        log.warning(f"Avatar [{avatar}] heart trial: still requires reply target after retry")
-                        return False
-
-            # 检查是否是第1轮提示
-            if not self.heart_trial_round_prompt(trial_text, 1):
-                if "坠魔心劫" in trial_text:
-                    log.info(f"Avatar [{avatar}] heart trial: got response but not round 1 prompt, proceeding anyway")
-                else:
-                    log.warning(f"Avatar [{avatar}] heart trial: response did not start round 1: {trial_text[:80]}")
-                    return False
-
-            # 2. 三轮心劫循环（每轮发 .稳）
-            current_msg = trial_resp if hasattr(trial_resp, "id") else None
-            for idx in range(1, 4):
-                confirmed = False
-                current_text = ""
-                for attempt in range(1, 4):
-                    try:
-                        # 确保身份仍然正确
-                        if self.current_identity != avatar:
-                            log.warning(f"Avatar [{avatar}] heart trial: identity drifted to {self.current_identity}, re-switching")
-                            switch_resp = await self.send_and_wait_feedback(f".切换 {avatar}", timeout=30)
-                            self.current_identity = avatar
-                            await asyncio.sleep(2)
-                        if not current_msg or not hasattr(current_msg, "id"):
-                            log.warning(f"Avatar [{avatar}] heart trial: missing round {idx} reply target.")
-                            self.set_avatar_state(avatar, "next_heart_trial_time",
-                                                  add_seconds_str(now_str(), 600))
-                            return False
-
-                        log.info(f"Avatar [{avatar}] heart trial: sending .稳 ({idx}/3, try {attempt}/3)")
-                        await self.pause_event.wait()
-                        if not await wait_for_bot_activity_before_send(self, ".稳", log):
-                            return False
-                        if not command_send_allowed(self, ".稳", log):
-                            return False
-                        remember_script_send_intent(self, ".稳")
-                        sent = await self.client.send_message(
-                            self.target_chat_id, ".稳",
-                            reply_to=current_msg.id
-                        )
-                        remember_script_sent_message(self, sent)
-                        record_command_sent(self, sent, ".稳", identity=avatar, source="auto", reply_to=current_msg.id, logger=log)
-                        schedule_command_auto_delete(self, sent, text=".稳", logger=log)
-                        log.info(f"🟢 OUT [{avatar}]:\n.稳 ({idx}/3, try {attempt}/3)")
-                    except Exception as e:
-                        log.error(f"Avatar [{avatar}] heart trial: failed to send .稳 ({idx}/3): {e}")
-                        await _handle_telegram_send_protection(
-                            self, ".稳", e, logger=log, identity=avatar
-                        )
-                        return False
-
-                    result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
-                        current_msg, sent, idx, timeout_sec=90, poll_sec=3,
-                    )
-                    if result_msg:
-                        current_msg = result_msg
-                        if self.heart_trial_settled(current_text):
-                            log.info(f"Avatar [{avatar}] heart trial settled after round {idx}!")
-                            self.set_avatar_state(avatar, "next_heart_trial_time",
-                                                  add_seconds_str(now_str(), 10 * 3600))
-                            return True
-                        if confirmed:
-                            log.info(f"Avatar [{avatar}] heart trial round {idx} confirmed")
-                            break
-                        if self.is_heart_trial_terminal_failure(current_text):
-                            await self.sync_avatar_heart_trial_cooldown_after_failure(
-                                avatar, f"round {idx} terminal response: {current_text[:80]}"
-                            )
-                            return False
-                        if self.is_concubine_status_panel(current_text):
-                            await self.sync_avatar_heart_trial_cooldown_after_failure(
-                                avatar, f"round {idx} matched concubine status panel"
-                            )
-                            return False
-                        if self.heart_trial_round_prompt(current_text, idx) and attempt < 3:
-                            log.warning(f"Avatar [{avatar}] heart trial still on round {idx}; retrying.")
-                            await asyncio.sleep(3)
-                            continue
-                        log.warning(f"Avatar [{avatar}] heart trial round {idx} not confirmed: {current_text[:80]}")
-                    else:
-                        log.warning(f"Avatar [{avatar}] heart trial: no result for round {idx} try {attempt}")
-
-                    if attempt < 3:
-                        await asyncio.sleep(3)
-
-                if not confirmed:
-                    log.warning(f"Avatar [{avatar}] heart trial: round {idx} failed after 3 attempts")
-                    self.set_avatar_state(avatar, "next_heart_trial_time",
-                                          add_seconds_str(now_str(), 600))
-                    return False
-
-            # 3轮都完成了但没看到结算消息
-            log.info(f"Avatar [{avatar}] heart trial: all 3 rounds completed")
-            self.set_avatar_state(avatar, "next_heart_trial_time",
-                                  add_seconds_str(now_str(), 10 * 3600))
-            return True
-
-    # ============================================================
-    # 身外化身：深度闭关循环（精细版）
-    # ============================================================
-
-    async def _avatar_daily_checkin(self, avatar):
-        return await self.common_avatar_daily_checkin(
+    async def _avatar_mulan_support(self, avatar):
+        return await self.common_avatar_mulan_support(
             avatar,
             daily_start_wait_func=seconds_until_daily_task_start,
         )
@@ -5845,7 +5616,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         """
         化身循环（深度闭关模式，精细版）。
         按主循环 run_formation_meditation_loop 的深度闭关逻辑实现：
-        - 野外历练由独立循环执行，避免被闭关/侍妾流程延迟
         - 检查深度闭关缓存状态
         - 通过 .查看闭关 确认实际状态
         - 根据响应类型（进行中/未闭关/结算/冷却/未知）分别处理
@@ -5954,22 +5724,19 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                             self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
                             med_wait = 600
 
-                # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ----
+                # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 侍妾远航 ----
                 await self.execute_avatar_concubine_chain(avatar)
 
-                # 每日一次性点卯放在本轮最后，避免恢复后抢占冷却收益任务。
-                await self._avatar_daily_checkin(avatar)
+                await self._avatar_mulan_support(avatar)
 
                 # ---- 等待下次循环 ----
-                # 考虑深度闭关、闭关冷却、野外历练冷却、阵法冷却、心劫冷却、入梦冷却，取最小值
+                # 考虑深度闭关、闭关冷却、阵法和侍妾冷却，取最小值。
                 a_state = self.get_avatar_state(avatar)
                 med_end2 = a_state.get("deep_meditation_end_time", "")
                 next_med = a_state.get("next_meditation_time", "")
-                next_ft2 = a_state.get("next_field_training_time", "")
                 retry_time2 = a_state.get("next_meditation_retry_time", "")
                 next_form = self.avatar_formation_block_until(avatar, a_state) if avatar in AVATAR_FORMATION_AVATARS else ""
                 next_force_exit = a_state.get("next_force_exit_time", "")
-                next_heart2 = a_state.get("next_heart_trial_time", "")
                 next_dream2 = a_state.get("next_dream_map_time", "")
                 next_voyage = a_state.get("next_concubine_voyage_time", "")
 
@@ -5981,15 +5748,18 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                     elif due_when_missing:
                         wait_candidates.append(0)
 
-                if a_state.get("last_dianmao_date") != datetime.now().strftime("%Y-%m-%d") and seconds_until_daily_task_start(datetime.now()) <= 0:
+                support_retry = str(a_state.get("next_mulan_support_time") or "")
+                if (
+                    a_state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
+                    and seconds_until_daily_task_start(datetime.now()) <= 0
+                    and not (support_retry and is_future(support_retry))
+                ):
                     wait_candidates.append(60)
                 add_due_or_future(med_end2)
                 add_due_or_future(next_med)
-                add_due_or_future(next_ft2, due_when_missing=True)
                 add_due_or_future(retry_time2)
                 add_due_or_future(next_form, due_when_missing=(avatar in AVATAR_FORMATION_AVATARS))
                 add_due_or_future(next_force_exit)
-                add_due_or_future(next_heart2)
                 if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 冒险", avatar):
                     bound_time = self.latest_concubine_chain_time(avatar)
                     add_due_or_future(bound_time)
@@ -6020,15 +5790,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             finally:
                 await asyncio.sleep(300)
 
-    async def run_avatar_field_training_loop(self, avatar, initial_delay=0):
-        """化身野外历练独立循环，按该化身自己的冷却时间执行。"""
-        return await self.run_common_avatar_field_training_loop(
-            avatar,
-            initial_delay=initial_delay,
-            sleep_func=scheduler_sleep_seconds,
-            handle_insufficient_cultivation=True,
-        )
-
     async def start(self):
         """
         脚本主入口。启动 Telethon 客户端后执行以下步骤：
@@ -6040,16 +5801,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
            b. 深度闭关状态对账。
            c. 阵法 CD 对账。
            d. 恢复强行出关计时器。
-           e. 确保侍妾处于洞府。
-           f. 释放 startup_done 信号，启动所有循环。
+           e. 释放 startup_done 信号，启动所有循环。
         4. 启动所有后台循环：
-           - run_daily_tasks (每日任务)
+           - run_daily_support_tasks (每日慕兰支援)
            - run_star_gazing_loop (观星监听)
            - run_star_attraction_loop (星辰牵引)
            - run_formation_meditation_loop (阵法&闭关)
            - run_concubine_loop (侍妾管理，继承自 ConcubineMixin)
-           - run_field_training_loop (野外历练，继承自 CommonCommandMixin)
-           - run_sect_war_loop (宗门战)
            - run_yuanying_out_loop (元婴出窍)
            - run_rift_search_loop (探寻裂缝)
            - run_treasure_touch_loop (抚摸法宝)
@@ -6062,7 +5820,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         self.my_info = await self.client.get_me()
         log.info(f"Sub-Account Login: {self.my_info.first_name}")
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
-        # 可迁移指令优先走 Mini App；不支持的指令与 Mini App 故障时回退群内发送。
+        # Mini App 支持的指令固定走 Mini App；仅不支持的指令保留群内发送。
         await install_miniapp_command_router(self, self.account_key, logger=log)
 
         # 注册新消息处理器
@@ -6286,12 +6044,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                             )
                             self.set_avatar_state(avatar_name, "next_force_exit_time", "")
 
-                # 5. 确保侍妾处于洞府（仅主魂启用侍妾流程时执行）
-                if self.main_concubine_enabled:
-                    await self.ensure_concubine_home_default(
-                        "Startup Sync default concubine placement"
-                    )
-
                 self.save_state()
                 self.startup_done.set()
                 log.info("Startup Sync: Finished. All loops released.")
@@ -6307,15 +6059,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         asyncio.create_task(self.run_sub_health_watchdog_loop())
 
         # 启动所有后台循环
-        self.create_scheduler_task("daily_tasks", lambda: self.run_daily_tasks())           # 每日任务（点卯/传功）
+        self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())      # 全天观星监听
         if self.main_star_palace_enabled:
             self.create_scheduler_task("star_attraction", lambda: self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
         self.create_scheduler_task("formation_meditation", lambda: self.run_formation_meditation_loop())  # 阵法 & 深度闭关
         if self.main_concubine_enabled:
             self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())       # 侍妾管理（继承）
-        self.create_scheduler_task("field_training", lambda: self.run_field_training_loop())   # 野外历练（继承）
-        self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())         # 宗门战（继承）
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=45))
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())    # dashboard 自定义指令
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
@@ -6327,7 +6077,6 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         # 化身闭关修炼循环（深度闭关模式，各化身错开启动避免冲突）
         for i, avatar_name in enumerate(self.avatars):
             self.create_scheduler_task(f"avatar_loop_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_loop(avatar_name, initial_delay=i * 10))
-            self.create_scheduler_task(f"avatar_field_training_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_field_training_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in AVATAR_YUANYING_RIFT_AVATARS:
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_yuanying_rift_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:

@@ -264,21 +264,9 @@ class DuelFeatureTests(unittest.TestCase):
             }, handle, ensure_ascii=False)
         self.assertFalse(duel_features.titan_target_status()["ready"])
 
-    def test_titan_gate_accepts_manually_selected_pasture_mode(self):
-        duel_features.set_duel_control(False, "waaiging")
-        duel_features.set_titan_beast_mode("pasture")
-        with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
-            json.dump({
-                "current_identity": "主魂",
-                "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
-            }, handle, ensure_ascii=False)
-
-        status = duel_features.titan_target_status()
-        reservation = duel_features.reserve_duel_for_account("main")
-
-        self.assertTrue(status["ready"])
-        self.assertEqual(status["desired_mode"], "pasture")
-        self.assertEqual(reservation["queue_key"], "titan")
+    def test_titan_gate_rejects_retired_pasture_mode(self):
+        with self.assertRaises(ValueError):
+            duel_features.set_titan_beast_mode("pasture")
 
     def test_titan_gate_reports_send_restriction_when_selected_mode_is_not_applied(self):
         duel_features.set_titan_beast_mode("deploy")
@@ -318,8 +306,8 @@ class DuelFeatureTests(unittest.TestCase):
             "等待小号群组发送权限恢复后切换六翼出战",
         )
 
-    def test_titan_preparation_applies_selected_pasture_mode_on_main_soul(self):
-        duel_features.set_titan_beast_mode("pasture")
+    def test_titan_preparation_applies_deploy_mode_on_main_soul(self):
+        duel_features.set_titan_beast_mode("deploy")
         state_path = duel_features.XIAOHAO_STATE_FILE
 
         class Actor(duel_features.DuelMixin):
@@ -331,8 +319,8 @@ class DuelFeatureTests(unittest.TestCase):
                 self.state = {
                     "current_identity": self.current_identity,
                     "best_beast_name": "六翼",
-                    "best_beast_status": "出战中",
-                    "beasts_cache": [{"full_name": "六翼", "status": "出战中"}],
+                    "best_beast_status": "放养中",
+                    "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
                 }
                 self.sent = []
                 self.save_state()
@@ -350,33 +338,37 @@ class DuelFeatureTests(unittest.TestCase):
             def get_cached_beast_by_name(self, name):
                 return self.state["beasts_cache"][0]
 
-            async def ensure_focus_beast_ready_for_pasture(self):
-                self.sent.append(".灵兽休息 六翼")
-                self.state["best_beast_status"] = "休息中"
-                self.state["beasts_cache"][0]["status"] = "休息中"
-                self.save_state()
-                return True
-
             async def send_and_wait_feedback(self, command, **kwargs):
                 self.sent.append(command)
-                return "六翼 等1只灵兽欢快地冲入了万兽谷！它将在4小时后自动归来。"
+                if command == ".灵兽休息 六翼":
+                    return "灵兽【六翼】已回到休息状态。"
+                if command == ".灵兽出战 六翼":
+                    return "灵兽【六翼】已进入出战状态。"
+                return ""
 
             @staticmethod
             def response_text(response):
                 return str(response or "")
 
-            def record_auto_pasture_response(self, *args, **kwargs):
-                self.state["best_beast_status"] = "放养中"
-                self.state["beasts_cache"][0]["status"] = "放养中"
+            @staticmethod
+            def parse_rest_response_status(response):
+                return "休息中" if "休息" in response else ""
+
+            @staticmethod
+            def is_beast_deploy_success(response):
+                return "出战" in response
+
+            def set_best_beast_status(self, name, status):
+                self.state["best_beast_status"] = status
+                self.state["beasts_cache"][0]["status"] = status
                 self.save_state()
-                return True
 
         actor = Actor()
         success, detail = asyncio.run(actor.prepare_titan_target_for_duel())
 
         self.assertTrue(success, detail)
-        self.assertEqual(actor.sent, ["切回主魂", ".灵兽休息 六翼", ".一键放养"])
-        self.assertIn("六翼已放养", detail)
+        self.assertEqual(actor.sent, ["切回主魂", ".灵兽休息 六翼", ".灵兽出战 六翼"])
+        self.assertIn("六翼已出战", detail)
 
     def test_waaiging_queue_skips_xiaohao_only_while_write_restricted(self):
         state = duel_features.load_duel_state(write_back=True)

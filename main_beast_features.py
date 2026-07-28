@@ -909,27 +909,14 @@ class MainBeastMixin:
                     await asyncio.sleep(30)
                     continue
                 async with self.beast_lock:
-                    due_abyss = self.main_beast_due("next_abyss_time", "last_abyss_time", ABYSS_CD_SECONDS)
                     due_patrol = self.main_beast_due("next_beast_border_patrol_time", "last_beast_border_patrol_time", BORDER_PATROL_CD_SECONDS)
-                    due_pasture = self.main_beast_due("next_pasture_time", "last_pasture_time", PASTURE_CD_SECONDS)
-                    if due_abyss and not self.main_beast_action_paused(".探渊 <灵兽>"):
-                        await self.execute_main_beast_abyss()
-                        await asyncio.sleep(2)
                     if due_patrol and not self.main_beast_action_paused(".灵兽巡边 <灵兽> 袭营"):
                         await self.execute_main_beast_patrol()
                         await asyncio.sleep(2)
-                    if due_pasture and not self.main_beast_action_paused(".一键放养"):
-                        response = await self.send_and_wait_feedback(".一键放养", timeout=60, max_retries=0)
-                        self.record_main_pasture_response(self.main_beast_response_text(response))
-                        await asyncio.sleep(2)
-                future_times = [
-                    beast_seconds_until(self.state.get(key))
-                    for key in (
-                        "next_abyss_time", "next_beast_border_patrol_time",
-                        "next_pasture_time",
-                    )
-                    if beast_time_is_future(self.state.get(key))
-                ]
+                future_times = []
+                next_patrol = self.state.get("next_beast_border_patrol_time")
+                if beast_time_is_future(next_patrol):
+                    future_times.append(beast_seconds_until(next_patrol))
                 if future_times:
                     sleep_for = max(30, min(MAX_LOOP_SLEEP_SECONDS, min(future_times) + random.randint(5, 20)))
             except asyncio.CancelledError:

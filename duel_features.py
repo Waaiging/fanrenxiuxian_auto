@@ -37,7 +37,6 @@ DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
 TITAN_BEAST_MODE_DEFAULT = "deploy"
 TITAN_BEAST_MODE_LABELS = {
     "deploy": "出战",
-    "pasture": "放养",
 }
 
 DUEL_ACCOUNT_LABELS = {
@@ -112,7 +111,7 @@ def normalize_duel_target(value, fallback=""):
 
 def normalize_titan_beast_mode(value):
     mode = str(value or TITAN_BEAST_MODE_DEFAULT).strip().lower()
-    aliases = {"出战": "deploy", "放养": "pasture"}
+    aliases = {"出战": "deploy"}
     mode = aliases.get(mode, mode)
     if mode not in TITAN_BEAST_MODE_LABELS:
         raise ValueError("invalid titan beast mode")
@@ -448,7 +447,7 @@ def titan_target_status(desired_mode=None):
         if not beast_status and str(state.get("best_beast_name") or "").startswith("六翼"):
             beast_status = str(state.get("best_beast_status") or "")
         result["beast_status"] = beast_status
-        desired_status = "出战" if desired_mode == "deploy" else "放养"
+        desired_status = "出战"
         result["ready"] = result["current_identity"] == "主魂" and desired_status in beast_status
         result["state_updated_at"] = duel_time(datetime.fromtimestamp(os.path.getmtime(XIAOHAO_STATE_FILE)))
     except Exception:
@@ -1126,53 +1125,28 @@ class DuelMixin:
             focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
             beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
             last_response = ""
-            if desired["desired_mode"] == "deploy":
-                if "出战" not in beast_status:
-                    if "放养" in beast_status:
-                        rest_resp = await self.send_and_wait_feedback(
-                            ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
-                        )
-                        rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
-                        rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
-                        if rest_status and hasattr(self, "set_best_beast_status"):
-                            self.set_best_beast_status("六翼", rest_status)
-                        if not rest_status:
-                            return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
-                        await asyncio.sleep(2)
-                    deploy_resp = await self.send_and_wait_feedback(
-                        ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
+            if "出战" not in beast_status:
+                if "放养" in beast_status:
+                    rest_resp = await self.send_and_wait_feedback(
+                        ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
                     )
-                    last_response = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
-                    if not self.is_beast_deploy_success(last_response):
-                        if hasattr(self, "record_beast_current_status_response"):
-                            self.record_beast_current_status_response(last_response, "六翼", source="斗法准备")
-                        return False, f"六翼出战失败：{last_response[:80] or '无回复'}"
-                    if hasattr(self, "set_best_beast_status"):
-                        self.set_best_beast_status("六翼", "出战中")
-            elif "放养" not in beast_status:
-                prepare_pasture = getattr(self, "ensure_focus_beast_ready_for_pasture", None)
-                if not callable(prepare_pasture) or not await prepare_pasture():
-                    return False, "六翼暂时无法放养"
-                focus = self.get_cached_beast_by_name("六翼") if hasattr(self, "get_cached_beast_by_name") else None
-                beast_status = str((focus or {}).get("status") or self.state.get("best_beast_status") or "")
-                if "放养" not in beast_status:
-                    cache = list(self.state.get("beasts_cache") or [])
-                    best_name = str(self.state.get("best_beast_name") or "六翼")
-                    best_status = str(self.state.get("best_beast_status") or beast_status)
-                    pasture_resp = await self.send_and_wait_feedback(
-                        ".一键放养", timeout=60, max_retries=0, force_identity_check=True
-                    )
-                    last_response = self.response_text(pasture_resp) if hasattr(self, "response_text") else str(pasture_resp or "")
-                    if hasattr(self, "record_auto_pasture_response"):
-                        self.record_auto_pasture_response(
-                            last_response,
-                            cache,
-                            best_name,
-                            best_status,
-                        )
-                    elif hasattr(self, "is_pasture_success") and self.is_pasture_success(last_response):
-                        if hasattr(self, "set_best_beast_status"):
-                            self.set_best_beast_status("六翼", "放养中")
+                    rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
+                    rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
+                    if rest_status and hasattr(self, "set_best_beast_status"):
+                        self.set_best_beast_status("六翼", rest_status)
+                    if not rest_status:
+                        return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
+                    await asyncio.sleep(2)
+                deploy_resp = await self.send_and_wait_feedback(
+                    ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
+                )
+                last_response = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
+                if not self.is_beast_deploy_success(last_response):
+                    if hasattr(self, "record_beast_current_status_response"):
+                        self.record_beast_current_status_response(last_response, "六翼", source="斗法准备")
+                    return False, f"六翼出战失败：{last_response[:80] or '无回复'}"
+                if hasattr(self, "set_best_beast_status"):
+                    self.set_best_beast_status("六翼", "出战中")
 
             current = titan_target_status()
             if current["ready"]:

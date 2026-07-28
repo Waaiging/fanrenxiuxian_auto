@@ -2942,7 +2942,7 @@
             if (queueGrid) {
                 queueGrid.innerHTML = queues.map(queue => {
                     const gate = queue.target_status || {ready: true};
-                    const beastMode = gate.desired_mode === 'pasture' ? 'pasture' : 'deploy';
+                    const beastMode = 'deploy';
                     const gateBlocked = Boolean(!gate.ready && gate.preparation_blocked);
                     const gateText = queue.key === 'titan'
                         ? (gate.ready
@@ -2956,7 +2956,6 @@
                             <span class="duel-beast-name">目标 · 小号主魂 · ${escapeHtml(gate.beast || '六翼')}</span>
                             <div class="duel-beast-modes" role="group" aria-label="小号主魂灵兽状态">
                                 <button class="duel-beast-mode ${beastMode === 'deploy' ? 'is-active' : ''}" type="button" aria-pressed="${beastMode === 'deploy'}" title="指定出战" ${duelControlPending ? 'disabled' : ''} onclick="setDuelBeastMode('deploy')"><i data-lucide="swords" aria-hidden="true"></i>出战</button>
-                                <button class="duel-beast-mode ${beastMode === 'pasture' ? 'is-active' : ''}" type="button" aria-pressed="${beastMode === 'pasture'}" title="指定放养" ${duelControlPending ? 'disabled' : ''} onclick="setDuelBeastMode('pasture')"><i data-lucide="sprout" aria-hidden="true"></i>放养</button>
                             </div>
                         </div>
                     ` : '';
@@ -3081,7 +3080,7 @@
         }
 
         async function setDuelBeastMode(mode) {
-            if (duelControlPending || !['deploy', 'pasture'].includes(mode)) return;
+            if (duelControlPending || mode !== 'deploy') return;
             duelControlPending = true;
             renderDuelDashboard();
             try {
