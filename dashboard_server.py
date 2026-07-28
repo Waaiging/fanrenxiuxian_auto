@@ -345,6 +345,20 @@ SCRIPT_MAP = {
     "xiaohao": "cultivator_xiaohao.py",
     "waaiging": "cultivator_waaiging.py",
 }
+# Restricted accounts may be represented by either their full automation
+# script or the red-packet/Mini App standby worker, depending on group access.
+ACCOUNT_PROCESS_SIGNATURES = {
+    "main": (("intelligent_cultivator.py", ""),),
+    "sub": (("sub_cultivator.py", ""),),
+    "xiaohao": (
+        ("cultivator_xiaohao.py", ""),
+        ("red_packet_account.py", "xiaohao"),
+    ),
+    "waaiging": (
+        ("cultivator_waaiging.py", ""),
+        ("red_packet_account.py", "waaiging"),
+    ),
+}
 WINDOW_MAP = {"main": 0, "sub": 1, "xiaohao": 2, "waaiging": 3}
 
 
@@ -4008,24 +4022,55 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
 # 进程管理
 # =====================================================================
 
+def account_process_command_matches(account, command):
+    """Return whether one process command line belongs to an account."""
+    clean = re.sub(r"\s+", " ", str(command or "")).strip()
+    if not clean:
+        return False
+    for script, restricted_account in ACCOUNT_PROCESS_SIGNATURES.get(account, ()):
+        if script not in clean:
+            continue
+        if not restricted_account:
+            return True
+        account_pattern = rf"(?:^|\s)--account(?:=|\s+){re.escape(restricted_account)}(?:\s|$)"
+        if re.search(account_pattern, clean):
+            return True
+    return False
+
+
 def get_process_status(account):
     """检测脚本进程是否在运行"""
-    script = SCRIPT_MAP.get(account)
-    if not script: return False
+    if not SCRIPT_MAP.get(account):
+        return False
     try:
         if os.name == 'nt':
-            ps_cmd = f'powershell -Command "Get-WmiObject Win32_Process -Filter \\"name=\'python.exe\' or name=\'pythonw.exe\'\\" | Where-Object {{$_.CommandLine -match \'{script}\'}}"'
-            return bool(subprocess.check_output(ps_cmd, shell=True, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore').strip())
-        else:
-            return bool(account_process_pids(account))
-    except: return False
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | "
+                    "Where-Object { $_.Name -in @('python.exe','pythonw.exe') } | "
+                    "Select-Object -ExpandProperty CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode != 0:
+                return False
+            return any(account_process_command_matches(account, line) for line in result.stdout.splitlines())
+        return bool(account_process_pids(account))
+    except Exception:
+        return False
 
 def account_process_pids(account):
-    """Return live python process ids for one account script."""
-    script = SCRIPT_MAP.get(account)
-    if not script:
+    """Return live python process ids for one account launch shape."""
+    signatures = ACCOUNT_PROCESS_SIGNATURES.get(account, ())
+    if not signatures:
         return []
-    result = subprocess.run(["pgrep", "-af", script], capture_output=True, text=True)
+    script_pattern = "|".join(sorted({re.escape(script) for script, _ in signatures}))
+    result = subprocess.run(["pgrep", "-af", script_pattern], capture_output=True, text=True)
     if result.returncode != 0:
         return []
     pids = []
@@ -4034,7 +4079,7 @@ def account_process_pids(account):
         if len(parts) != 2:
             continue
         pid_text, cmd = parts
-        if script not in cmd or "python" not in cmd or "tmux " in cmd:
+        if "python" not in cmd.lower() or "tmux " in cmd or not account_process_command_matches(account, cmd):
             continue
         try:
             pid = int(pid_text)
