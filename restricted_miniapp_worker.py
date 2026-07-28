@@ -267,8 +267,6 @@ class RestrictedMiniAppWorker:
                 restricted_miniapp_last_command_at=now_str(),
                 restricted_miniapp_last_error="",
             )
-            self.log.info("Mini App OUT [%s]: %s", identity, command)
-            self.log.info("Mini App IN [%s]: %s", identity, response.text[:500])
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self._record_worker_state(
@@ -435,7 +433,6 @@ class RestrictedMiniAppWorker:
             (payload.get("actionResult") or {}).get("message") or ""
         )
         self._record_star_snapshot(payload)
-        self.log.info("Star farm Mini App action completed: %s", action)
         return payload
 
     async def run_star_farm_loop(self) -> None:

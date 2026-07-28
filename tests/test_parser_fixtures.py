@@ -7,7 +7,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import concubine_features
 import common_command_features
@@ -2237,6 +2237,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(wait, 5)
         self.assertTrue(actor.state["yuanying_out_active"])
         self.assertGreater(common_seconds_until(actor.state["next_yuanying_out_time"]), 7 * 3600)
+
+    def test_common_main_yuanying_active_wait_is_debug_only(self):
+        class DummyMainYuanying(DummyCommon):
+            async def _wait_for_main_identity(self):
+                return None
+
+        actor = DummyMainYuanying()
+        actor.state.update({
+            "yuanying_out_active": True,
+            "yuanying_out_end_time": add_seconds_str(now_str(), 3600),
+        })
+        logger = SimpleNamespace(info=Mock(), debug=Mock())
+        actor.common_command_logger = lambda: logger
+
+        wait = asyncio.run(actor.common_main_yuanying_out_tick())
+
+        self.assertGreater(wait, 3500)
+        logger.info.assert_not_called()
+        logger.debug.assert_called_once()
 
     def test_common_main_yuanying_retreat_tick_retries_after_settlement(self):
         class DummyRetreatTick(DummyCommon):

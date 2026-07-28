@@ -2742,7 +2742,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             # 检查重试延迟
             retry_time = self.meditation_defer_until(self.state)
             if retry_time and is_future(retry_time):
-                log.info(f"Meditation: deferred until {retry_time}.")
+                log.debug(f"Meditation: deferred until {retry_time}.")
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(retry_time)))
                 self.state["next_meditation_retry_time"] = ""
                 self.save_state()
@@ -2807,7 +2807,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     self.save_state()
                 guard_wait = self.meditation_guard_wait_seconds_for_state(self.state)
                 if guard_wait > 0:
-                    log.info(
+                    log.debug(
                         f"Meditation Step 3: protected from .查看闭关 for "
                         f"{self.compact_duration_text(guard_wait)}."
                     )
@@ -2817,7 +2817,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 end_time = self.state.get("deep_meditation_end_time", "")
                 if end_time and is_future(end_time):
                     # 本地状态显示还在闭关，等待到结束时间
-                    log.info(f"Meditation Step 3: Local state valid (ends at {end_time}).")
+                    log.debug(f"Meditation Step 3: Local state valid (ends at {end_time}).")
                     await self.sleep_until_meditation_check(end_time)
                     continue
 
@@ -4881,7 +4881,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             self.save_state()
         guard_wait = self.meditation_guard_wait_seconds_for_state(a_state)
         if guard_wait > 0:
-            log.info(
+            log.debug(
                 f"[{avatar}] 深度闭关保护中，剩余 {self.compact_duration_text(guard_wait)}，跳过闭关检查。"
             )
             return
@@ -4890,7 +4890,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         if a_state.get("in_deep_meditation"):
             end_time = a_state.get("deep_meditation_end_time", "")
             if end_time and is_future(end_time):
-                log.info(f"[{avatar}] 深度闭关中，剩余 {seconds_until(end_time)}s，跳过闭关检查。")
+                log.debug(f"[{avatar}] 深度闭关中，剩余 {seconds_until(end_time)}s，跳过闭关检查。")
                 return  # 不 sleep，让外层循环继续检查其他任务（历练/心劫/入梦等）
             self.mark_avatar_meditation_restart_pending(avatar, "local end time expired")
             a_state = self.get_avatar_state(avatar)

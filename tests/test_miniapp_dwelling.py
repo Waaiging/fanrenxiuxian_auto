@@ -35,6 +35,22 @@ START = {
 }
 
 
+class FakeLogger:
+    def __init__(self):
+        self.info_messages = []
+        self.error_messages = []
+
+    @staticmethod
+    def _format(message, args):
+        return message % args if args else message
+
+    def info(self, message, *args):
+        self.info_messages.append(self._format(message, args))
+
+    def error(self, message, *args):
+        self.error_messages.append(self._format(message, args))
+
+
 class MiniAppDwellingTests(unittest.TestCase):
     def test_periodic_sync_without_previous_timestamp_runs_immediately(self):
         self.assertEqual(_periodic_wait_seconds("", 12 * 3600), 0)
@@ -91,6 +107,7 @@ class MiniAppDwellingTests(unittest.TestCase):
 
     def test_completed_status_is_settled_for_maintenance_loop(self):
         calls = []
+        logger = FakeLogger()
 
         async def post_json(origin, path, payload, timeout):
             calls.append((path, payload.get("action")))
@@ -108,7 +125,12 @@ class MiniAppDwellingTests(unittest.TestCase):
                 "dwelling": {"meditation": {"deepSeclusion": {"active": False}}},
             }
 
-        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
         with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
             response = asyncio.run(transport.command(".查看闭关"))
 
@@ -117,6 +139,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             ("/api/miniapp/xianxia-dwelling/deep-seclusion", "status"),
             ("/api/miniapp/xianxia-dwelling/deep-seclusion", "settle"),
         ])
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("Mini App [主魂] 指令 .查看闭关 -> 闭关已圆满，可结算。", combined)
+        self.assertIn("Mini App [主魂] 深度闭关自动结算 -> 【深度闭关总结】修为增加。", combined)
 
     def test_star_farm_uses_scoped_external_token(self):
         calls = []
@@ -139,6 +164,84 @@ class MiniAppDwellingTests(unittest.TestCase):
         external = next(item for item in calls if item[0].endswith("/external"))
         self.assertEqual(external[1]["playerId"], -200)
         self.assertEqual(external[1]["action"], "sect_farm")
+
+    def test_every_semantic_miniapp_operation_is_logged(self):
+        logger = FakeLogger()
+
+        async def post_json(origin, path, payload, timeout):
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/details"):
+                return {"ok": True, "account": {"playerId": payload["playerId"]}}
+            if path.endswith("/xianxia-dwelling/command-center"):
+                return {"ok": True, "actionResult": {"ok": True, "rawMessage": "元婴已出窍"}}
+            if path.endswith("/xianxia-dwelling/external"):
+                if payload["action"] == "spirit_beast":
+                    return {"ok": True, "url": "/miniapp/spirit?startapp=spiritbeast_fixture"}
+                return {"ok": True, "url": "/miniapp/farm?startapp=farm_fixture"}
+            if path.endswith("/xianxia-spirit-beast/start"):
+                return {
+                    "ok": True,
+                    "beasts": [{
+                        "id": 7,
+                        "name": "大圣",
+                        "beastType": "金瞳妖猴",
+                        "tier": 3,
+                        "stamina": 42,
+                    }],
+                }
+            if path.endswith("/xianxia-spirit-beast/action"):
+                return {"ok": True, "message": "大圣安抚完成"}
+            if path.endswith("/xianxia-sect-farm/start"):
+                return {"ok": True, "domain": {"mode": "stars", "plots": [{"plotKey": "1"}]}}
+            if path.endswith("/xianxia-sect-farm/action"):
+                return {"ok": True, "actionResult": {"ok": True, "message": "安抚完成"}}
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            asyncio.run(transport.details("主魂"))
+            asyncio.run(transport.command(".元婴出窍", identity="素心子"))
+            asyncio.run(transport.spirit_beast_snapshot("主魂"))
+            asyncio.run(transport.spirit_beast_interaction("主魂", 7, "安抚"))
+            asyncio.run(transport.sect_farm_snapshot("素心子"))
+            asyncio.run(transport.sect_farm_action("素心子", "soothe"))
+
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("Mini App [主魂] 同步洞府详情 -> 完成", combined)
+        self.assertIn("Mini App [素心子] 指令 .元婴出窍 -> 元婴已出窍", combined)
+        self.assertIn("Mini App [主魂] 读取万兽谷灵兽列表 -> 1 只灵兽", combined)
+        self.assertIn("Mini App [主魂] 万兽谷灵兽安抚（ID 7） -> 大圣安抚完成", combined)
+        self.assertIn("Mini App [素心子] 读取宗门灵圃 -> 1 个星位", combined)
+        self.assertIn("Mini App [素心子] 宗门灵圃安抚星辰 -> 安抚完成", combined)
+
+    def test_failed_miniapp_operation_is_logged(self):
+        logger = FakeLogger()
+
+        async def post_json(origin, path, payload, timeout):
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            raise MiniAppBeastError("fixture_failure")
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            with self.assertRaises(MiniAppBeastError):
+                asyncio.run(transport.command(".元婴出窍"))
+
+        self.assertIn(
+            "Mini App [主魂] 指令 .元婴出窍失败：fixture_failure",
+            logger.error_messages,
+        )
 
     def test_snapshot_updates_legacy_meditation_state(self):
         actor = SimpleNamespace(state={}, get_avatar_state=lambda name: actor.state.setdefault("avatar", {}))

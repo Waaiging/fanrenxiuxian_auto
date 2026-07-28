@@ -1967,7 +1967,7 @@ class CommonCommandMixin:
         if wait_seconds <= 0:
             return ""
         log = logger or self.common_command_logger()
-        log.info(
+        log.debug(
             f"[{identity}] skipped early .查看闭关; meditation protected for "
             f"{self.compact_duration_text(wait_seconds)}."
         )
@@ -3371,11 +3371,11 @@ class CommonCommandMixin:
 
         if active and end_time and is_future(end_time):
             wait_time = seconds_until(end_time)
-            log.info(f"Yuanying out active. Auto-return due at {end_time}.")
+            log.debug(f"Yuanying out active. Auto-return due at {end_time}.")
             return wait_time
 
         if active and not end_time and command == YUANYING_RETREAT_COMMAND:
-            log.info("Yuanying retreat active; waiting for passive settlement reply.")
+            log.debug("Yuanying retreat active; waiting for passive settlement reply.")
             return 600
 
         if active:

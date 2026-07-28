@@ -7289,7 +7289,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                     )
                 guard_wait = self.meditation_guard_wait_seconds_for_state(a_state)
                 if guard_wait > 0:
-                    log.info(
+                    log.debug(
                         f"Avatar [{avatar}] deep meditation protected for "
                         f"{self.compact_duration_text(guard_wait)}; skipping .查看闭关."
                     )

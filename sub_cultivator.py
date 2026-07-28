@@ -4972,7 +4972,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             meditation_retry_time = self.meditation_defer_until(self.state)
             if meditation_retry_time and is_future(meditation_retry_time):
                 wait_sec = min(300, seconds_until(meditation_retry_time))
-                log.info(
+                log.debug(
                     f"Meditation: deferred until "
                     f"{meditation_retry_time}."
                 )
@@ -4985,7 +4985,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             end_time_str = self.state.get("deep_meditation_end_time", "")
             if guard_wait > 0:
                 # 缓存的闭关结束时间在未来，跳过 .查看闭关，直接等待
-                log.info(
+                log.debug(
                     f"Meditation protected, skipping .查看闭关 for "
                     f"{self.compact_duration_text(guard_wait)}."
                 )
@@ -5875,7 +5875,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 retry_time = self.meditation_defer_until(a_state)
                 if retry_time and is_future(retry_time):
                     wait_sec = min(300, seconds_until(retry_time))
-                    log.info(f"Avatar [{avatar}] meditation deferred until {retry_time}.")
+                    log.debug(f"Avatar [{avatar}] meditation deferred until {retry_time}.")
                     await asyncio.sleep(wait_sec)
                     continue
 
@@ -5900,7 +5900,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                     # 缓存的闭关结束时间在未来，跳过 .查看闭关
                     # ⚠️ 不能直接 sleep 到闭关结束，否则野外历练会被跳过
                     # 短睡后重新循环，确保野外历练等冷却到期的功能不被阻塞
-                    log.info(
+                    log.debug(
                         f"Avatar [{avatar}] deep meditation protected for "
                         f"{self.compact_duration_text(guard_wait)}, short sleep then recheck."
                     )

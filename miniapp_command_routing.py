@@ -179,8 +179,6 @@ class MiniAppCommandRouter:
                 miniapp_route_last_command_at=_now_text(),
                 miniapp_route_last_error="",
             )
-            self.log.info("Mini App OUT [%s]: %s", identity, command)
-            self.log.info("Mini App IN [%s]: %s", identity, response.text[:500])
         except asyncio.CancelledError:
             raise
         except Exception as exc:

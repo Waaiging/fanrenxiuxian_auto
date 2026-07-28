@@ -109,6 +109,25 @@ def command_result_ok(payload: dict[str, Any]) -> bool:
     return not isinstance(result, dict) or result.get("ok") is not False
 
 
+def miniapp_operation_result_text(payload: Any) -> str:
+    """Return one concise, non-sensitive summary for Mini App operation logs."""
+    if not isinstance(payload, dict):
+        return "完成"
+    result = payload.get("actionResult")
+    if isinstance(result, dict):
+        text = str(result.get("rawMessage") or result.get("message") or "").strip()
+        if text:
+            return re.sub(r"\s+", " ", text)[:500]
+        if result.get("ok") is False:
+            return str(result.get("error") or "操作失败")[:200]
+    text = str(payload.get("rawMessage") or payload.get("message") or "").strip()
+    if text:
+        return re.sub(r"\s+", " ", text)[:500]
+    if payload.get("ok") is False:
+        return str(payload.get("error") or "操作失败")[:200]
+    return "完成"
+
+
 class MiniAppDwellingTransport:
     """Authenticated, identity-aware access to the fixed dwelling entry."""
 
@@ -140,6 +159,31 @@ class MiniAppDwellingTransport:
         method = getattr(self.logger, level, None)
         if callable(method):
             method(message, *args)
+
+    async def _logged_operation(
+        self,
+        identity: str,
+        operation: str,
+        callback: Any,
+        summarize: Any = None,
+    ) -> dict[str, Any]:
+        """Execute one semantic Mini App operation and always leave an audit log."""
+        try:
+            payload = await callback()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+            self._log("error", "Mini App [%s] %s失败：%s", identity, operation, code)
+            raise
+        try:
+            summary = summarize(payload) if callable(summarize) else miniapp_operation_result_text(payload)
+        except Exception:
+            # Logging must never turn a successful Mini App operation into a failure.
+            summary = miniapp_operation_result_text(payload)
+        summary = re.sub(r"\s+", " ", str(summary or "完成").strip())[:500]
+        self._log("info", "Mini App [%s] %s -> %s", identity, operation, summary or "完成")
+        return payload
 
     async def initialize(self, force: bool = False) -> dict[str, Any]:
         async with self._lock:
@@ -262,9 +306,13 @@ class MiniAppDwellingTransport:
             )
 
     async def details(self, identity: str = "主魂") -> dict[str, Any]:
-        return await self.request(
-            "/api/miniapp/xianxia-dwelling/details",
-            identity=identity,
+        return await self._logged_operation(
+            identity,
+            "同步洞府详情",
+            lambda: self.request(
+                "/api/miniapp/xianxia-dwelling/details",
+                identity=identity,
+            ),
         )
 
     async def command(
@@ -278,10 +326,14 @@ class MiniAppDwellingTransport:
             raise MiniAppBeastError("miniapp_command_not_allowed")
         async with self._lock:
             if meditation_prefix and command == ".闭关修炼":
-                prefix = await self._request_unlocked(
-                    "/api/miniapp/xianxia-dwelling/command-center",
-                    {"command": ".推命 闭关"},
-                    identity=identity,
+                prefix = await self._logged_operation(
+                    identity,
+                    "指令 .推命 闭关（闭关前置）",
+                    lambda: self._request_unlocked(
+                        "/api/miniapp/xianxia-dwelling/command-center",
+                        {"command": ".推命 闭关"},
+                        identity=identity,
+                    ),
                 )
                 if not command_result_ok(prefix):
                     return MiniAppCommandResponse(command_result_text(prefix), prefix)
@@ -298,17 +350,25 @@ class MiniAppDwellingTransport:
             else:
                 path = "/api/miniapp/xianxia-dwelling/command-center"
                 payload = {"command": command}
-            result = await self._request_unlocked(path, payload, identity=identity)
+            result = await self._logged_operation(
+                identity,
+                f"指令 {command}",
+                lambda: self._request_unlocked(path, payload, identity=identity),
+            )
             if command == ".查看闭关":
                 deep = (
                     ((result.get("dwelling") or {}).get("meditation") or {}).get("deepSeclusion")
                     or {}
                 )
                 if deep.get("completed") or deep.get("canSettle"):
-                    result = await self._request_unlocked(
-                        "/api/miniapp/xianxia-dwelling/deep-seclusion",
-                        {"action": "settle"},
-                        identity=identity,
+                    result = await self._logged_operation(
+                        identity,
+                        "深度闭关自动结算",
+                        lambda: self._request_unlocked(
+                            "/api/miniapp/xianxia-dwelling/deep-seclusion",
+                            {"action": "settle"},
+                            identity=identity,
+                        ),
                     )
             return MiniAppCommandResponse(command_result_text(result), result)
 
@@ -377,11 +437,16 @@ class MiniAppDwellingTransport:
 
     async def spirit_beast_snapshot(self, identity: str = "主魂") -> dict[str, Any]:
         async with self._lock:
-            payload = await self._external_request_unlocked(
+            payload = await self._logged_operation(
                 identity,
-                "spirit_beast",
-                "spiritbeast_",
-                "/api/miniapp/xianxia-spirit-beast/start",
+                "读取万兽谷灵兽列表",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/start",
+                ),
+                summarize=lambda result: f"{len(normalize_spirit_beast_roster(result))} 只灵兽",
             )
             return {
                 "beasts": normalize_spirit_beast_roster(payload),
@@ -404,25 +469,34 @@ class MiniAppDwellingTransport:
         if beast_id <= 0:
             raise MiniAppBeastError("spirit_beast_id_invalid")
         async with self._lock:
-            return await self._external_request_unlocked(
+            return await self._logged_operation(
                 identity,
-                "spirit_beast",
-                "spiritbeast_",
-                "/api/miniapp/xianxia-spirit-beast/action",
-                payload={
-                    "action": "interact",
-                    "beastId": beast_id,
-                    "interaction": interaction,
-                },
+                f"万兽谷灵兽{interaction}（ID {beast_id}）",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/action",
+                    payload={
+                        "action": "interact",
+                        "beastId": beast_id,
+                        "interaction": interaction,
+                    },
+                ),
             )
 
     async def sect_farm_snapshot(self, identity: str) -> dict[str, Any]:
         async with self._lock:
-            return await self._external_request_unlocked(
+            return await self._logged_operation(
                 identity,
-                "sect_farm",
-                "farm_",
-                "/api/miniapp/xianxia-sect-farm/start",
+                "读取宗门灵圃",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "sect_farm",
+                    "farm_",
+                    "/api/miniapp/xianxia-sect-farm/start",
+                ),
+                summarize=lambda result: f"{len(((result.get('domain') or {}).get('plots') or []))} 个星位",
             )
 
     async def sect_farm_action(
@@ -439,13 +513,20 @@ class MiniAppDwellingTransport:
             if not star_name:
                 raise MiniAppBeastError("star_name_missing")
             body["starName"] = str(star_name)
+        action_name = {"collect": "收集精华", "soothe": "安抚星辰", "pull": "牵引星辰"}[action]
+        detail = str(plot_key or star_name or "").strip()
+        operation = f"宗门灵圃{action_name}{f'（{detail}）' if detail else ''}"
         async with self._lock:
-            return await self._external_request_unlocked(
+            return await self._logged_operation(
                 identity,
-                "sect_farm",
-                "farm_",
-                "/api/miniapp/xianxia-sect-farm/action",
-                payload=body,
+                operation,
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "sect_farm",
+                    "farm_",
+                    "/api/miniapp/xianxia-sect-farm/action",
+                    payload=body,
+                ),
             )
 
 
