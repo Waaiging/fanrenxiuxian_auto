@@ -6690,6 +6690,8 @@ class ParserFixtureTests(unittest.TestCase):
                     "2026-07-28 19:46:00,000 [INFO] IN [.查看闭关] 韩天尊(@hantianzun24_bot):\n闭关回复",
                     "2026-07-28 19:46:01,000 [INFO] OUT [Mini App | 素心子]:\n指令 .元婴出窍",
                     "2026-07-28 19:46:02,000 [INFO] IN [Mini App | 素心子]:\n指令 .元婴出窍 -> 元婴已出窍",
+                    "2026-07-28 19:46:02,100 [INFO] OUT [Mini App | 主魂]:\n同步洞府首页",
+                    "2026-07-28 19:46:02,200 [INFO] IN [Mini App | 主魂]:\n同步洞府首页 -> 完成",
                     "2026-07-28 19:46:03,000 [INFO] Yuanying out active. Auto-return due at 2026-07-28 20:52:40.",
                     "2026-07-28 19:46:04,000 [WARNING] 指令未收到回复，稍后重试。",
                     "2026-07-28 19:46:05,000 [ERROR] Mini App request failed.",
@@ -6710,6 +6712,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertNotIn("Meditation Step 3", content)
                 self.assertNotIn("Yuanying out active", content)
                 self.assertNotIn("IN [mention 100]", content)
+                self.assertNotIn("同步洞府首页", content)
 
                 incoming = dashboard_server.get_log_page("main", limit=20, kind="in")
                 self.assertEqual(len(incoming.get("entries") or []), 2)

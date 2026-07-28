@@ -271,7 +271,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(external[1]["playerId"], -200)
         self.assertEqual(external[1]["action"], "sect_farm")
 
-    def test_every_semantic_miniapp_operation_is_logged(self):
+    def test_user_visible_miniapp_operations_are_logged_but_overview_sync_is_quiet(self):
         logger = FakeLogger()
 
         async def post_json(origin, path, payload, timeout):
@@ -336,7 +336,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         combined = "\n".join(logger.info_messages)
         self.assertIn("OUT [Mini App | 主魂]:\n同步洞府详情", combined)
         self.assertIn("IN [Mini App | 主魂]:\n同步洞府详情 -> 完成", combined)
-        self.assertIn("IN [Mini App | 主魂]:\n同步洞府首页 -> 完成", combined)
+        self.assertNotIn("同步洞府首页", combined)
         self.assertIn("IN [Mini App | 素心子]:\n指令 .元婴出窍 -> 元婴已出窍", combined)
         self.assertIn("IN [Mini App | 主魂]:\n读取万兽谷灵兽列表 -> 1 只灵兽", combined)
         self.assertIn("IN [Mini App | 主魂]:\n万兽谷灵兽安抚（ID 7） -> 大圣安抚完成", combined)

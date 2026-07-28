@@ -3889,6 +3889,13 @@ def is_miniapp_transport_log_entry(entry, direction=""):
     return marker in header
 
 
+def is_quiet_miniapp_sync_log_entry(entry):
+    """Hide routine Mini App profile polling from the Dashboard log feed."""
+    if not is_miniapp_transport_log_entry(entry):
+        return False
+    return "同步洞府首页" in str(entry.get("text") or "")
+
+
 def is_command_reply_log_entry(entry):
     """Keep concrete command replies while hiding duplicate mention/edit mirrors."""
     if is_miniapp_transport_log_entry(entry, "in"):
@@ -3905,6 +3912,8 @@ def is_command_reply_log_entry(entry):
 def is_dashboard_visible_log_entry(entry):
     """Show only command traffic plus actual error diagnostics on Dashboard."""
     header = log_entry_header(entry)
+    if is_quiet_miniapp_sync_log_entry(entry):
+        return False
     if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry):
         return True
     return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))

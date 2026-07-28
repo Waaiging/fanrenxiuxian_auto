@@ -344,14 +344,10 @@ class MiniAppDwellingTransport:
         )
 
     async def overview(self, identity: str = "主魂") -> dict[str, Any]:
-        """Fetch the Mini App home/overview snapshot for one identity."""
-        return await self._logged_operation(
-            identity,
-            "同步洞府首页",
-            lambda: self.request(
-                "/api/miniapp/xianxia-dwelling/overview",
-                identity=identity,
-            ),
+        """Fetch a background profile snapshot without routine success logs."""
+        return await self.request(
+            "/api/miniapp/xianxia-dwelling/overview",
+            identity=identity,
         )
 
     async def command(
