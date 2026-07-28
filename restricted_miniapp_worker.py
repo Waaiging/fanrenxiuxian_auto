@@ -461,9 +461,9 @@ class RestrictedMiniAppWorker:
             try:
                 payload = await self.transport.sect_farm_snapshot(STAR_IDENTITY)
                 ready, troubled, empty, next_wait = self._record_star_snapshot(payload)
-                if ready:
+                collection_due = ready > 0 or (troubled > 0 and next_wait <= 0)
+                if collection_due:
                     _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
-                if ready:
                     _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
                 for plot_key in empty:
                     _, (ready, troubled, _, next_wait) = await self._star_action(

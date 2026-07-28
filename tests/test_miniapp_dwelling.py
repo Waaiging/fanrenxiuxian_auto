@@ -601,7 +601,7 @@ class MiniAppDwellingTests(unittest.TestCase):
                 "mode": "stars",
                 "plots": [
                     {"key": "1", "status": "元磁紊乱"},
-                    {"key": "2", "status": "可收集"},
+                    {"key": "2", "status": "元磁紊乱"},
                     {"key": "3", "empty": True},
                 ],
             }
@@ -610,7 +610,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         async def action(identity, action, plot_key="", star_name=""):
             if action == "soothe":
                 plots = [
-                    {"key": "1", "status": "正常"},
+                    {"key": "1", "status": "可收集"},
                     {"key": "2", "status": "可收集"},
                     {"key": "3", "empty": True},
                 ]

@@ -310,14 +310,14 @@ class MiniAppCommandRouter:
         """Run one due batch and return seconds until the next collection."""
         payload = await self.transport.sect_farm_snapshot(identity)
         ready, troubled, empty, next_wait = self._record_star_snapshot(identity, payload)
-        if ready:
+        collection_due = ready > 0 or (troubled > 0 and next_wait <= 0)
+        if collection_due:
             # One maintenance action immediately before the batch collection;
             # no fixed-interval soothing or polling while stars are maturing.
             _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
                 identity,
                 "soothe",
             )
-        if ready:
             _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
                 identity,
                 "collect",
