@@ -1293,10 +1293,10 @@
                 <div class="log-field">
                     <label>类型</label>
                     <div class="log-kind-row">
-                        <button id="log-kind-all" class="log-tool-btn active" onclick="setLogKind('')">全部</button>
+                        <button id="log-kind-all" class="log-tool-btn active" onclick="setLogKind('')">指令/错误</button>
                         <button id="log-kind-out" class="log-tool-btn" onclick="setLogKind('out')">OUT</button>
                         <button id="log-kind-in" class="log-tool-btn" onclick="setLogKind('in')">IN</button>
-                        <button id="log-kind-issue" class="log-tool-btn warning" onclick="setLogKind('issue')">异常</button>
+                        <button id="log-kind-issue" class="log-tool-btn warning" onclick="setLogKind('issue')">错误</button>
                         <button id="log-pause-btn" class="log-tool-btn" onclick="toggleLogPause()">暂停刷新</button>
                     </div>
                 </div>
@@ -3817,7 +3817,7 @@
                 in: 'IN',
                 warn: 'WARNING',
                 error: 'ERROR',
-                issue: '异常'
+                issue: '错误'
             }[kind] || '';
         }
 
@@ -3845,7 +3845,7 @@
             if (currentLogTag) parts.push(`标签 ${currentLogTag}`);
             if (currentLogKind) parts.push(`类型 ${logKindLabel()}`);
             if (currentLogSearch) parts.push(`搜索 "${currentLogSearch}"`);
-            const scope = parts.length ? parts.join('，') : '全部日志';
+            const scope = parts.length ? parts.join('，') : '指令、回复与错误';
             const loaded = logState.loaded || logState.lines.length || 0;
             const countText = logState.partial
                 ? `已载入最近 ${loaded} 条${logState.hasMore ? '，向上滚动加载更多' : ''}`

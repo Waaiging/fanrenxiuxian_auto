@@ -141,8 +141,10 @@ class MiniAppDwellingTests(unittest.TestCase):
             ("/api/miniapp/xianxia-dwelling/deep-seclusion", "settle"),
         ])
         combined = "\n".join(logger.info_messages)
-        self.assertIn("Mini App [主魂] 指令 .查看闭关 -> 闭关已圆满，可结算。", combined)
-        self.assertIn("Mini App [主魂] 深度闭关自动结算 -> 【深度闭关总结】修为增加。", combined)
+        self.assertIn("OUT [Mini App | 主魂]:\n指令 .查看闭关", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n指令 .查看闭关 -> 闭关已圆满，可结算。", combined)
+        self.assertIn("OUT [Mini App | 主魂]:\n深度闭关自动结算", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n深度闭关自动结算 -> 【深度闭关总结】修为增加。", combined)
 
     def test_star_farm_uses_scoped_external_token(self):
         calls = []
@@ -229,13 +231,14 @@ class MiniAppDwellingTests(unittest.TestCase):
             asyncio.run(transport.sect_farm_action("素心子", "soothe"))
 
         combined = "\n".join(logger.info_messages)
-        self.assertIn("Mini App [主魂] 同步洞府详情 -> 完成", combined)
-        self.assertIn("Mini App [主魂] 同步洞府首页 -> 完成", combined)
-        self.assertIn("Mini App [素心子] 指令 .元婴出窍 -> 元婴已出窍", combined)
-        self.assertIn("Mini App [主魂] 读取万兽谷灵兽列表 -> 1 只灵兽", combined)
-        self.assertIn("Mini App [主魂] 万兽谷灵兽安抚（ID 7） -> 大圣安抚完成", combined)
-        self.assertIn("Mini App [素心子] 读取宗门灵圃 -> 1 个星位", combined)
-        self.assertIn("Mini App [素心子] 宗门灵圃安抚星辰 -> 安抚完成", combined)
+        self.assertIn("OUT [Mini App | 主魂]:\n同步洞府详情", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n同步洞府详情 -> 完成", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n同步洞府首页 -> 完成", combined)
+        self.assertIn("IN [Mini App | 素心子]:\n指令 .元婴出窍 -> 元婴已出窍", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n读取万兽谷灵兽列表 -> 1 只灵兽", combined)
+        self.assertIn("IN [Mini App | 主魂]:\n万兽谷灵兽安抚（ID 7） -> 大圣安抚完成", combined)
+        self.assertIn("IN [Mini App | 素心子]:\n读取宗门灵圃 -> 1 个星位", combined)
+        self.assertIn("IN [Mini App | 素心子]:\n宗门灵圃安抚星辰 -> 安抚完成", combined)
 
     def test_failed_miniapp_operation_is_logged(self):
         logger = FakeLogger()

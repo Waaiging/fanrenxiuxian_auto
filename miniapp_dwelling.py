@@ -168,6 +168,7 @@ class MiniAppDwellingTransport:
         summarize: Any = None,
     ) -> dict[str, Any]:
         """Execute one semantic Mini App operation and always leave an audit log."""
+        self._log("info", "OUT [Mini App | %s]:\n%s", identity, operation)
         try:
             payload = await callback()
         except asyncio.CancelledError:
@@ -182,7 +183,13 @@ class MiniAppDwellingTransport:
             # Logging must never turn a successful Mini App operation into a failure.
             summary = miniapp_operation_result_text(payload)
         summary = re.sub(r"\s+", " ", str(summary or "完成").strip())[:500]
-        self._log("info", "Mini App [%s] %s -> %s", identity, operation, summary or "完成")
+        self._log(
+            "info",
+            "IN [Mini App | %s]:\n%s -> %s",
+            identity,
+            operation,
+            summary or "完成",
+        )
         return payload
 
     async def initialize(self, force: bool = False) -> dict[str, Any]:

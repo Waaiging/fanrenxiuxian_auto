@@ -2534,7 +2534,7 @@ def log_entries_from_bytes(raw, base_offset, end_offset, trim_start=True):
         })
     return entries
 
-def read_recent_log_entries(name, before_byte=None, limit=80):
+def read_recent_log_entries(name, before_byte=None, limit=80, entry_filter=None):
     """Read recent log entries from the tail without parsing the whole file."""
     filename = get_log_filename(name)
     path = os.path.join(CONFIG_DIR, filename)
@@ -2557,6 +2557,9 @@ def read_recent_log_entries(name, before_byte=None, limit=80):
 
     read_bytes = min(max(LOG_TAIL_INITIAL_BYTES, 16 * 1024), end_byte)
     parsed = []
+    decorated = []
+    matched = []
+    start_byte = end_byte
     try:
         with open(path, "rb") as f:
             while True:
@@ -2564,20 +2567,21 @@ def read_recent_log_entries(name, before_byte=None, limit=80):
                 f.seek(start_byte)
                 raw = f.read(end_byte - start_byte)
                 parsed = log_entries_from_bytes(raw, start_byte, end_byte, trim_start=start_byte > 0)
-                if len(parsed) >= limit + 1 or start_byte == 0 or read_bytes >= min(LOG_TAIL_MAX_BYTES, end_byte):
+                decorated = decorate_log_entries(parsed)
+                matched = [entry for entry in decorated if entry_filter(entry)] if entry_filter else decorated
+                if len(matched) >= limit + 1 or start_byte == 0 or read_bytes >= min(LOG_TAIL_MAX_BYTES, end_byte):
                     break
                 read_bytes = min(read_bytes * 2, end_byte, LOG_TAIL_MAX_BYTES)
     except Exception:
         return [], "无法读取日志内容。", {"log_size": file_size, "partial": True}
 
-    page = parsed[-limit:]
-    decorated = decorate_log_entries(page)
+    page = matched[-limit:]
     if page:
         next_before = page[0].get("start_byte")
-        has_more = bool(next_before and next_before > 0)
+        has_more = bool(len(matched) > limit or (start_byte > 0 and next_before and next_before > start_byte))
     else:
-        next_before = None
-        has_more = False
+        next_before = start_byte if start_byte > 0 else None
+        has_more = bool(next_before)
     meta = {
         "log_size": file_size,
         "partial": True,
@@ -2587,7 +2591,7 @@ def read_recent_log_entries(name, before_byte=None, limit=80):
         "loaded_from_byte": page[0].get("start_byte") if page else end_byte,
         "loaded_to_byte": page[-1].get("end_byte") if page else end_byte,
     }
-    return decorated, "", meta
+    return page, "", meta
 
 
 # =====================================================================
@@ -3917,28 +3921,61 @@ def log_entry_header(entry):
     text = str(entry.get("text") or "")
     return text.splitlines()[0] if text else ""
 
+
+def is_miniapp_transport_log_entry(entry, direction=""):
+    """Return whether an entry is a semantic Mini App request/response log."""
+    header = log_entry_header(entry)
+    marker = f"{str(direction or '').strip().upper()} [Mini App |"
+    if marker.strip() == "[Mini App |":
+        return "OUT [Mini App |" in header or "IN [Mini App |" in header
+    return marker in header
+
+
+def is_command_reply_log_entry(entry):
+    """Keep concrete command replies while hiding duplicate mention/edit mirrors."""
+    if is_miniapp_transport_log_entry(entry, "in"):
+        return True
+    if not is_incoming_log_entry(entry):
+        return False
+    label = incoming_log_label(log_entry_header(entry))
+    if extract_command_from_line(label):
+        return True
+    label_lower = label.casefold()
+    return label_lower.startswith("manual ") and " reply" in label_lower and "." in label
+
+
+def is_dashboard_visible_log_entry(entry):
+    """Show only command traffic plus actual error diagnostics on Dashboard."""
+    header = log_entry_header(entry)
+    if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry):
+        return True
+    return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))
+
+
 def entry_matches_log_kind(entry, kind=""):
     kind = str(kind or "").strip().lower()
     if not kind:
         return True
     header = log_entry_header(entry)
     if kind == "out":
-        return " OUT " in f" {header} "
+        return is_outgoing_log_entry(entry)
     if kind == "in":
-        return " IN " in f" {header} "
+        return is_command_reply_log_entry(entry)
     if kind == "warn":
         return "[WARNING]" in header
     if kind == "error":
         return "[ERROR]" in header or "[CRITICAL]" in header
     if kind == "issue":
-        return any(marker in header for marker in ("[WARNING]", "[ERROR]", "[CRITICAL]"))
+        return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))
     return True
 
 def filter_log_entries(entries, tag="", q="", kind=""):
-    """按标签和关键词过滤日志条目"""
+    """按 Dashboard 可见范围、标签和关键词过滤日志条目"""
     tag = (tag or "").strip(); q = (q or "").strip().lower()
     filtered = []
     for entry in entries:
+        if not is_dashboard_visible_log_entry(entry):
+            continue
         if kind and not entry_matches_log_kind(entry, kind):
             continue
         if tag:
@@ -3964,6 +4001,7 @@ def get_log_tags(name, include_counts=True):
         return {"tags": ordered, "error": "", "partial": True}
 
     entries, error = read_log_entries(name)
+    entries = [entry for entry in entries if is_dashboard_visible_log_entry(entry)]
     counts = {}
     for entry in entries:
         for tag in entry["tags"]: counts[tag] = counts.get(tag, 0) + 1
@@ -3982,7 +4020,12 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
     if kind not in {"", "out", "in", "warn", "error", "issue"}:
         kind = ""
     if not (tag or q or kind):
-        entries, error, meta = read_recent_log_entries(name, before_byte=before, limit=limit)
+        entries, error, meta = read_recent_log_entries(
+            name,
+            before_byte=before,
+            limit=limit,
+            entry_filter=is_dashboard_visible_log_entry,
+        )
         if error:
             return {"content": error, "entries": [], "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None, "partial": True}
         return {

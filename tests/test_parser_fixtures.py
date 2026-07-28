@@ -2281,6 +2281,20 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(deep["execution_channel"], "group")
         self.assertIn("路由未启用", deep["execution_channel_detail"])
 
+    def test_dashboard_labels_restricted_account_commands_as_miniapp(self):
+        state = {
+            "restricted_miniapp_active": True,
+            "done": [],
+            "avatars": {},
+        }
+
+        commands = build_command_panels("xiaohao", state)[0]["commands"]
+        by_command = {item["command"]: item for item in commands}
+
+        self.assertEqual(by_command[".深度闭关"]["execution_channel"], "miniapp")
+        self.assertEqual(by_command[".元婴出窍"]["execution_channel"], "miniapp")
+        self.assertIn("受限模式", by_command[".深度闭关"]["execution_channel_detail"])
+
     def test_common_main_yuanying_retreat_tick_retries_after_settlement(self):
         class DummyRetreatTick(DummyCommon):
             yuanying_main_command = ".元婴闭关"
@@ -6662,6 +6676,46 @@ class ParserFixtureTests(unittest.TestCase):
             dashboard_server.CONFIG_DIR = old_config_dir
             dashboard_server.LOG_TAIL_INITIAL_BYTES = old_initial_bytes
             dashboard_server.LOG_TAIL_MAX_BYTES = old_max_bytes
+
+    def test_dashboard_logs_only_show_command_traffic_and_issues(self):
+        old_config_dir = dashboard_server.CONFIG_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                dashboard_server.CONFIG_DIR = tmp
+                entries = [
+                    "2026-07-28 19:45:57,452 [INFO] Meditation Step 3: protected from .查看闭关 for 25分钟31秒.",
+                    "2026-07-28 19:45:58,000 [INFO] OUT [主魂]:\n.查看闭关",
+                    "2026-07-28 19:45:59,000 [INFO] IN [mention 100] 韩天尊(@hantianzun24_bot):\n重复提及消息",
+                    "2026-07-28 19:46:00,000 [INFO] IN [.查看闭关] 韩天尊(@hantianzun24_bot):\n闭关回复",
+                    "2026-07-28 19:46:01,000 [INFO] OUT [Mini App | 素心子]:\n指令 .元婴出窍",
+                    "2026-07-28 19:46:02,000 [INFO] IN [Mini App | 素心子]:\n指令 .元婴出窍 -> 元婴已出窍",
+                    "2026-07-28 19:46:03,000 [INFO] Yuanying out active. Auto-return due at 2026-07-28 20:52:40.",
+                    "2026-07-28 19:46:04,000 [WARNING] 指令未收到回复，稍后重试。",
+                    "2026-07-28 19:46:05,000 [ERROR] Mini App request failed.",
+                ]
+                with open(os.path.join(tmp, "cultivator.log"), "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(entries))
+
+                page = dashboard_server.get_log_page("main", limit=20)
+                content = page.get("content") or ""
+
+                self.assertEqual(len(page.get("entries") or []), 5)
+                self.assertIn("OUT [主魂]", content)
+                self.assertIn("IN [.查看闭关]", content)
+                self.assertIn("OUT [Mini App | 素心子]", content)
+                self.assertIn("IN [Mini App | 素心子]", content)
+                self.assertIn("[ERROR]", content)
+                self.assertNotIn("[WARNING]", content)
+                self.assertNotIn("Meditation Step 3", content)
+                self.assertNotIn("Yuanying out active", content)
+                self.assertNotIn("IN [mention 100]", content)
+
+                incoming = dashboard_server.get_log_page("main", limit=20, kind="in")
+                self.assertEqual(len(incoming.get("entries") or []), 2)
+                issues = dashboard_server.get_log_page("main", limit=20, kind="issue")
+                self.assertEqual(len(issues.get("entries") or []), 1)
+        finally:
+            dashboard_server.CONFIG_DIR = old_config_dir
 
     def test_dashboard_command_records_use_sent_ledger_rows(self):
         old_config_dir = dashboard_server.CONFIG_DIR
