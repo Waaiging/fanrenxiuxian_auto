@@ -19,7 +19,13 @@
     "contract_interaction_delay_seconds": 1,
     "star_farm_enabled": true,
     "star_farm_retry_seconds": 300,
-    "star_farm_target": "天雷星"
+    "star_farm_target": "天雷星",
+    "pagoda_daily_enabled": true,
+    "pagoda_daily_hour": 23,
+    "hunt_daily_enabled": true,
+    "hunt_daily_hour": 7,
+    "hunt_target_reward": "阴凝之晶",
+    "miniapp_daily_retry_seconds": 900
   },
   "restricted_miniapp": {
     "enabled": true,

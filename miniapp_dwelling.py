@@ -484,6 +484,7 @@ class MiniAppDwellingTransport:
         expected_prefix: str,
         path: str,
         payload: dict[str, Any] | None = None,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         token = await self._external_token_unlocked(identity, action, expected_prefix)
         body = {"token": token, "initData": self.init_data}
@@ -493,7 +494,7 @@ class MiniAppDwellingTransport:
                 self.origin,
                 path,
                 body,
-                self.timeout,
+                int(timeout or self.timeout),
                 post_json=self.post_json,
             )
         except MiniAppBeastError as exc:
@@ -510,7 +511,7 @@ class MiniAppDwellingTransport:
                 self.origin,
                 path,
                 body,
-                self.timeout,
+                int(timeout or self.timeout),
                 post_json=self.post_json,
             )
 
@@ -601,6 +602,148 @@ class MiniAppDwellingTransport:
                     "/api/miniapp/xianxia-sect-farm/action",
                     payload=body,
                 ),
+            )
+
+    async def pagoda_snapshot(self, identity: str) -> dict[str, Any]:
+        """Read the independent pagoda state without routine success logs."""
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "pagoda",
+                "pagoda_",
+                "/api/miniapp/xianxia-pagoda/start",
+            )
+
+    async def pagoda_challenge(self, identity: str) -> dict[str, Any]:
+        """Run the identity's single scheduled daily pagoda challenge."""
+
+        def summarize(payload: dict[str, Any]) -> str:
+            replay = payload.get("replay") if isinstance(payload, dict) else {}
+            replay = replay if isinstance(replay, dict) else {}
+            cleared = int(replay.get("clearedCount") or 0)
+            end_floor = int(replay.get("endFloor") or 0)
+            failed_floor = int(replay.get("failedFloor") or 0)
+            summary = f"通过 {cleared} 层，抵达第 {end_floor} 层"
+            if failed_floor > 0:
+                summary += f"，止步第 {failed_floor} 层"
+            return summary
+
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                "琉璃问心塔一念登塔",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "pagoda",
+                    "pagoda_",
+                    "/api/miniapp/xianxia-pagoda/challenge",
+                    timeout=max(60, self.timeout),
+                ),
+                summarize=summarize,
+            )
+
+    async def hunt_snapshot(self, identity: str) -> dict[str, Any]:
+        """Read the current daily hunt counter/session without routine logs."""
+        async with self._lock:
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/details",
+                identity=identity,
+            )
+
+    async def hunt_start(self, identity: str) -> dict[str, Any]:
+        def summarize(payload: dict[str, Any]) -> str:
+            run = payload.get("huntRun") if isinstance(payload, dict) else {}
+            run = run if isinstance(run, dict) else {}
+            return f"本局开始，神识 {int(run.get('ap') or 0)} / {int(run.get('maxAp') or 0)}"
+
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                "洞府寻宝入府",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/hunt",
+                    identity=identity,
+                ),
+                summarize=summarize,
+            )
+
+    async def hunt_reveal(
+        self,
+        identity: str,
+        session_id: str,
+        index: int,
+    ) -> dict[str, Any]:
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise MiniAppBeastError("hunt_session_missing")
+        try:
+            index = int(index)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("hunt_cell_invalid") from exc
+        if index < 0 or index >= 25:
+            raise MiniAppBeastError("hunt_cell_invalid")
+
+        def summarize(payload: dict[str, Any]) -> str:
+            run = payload.get("huntRun") if isinstance(payload, dict) else {}
+            run = run if isinstance(run, dict) else {}
+            cells = run.get("cells") if isinstance(run.get("cells"), list) else []
+            cell = next(
+                (
+                    item
+                    for item in cells
+                    if isinstance(item, dict) and int(item.get("index", -1)) == index
+                ),
+                {},
+            )
+            title = str(cell.get("title") or cell.get("type") or "已探明").strip()
+            loot = cell.get("loot") if isinstance(cell.get("loot"), dict) else {}
+            loot_text = ""
+            if loot:
+                loot_text = f"，获得{loot.get('name') or '物品'} x{loot.get('quantity') or 1}"
+            return f"第 {index + 1} 格：{title}，剩余神识 {int(run.get('ap') or 0)}{loot_text}"
+
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                f"洞府寻宝探查第 {index + 1} 格",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/hunt/reveal",
+                    {"sessionId": session_id, "index": index},
+                    identity=identity,
+                ),
+                summarize=summarize,
+            )
+
+    async def hunt_settle(self, identity: str, session_id: str) -> dict[str, Any]:
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise MiniAppBeastError("hunt_session_missing")
+
+        def summarize(payload: dict[str, Any]) -> str:
+            result = payload.get("huntResult") if isinstance(payload, dict) else {}
+            result = result if isinstance(result, dict) else {}
+            loot = result.get("loot") if isinstance(result.get("loot"), list) else []
+            loot_text = "，".join(
+                f"{item.get('name') or '物品'} x{item.get('quantity') or 1}"
+                for item in loot
+                if isinstance(item, dict)
+            ) or "无额外物品"
+            main = "已找到主宝匣" if result.get("foundMain") else "未找到主宝匣"
+            return (
+                f"{result.get('grade') or '结算'}，{int(result.get('score') or 0)} 分，"
+                f"{main}；{loot_text}"
+            )
+
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                "洞府寻宝见好就收",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/hunt/settle",
+                    {"sessionId": session_id},
+                    identity=identity,
+                ),
+                summarize=summarize,
             )
 
 

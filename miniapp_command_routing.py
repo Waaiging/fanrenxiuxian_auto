@@ -28,6 +28,7 @@ from miniapp_dwelling import (
     normalize_miniapp_command,
     sect_farm_snapshot_status,
 )
+from miniapp_daily_activities import MiniAppDailyActivities
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -82,11 +83,18 @@ class MiniAppCommandRouter:
             timeout=int(settings.get("timeout_seconds") or 20),
             logger=self.log,
         )
+        self.daily_activities = MiniAppDailyActivities(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
         self._orig_send = None
         self._orig_send_identity = None
         self._last_auth_refresh = datetime.min
         self._profile_task: asyncio.Task[Any] | None = None
         self._star_farm_tasks: list[asyncio.Task[Any]] = []
+        self._daily_activity_tasks: list[asyncio.Task[Any]] = []
 
     def _record(self, **updates: Any) -> None:
         state = getattr(self.actor, "state", None)
@@ -152,6 +160,20 @@ class MiniAppCommandRouter:
                 asyncio.create_task(
                     self.run_star_farm_loop(identity),
                     name=f"miniapp_{self.account}_star_farm_{identity}",
+                )
+            )
+        if self.daily_activities.pagoda_enabled:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.daily_activities.run_pagoda_loop(),
+                    name=f"miniapp_{self.account}_pagoda",
+                )
+            )
+        if self.daily_activities.hunt_enabled:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.daily_activities.run_hunt_loop(),
+                    name=f"miniapp_{self.account}_hunt",
                 )
             )
         self.log.warning(

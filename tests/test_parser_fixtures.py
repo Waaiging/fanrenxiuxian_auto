@@ -6132,6 +6132,59 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state.get("pending_star_gazing_manifest_time", ""), "")
         self.assertEqual(xiaohao_state.get("star_gazing_claimed_manifest_time", ""), "")
 
+    def test_main_daily_star_gazing_fallback_uses_synced_star_palace_avatar(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 29, 23, 59, 2)
+                return value.replace(tzinfo=tz) if tz else value
+
+        async def run_case():
+            actor = Cultivator.__new__(Cultivator)
+            actor.sect_name = "万灵宗"
+            actor.identity_sect_names = {
+                "主魂": "万灵宗",
+                "无咎子": "天星宗",
+                "缘生子": "阴罗宗",
+                "素缘子": "星宫",
+            }
+            actor.avatars = ["无咎子", "缘生子", "素缘子"]
+            actor.avatar_nicknames = {name: "" for name in actor.avatars}
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            actor.dashboard_command_paused = lambda command, identity=None: False
+            scheduled = []
+
+            async def fake_schedule(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.schedule_star_gazing_simple = fake_schedule
+            actor.state = {
+                "last_gazing_date": "",
+                "last_star_shift_date": "",
+                "last_star_gazing_fallback_date": "",
+                "star_gazing_avatar_index": 0,
+                "identity_sect_names": dict(actor.identity_sect_names),
+                "avatars": {
+                    "无咎子": {},
+                    "缘生子": {},
+                    "素缘子": {},
+                },
+            }
+            with patch.object(intelligent_cultivator, "datetime", FixedDatetime):
+                handled = await actor.maybe_run_daily_star_gazing_fallback()
+            return handled, actor.state, scheduled
+
+        handled, state, scheduled = asyncio.run(run_case())
+
+        self.assertTrue(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-29")
+        self.assertEqual(state["star_gazing_claimed_avatar"], "素缘子")
+        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-30 00:00:00")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][1]["avatar"], "素缘子")
+        self.assertNotEqual(scheduled[0][1]["avatar"], "主魂")
+
     def test_sub_daily_star_gazing_fallback_uses_avatar_when_main_star_palace_disabled(self):
         class FixedDatetime(datetime):
             @classmethod

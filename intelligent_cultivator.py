@@ -5541,7 +5541,11 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
 
     def choose_star_gazing_avatar_for_today(self, today):
             """按轮换顺序选择今天尚未观星的一个化身。"""
-            avatars = STAR_GAZING_ROTATING_AVATARS
+            avatars = [
+                avatar
+                for avatar in STAR_GAZING_ROTATING_AVATARS
+                if self.identity_sect_name(avatar) in {"", "星宫"}
+            ]
             if not avatars:
                 return None, 0
             start_idx = self.state.get("star_gazing_avatar_index", 0) % len(avatars)
@@ -5596,70 +5600,54 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 self.state["last_star_gazing_fallback_date"] = today
                 self.save_state()
 
-                if self.dashboard_command_paused(".观星", "主魂"):
-                    log.info("Star gazing fallback: .观星 paused by dashboard; skipping 23:59 fallback.")
+                selected_avatar, _ = self.choose_star_gazing_avatar_for_today(today)
+                if not selected_avatar:
+                    log.info(
+                        f"Star gazing fallback: no synced Star Palace identity still needs .观星 on {today}; skipping."
+                    )
                     self.clear_pending_star_gazing_schedule()
                     self.clear_star_gazing_round_claim()
                     self.save_state()
                     return True
 
-                log.info("Star gazing fallback: no .观星 today; sending .观星 at 23:59.")
-                self.active_atomic_task = asyncio.current_task()
-                log.info("🔒 [ATOMIC LOCK] Acquired by StarGazingFallback")
-                try:
-                    resp_msg = await self.send_and_wait_feedback_identity(
-                        "主魂",
-                        ".观星",
-                        timeout=45,
-                        max_retries=0,
-                        return_response_msg=True,
-                        delete_after=False,
-                        force_identity_check=True,
-                        suppress_no_response_alert=True,
+                if self.dashboard_command_paused(".观星", selected_avatar):
+                    log.info(
+                        f"Star gazing fallback [{selected_avatar}]: .观星 paused by dashboard; skipping 23:59 fallback."
                     )
-                    if not resp_msg:
-                        self.save_state()
-                        return True
-
-                    resp_text = (resp_msg.text or "")
-                    self.state["last_gazing_date"] = today
-                    self.state["last_gazing_time"] = now_str()
-
-                    if self.star_gazing_good_opportunity(resp_text):
-                        # 调度改换星移：由于是在 23:59 兜底，目标显化时间强制绑定在次日 00:00:00 窗口
-                        tomorrow = now + timedelta(days=1)
-                        target_dt = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
-                        target_day = target_dt.strftime("%Y-%m-%d")
-                        if self.star_gazing_final_report_seen(target_dt):
-                            log.info(
-                                f"Star gazing fallback: final report already seen for {dt_to_str(target_dt)}; "
-                                "not scheduling .改换星移."
-                            )
-                            self.save_state()
-                            return True
-                        if not self.star_shift_done_today(target_day):
-                            self.state["pending_star_shift_date"] = target_day
-                            self.state["pending_star_shift_target_time"] = dt_to_str(target_dt)
-                            self.state["pending_star_shift_msg_id"] = resp_msg.id
-                            self.save_state()
-                            log.info(
-                                f"Star gazing fallback: GOOD result detected; "
-                                f"scheduling .改换星移 for manifest {dt_to_str(target_dt)}."
-                            )
-                            self.star_shift_task = asyncio.create_task(
-                                self.schedule_star_shift(resp_msg.id, target_dt, target_day)
-                            )
-                        else:
-                            log.info("Star gazing fallback: GOOD result but shift already done today.")
-                    else:
-                        log.info("Star gazing fallback: .观星 result did not contain GOOD keyword.")
-
+                    self.clear_pending_star_gazing_schedule()
+                    self.clear_star_gazing_round_claim()
                     self.save_state()
                     return True
-                finally:
-                    if self.active_atomic_task == asyncio.current_task():
-                        self.active_atomic_task = None
-                        log.info("🔓 [ATOMIC LOCK] Released by StarGazingFallback")
+
+                target_dt = (now + timedelta(days=1)).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+                manifest_key = dt_to_str(target_dt)
+                self.state["star_gazing_claimed_manifest_time"] = manifest_key
+                self.state["star_gazing_claimed_avatar"] = selected_avatar
+                self.state["pending_star_gazing_manifest_time"] = manifest_key
+                self.state["pending_star_gazing_fate_type"] = "Good - daily fallback"
+                self.state["pending_star_gazing_date"] = today
+                self.state["pending_star_gazing_target_time"] = dt_to_str(now)
+                self.state["pending_star_gazing_scheduled_time"] = dt_to_str(now)
+                self.state["next_star_gazing_time"] = dt_to_str(now)
+                self.save_state()
+
+                log.info(
+                    f"Star gazing fallback: no .观星 today; sending as synced Star Palace identity "
+                    f"{selected_avatar} at 23:59."
+                )
+                await self.schedule_star_gazing_simple(
+                    now,
+                    immediate_shift=False,
+                    avatar=selected_avatar,
+                    manifest_dt=target_dt,
+                    gazing_date=today,
+                )
+                return True
 
     def next_star_manifest_dt(self, now=None):
             return self.common_next_star_manifest_dt(
@@ -5958,9 +5946,9 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                    - immediate_shift=False: 排期到下一个显化窗口后发送
             """
             now = datetime.now()
+            who = avatar or "主魂"
             wait_sec = (send_dt - now).total_seconds()
             if wait_sec > 0:
-                who = avatar or "主魂"
                 log.info(
                     f"Star gazing [{who}]: waiting {int(wait_sec)}s to send .观星 at {dt_to_str(send_dt)}."
                 )
@@ -5970,6 +5958,16 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     command=".观星",
                     lead_seconds=20,
                 )
+
+            if self.identity_sect_name(who) != "星宫":
+                log.warning(
+                    f"Star gazing [{who}]: blocked because synced sect is "
+                    f"{self.identity_sect_name(who) or 'unknown'}, not 星宫."
+                )
+                self.clear_pending_star_gazing_schedule()
+                self.clear_star_gazing_round_claim()
+                self.save_state()
+                return
 
             today = gazing_date or datetime.now().strftime("%Y-%m-%d")
             if avatar:
@@ -5997,7 +5995,6 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 return  # 还没到时间，可能是被提前唤醒了
 
             # 发送 .观星
-            who = avatar or "主魂"
             if self.dashboard_command_paused(".观星", who):
                 log.info(f"Star gazing [{who}]: .观星 paused by dashboard; clearing pending schedule.")
                 self.clear_pending_star_gazing_schedule()

@@ -358,6 +358,95 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("读取宗门灵圃", combined)
         self.assertIn("IN [Mini App | 素心子]:\n宗门灵圃安抚星辰 -> 安抚完成", combined)
 
+    def test_pagoda_and_hunt_use_their_miniapp_endpoints_and_log_actions(self):
+        logger = FakeLogger()
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload), timeout))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-pagoda?startapp=pagoda_fixture",
+                }
+            if path.endswith("/xianxia-pagoda/start"):
+                return {"ok": True, "state": {"canChallenge": True}}
+            if path.endswith("/xianxia-pagoda/challenge"):
+                return {
+                    "ok": True,
+                    "state": {"canChallenge": False},
+                    "replay": {"clearedCount": 20, "endFloor": 20, "failedFloor": 21},
+                }
+            if path.endswith("/xianxia-dwelling/details"):
+                return {
+                    "ok": True,
+                    "dwelling": {
+                        "hunt": {"used": 0, "limit": 3, "remaining": 3, "actionPoints": 8}
+                    },
+                }
+            if path.endswith("/xianxia-dwelling/hunt"):
+                return {
+                    "ok": True,
+                    "huntRun": {"sessionId": "hunt-1", "ap": 8, "maxAp": 8},
+                }
+            if path.endswith("/xianxia-dwelling/hunt/reveal"):
+                return {
+                    "ok": True,
+                    "huntRun": {
+                        "sessionId": "hunt-1",
+                        "ap": 7,
+                        "cells": [
+                            {
+                                "index": 6,
+                                "revealed": True,
+                                "title": "主宝匣",
+                                "loot": {"name": "阴凝之晶", "quantity": 1},
+                            }
+                        ],
+                    },
+                }
+            if path.endswith("/xianxia-dwelling/hunt/settle"):
+                return {
+                    "ok": True,
+                    "huntResult": {
+                        "grade": "甲等",
+                        "score": 90,
+                        "foundMain": True,
+                        "loot": [{"name": "阴凝之晶", "quantity": 1}],
+                    },
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            asyncio.run(transport.pagoda_snapshot("素心子"))
+            asyncio.run(transport.pagoda_challenge("素心子"))
+            asyncio.run(transport.hunt_snapshot("素心子"))
+            asyncio.run(transport.hunt_start("素心子"))
+            asyncio.run(transport.hunt_reveal("素心子", "hunt-1", 6))
+            asyncio.run(transport.hunt_settle("素心子", "hunt-1"))
+
+        external = next(call for call in calls if call[0].endswith("/external"))
+        self.assertEqual(external[1]["action"], "pagoda")
+        self.assertEqual(external[1]["playerId"], -200)
+        challenge = next(call for call in calls if call[0].endswith("/xianxia-pagoda/challenge"))
+        self.assertGreaterEqual(challenge[2], 60)
+        reveal = next(call for call in calls if call[0].endswith("/hunt/reveal"))
+        self.assertEqual(reveal[1]["playerId"], -200)
+        self.assertEqual(reveal[1]["sessionId"], "hunt-1")
+        self.assertEqual(reveal[1]["index"], 6)
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("OUT [Mini App | 素心子]:\n琉璃问心塔一念登塔", combined)
+        self.assertIn("洞府寻宝探查第 7 格 -> 第 7 格：主宝匣", combined)
+        self.assertIn("洞府寻宝见好就收 -> 甲等，90 分，已找到主宝匣", combined)
+
     def test_failed_miniapp_operation_is_logged(self):
         logger = FakeLogger()
 

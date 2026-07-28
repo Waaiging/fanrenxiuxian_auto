@@ -79,6 +79,7 @@ from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from group_visibility_control import run_telegram_write_permission_monitor
 from miniapp_beast_contract import MiniAppBeastContractWorker
+from miniapp_daily_activities import MiniAppDailyActivities
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
@@ -7306,6 +7307,16 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self,
             logger=log,
         )
+        self._miniapp_daily_activities = (
+            MiniAppDailyActivities(
+                self,
+                self._miniapp_beast_contract.transport,
+                self.account_key,
+                log,
+            )
+            if self._miniapp_beast_contract.transport is not None
+            else None
+        )
         self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
@@ -7420,6 +7431,17 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 "beast_contract",
                 lambda: self._miniapp_beast_contract.run(),
             )
+        if self._miniapp_daily_activities is not None:
+            if self._miniapp_daily_activities.pagoda_enabled:
+                self.create_scheduler_task(
+                    "miniapp_pagoda",
+                    lambda: self._miniapp_daily_activities.run_pagoda_loop(),
+                )
+            if self._miniapp_daily_activities.hunt_enabled:
+                self.create_scheduler_task(
+                    "miniapp_hunt",
+                    lambda: self._miniapp_daily_activities.run_hunt_loop(),
+                )
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())

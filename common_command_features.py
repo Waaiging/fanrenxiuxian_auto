@@ -590,6 +590,8 @@ class CommonCommandMixin:
             ".灵兽探渊",
             ".问道",
             ".支援慕兰",
+            ".闯塔",
+            ".洞府寻宝",
         }
 
     def daily_reward_account_label(self):
@@ -979,12 +981,14 @@ class CommonCommandMixin:
             ".登天阶": "登阶",
             ".收集精华": "精华",
             ".问道": "问道",
+            ".闯塔": "问心塔",
+            ".洞府寻宝": "寻宝",
         }.get(root, root.lstrip(".") or "未知")
 
     def daily_reward_command_counts_compact_text(self, command_counts):
         if not command_counts:
             return ""
-        ordered = ["历练", "裂缝", "出窍", "闭关", "探渊", "问道", "登阶", "精华"]
+        ordered = ["历练", "裂缝", "出窍", "闭关", "探渊", "问道", "登阶", "问心塔", "寻宝", "精华"]
         normalized = {}
         for command, count in command_counts.items():
             label = self.daily_reward_command_short_label(command)
