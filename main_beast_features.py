@@ -382,25 +382,32 @@ class MainBeastMixin:
         self.state["last_beast_roster_query_result"] = "miniapp_fetching"
         self.main_beast_save()
         try:
-            snapshot = await fetch_miniapp_beast_snapshot(
-                self.client,
-                settings["entry_url"],
-                cached_spirit_token=getattr(self, "_miniapp_beast_token", ""),
-                bot_username=settings["bot_username"],
-                timeout=settings["timeout"],
-            )
-            self._miniapp_beast_token = str(snapshot.get("spirit_token") or "")
-            try:
-                write_cached_spirit_token(
-                    self.main_beast_config_dir(),
+            router = getattr(self, "_miniapp_command_router", None)
+            transport = getattr(router, "transport", None) if getattr(router, "enabled", False) else None
+            if transport is not None:
+                # 与受限账号相同的取数路径：带 playerId 的 dwelling transport。
+                snapshot = await transport.spirit_beast_snapshot("主魂")
+            else:
+                snapshot = await fetch_miniapp_beast_snapshot(
+                    self.client,
                     settings["entry_url"],
-                    self._miniapp_beast_token,
+                    cached_spirit_token=getattr(self, "_miniapp_beast_token", ""),
+                    bot_username=settings["bot_username"],
+                    timeout=settings["timeout"],
                 )
-            except Exception:
-                self.main_beast_logger().warning(
-                    "Main beast Mini App token cache could not be persisted; continuing with memory cache.",
-                    exc_info=True,
-                )
+            if snapshot.get("spirit_token"):
+                self._miniapp_beast_token = str(snapshot.get("spirit_token") or "")
+                try:
+                    write_cached_spirit_token(
+                        self.main_beast_config_dir(),
+                        settings["entry_url"],
+                        self._miniapp_beast_token,
+                    )
+                except Exception:
+                    self.main_beast_logger().warning(
+                        "Main beast Mini App token cache could not be persisted; continuing with memory cache.",
+                        exc_info=True,
+                    )
             self.record_main_beast_miniapp_snapshot(snapshot)
             # 只有同步成功才消耗每日配额；失败时按 retry_seconds 重试，
             # 避免瞬时故障把当天 2 次配额烧光、灵兽动作卡到次日。
