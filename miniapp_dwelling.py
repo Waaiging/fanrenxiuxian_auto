@@ -315,6 +315,17 @@ class MiniAppDwellingTransport:
             ),
         )
 
+    async def overview(self, identity: str = "主魂") -> dict[str, Any]:
+        """Fetch the Mini App home/overview snapshot for one identity."""
+        return await self._logged_operation(
+            identity,
+            "同步洞府首页",
+            lambda: self.request(
+                "/api/miniapp/xianxia-dwelling/overview",
+                identity=identity,
+            ),
+        )
+
     async def command(
         self,
         command: str,
@@ -546,21 +557,145 @@ def identity_state(actor: Any, identity: str) -> dict[str, Any]:
     return actor.state
 
 
+def _snapshot_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _snapshot_text(*values: Any) -> str:
+    for value in values:
+        if value is None or isinstance(value, (dict, list, tuple, set)):
+            continue
+        text = str(value).strip()
+        if text and text.casefold() not in {"none", "null", "undefined"}:
+            return text
+    return ""
+
+
+def _snapshot_int(value: Any, *, minimum: int | None = None) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, str):
+            normalized = value.strip().replace(",", "")
+            if not re.fullmatch(r"[+-]?\d+(?:\.0+)?", normalized):
+                return None
+            number = int(float(normalized))
+        else:
+            number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if minimum is not None and number < minimum:
+        return None
+    return number
+
+
+def _sync_identity_sect(actor: Any, identity: str, sect_name: str) -> None:
+    state = getattr(actor, "state", None)
+    if not isinstance(state, dict):
+        return
+    mapping = getattr(actor, "identity_sect_names", None)
+    if not isinstance(mapping, dict):
+        mapping = state.get("identity_sect_names")
+    mapping = dict(mapping) if isinstance(mapping, dict) else {}
+    mapping[identity] = sect_name
+    state["identity_sect_names"] = dict(mapping)
+    try:
+        actor.identity_sect_names = mapping
+    except (AttributeError, TypeError):
+        pass
+    if identity == "主魂":
+        state["sect_name"] = sect_name
+        try:
+            actor.sect_name = sect_name
+        except (AttributeError, TypeError):
+            pass
+
+
 def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) -> bool:
     """Copy authoritative Mini App meditation/identity state into legacy state."""
     container = identity_state(actor, identity)
-    account = payload.get("account") or {}
-    dwelling = payload.get("dwelling") or {}
-    meditation = dwelling.get("meditation") or {}
-    deep = meditation.get("deepSeclusion") or {}
-    standard = meditation.get("standardCultivation") or {}
+    payload = _snapshot_mapping(payload)
+    account = _snapshot_mapping(payload.get("account"))
+    profile = _snapshot_mapping(account.get("profile"))
+    cultivation = _snapshot_mapping(profile.get("cultivation"))
+    dwelling = _snapshot_mapping(payload.get("dwelling"))
+    meditation = _snapshot_mapping(dwelling.get("meditation"))
+    deep = _snapshot_mapping(meditation.get("deepSeclusion"))
+    standard = _snapshot_mapping(meditation.get("standardCultivation"))
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     container["miniapp_last_sync_time"] = now_text
-    container["miniapp_player_id"] = int(account.get("playerId") or 0)
-    container["miniapp_dao_name"] = str(account.get("daoName") or "")
-    container["miniapp_sect_name"] = str((account.get("profile") or {}).get("sectName") or "")
     container["miniapp_last_error"] = ""
+
+    player_id = _snapshot_int(account.get("playerId"))
+    if player_id:
+        container["miniapp_player_id"] = player_id
+    dao_name = _snapshot_text(account.get("daoName"))
+    if dao_name:
+        container["miniapp_dao_name"] = dao_name
+
+    sect_name = _snapshot_text(profile.get("sectName"), account.get("sectName"))
+    spirit_root_value = profile.get("spiritRoot")
+    spirit_root = _snapshot_text(
+        _snapshot_mapping(spirit_root_value).get("name"),
+        spirit_root_value,
+        profile.get("spiritRootName"),
+        account.get("spiritRootName"),
+    )
+    cultivation_level = _snapshot_text(
+        account.get("cultivationLevel"),
+        profile.get("cultivationLevel"),
+        cultivation.get("level"),
+        standard.get("currentLevel"),
+        meditation.get("currentLevel"),
+    )
+    current_exp = _snapshot_int(
+        cultivation.get("current")
+        if cultivation.get("current") is not None
+        else meditation.get("currentCultivation"),
+        minimum=0,
+    )
+    total_exp = _snapshot_int(
+        cultivation.get("next")
+        if cultivation.get("next") is not None
+        else meditation.get("nextThreshold"),
+        minimum=1,
+    )
+    if current_exp is None or total_exp is None:
+        cultivation_text = _snapshot_text(cultivation.get("text"))
+        match = re.search(r"([\d,]+)\s*/\s*([\d,]+)", cultivation_text)
+        if match:
+            if current_exp is None:
+                current_exp = _snapshot_int(match.group(1), minimum=0)
+            if total_exp is None:
+                total_exp = _snapshot_int(match.group(2), minimum=1)
+
+    has_profile_snapshot = False
+    if sect_name:
+        container["miniapp_sect_name"] = sect_name
+        container["sect_name"] = sect_name
+        _sync_identity_sect(actor, identity, sect_name)
+        has_profile_snapshot = True
+    if spirit_root:
+        container["miniapp_spirit_root"] = spirit_root
+        container["spirit_root"] = spirit_root
+        has_profile_snapshot = True
+    if cultivation_level:
+        container["miniapp_cultivation_level"] = cultivation_level
+        container["cultivation_level"] = cultivation_level
+        container["level"] = cultivation_level
+        has_profile_snapshot = True
+    if current_exp is not None and total_exp is not None:
+        container["miniapp_current_exp"] = current_exp
+        container["miniapp_total_exp"] = total_exp
+        container["current_exp"] = current_exp
+        container["total_exp"] = total_exp
+        has_profile_snapshot = True
+    if has_profile_snapshot:
+        snapshot = _snapshot_mapping(payload.get("snapshot"))
+        snapshot_level = _snapshot_text(snapshot.get("level")) or "snapshot"
+        container["miniapp_profile_updated_at"] = now_text
+        container["miniapp_profile_source"] = f"dwelling_{snapshot_level}"
 
     # Command-center responses often contain placeholder dwelling/account
     # objects. Only authoritative details and meditation endpoints may change

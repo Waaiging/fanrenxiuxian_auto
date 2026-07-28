@@ -62,7 +62,9 @@
         .cultivation-current { display: grid; grid-template-columns: 1fr auto; gap: 0.55rem; align-items: baseline; margin-bottom: 0.55rem; font-size: 0.82rem; }
         .cultivation-level { color: var(--accent-color); font-weight: 700; }
         .cultivation-value { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); font-weight: 600; }
-        .cultivation-root { grid-column: 1 / -1; color: #6ee7b7; font-size: 0.74rem; font-weight: 700; text-shadow: 0 0 10px rgba(16,185,129,0.28); }
+        .cultivation-affiliation { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap; }
+        .cultivation-root { color: #6ee7b7; font-size: 0.74rem; font-weight: 700; text-shadow: 0 0 10px rgba(16,185,129,0.28); }
+        .cultivation-sect { color: #c4b5fd; font-size: 0.74rem; font-weight: 700; }
         .cultivation-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; margin-bottom: 0.55rem; display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
         .cultivation-days { display: grid; gap: 0.25rem; }
         .cultivation-row { display: grid; grid-template-columns: 5.8rem 1fr 1fr 1fr; gap: 0.45rem; align-items: center; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text-secondary); }
@@ -452,6 +454,14 @@
             text-overflow: ellipsis;
             text-shadow: 0 0 8px rgba(16,185,129,0.24);
         }
+        .avatar-sect {
+            font-size: 0.62rem;
+            color: #c4b5fd;
+            line-height: 1.15;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .avatar-status {
             font-size: 0.66rem;
             color: var(--text-secondary);
@@ -704,6 +714,14 @@
             font-size: 0.66rem;
             white-space: nowrap;
         }
+        .account-profile-sect {
+            margin-top: 0.28rem;
+            color: #c4b5fd;
+            font-size: 0.64rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .account-profile-exp {
             display: flex;
             justify-content: space-between;
@@ -822,6 +840,7 @@
         .avatar-username { font-size: 0.54rem; }
         .avatar-level { color: var(--account-accent); background: transparent; padding: 0; font-size: 0.64rem; }
         .avatar-root { font-size: 0.56rem; }
+        .avatar-sect { font-size: 0.54rem; }
         .avatar-exp {
             display: block;
             width: 100%;
@@ -1448,21 +1467,57 @@
             return names.join(', ');
         }
 
-        function renderCultivation(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot) {
+        function firstProfileText(...values) {
+            for (const value of values) {
+                if (value === undefined || value === null) continue;
+                const text = String(value).trim();
+                if (text) return text;
+            }
+            return '';
+        }
+
+        function finiteProfileNumber(value) {
+            if (value === undefined || value === null || value === '') return null;
+            const number = Number(value);
+            return Number.isFinite(number) ? number : null;
+        }
+
+        function dashboardIdentityProfile(accountState, identity, identityState) {
+            const account = accountState || {};
+            const source = identityState || {};
+            const sectMap = account.identity_sect_names || {};
+            const miniCurrent = finiteProfileNumber(source.miniapp_current_exp);
+            const miniTotal = finiteProfileNumber(source.miniapp_total_exp);
+            const hasMiniExp = miniCurrent !== null && miniCurrent >= 0
+                && miniTotal !== null && miniTotal > 0;
+            return {
+                sect: firstProfileText(source.miniapp_sect_name, source.sect_name, sectMap[identity]),
+                level: firstProfileText(source.miniapp_cultivation_level, source.level, source.cultivation_level),
+                spiritRoot: firstProfileText(source.miniapp_spirit_root, source.spirit_root),
+                current: hasMiniExp ? miniCurrent : finiteProfileNumber(source.current_exp),
+                total: hasMiniExp ? miniTotal : finiteProfileNumber(source.total_exp),
+            };
+        }
+
+        function renderCultivation(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot, stateSect) {
             const data = cultivation || {};
             const profile = data.profile || {};
             const days = Array.isArray(data.days) ? data.days.slice(0, 7) : [];
             // 优先使用 state 中的境界和修为（更准确）
             const level = stateLevel || profile.level || '未获取';
             const spiritRoot = stateSpiritRoot || profile.spirit_root || '未获取';
+            const sect = stateSect || '宗门未同步';
             // 修为：state 是实时查询结果；日志 profile 只作为缺失时兜底。
             const profileCurrent = profile.estimated_current !== null && profile.estimated_current !== undefined
                 ? profile.estimated_current : (profile.current || 0);
             const profileRequired = profile.required || 0;
             const stateCurrentNum = Number(stateCurrent);
             const stateTotalNum = Number(stateTotal);
-            const hasStateFields = stateCurrent !== undefined || stateTotal !== undefined;
-            const hasValidStateExp = Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
+            const hasStateCurrent = stateCurrent !== undefined && stateCurrent !== null && stateCurrent !== '';
+            const hasStateTotal = stateTotal !== undefined && stateTotal !== null && stateTotal !== '';
+            const hasStateFields = hasStateCurrent || hasStateTotal;
+            const hasValidStateExp = hasStateCurrent && hasStateTotal
+                && Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
                 && Number.isFinite(stateTotalNum) && stateTotalNum > 0;
             const hasProfileExp = profileCurrent !== null && profileCurrent !== undefined
                 && Number.isFinite(Number(profileCurrent)) && Number(profileRequired) > 0;
@@ -1493,9 +1548,12 @@
                 <div class="cultivation-panel">
                     <div class="cultivation-title">修为统计</div>
                     <div class="cultivation-current">
-                        <span class="cultivation-level">${level}</span>
+                        <span class="cultivation-level">${escapeHtml(level)}</span>
                         <span class="cultivation-value">${currentText}</span>
-                        <span class="cultivation-root">灵根 ${spiritRoot}</span>
+                        <div class="cultivation-affiliation">
+                            <span class="cultivation-root">灵根 ${escapeHtml(spiritRoot)}</span>
+                            <span class="cultivation-sect">宗门 ${escapeHtml(sect)}</span>
+                        </div>
                     </div>
                     <div class="cultivation-meta">
                         <span>统计到 ${processedUntil}</span>
@@ -1514,16 +1572,20 @@
             `;
         }
 
-        function renderCultivationOverview(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot) {
+        function renderCultivationOverview(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot, stateSect) {
             const data = cultivation || {};
             const profile = data.profile || {};
             const level = stateLevel || profile.level || '境界未同步';
             const spiritRoot = stateSpiritRoot || profile.spirit_root || '灵根未同步';
+            const sect = stateSect || '宗门未同步';
             const stateCurrentNum = Number(stateCurrent);
             const stateTotalNum = Number(stateTotal);
             const estimatedCurrent = Number(profile.estimated_current ?? profile.current);
             const estimatedTotal = Number(profile.required);
-            const hasState = Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
+            const hasStateCurrent = stateCurrent !== undefined && stateCurrent !== null && stateCurrent !== '';
+            const hasStateTotal = stateTotal !== undefined && stateTotal !== null && stateTotal !== '';
+            const hasState = hasStateCurrent && hasStateTotal
+                && Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
                 && Number.isFinite(stateTotalNum) && stateTotalNum > 0;
             const hasEstimate = Number.isFinite(estimatedCurrent) && estimatedCurrent >= 0
                 && Number.isFinite(estimatedTotal) && estimatedTotal > 0;
@@ -1544,6 +1606,7 @@
                         <span class="account-profile-level" title="${escapeHtml(level)}">${escapeHtml(level)}</span>
                         <span class="account-profile-root" title="${escapeHtml(spiritRoot)}">${escapeHtml(spiritRoot)}</span>
                     </div>
+                    <div class="account-profile-sect" title="宗门 ${escapeHtml(sect)}">宗门 ${escapeHtml(sect)}</div>
                     <div class="account-profile-exp">
                         <span>${escapeHtml(expText)}</span>
                         <span>${current !== null && total ? `${percent.toFixed(1)}%` : '--'}</span>
@@ -1561,7 +1624,7 @@
             const s = state || {};
             if (id !== 'main') return s.cloud_stairs_progress || s.date || '活跃';
 
-            if (String(s.sect_name || '').trim() === '万灵宗') {
+            if (firstProfileText(s.miniapp_sect_name, s.sect_name) === '万灵宗') {
                 const beastName = String(s.best_beast_name || '').trim();
                 const stamina = Number(s.best_beast_stamina);
                 if (beastName) {
@@ -3511,11 +3574,14 @@
                     if (s.avatars && Object.keys(s.avatars).length > 0) {
                         const avatarItems = Object.entries(s.avatars).map(([name, val]) => {
                             const usernameText = identityUsername(acc, name);
-                            const level = val.level || '未获取';
-                            const spiritRoot = val.spirit_root || '灵根未获取';
-                            const avatarCurrent = Number(val.current_exp);
-                            const avatarTotal = Number(val.total_exp);
-                            const hasAvatarExp = Number.isFinite(avatarCurrent) && avatarCurrent >= 0
+                            const profile = dashboardIdentityProfile(s, name, val);
+                            const level = profile.level || '未获取';
+                            const spiritRoot = profile.spiritRoot || '灵根未获取';
+                            const sect = profile.sect || '宗门未同步';
+                            const avatarCurrent = profile.current;
+                            const avatarTotal = profile.total;
+                            const hasAvatarExp = avatarCurrent !== null && avatarTotal !== null
+                                && Number.isFinite(avatarCurrent) && avatarCurrent >= 0
                                 && Number.isFinite(avatarTotal) && avatarTotal > 0;
                             const expText = hasAvatarExp
                                 ? `${formatNumber(avatarCurrent)} / ${formatNumber(avatarTotal)}`
@@ -3592,6 +3658,7 @@
                                     ${attachedTag}
                                     <div class="avatar-level">${escapeHtml(level)}</div>
                                     <div class="avatar-root" title="${escapeHtml(spiritRoot)}">${escapeHtml(spiritRoot)}</div>
+                                    <div class="avatar-sect" title="宗门 ${escapeHtml(sect)}">宗门 ${escapeHtml(sect)}</div>
                                     <div class="avatar-exp" title="修为 ${escapeHtml(expText)}">修为 ${escapeHtml(expText)}</div>
                                     <div class="avatar-exp-bar" role="progressbar" aria-label="${escapeHtml(name)} 修为进度" aria-valuenow="${expPercent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${expPercent.toFixed(1)}%"></span></div>
                                     <div class="avatar-status ${statusClass}">
@@ -3614,6 +3681,7 @@
                         `;
                     }
                     const mainUsernameText = identityUsername(acc, '主魂');
+                    const mainProfile = dashboardIdentityProfile(s, '主魂', s);
 
                     html += `
                         <article class="card account-${escapeHtml(id)}">
@@ -3629,7 +3697,7 @@
                                     </div>
                                 </div>
                                 ${mainUsernameText ? `<div class="identity-username account-username" title="${escapeHtml(mainUsernameText)}">主魂 ${escapeHtml(mainUsernameText)}</div>` : ''}
-                                ${renderCultivationOverview(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
+                                ${renderCultivationOverview(acc.cultivation, mainProfile.level, mainProfile.current, mainProfile.total, mainProfile.spiritRoot, mainProfile.sect)}
                                 ${renderIdentityCommandStrip(id, '主魂')}
                             </div>
                             ${accountHealthHtml}
@@ -3637,7 +3705,7 @@
                             ${commandPanelHtml}
                             <details class="account-detail-drawer">
                                 <summary>${escapeHtml(s.in_deep_meditation ? '深度闭关中' : '普通闭关')} · ${escapeHtml(mainProgressText(id, s))} · 查看修为明细</summary>
-                                ${renderCultivation(acc.cultivation, s.level, s.current_exp, s.total_exp, s.spirit_root)}
+                                ${renderCultivation(acc.cultivation, mainProfile.level, mainProfile.current, mainProfile.total, mainProfile.spiritRoot, mainProfile.sect)}
                             </details>
                             <div class="controls">
                                 <button class="btn btn-start" onclick="doAction('${id}', 'start')"><i data-lucide="play" aria-hidden="true"></i>启动</button>

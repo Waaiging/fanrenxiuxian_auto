@@ -289,7 +289,7 @@ class RestrictedMiniAppWorker:
         synced = 0
         for identity in self.identities():
             try:
-                payload = await self.transport.details(identity)
+                payload = await self.transport.overview(identity)
                 apply_dwelling_snapshot(self.actor, identity, payload)
                 synced += 1
             except Exception as exc:

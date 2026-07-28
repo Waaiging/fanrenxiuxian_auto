@@ -19,6 +19,7 @@ from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
+    identity_state,
     miniapp_command_allowed,
     normalize_miniapp_command,
 )
@@ -26,6 +27,7 @@ from miniapp_dwelling import (
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_AUTH_REFRESH_SECONDS = 6 * 3600
+DEFAULT_PROFILE_REFRESH_SECONDS = 30 * 60
 
 
 def _now_text() -> str:
@@ -53,6 +55,10 @@ class MiniAppCommandRouter:
             1800,
             int(settings.get("auth_refresh_seconds") or DEFAULT_AUTH_REFRESH_SECONDS),
         )
+        self.profile_refresh_seconds = max(
+            300,
+            int(settings.get("profile_refresh_seconds") or DEFAULT_PROFILE_REFRESH_SECONDS),
+        )
         self.transport = MiniAppDwellingTransport(
             actor.client,
             entry_url,
@@ -63,6 +69,7 @@ class MiniAppCommandRouter:
         self._orig_send = None
         self._orig_send_identity = None
         self._last_auth_refresh = datetime.min
+        self._profile_task: asyncio.Task[Any] | None = None
 
     def _record(self, **updates: Any) -> None:
         state = getattr(self.actor, "state", None)
@@ -107,12 +114,54 @@ class MiniAppCommandRouter:
             miniapp_route_last_error="",
             miniapp_route_identities=known,
         )
+        await self.sync_all_profiles(known)
+        self._profile_task = asyncio.create_task(
+            self.run_profile_sync_loop(),
+            name=f"miniapp_{self.account}_profiles",
+        )
         self.log.warning(
             "[%s] Mini App command routing active for identities %s; unsupported commands stay in the group",
             self.account,
             known,
         )
         return True
+
+    def routable_identities(self) -> list[str]:
+        return [
+            name
+            for name in ["主魂", *(getattr(self.actor, "avatars", []) or [])]
+            if self._identity_routable(name)
+        ]
+
+    async def sync_all_profiles(self, identities: list[str] | None = None) -> int:
+        synced = 0
+        for identity in identities if identities is not None else self.routable_identities():
+            try:
+                payload = await self.transport.overview(identity)
+                apply_dwelling_snapshot(self.actor, identity, payload)
+                synced += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+                identity_state(self.actor, identity)["miniapp_last_error"] = code
+                self.log.warning(
+                    "Mini App profile sync failed for %s (%s)",
+                    identity,
+                    code,
+                )
+        self._record(
+            miniapp_profile_last_sync_time=_now_text(),
+            miniapp_profile_identity_count=synced,
+        )
+        return synced
+
+    async def run_profile_sync_loop(self) -> None:
+        while getattr(self.actor, "is_running", True):
+            await asyncio.sleep(self.profile_refresh_seconds)
+            if not getattr(self.actor, "is_running", True):
+                return
+            await self.sync_all_profiles()
 
     def _identity_routable(self, identity: str) -> bool:
         key = str(identity or "主魂").strip() or "主魂"
