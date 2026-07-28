@@ -8,6 +8,7 @@ from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
     miniapp_command_allowed,
+    sect_farm_snapshot_status,
 )
 from miniapp_command_routing import MiniAppCommandRouter
 from dashboard_server import apply_command_execution_channels
@@ -61,6 +62,20 @@ class MiniAppDwellingTests(unittest.TestCase):
     def test_periodic_sync_without_previous_timestamp_runs_immediately(self):
         self.assertEqual(_periodic_wait_seconds("", 12 * 3600), 0)
         self.assertEqual(_periodic_wait_seconds("not-a-timestamp", 12 * 3600), 0)
+
+    def test_star_farm_cooldown_batches_same_star_without_fixed_polling(self):
+        status = sect_farm_snapshot_status({
+            "domain": {
+                "mode": "stars",
+                "plots": [
+                    {"key": "1", "name": "天雷星", "remainingSeconds": 100},
+                    {"key": "2", "name": "天雷星", "remainingSeconds": 112},
+                    {"key": "3", "name": "建木星", "remainingSeconds": 80},
+                ],
+            }
+        })
+
+        self.assertEqual(status["next_wait_seconds"], 80)
 
     def test_command_whitelist_rejects_group_only_actions(self):
         for command in (
@@ -271,7 +286,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(external[1]["playerId"], -200)
         self.assertEqual(external[1]["action"], "sect_farm")
 
-    def test_user_visible_miniapp_operations_are_logged_but_overview_sync_is_quiet(self):
+    def test_user_visible_miniapp_operations_are_logged_but_polling_and_batch_items_are_quiet(self):
         logger = FakeLogger()
 
         async def post_json(origin, path, payload, timeout):
@@ -339,8 +354,8 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("同步洞府首页", combined)
         self.assertIn("IN [Mini App | 素心子]:\n指令 .元婴出窍 -> 元婴已出窍", combined)
         self.assertIn("IN [Mini App | 主魂]:\n读取万兽谷灵兽列表 -> 1 只灵兽", combined)
-        self.assertIn("IN [Mini App | 主魂]:\n万兽谷灵兽安抚（ID 7） -> 大圣安抚完成", combined)
-        self.assertIn("IN [Mini App | 素心子]:\n读取宗门灵圃 -> 1 个星位", combined)
+        self.assertNotIn("万兽谷灵兽安抚（ID 7）", combined)
+        self.assertNotIn("读取宗门灵圃", combined)
         self.assertIn("IN [Mini App | 素心子]:\n宗门灵圃安抚星辰 -> 安抚完成", combined)
 
     def test_failed_miniapp_operation_is_logged(self):
@@ -476,6 +491,168 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(actor.state["avatars"]["素心子"]["miniapp_sect_name"], "星宫")
         self.assertGreater(actor.saved, 0)
 
+    def test_router_discovers_main_and_sub_star_palace_identities(self):
+        main_actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["无咎子", "缘生子", "素缘子"],
+            identity_sect_names={
+                "主魂": "万灵宗",
+                "无咎子": "天星宗",
+                "缘生子": "阴罗宗",
+                "素缘子": "星宫",
+            },
+        )
+        main_router = MiniAppCommandRouter(main_actor, "main")
+        main_router.transport.identity_player_ids = {
+            "主魂": 100,
+            "无咎子": -101,
+            "缘生子": -102,
+            "素缘子": -103,
+        }
+
+        sub_actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["厚土", "缘生子", "寻真子"],
+            identity_sect_names={
+                "主魂": "元婴宗",
+                "厚土": "星宫",
+                "缘生子": "阴罗宗",
+                "寻真子": "落云宗",
+            },
+        )
+        sub_router = MiniAppCommandRouter(sub_actor, "sub")
+        sub_router.transport.identity_player_ids = {
+            "主魂": 200,
+            "厚土": -201,
+            "缘生子": -202,
+            "寻真子": -203,
+        }
+
+        self.assertEqual(main_router.star_farm_identities(), ["素缘子"])
+        self.assertEqual(sub_router.star_farm_identities(), ["厚土"])
+
+    def test_router_uses_synced_miniapp_sect_instead_of_stale_mapping(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {"avatars": {"厚土": {}, "寻真子": {}}}
+                self.avatars = ["厚土", "寻真子"]
+                self.identity_sect_names = {
+                    "主魂": "元婴宗",
+                    "厚土": "星宫",
+                    "寻真子": "星宫",
+                }
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        router = MiniAppCommandRouter(actor, "sub")
+        router.transport.identity_player_ids = {"主魂": 100, "厚土": -201, "寻真子": -203}
+
+        async def overview(identity):
+            sect = {"主魂": "元婴宗", "厚土": "星宫", "寻真子": "落云宗"}[identity]
+            return {
+                "snapshot": {"level": "overview"},
+                "account": {
+                    "playerId": router.transport.identity_player_ids[identity],
+                    "profile": {"sectName": sect},
+                },
+            }
+
+        router.transport.overview = AsyncMock(side_effect=overview)
+        asyncio.run(router.sync_all_profiles(["主魂", "厚土", "寻真子"]))
+
+        self.assertEqual(actor.identity_sect_names["寻真子"], "落云宗")
+        self.assertEqual(router.star_farm_identities(), ["厚土"])
+
+    def test_router_star_farm_cycle_soothes_collects_and_pulls_via_miniapp(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {"avatars": {"素缘子": {}}}
+                self.avatars = ["素缘子"]
+                self.identity_sect_names = {"主魂": "万灵宗", "素缘子": "星宫"}
+                self.rewards = []
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def record_daily_reward_event(self, identity, command, text, source=""):
+                self.rewards.append((identity, command, text, source))
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        router = MiniAppCommandRouter(actor, "main")
+        router.transport.identity_player_ids = {"主魂": 100, "素缘子": -200}
+        router.transport.sect_farm_snapshot = AsyncMock(return_value={
+            "domain": {
+                "mode": "stars",
+                "plots": [
+                    {"key": "1", "status": "元磁紊乱"},
+                    {"key": "2", "status": "可收集"},
+                    {"key": "3", "empty": True},
+                ],
+            }
+        })
+
+        async def action(identity, action, plot_key="", star_name=""):
+            if action == "soothe":
+                plots = [
+                    {"key": "1", "status": "正常"},
+                    {"key": "2", "status": "可收集"},
+                    {"key": "3", "empty": True},
+                ]
+                message = "安抚完成"
+            elif action == "collect":
+                plots = [
+                    {"key": "1", "status": "正常"},
+                    {"key": "2", "empty": True},
+                    {"key": "3", "empty": True},
+                ]
+                message = "成功收集星辰精华"
+            else:
+                plots = [
+                    {"key": "2", "name": "天雷星", "remainingSeconds": 3598},
+                    {"key": "3", "name": "天雷星", "remainingSeconds": 3600},
+                ]
+                message = f"已在星位 {plot_key} 牵引{star_name}"
+            return {
+                "ok": True,
+                "actionResult": {"ok": True, "rawMessage": message},
+                "domain": {"mode": "stars", "plots": plots},
+            }
+
+        router.transport.sect_farm_action = AsyncMock(side_effect=action)
+        with patch("miniapp_command_routing.asyncio.sleep", new=AsyncMock()):
+            wait = asyncio.run(router.run_star_farm_cycle("素缘子"))
+
+        self.assertEqual(wait, 3605)
+        self.assertEqual(
+            [call.args[1:] for call in router.transport.sect_farm_action.await_args_list],
+            [
+                ("soothe",),
+                ("collect",),
+                ("pull",),
+                ("pull",),
+            ],
+        )
+        pull_calls = router.transport.sect_farm_action.await_args_list[-2:]
+        self.assertEqual([call.kwargs["plot_key"] for call in pull_calls], ["2", "3"])
+        self.assertTrue(all(call.kwargs["star_name"] == "天雷星" for call in pull_calls))
+        self.assertEqual(actor.rewards[0][0:2], ("素缘子", ".收集精华"))
+
     def test_command_center_placeholder_does_not_clear_deep_meditation(self):
         actor = SimpleNamespace(
             state={
@@ -559,9 +736,10 @@ class MiniAppDwellingTests(unittest.TestCase):
             "domain": {"mode": "stars", "plots": []},
         })
 
-        payload = asyncio.run(worker._star_action("soothe"))
+        payload, status = asyncio.run(worker._star_action("soothe"))
 
         self.assertTrue(payload["ok"])
+        self.assertEqual(status, (0, 0, [], 0))
         worker.transport.sect_farm_action.assert_awaited_once_with(
             "素心子",
             "soothe",

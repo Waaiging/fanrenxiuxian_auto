@@ -1,7 +1,7 @@
 import asyncio
 import copy
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from miniapp_beast import MiniAppBeastError
 from miniapp_beast_contract import MiniAppBeastContractWorker
@@ -122,7 +122,8 @@ class MiniAppBeastContractTests(unittest.TestCase):
     def test_cycle_interacts_with_every_beast_once_and_updates_stamina(self):
         actor = DummyActor()
         transport = FakeTransport()
-        worker = MiniAppBeastContractWorker(actor, transport)
+        logger = Mock()
+        worker = MiniAppBeastContractWorker(actor, transport, logger=logger)
 
         self.assertTrue(asyncio.run(worker.run_cycle()))
 
@@ -135,6 +136,12 @@ class MiniAppBeastContractTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_contract_interaction_success_count"], 2)
         self.assertEqual(actor.state["beast_contract_interaction_completed_count"], 1)
         self.assertEqual(actor.state["beast_contract_interaction_last_error"], "")
+        self.assertEqual(logger.info.call_count, 1)
+        message, *args = logger.info.call_args.args
+        combined = message % tuple(args)
+        self.assertIn("IN [Mini App | 主魂]:\n万兽谷灵兽安抚", combined)
+        self.assertIn("大圣 体力35→45", combined)
+        self.assertIn("灵狐 体力80→90", combined)
 
     def test_partial_failure_retries_only_failed_beast(self):
         actor = DummyActor()

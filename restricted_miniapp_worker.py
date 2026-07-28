@@ -25,10 +25,13 @@ from miniapp_dwelling import (
     MiniAppCommandResponse,
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
+    command_result_ok,
     command_result_text,
     identity_state,
     miniapp_command_allowed,
+    miniapp_operation_result_text,
     normalize_miniapp_command,
+    sect_farm_snapshot_status,
 )
 
 
@@ -36,7 +39,8 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_STATUS_REFRESH_SECONDS = 30 * 60
 DEFAULT_AUTH_REFRESH_SECONDS = 6 * 3600
 DEFAULT_BEAST_SYNC_SECONDS = 12 * 3600
-DEFAULT_STAR_REFRESH_SECONDS = 10 * 60
+DEFAULT_STAR_RETRY_SECONDS = 5 * 60
+STAR_FARM_WAKE_GRACE_SECONDS = 5
 STAR_IDENTITY = "素心子"
 STAR_TARGET = "天雷星"
 XIAOHAO_YUANYING_AVATARS = ("缘生子",)
@@ -83,9 +87,9 @@ class RestrictedMiniAppWorker:
             6 * 3600,
             int(settings.get("beast_sync_seconds") or DEFAULT_BEAST_SYNC_SECONDS),
         )
-        self.star_refresh_seconds = max(
+        self.star_retry_seconds = max(
             60,
-            int(settings.get("star_refresh_seconds") or DEFAULT_STAR_REFRESH_SECONDS),
+            int(settings.get("star_retry_seconds") or DEFAULT_STAR_RETRY_SECONDS),
         )
         self.star_enabled = bool(settings.get("star_farm_enabled", True))
         self.beast_enabled = bool(settings.get("beast_sync_enabled", True))
@@ -398,65 +402,80 @@ class RestrictedMiniAppWorker:
                 wait = 300
             await asyncio.sleep(max(60, min(int(wait or 300), 300)))
 
-    def _record_star_snapshot(self, payload: dict[str, Any]) -> tuple[int, int, list[str]]:
-        domain = payload.get("domain") or {}
-        if domain.get("mode") != "stars":
-            raise MiniAppBeastError("star_farm_identity_mismatch")
-        plots = [item for item in (domain.get("plots") or []) if isinstance(item, dict)]
-        ready = sum(1 for item in plots if item.get("status") == "可收集")
-        troubled = sum(1 for item in plots if item.get("status") in {"星光黯淡", "元磁紊乱"})
-        empty = [str(item.get("key") or "") for item in plots if item.get("empty")]
+    def _record_star_snapshot(self, payload: dict[str, Any]) -> tuple[int, int, list[str], int]:
+        snapshot = sect_farm_snapshot_status(payload)
+        ready = int(snapshot["ready_count"])
+        troubled = int(snapshot["troubled_count"])
+        empty = list(snapshot["empty_keys"])
+        next_wait = int(snapshot["next_wait_seconds"])
+        next_collect_time = (
+            add_seconds_str(now_str(), next_wait + STAR_FARM_WAKE_GRACE_SECONDS)
+            if next_wait > 0
+            else ""
+        )
         state = identity_state(self.actor, STAR_IDENTITY)
         state["star_miniapp_last_sync_time"] = now_str()
         state["star_miniapp_ready_count"] = ready
         state["star_miniapp_troubled_count"] = troubled
         state["star_miniapp_empty_count"] = len(empty)
+        state["star_miniapp_next_collect_time"] = next_collect_time
+        state["star_miniapp_next_wait_seconds"] = next_wait
         state["star_miniapp_last_error"] = ""
         state["last_star_observatory_time"] = now_str()
+        state["star_observatory_needs_refresh"] = False
+        state["next_star_collect_time"] = next_collect_time
+        state["next_star_appease_time"] = next_collect_time
+        state["next_star_check_time"] = next_collect_time
         state["star_observatory_summary"] = (
             f"Mini App: 可收集 {ready}，需安抚 {troubled}，空盘 {len(empty)}"
+            f"，下次采集 {next_collect_time or '待结算'}"
         )
         self._save()
-        return ready, troubled, empty
+        return ready, troubled, empty, next_wait
 
-    async def _star_action(self, action: str, plot_key: str = "") -> dict[str, Any]:
+    async def _star_action(
+        self,
+        action: str,
+        plot_key: str = "",
+    ) -> tuple[dict[str, Any], tuple[int, int, list[str], int]]:
         payload = await self.transport.sect_farm_action(
             STAR_IDENTITY,
             action,
             plot_key=plot_key,
             star_name=STAR_TARGET if action == "pull" else "",
         )
+        if not command_result_ok(payload):
+            raise MiniAppBeastError(f"star_farm_{action}_failed")
         state = identity_state(self.actor, STAR_IDENTITY)
         state["star_miniapp_last_action"] = action
         state["star_miniapp_last_action_time"] = now_str()
-        state["star_miniapp_last_result"] = command_result_text(payload) or str(
-            (payload.get("actionResult") or {}).get("message") or ""
+        state["star_miniapp_last_result"] = (
+            command_result_text(payload) or miniapp_operation_result_text(payload)
         )
-        self._record_star_snapshot(payload)
-        return payload
+        return payload, self._record_star_snapshot(payload)
 
     async def run_star_farm_loop(self) -> None:
         await self.actor.startup_done.wait()
         while self.actor.is_running:
-            wait = self.star_refresh_seconds
+            wait = self.star_retry_seconds
             try:
                 payload = await self.transport.sect_farm_snapshot(STAR_IDENTITY)
-                ready, troubled, empty = self._record_star_snapshot(payload)
-                if troubled:
-                    payload = await self._star_action("soothe")
-                    if payload:
-                        ready, troubled, empty = self._record_star_snapshot(payload)
+                ready, troubled, empty, next_wait = self._record_star_snapshot(payload)
                 if ready:
-                    payload = await self._star_action("collect")
-                    if payload:
-                        ready, troubled, empty = self._record_star_snapshot(payload)
+                    _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
+                if ready:
+                    _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
                 for plot_key in empty:
-                    payload = await self._star_action("pull", plot_key=plot_key)
-                    if not payload:
-                        break
+                    _, (ready, troubled, _, next_wait) = await self._star_action(
+                        "pull",
+                        plot_key=plot_key,
+                    )
                     await asyncio.sleep(1)
-                if troubled or ready or empty:
-                    wait = 60
+                wait = (
+                    next_wait + STAR_FARM_WAKE_GRACE_SECONDS
+                    if next_wait > 0
+                    else self.star_retry_seconds
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -466,7 +485,7 @@ class RestrictedMiniAppWorker:
                 state["star_miniapp_last_error_time"] = now_str()
                 self._save()
                 self.log.error("Star farm Mini App loop failed: %s", code, exc_info=True)
-                wait = 300
+                wait = self.star_retry_seconds
             await asyncio.sleep(max(60, int(wait)))
 
     def _record_beast_snapshot(self, snapshot: dict[str, Any]) -> None:

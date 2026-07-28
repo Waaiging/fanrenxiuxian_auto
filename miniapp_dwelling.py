@@ -149,6 +149,50 @@ def miniapp_operation_result_text(payload: Any) -> str:
     return "完成"
 
 
+def sect_farm_snapshot_status(payload: Any) -> dict[str, Any]:
+    """Normalize one sect-farm payload and derive its next useful wake-up."""
+    domain = payload.get("domain") if isinstance(payload, dict) else None
+    if not isinstance(domain, dict) or domain.get("mode") != "stars":
+        raise MiniAppBeastError("star_farm_identity_mismatch")
+    plots = [item for item in (domain.get("plots") or []) if isinstance(item, dict)]
+    ready = 0
+    troubled = 0
+    empty: list[str] = []
+    remaining_groups: dict[str, list[int]] = {}
+    for item in plots:
+        status = str(item.get("status") or item.get("statusLabel") or "").strip()
+        if status == "可收集":
+            ready += 1
+        if status in {"星光黯淡", "元磁紊乱"}:
+            troubled += 1
+        if item.get("empty"):
+            key = str(item.get("key") or item.get("plotKey") or "").strip()
+            if key:
+                empty.append(key)
+            continue
+        try:
+            remaining = max(0, int(item.get("remainingSeconds") or 0))
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining > 0:
+            # Slots pulled to the same star mature only seconds apart.  Wake
+            # after the last slot in that batch so one soothe/collect handles
+            # the whole batch; mixed star types keep their own earlier batch.
+            group = str(item.get("name") or item.get("starName") or "stars").strip() or "stars"
+            remaining_groups.setdefault(group, []).append(remaining)
+    next_wait_seconds = min(
+        (max(values) for values in remaining_groups.values()),
+        default=0,
+    )
+    return {
+        "plots": plots,
+        "ready_count": ready,
+        "troubled_count": troubled,
+        "empty_keys": empty,
+        "next_wait_seconds": next_wait_seconds,
+    }
+
+
 class MiniAppDwellingTransport:
     """Authenticated, identity-aware access to the fixed dwelling entry."""
 
@@ -504,34 +548,29 @@ class MiniAppDwellingTransport:
         if beast_id <= 0:
             raise MiniAppBeastError("spirit_beast_id_invalid")
         async with self._lock:
-            return await self._logged_operation(
+            # Contract cycles can soothe many beasts at once.  The worker
+            # emits one combined audit entry after the batch instead of two
+            # transport entries for every individual beast.
+            return await self._external_request_unlocked(
                 identity,
-                f"万兽谷灵兽{interaction}（ID {beast_id}）",
-                lambda: self._external_request_unlocked(
-                    identity,
-                    "spirit_beast",
-                    "spiritbeast_",
-                    "/api/miniapp/xianxia-spirit-beast/action",
-                    payload={
-                        "action": "interact",
-                        "beastId": beast_id,
-                        "interaction": interaction,
-                    },
-                ),
+                "spirit_beast",
+                "spiritbeast_",
+                "/api/miniapp/xianxia-spirit-beast/action",
+                payload={
+                    "action": "interact",
+                    "beastId": beast_id,
+                    "interaction": interaction,
+                },
             )
 
     async def sect_farm_snapshot(self, identity: str) -> dict[str, Any]:
+        """Read the farm state silently; callers log actions and failures."""
         async with self._lock:
-            return await self._logged_operation(
+            return await self._external_request_unlocked(
                 identity,
-                "读取宗门灵圃",
-                lambda: self._external_request_unlocked(
-                    identity,
-                    "sect_farm",
-                    "farm_",
-                    "/api/miniapp/xianxia-sect-farm/start",
-                ),
-                summarize=lambda result: f"{len(((result.get('domain') or {}).get('plots') or []))} 个星位",
+                "sect_farm",
+                "farm_",
+                "/api/miniapp/xianxia-sect-farm/start",
             )
 
     async def sect_farm_action(

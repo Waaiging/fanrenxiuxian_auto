@@ -455,7 +455,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             "主魂": "元婴宗",
             "厚土": "星宫",
             "缘生子": "阴罗宗",
-            "寻真子": "星宫",
+            "寻真子": "落云宗",
         }
         self.main_star_palace_enabled = False
         self.main_formation_enabled = False

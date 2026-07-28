@@ -3889,11 +3889,16 @@ def is_miniapp_transport_log_entry(entry, direction=""):
     return marker in header
 
 
-def is_quiet_miniapp_sync_log_entry(entry):
-    """Hide routine Mini App profile polling from the Dashboard log feed."""
+def is_suppressed_miniapp_transport_log_entry(entry):
+    """Hide routine polling and superseded per-item Mini App audit entries."""
     if not is_miniapp_transport_log_entry(entry):
         return False
-    return "同步洞府首页" in str(entry.get("text") or "")
+    text = str(entry.get("text") or "")
+    return any(marker in text for marker in (
+        "同步洞府首页",
+        "读取宗门灵圃",
+        "万兽谷灵兽安抚（ID ",
+    ))
 
 
 def is_command_reply_log_entry(entry):
@@ -3912,7 +3917,7 @@ def is_command_reply_log_entry(entry):
 def is_dashboard_visible_log_entry(entry):
     """Show only command traffic plus actual error diagnostics on Dashboard."""
     header = log_entry_header(entry)
-    if is_quiet_miniapp_sync_log_entry(entry):
+    if is_suppressed_miniapp_transport_log_entry(entry):
         return False
     if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry):
         return True

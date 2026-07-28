@@ -16,7 +16,10 @@
     "contract_interaction_enabled": true,
     "contract_interaction_seconds": 7200,
     "contract_interaction_retry_seconds": 300,
-    "contract_interaction_delay_seconds": 1
+    "contract_interaction_delay_seconds": 1,
+    "star_farm_enabled": true,
+    "star_farm_retry_seconds": 300,
+    "star_farm_target": "天雷星"
   },
   "restricted_miniapp": {
     "enabled": true,
@@ -25,7 +28,7 @@
     "beast_sync_enabled": true,
     "beast_sync_seconds": 43200,
     "star_farm_enabled": true,
-    "star_refresh_seconds": 600
+    "star_retry_seconds": 300
   },
   "monitor": {
     "chat_id": "fanrenxxz",

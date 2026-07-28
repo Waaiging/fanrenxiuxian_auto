@@ -271,6 +271,7 @@ class MiniAppBeastContractWorker:
             state["beast_contract_interaction_cycle_target_time"] = target_next
 
         failed = 0
+        batch_details: list[str] = []
         for index, beast in enumerate(due):
             beast_id = int(beast["id"])
             result_key = str(beast_id)
@@ -303,12 +304,8 @@ class MiniAppBeastContractWorker:
                 state["beast_contract_interaction_success_count"] = int(
                     state.get("beast_contract_interaction_success_count") or 0
                 ) + 1
-                self.log.info(
-                    "Spirit-beast contract soothe succeeded: %s (id=%s, stamina=%s->%s)",
-                    name,
-                    beast_id,
-                    before,
-                    item_state["stamina_after"],
+                batch_details.append(
+                    f"{name} 体力{before}→{item_state['stamina_after']}"
                 )
             except asyncio.CancelledError:
                 results[result_key] = item_state
@@ -327,13 +324,7 @@ class MiniAppBeastContractWorker:
                 ) + 1
                 state["beast_contract_interaction_last_error"] = f"{name}: {code}"[:240]
                 state["beast_contract_interaction_last_error_time"] = contract_time()
-                self.log.error(
-                    "Spirit-beast contract soothe failed: %s (id=%s): %s",
-                    name,
-                    beast_id,
-                    code,
-                    exc_info=True,
-                )
+                batch_details.append(f"{name} 失败({code})")
             results[result_key] = item_state
             self._save()
             if index + 1 < len(due) and self.action_delay_seconds > 0:
@@ -365,6 +356,14 @@ class MiniAppBeastContractWorker:
             state["beast_contract_interaction_active_cycle"] = ""
             state["beast_contract_interaction_cycle_target_time"] = ""
         self._save()
+        summary = (
+            f"共处理 {len(due)} 只，成功 {len(due) - failed}，失败 {failed}"
+            f"：{'；'.join(batch_details)}"
+        )
+        if failed:
+            self.log.error("Mini App [主魂] 万兽谷灵兽安抚部分失败：%s", summary)
+        else:
+            self.log.info("IN [Mini App | 主魂]:\n万兽谷灵兽安抚 -> %s", summary)
         return failed == 0
 
     async def run(self) -> None:
