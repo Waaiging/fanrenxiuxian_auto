@@ -10,5 +10,12 @@
     "chat_id": "fanrenxxz",
     "topic_id": null,
     "watch_bot": "fanrenxiuxian_bot"
+  },
+  "miniapp_beast": {
+    "enabled": true,
+    "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=<entry_token>",
+    "bot_username": "fanrenxiuxian_bot",
+    "timeout_seconds": 20,
+    "command_routing_enabled": true
   }
 }

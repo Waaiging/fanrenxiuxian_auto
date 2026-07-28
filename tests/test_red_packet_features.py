@@ -461,6 +461,35 @@ class RedPacketFeatureTests(unittest.TestCase):
 
         client.send_message.assert_not_awaited()
 
+    def test_unrecognized_receipt_name_keeps_pending_and_skips_notify(self):
+        client = SimpleNamespace(send_message=AsyncMock())
+        monitor = red_packet_features.RedPacketMonitor(client, "main")
+        monitor.topic_id = 42
+        monitor.self_names = {"waaiging"}
+        monitor._register_pending_claim(100, Decimal("10"))
+        receipt_message = SimpleNamespace(
+            id=101,
+            sender_id=8547797815,
+            reply_to=SimpleNamespace(
+                reply_to_top_id=None,
+                reply_to_msg_id=42,
+                forum_topic=True,
+            ),
+            raw_text="🧧 恭喜 SomeoneElse 抢到 0.36 LDC！",
+            text="",
+        )
+
+        asyncio.run(monitor.process_receipt(receipt_message))
+
+        client.send_message.assert_not_awaited()
+        self.assertEqual(len(monitor._pending_claims), 1)
+
+    def test_settings_claim_names_round_trip(self):
+        data = red_packet_features.normalize_red_packet_settings(
+            {"claim_names": [" Waaiging ", "", 123]}
+        )
+        self.assertEqual(data["claim_names"], ["Waaiging", "123"])
+
     def test_forged_receipt_from_member_does_not_notify(self):
         client = SimpleNamespace(send_message=AsyncMock())
         monitor = red_packet_features.RedPacketMonitor(client, "main")

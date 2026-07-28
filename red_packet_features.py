@@ -26,6 +26,9 @@ RED_PACKET_BUTTON_TEXT = "抢红包"
 RED_PACKET_BUTTON_TEXTS = (RED_PACKET_BUTTON_TEXT, "抢")
 RED_PACKET_NOTIFY_TARGET = "Waaiging"
 RED_PACKET_RECEIPT_BOT_IDS = {7900199668, 8547797815, 8757550896}
+# 回执里的名字是 LinuxDo 论坛账户名（"已自动分发到论坛账户"），不是 Telegram
+# 昵称/用户名。所有账号都绑定到同一个论坛账户，因此统一接受这些名字。
+RED_PACKET_FORUM_CLAIM_NAMES = ("Waaiging",)
 RED_PACKET_ACCOUNT_NAMES = {
     "main": "主号",
     "sub": "副号",
@@ -165,6 +168,7 @@ def default_red_packet_settings() -> dict[str, Any]:
     return {
         "enabled": False,
         "accounts": [],
+        "claim_names": [],
         "minimum_amount": "0",
         "delay_seconds": "0",
         "schedule_enabled": False,
@@ -182,10 +186,12 @@ def normalize_red_packet_settings(data: Any) -> dict[str, Any]:
         account for account in RED_PACKET_ACCOUNT_NAMES if account in set(str(item) for item in accounts)
     ]
     result = default_red_packet_settings()
+    claim_names = source.get("claim_names") if isinstance(source.get("claim_names"), list) else []
     result.update(
         {
             "enabled": bool(source.get("enabled")),
             "accounts": normalized_accounts,
+            "claim_names": [str(item).strip() for item in claim_names if str(item).strip()],
             "minimum_amount": _decimal_text(source.get("minimum_amount", "0")),
             "delay_seconds": _delay_text(source.get("delay_seconds", "0")),
             "schedule_enabled": bool(source.get("schedule_enabled")),
@@ -214,12 +220,16 @@ def save_red_packet_settings(
     schedule_enabled: bool = False,
     schedule_start: Any = "00:00",
     schedule_end: Any = "00:00",
+    claim_names: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
+    if claim_names is None:
+        claim_names = load_red_packet_settings().get("claim_names") or []
     data = normalize_red_packet_settings(
         {
             "enabled": enabled,
             "accounts": accounts,
+            "claim_names": claim_names,
             "minimum_amount": minimum_amount,
             "delay_seconds": delay_seconds,
             "schedule_enabled": schedule_enabled,
@@ -505,6 +515,11 @@ class RedPacketMonitor:
                 ),
             ]
             self.self_names = {_identity_key(value) for value in identity_values if value}
+            self.self_names.update(
+                _identity_key(value) for value in RED_PACKET_FORUM_CLAIM_NAMES if value
+            )
+            extra_names = load_red_packet_settings().get("claim_names") or []
+            self.self_names.update(_identity_key(value) for value in extra_names if value)
             try:
                 self.notify_entity = await self.client.get_entity(RED_PACKET_NOTIFY_TARGET)
             except Exception as exc:
@@ -551,7 +566,11 @@ class RedPacketMonitor:
         receipt = extract_claim_receipt(
             getattr(message, "raw_text", "") or getattr(message, "text", "") or ""
         )
-        if receipt is None or _identity_key(receipt["name"]) not in self.self_names:
+        if receipt is None:
+            return
+        name_matches = _identity_key(receipt["name"]) in self.self_names
+        self._purge_pending_claims()
+        if not name_matches and not self._pending_claims:
             return
         sender_id = int(getattr(message, "sender_id", 0) or 0)
         trusted_sender = sender_id in RED_PACKET_RECEIPT_BOT_IDS
@@ -566,6 +585,15 @@ class RedPacketMonitor:
             return
         message_id = int(getattr(message, "id", 0) or 0)
         if not message_id or message_id in self._notified_receipt_set:
+            return
+        if not name_matches:
+            # 有待确认的点击、回执可信但名字对不上——大概率是论坛账户名变了。
+            self.log.warning(
+                "[%s] Red-packet receipt name %r is not recognized while a claim is pending; "
+                "add it to red_packet_settings.json claim_names if it belongs to this account.",
+                self.account,
+                receipt["name"],
+            )
             return
         self._purge_pending_claims()
         if not self._pending_claims:

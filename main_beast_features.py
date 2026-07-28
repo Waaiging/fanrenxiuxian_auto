@@ -377,9 +377,6 @@ class MainBeastMixin:
             self.state["next_beast_status_check_time"] = self.main_beast_roster_quota_reset_time()
             self.main_beast_save()
             return trusted_cache
-        if not force:
-            automatic_count += 1
-            self.state["beast_roster_auto_query_count"] = automatic_count
 
         self.state["beast_miniapp_last_attempt_time"] = beast_time()
         self.state["last_beast_roster_query_result"] = "miniapp_fetching"
@@ -405,6 +402,11 @@ class MainBeastMixin:
                     exc_info=True,
                 )
             self.record_main_beast_miniapp_snapshot(snapshot)
+            # 只有同步成功才消耗每日配额；失败时按 retry_seconds 重试，
+            # 避免瞬时故障把当天 2 次配额烧光、灵兽动作卡到次日。
+            if not force:
+                automatic_count += 1
+                self.state["beast_roster_auto_query_count"] = automatic_count
             self.state["next_beast_status_check_time"] = (
                 self.main_beast_roster_quota_reset_time()
                 if not force and automatic_count >= ROSTER_DAILY_LIMIT
@@ -421,11 +423,7 @@ class MainBeastMixin:
             self.main_beast_logger().exception("Main beast Mini App sync failed")
         self.state["last_beast_roster_query_result"] = "miniapp_error"
         self.state["beast_miniapp_last_error"] = error
-        self.state["next_beast_status_check_time"] = (
-            self.main_beast_roster_quota_reset_time()
-            if not force and automatic_count >= ROSTER_DAILY_LIMIT
-            else beast_add_seconds(settings["retry_seconds"])
-        )
+        self.state["next_beast_status_check_time"] = beast_add_seconds(settings["retry_seconds"])
         self.main_beast_save()
         self.main_beast_logger().warning(
             "Main beast Mini App sync failed (%s); stale roster will not be used for a new beast action.",

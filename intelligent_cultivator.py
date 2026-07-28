@@ -89,6 +89,7 @@ def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
 
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 from red_packet_features import install_red_packet_monitor
+from miniapp_command_routing import install_miniapp_command_router
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
@@ -5594,6 +5595,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             getattr(self.my_info, "username", "") or "",
         )
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
+        # 可迁移指令优先走 Mini App；不支持的指令与 Mini App 故障时回退群内发送。
+        await install_miniapp_command_router(self, self.account_key, logger=log)
 
         restricted_specs = self.restricted_account_specs()
         if restricted_specs and os.name != "nt":
