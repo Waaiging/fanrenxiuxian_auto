@@ -2257,6 +2257,30 @@ class ParserFixtureTests(unittest.TestCase):
         logger.info.assert_not_called()
         logger.debug.assert_called_once()
 
+    def test_dashboard_labels_miniapp_and_group_execution_channels(self):
+        state = {
+            "miniapp_route_active": True,
+            "done": [],
+            "avatars": {},
+        }
+
+        commands = build_command_panels("main", state)[0]["commands"]
+        by_command = {item["command"]: item for item in commands}
+
+        self.assertEqual(by_command[".深度闭关"]["execution_channel"], "miniapp")
+        self.assertEqual(by_command[".元婴出窍"]["execution_channel"], "miniapp")
+        self.assertEqual(by_command[".探寻裂缝"]["execution_channel"], "group")
+        self.assertEqual(by_command["miniapp:spirit-beast"]["execution_channel"], "miniapp")
+
+    def test_dashboard_uses_group_marker_when_miniapp_route_is_inactive(self):
+        state = {"done": [], "avatars": {}}
+
+        commands = build_command_panels("main", state)[0]["commands"]
+        deep = next(item for item in commands if item["command"] == ".深度闭关")
+
+        self.assertEqual(deep["execution_channel"], "group")
+        self.assertIn("路由未启用", deep["execution_channel_detail"])
+
     def test_common_main_yuanying_retreat_tick_retries_after_settlement(self):
         class DummyRetreatTick(DummyCommon):
             yuanying_main_command = ".元婴闭关"

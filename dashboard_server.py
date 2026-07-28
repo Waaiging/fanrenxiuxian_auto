@@ -55,6 +55,7 @@ from duel_features import (
 )
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
+from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -614,6 +615,34 @@ def apply_command_controls(account, panel):
             row["tone"] = "paused"
             detail = row.get("detail", "")
             row["detail"] = f"dashboard 临时暂停{f' · {detail}' if detail else ''}"
+    return panel
+
+
+def apply_command_execution_channels(panel, root_state=None):
+    """Label each row with the channel that will currently execute it."""
+    state = root_state if isinstance(root_state, dict) else {}
+    route_active = bool(state.get("miniapp_route_active"))
+    restricted_active = bool(state.get("restricted_miniapp_active"))
+    miniapp_active = route_active or restricted_active
+    for row in panel.get("commands") or []:
+        command = normalize_miniapp_command(row.get("command", ""))
+        miniapp_only = command.startswith("miniapp:")
+        miniapp_capable = miniapp_command_allowed(command)
+        if miniapp_only or (miniapp_active and miniapp_capable):
+            row["execution_channel"] = "miniapp"
+            if miniapp_only:
+                row["execution_channel_detail"] = "仅通过 Mini App 执行"
+            elif restricted_active:
+                row["execution_channel_detail"] = "当前受限模式，仅通过 Mini App 执行"
+            else:
+                row["execution_channel_detail"] = "优先通过 Mini App 执行；失败时回退群内"
+        else:
+            row["execution_channel"] = "group"
+            row["execution_channel_detail"] = (
+                "当前 Mini App 路由未启用，使用群指令"
+                if miniapp_capable
+                else "Mini App 不支持，继续在群内发送"
+            )
     return panel
 
 
@@ -2142,6 +2171,7 @@ def build_command_panels(account, state):
     result = []
     for panel in panels:
         append_custom_commands(account, panel, custom_commands, root_state=state)
+        panel = apply_command_execution_channels(panel, root_state=state)
         panel = apply_command_controls(account, panel)
         panel = apply_identity_pause(panel, state)
         result.append(panel)

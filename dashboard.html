@@ -125,7 +125,13 @@
         .command-row { display: grid; grid-template-columns: minmax(9rem, 1.6fr) minmax(8rem, 1fr) minmax(5.5rem, auto) minmax(5.8rem, auto); gap: 0.75rem; align-items: center; padding: 0.78rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.92rem; }
         .command-row:first-child { border-top: 0; }
         .command-main { min-width: 0; display: flex; flex-direction: column; gap: 0.22rem; }
+        .command-name-line { min-width: 0; display: flex; align-items: center; gap: 0.42rem; }
         .command-name { font-weight: 800; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
+        .command-channel { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px; padding: 0.12rem 0.38rem; font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; font-weight: 900; line-height: 1.15; white-space: nowrap; }
+        .command-channel.execution-miniapp { color: #c4b5fd; background: rgba(139,92,246,0.15); border-color: rgba(167,139,250,0.42); }
+        .command-channel.execution-group { color: #7dd3fc; background: rgba(14,165,233,0.1); border-color: rgba(125,211,252,0.32); }
+        .command-row.execution-miniapp { box-shadow: inset 3px 0 0 rgba(167,139,250,0.62); background: linear-gradient(90deg, rgba(139,92,246,0.07), transparent 42%); }
+        .command-row.execution-group { box-shadow: inset 3px 0 0 rgba(56,189,248,0.28); }
         .command-code { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .command-status { justify-self: start; border-radius: 999px; padding: 0.22rem 0.58rem; font-size: 0.78rem; font-weight: 800; white-space: nowrap; }
         .command-schedule { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); white-space: nowrap; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; }
@@ -2224,6 +2230,11 @@
                 const isNextDue = dueKey && commandItemKey(item) === dueKey;
                 const baitOptions = Array.isArray(item.bait_options) ? item.bait_options : [];
                 const dashboardAction = String(item.dashboard_action || '');
+                const executionChannel = item.execution_channel === 'miniapp' ? 'miniapp' : 'group';
+                const executionLabel = executionChannel === 'miniapp' ? 'Mini App' : '群指令';
+                const executionTitle = item.execution_channel_detail || (
+                    executionChannel === 'miniapp' ? '通过 Mini App 执行' : '在 Telegram 群内发送'
+                );
                 const actionKey = `${account}:${dashboardAction}`;
                 const actionPending = Boolean(dashboardActionPending[actionKey]);
                 const baitSelect = baitOptions.length ? `
@@ -2242,9 +2253,12 @@
                     <span>${pending ? '处理中' : controlLabel}</span>
                 `;
                 return `
-                    <div class="command-row tone-${tone} ${isNextDue ? 'next-due' : ''}">
+                    <div class="command-row tone-${tone} execution-${executionChannel} ${isNextDue ? 'next-due' : ''}">
                         <div class="command-main">
-                            <span class="command-name" title="${escapeHtml(item.command || item.label || '')}">${escapeHtml(item.label || item.command || '')}</span>
+                            <div class="command-name-line">
+                                <span class="command-name" title="${escapeHtml(item.command || item.label || '')}">${escapeHtml(item.label || item.command || '')}</span>
+                                <span class="command-channel execution-${executionChannel}" title="${escapeHtml(executionTitle)}">${escapeHtml(executionLabel)}</span>
+                            </div>
                         </div>
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
@@ -2314,8 +2328,10 @@
             const shown = visibleCommands(panelKey, commands);
             const hiddenCount = commands.length - shown.length;
             const pausedCount = commands.filter(item => item.control_disabled).length;
+            const miniappCount = shown.filter(item => item.execution_channel === 'miniapp').length;
+            const groupCount = shown.length - miniappCount;
             const title = `${panel.identity || '未知身份'} 指令`;
-            const subtitle = `${shown.length} 条显示，${hiddenCount} 条隐藏，${pausedCount} 条暂停，共 ${commands.length} 条`;
+            const subtitle = `Mini App ${miniappCount} 条 · 群指令 ${groupCount} 条 · 隐藏 ${hiddenCount} 条 · 暂停 ${pausedCount} 条`;
 
             const visibility = loadCommandVisibility(panelKey);
             const switches = commands.map(item => {
