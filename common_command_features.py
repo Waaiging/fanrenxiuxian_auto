@@ -2378,61 +2378,103 @@ class CommonCommandMixin:
         window = min(120, max(10, timeout + 5))
         return wait if wait <= window else -1
 
-    async def prepare_identity_for_time_critical_command(self, identity, command=".观星", timeout=20):
-        """Pre-switch identity before a narrow-window command without sending the command itself."""
+    async def prepare_identity_for_time_critical_command(
+        self,
+        identity,
+        command=".观星",
+        timeout=20,
+        force_fresh=False,
+        return_switch_message_id=False,
+    ):
+        """Pre-switch identity before a narrow-window command without sending the command itself.
+
+        ``force_fresh`` always emits a new ``.切换`` message even when the
+        requested identity is already active.  Duel target preparation uses
+        that concrete outgoing message as the cross-account reply anchor.
+        """
         identity = str(identity or "主魂").strip() or "主魂"
         command = str(command or "").strip() or ".观星"
         log = self.common_command_logger()
 
+        def prepared(success, message_id=None):
+            if return_switch_message_id:
+                try:
+                    message_id = int(message_id) if message_id is not None else None
+                except (TypeError, ValueError):
+                    message_id = None
+                return bool(success), message_id
+            return bool(success)
+
         if hasattr(self, "wait_while_identity_paused"):
             if not await self.wait_while_identity_paused(identity, command):
-                return False
+                return prepared(False)
 
         if not command_send_precheck(self, command, log, identity=identity):
-            return False
+            return prepared(False)
 
         while hasattr(self, "should_wait_for_atomic_task") and self.should_wait_for_atomic_task(command):
             await asyncio.sleep(0.5)
 
         current = getattr(self, "current_identity", "主魂") or "主魂"
         main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
-        if current == identity and (identity != "主魂" or main_confirmed):
-            return True
+        if not force_fresh and current == identity and (identity != "主魂" or main_confirmed):
+            return prepared(True)
 
         lock = getattr(self, "avatar_send_lock", None)
         if lock is None or not hasattr(self, "_send_and_wait_feedback_raw"):
-            return False
+            return prepared(False)
 
         async with lock:
             current = getattr(self, "current_identity", "主魂") or "主魂"
             main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
-            if current == identity and (identity != "主魂" or main_confirmed):
-                return True
+            if not force_fresh and current == identity and (identity != "主魂" or main_confirmed):
+                return prepared(True)
 
             ban_time = (getattr(self, "state", {}) or {}).get("next_switch_allowed_time", "")
             if ban_time and is_future(ban_time):
                 log.info(
                     f"Pre-switch for {command} skipped: switch command is cooling until {ban_time}."
                 )
-                return False
+                return prepared(False)
 
             switch_cmd = f".切换 {identity}"
+            previous_sent_id = getattr(self, "last_sent_id", None)
             log.info(
-                f"Pre-switch for {command}: {current} -> {identity} before time-critical send."
+                f"Pre-switch for {command}: {current} -> {identity} before time-critical send"
+                f"{' (fresh reply anchor)' if force_fresh else ''}."
             )
             switch_resp = await self._send_and_wait_feedback_raw(
                 switch_cmd,
                 timeout=timeout,
                 max_retries=1,
                 suppress_no_response_alert=True,
+                delete_after=not return_switch_message_id,
             )
             resp_text = self.timed_command_response_text(switch_resp)
+            switch_message_id = getattr(self, "last_sent_id", None)
+            try:
+                switch_message_id = int(switch_message_id)
+            except (TypeError, ValueError):
+                switch_message_id = None
+            try:
+                previous_sent_id = int(previous_sent_id)
+            except (TypeError, ValueError):
+                previous_sent_id = None
 
             if hasattr(self, "check_and_record_switch_ban") and self.check_and_record_switch_ban(resp_text):
-                return False
+                return prepared(False)
             if not resp_text and hasattr(self, "apply_switch_guard_backoff"):
                 if self.apply_switch_guard_backoff(switch_cmd):
-                    return False
+                    return prepared(False)
+
+            if force_fresh and (
+                switch_message_id is None
+                or (previous_sent_id is not None and switch_message_id == previous_sent_id)
+            ):
+                log.info(
+                    f"Pre-switch for {command} to {identity} did not produce a fresh reply anchor."
+                )
+                return prepared(False)
 
             passively_confirmed = getattr(self, "current_identity", "") == identity
             confirmed = passively_confirmed or (
@@ -2443,12 +2485,12 @@ class CommonCommandMixin:
                     f"Pre-switch for {command} to {identity} was not confirmed; "
                     f"response={resp_text[:120]!r}."
                 )
-                return False
+                return prepared(False)
 
             self.current_identity = identity
             self._main_confirmed = (identity == "主魂")
             log.info(f"Pre-switch for {command}: identity ready as {identity}.")
-            return True
+            return prepared(True, switch_message_id)
 
     async def sleep_then_prepare_time_critical_identity(self, send_dt, identity, command=".观星", lead_seconds=20):
         """Sleep until the pre-switch lead window, switch identity, then return near send time."""

@@ -711,10 +711,17 @@ def claim_duel_target_preparation(account):
         return dict(preparation)
 
 
-def finish_duel_target_preparation(claim, success, detail=""):
+def finish_duel_target_preparation(claim, success, detail="", reply_to_msg_id=None):
     if not claim:
         return False
     now = duel_now()
+    try:
+        reply_to_msg_id = int(reply_to_msg_id or 0)
+    except (TypeError, ValueError):
+        reply_to_msg_id = 0
+    if success and reply_to_msg_id <= 0:
+        success = False
+        detail = detail or "目标分身切换消息缺失"
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
         multi = data["multi"]
@@ -724,11 +731,13 @@ def finish_duel_target_preparation(claim, success, detail=""):
         if success:
             preparation["status"] = "ready"
             preparation["ready_at"] = duel_time(now)
+            preparation["reply_to_msg_id"] = reply_to_msg_id
             preparation["lease_until"] = duel_time(
                 now + timedelta(seconds=DUEL_LEASE_SECONDS)
             )
             multi["last_result"] = detail or (
-                f"@{preparation.get('target_username')} · {preparation.get('target_identity')} 已激活"
+                f"@{preparation.get('target_username')} · {preparation.get('target_identity')} "
+                "已发送切换锚点"
             )
         else:
             multi["preparation"] = {}
@@ -845,6 +854,16 @@ def _reserve_multi_duel_locked(data, account, now):
             and preparation.get("target_username", "").lower() == target_username.lower()
             and preparation.get("target_identity") == activation["identity"]
         )
+        if matching_preparation and str(preparation.get("status") or "") == "ready":
+            try:
+                reply_to_msg_id = int(preparation.get("reply_to_msg_id") or 0)
+            except (TypeError, ValueError):
+                reply_to_msg_id = 0
+            if reply_to_msg_id <= 0:
+                multi["preparation"] = {}
+                preparation = {}
+                matching_preparation = False
+                dirty = True
         if not matching_preparation:
             run_id = uuid.uuid4().hex
             multi["preparation"] = {
@@ -859,12 +878,13 @@ def _reserve_multi_duel_locked(data, account, now):
             }
             selected["status"] = "preparing"
             multi["last_result"] = (
-                f"等待 {activation['account_name']} · {activation['identity']} 激活后斗法"
+                f"等待 {activation['account_name']} · {activation['identity']} "
+                "发送新鲜的 .切换 消息"
             )
             return None, True
         if str(preparation.get("status") or "") != "ready":
             multi["last_result"] = (
-                f"正在激活 {activation['account_name']} · {activation['identity']}"
+                f"正在生成 {activation['account_name']} · {activation['identity']} 的切换锚点"
             )
             return None, True
 
@@ -885,6 +905,7 @@ def _reserve_multi_duel_locked(data, account, now):
         now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
     )
     preparation_run_id = ""
+    reply_to_msg_id = None
     if activation:
         preparation = multi.get("preparation") or {}
         preparation["status"] = "holding"
@@ -892,12 +913,14 @@ def _reserve_multi_duel_locked(data, account, now):
             now + timedelta(seconds=DUEL_LEASE_SECONDS)
         )
         preparation_run_id = str(preparation.get("run_id") or "")
+        reply_to_msg_id = int(preparation.get("reply_to_msg_id") or 0) or None
     multi["in_flight"] = {
         "run_id": run_id,
         "owner": account,
         "target_id": selected["id"],
         "target_username": target_username,
         "preparation_run_id": preparation_run_id,
+        "reply_to_msg_id": reply_to_msg_id,
         "started_at": duel_time(now),
         "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
     }
@@ -912,8 +935,11 @@ def _reserve_multi_duel_locked(data, account, now):
         "challenger_username": initiator["username"],
         "target_id": selected["id"],
         "target_username": target_username,
+        "target_account": (activation or {}).get("account", ""),
+        "target_identity": (activation or {}).get("identity", ""),
         "preparation_run_id": preparation_run_id,
-        "command": f".斗法 @{target_username}",
+        "reply_to_msg_id": reply_to_msg_id,
+        "command": ".斗法" if activation else f".斗法 @{target_username}",
         "reserved_at": duel_time(now),
     }, True
 
@@ -1714,6 +1740,11 @@ def duel_dashboard_payload(date="", limit=200):
             "activation_required": bool(
                 target_identity and target_identity.get("identity") != "主魂"
             ),
+            "duel_method": (
+                "reply_switch"
+                if target_identity and target_identity.get("identity") != "主魂"
+                else "username"
+            ),
             "target_account": (target_identity or {}).get("account", ""),
             "target_account_name": (target_identity or {}).get("account_name", ""),
             "target_identity": (target_identity or {}).get("identity", ""),
@@ -1775,22 +1806,39 @@ class DuelMixin:
     async def prepare_duel_target_identity(self, claim):
         account = str(getattr(self, "account_key", "") or "")
         if str(claim.get("owner") or "") != account:
-            return False, "目标身份准备账号不匹配"
+            return False, "目标身份准备账号不匹配", None
         identity = str(claim.get("target_identity") or "").strip()
         username = str(claim.get("target_username") or "").strip()
         if not identity or identity == "主魂" or identity not in getattr(self, "avatars", []):
-            return False, "目标不是可切换分身"
+            return False, "目标不是可切换分身", None
         prepare = getattr(self, "prepare_identity_for_time_critical_command", None)
         if not callable(prepare):
-            return False, "账号缺少分身预切换能力"
-        success = await prepare(
+            return False, "账号缺少分身预切换能力", None
+        prepared = await prepare(
             identity,
-            command=f".斗法 @{username}",
+            command=".斗法",
             timeout=30,
+            force_fresh=True,
+            return_switch_message_id=True,
         )
+        if isinstance(prepared, tuple):
+            success, reply_to_msg_id = prepared
+        else:
+            success = bool(prepared)
+            reply_to_msg_id = getattr(self, "last_sent_id", None) if success else None
+        try:
+            reply_to_msg_id = int(reply_to_msg_id or 0)
+        except (TypeError, ValueError):
+            reply_to_msg_id = 0
         if not success or str(getattr(self, "current_identity", "") or "") != identity:
-            return False, f"{identity} 激活未确认"
-        return True, f"@{username} · {identity} 已激活并保持等待斗法"
+            return False, f"{identity} 激活未确认", None
+        if reply_to_msg_id <= 0:
+            return False, f"{identity} 的 .切换 消息 ID 未取得", None
+        return (
+            True,
+            f"@{username} · 已发送 .切换 {identity}，等待发起者引用该消息斗法",
+            reply_to_msg_id,
+        )
 
     async def _run_duel_target_preparation_if_due(self):
         claim = claim_duel_target_preparation(getattr(self, "account_key", ""))
@@ -1799,11 +1847,17 @@ class DuelMixin:
         logger = self.duel_logger()
 
         async def prepare_and_hold():
-            success, detail = await self.prepare_duel_target_identity(claim)
-            finish_duel_target_preparation(claim, success, detail)
+            success, detail, reply_to_msg_id = await self.prepare_duel_target_identity(claim)
+            finish_duel_target_preparation(
+                claim,
+                success,
+                detail,
+                reply_to_msg_id=reply_to_msg_id,
+            )
             logger.info(
-                "Duel target preparation: target=@%s identity=%s success=%s detail=%s",
-                claim.get("target_username"), claim.get("target_identity"), success, detail,
+                "Duel target preparation: target=@%s identity=%s success=%s reply_to=%s detail=%s",
+                claim.get("target_username"), claim.get("target_identity"), success,
+                reply_to_msg_id, detail,
             )
             if not success:
                 return
@@ -1817,10 +1871,28 @@ class DuelMixin:
             release_duel_target_preparation(
                 claim,
                 detail=(
-                    f"@{claim.get('target_username')} 分身激活等待超时，稍后重试"
+                    f"@{claim.get('target_username')} 分身切换消息等待超时，稍后重试"
                     if time.monotonic() >= deadline else ""
                 ),
             )
+            if reply_to_msg_id:
+                try:
+                    await self.client.delete_messages(
+                        self.target_chat_id,
+                        [int(reply_to_msg_id)],
+                    )
+                    logger.info(
+                        "Duel target switch anchor deleted after use: msg=%s target=@%s",
+                        reply_to_msg_id,
+                        claim.get("target_username"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Duel target switch anchor cleanup failed: msg=%s target=@%s",
+                        reply_to_msg_id,
+                        claim.get("target_username"),
+                        exc_info=True,
+                    )
 
         atomic = getattr(self, "common_atomic_task", None)
         if callable(atomic):
@@ -1913,13 +1985,14 @@ class DuelMixin:
         result = {"status": "error", "outcome": "执行异常", "text": ""}
         try:
             logger.info(
-                "Duel turn [%s]: %s/%s -> @%s",
+                "Duel turn [%s]: %s/%s -> @%s reply_to=%s",
                 reservation["queue_key"], reservation["account"], reservation["identity"],
-                reservation["target_username"],
+                reservation["target_username"], reservation.get("reply_to_msg_id"),
             )
             response_msg = await self.send_and_wait_feedback_identity(
                 reservation["identity"],
                 reservation["command"],
+                reply_to=reservation.get("reply_to_msg_id"),
                 timeout=60,
                 max_retries=0,
                 return_response_msg=True,

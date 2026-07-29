@@ -3,9 +3,11 @@ import os
 import tempfile
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import duel_features
+from common_command_features import CommonCommandMixin
 
 
 class DuelControlTests(unittest.TestCase):
@@ -243,10 +245,19 @@ class DuelControlTests(unittest.TestCase):
 
         claim = duel_features.claim_duel_target_preparation("sub")
         self.assertIsNotNone(claim)
-        self.assertTrue(duel_features.finish_duel_target_preparation(claim, True, "寻真子已激活"))
+        self.assertTrue(
+            duel_features.finish_duel_target_preparation(
+                claim,
+                True,
+                "寻真子已发送切换消息",
+                reply_to_msg_id=8101,
+            )
+        )
 
         reservation = duel_features.reserve_duel_for_account("main")
         self.assertEqual((reservation["queue_key"], reservation["target_username"]), ("multi", "ding303"))
+        self.assertEqual(reservation["command"], ".斗法")
+        self.assertEqual(reservation["reply_to_msg_id"], 8101)
         self.assertEqual(
             duel_features.load_duel_state()["multi"]["preparation"]["status"],
             "holding",
@@ -255,6 +266,26 @@ class DuelControlTests(unittest.TestCase):
             "status": "settled", "outcome": "胜利", "remaining": 9,
         })
         self.assertEqual(duel_features.load_duel_state()["multi"]["preparation"], {})
+
+    def test_stale_ready_preparation_without_reply_anchor_is_recreated(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+        )
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        state = duel_features.load_duel_state()
+        old_run_id = state["multi"]["preparation"]["run_id"]
+        state["multi"]["preparation"]["status"] = "ready"
+        state["multi"]["preparation"].pop("reply_to_msg_id", None)
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        recreated = duel_features.load_duel_state()["multi"]["preparation"]
+
+        self.assertEqual(recreated["status"], "pending")
+        self.assertNotEqual(recreated["run_id"], old_run_id)
 
     def test_target_preparation_switches_and_confirms_requested_avatar(self):
         class Actor(duel_features.DuelMixin):
@@ -265,13 +296,13 @@ class DuelControlTests(unittest.TestCase):
                 self.current_identity = "主魂"
                 self.calls = []
 
-            async def prepare_identity_for_time_critical_command(self, identity, command="", timeout=0):
-                self.calls.append((identity, command, timeout))
+            async def prepare_identity_for_time_critical_command(self, identity, command="", timeout=0, **kwargs):
+                self.calls.append((identity, command, timeout, kwargs))
                 self.current_identity = identity
-                return True
+                return True, 8123
 
         actor = Actor()
-        success, detail = asyncio.run(actor.prepare_duel_target_identity({
+        success, detail, reply_to_msg_id = asyncio.run(actor.prepare_duel_target_identity({
             "owner": "sub",
             "target_identity": "寻真子",
             "target_username": "ding303",
@@ -279,7 +310,94 @@ class DuelControlTests(unittest.TestCase):
 
         self.assertTrue(success, detail)
         self.assertEqual(actor.current_identity, "寻真子")
-        self.assertEqual(actor.calls, [("寻真子", ".斗法 @ding303", 30)])
+        self.assertEqual(reply_to_msg_id, 8123)
+        self.assertEqual(actor.calls, [(
+            "寻真子",
+            ".斗法",
+            30,
+            {"force_fresh": True, "return_switch_message_id": True},
+        )])
+
+    def test_fresh_target_switch_returns_the_outgoing_message_id(self):
+        class Actor(CommonCommandMixin):
+            avatars = ["厚土"]
+
+            def __init__(self):
+                self.state = {}
+                self._current_identity = "厚土"
+                self._main_confirmed = False
+                self.avatar_send_lock = asyncio.Lock()
+                self.last_sent_id = 7001
+                self.calls = []
+
+            def save_state(self):
+                pass
+
+            async def _send_and_wait_feedback_raw(self, command, **kwargs):
+                self.calls.append((command, kwargs))
+                self.last_sent_id = 7002
+                return "已切换至厚土"
+
+        actor = Actor()
+        with patch("common_command_features.command_send_precheck", return_value=True):
+            prepared, message_id = asyncio.run(
+                actor.prepare_identity_for_time_critical_command(
+                    "厚土",
+                    command=".斗法",
+                    timeout=30,
+                    force_fresh=True,
+                    return_switch_message_id=True,
+                )
+            )
+
+        self.assertTrue(prepared)
+        self.assertEqual(message_id, 7002)
+        self.assertEqual(actor.calls[0][0], ".切换 厚土")
+        self.assertFalse(actor.calls[0][1]["delete_after"])
+
+    def test_avatar_duel_replies_to_switch_message_with_plain_command(self):
+        class Actor(duel_features.DuelMixin):
+            is_running = True
+            last_sent_id = 9001
+
+            def __init__(self):
+                self.calls = []
+                self.client = SimpleNamespace()
+                self.target_chat_id = -1001
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.calls.append((identity, command, kwargs))
+                return SimpleNamespace(
+                    id=9002,
+                    text="胜者：@wuxinglinggen\n败者：@ding303\n胜负已分！\n今日神念：9/10",
+                    reply_to=SimpleNamespace(reply_to_msg_id=9001),
+                )
+
+        reservation = {
+            "queue_key": "multi",
+            "run_id": "run-reply",
+            "participant_key": "main|无咎子",
+            "account": "main",
+            "identity": "无咎子",
+            "challenger_username": "wuxinglinggen",
+            "target_id": "target-1",
+            "target_username": "ding303",
+            "target_account": "sub",
+            "target_identity": "寻真子",
+            "preparation_run_id": "prep-1",
+            "reply_to_msg_id": 8101,
+            "command": ".斗法",
+        }
+        actor = Actor()
+        with (
+            patch.object(duel_features, "record_duel_event"),
+            patch.object(duel_features, "finish_duel_reservation"),
+        ):
+            result = asyncio.run(actor.execute_duel_reservation(reservation))
+
+        self.assertEqual(result["status"], "settled")
+        self.assertEqual(actor.calls[0][0:2], ("无咎子", ".斗法"))
+        self.assertEqual(actor.calls[0][2]["reply_to"], 8101)
 
     def test_one_to_many_rejects_target_on_same_account(self):
         with self.assertRaisesRegex(ValueError, "same account duel target"):
@@ -312,6 +430,15 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(payload["multi"]["targets"][0]["count"], 3)
         self.assertEqual(payload["target_interval_seconds"], 11 * 60)
         self.assertTrue(any(item["username"] == "ding303" for item in payload["identity_options"]))
+
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=False,
+        )
+        avatar_target = duel_features.duel_dashboard_payload()["multi"]["targets"][0]
+        self.assertEqual(avatar_target["duel_method"], "reply_switch")
 
 
 if __name__ == "__main__":

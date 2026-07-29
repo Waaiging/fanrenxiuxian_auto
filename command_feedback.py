@@ -498,7 +498,8 @@ async def send_and_wait_feedback_common(
                 await record_telegram_send_success(actor, logger=logger)
                 sent_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 remember_script_sent_message(actor, sent_msg)
-                schedule_command_auto_delete(actor, sent_msg, text=message, logger=logger)
+                if delete_after:
+                    schedule_command_auto_delete(actor, sent_msg, text=message, logger=logger)
                 msg_id = sent_msg.id
                 final_sent_msg = sent_msg
                 _identity = getattr(actor, "current_identity", None)

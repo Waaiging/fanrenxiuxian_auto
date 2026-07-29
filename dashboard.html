@@ -1259,7 +1259,7 @@
                     <div class="duel-multi-actions">
                         <button class="reward-refresh" type="button" id="duel-multi-save" onclick="saveDuelMultiPlan()"><i data-lucide="save" aria-hidden="true"></i>保存计划</button>
                         <button class="reward-refresh" type="button" onclick="resetDuelMultiDraft()">放弃修改</button>
-                        <span class="duel-multi-hint">列表每 6 分钟轮换；同一对象至少间隔 11 分钟。已知分身会先切换激活并保持到斗法完成。</span>
+                        <span class="duel-multi-hint">列表每 6 分钟轮换；同一对象至少间隔 11 分钟。已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。</span>
                     </div>
                 </div>
             </div>
@@ -2963,8 +2963,8 @@
         function duelMultiTargetMeta(username) {
             const clean = String(username || '').trim().replace(/^@+/, '').toLowerCase();
             const match = (duelDashboardData.identity_options || []).find(item => String(item.username || '').toLowerCase() === clean);
-            if (!match) return clean ? '外部用户名 · 无需分身预切换' : '填写 Telegram 用户名';
-            return `${match.account_name || match.account} · ${match.identity}${match.identity === '主魂' ? '' : ' · 斗法前自动激活'}`;
+            if (!match) return clean ? '外部用户名 · 使用 .斗法 @用户名' : '填写 Telegram 用户名';
+            return `${match.account_name || match.account} · ${match.identity}${match.identity === '主魂' ? ' · 使用用户名定位' : ' · 自动引用新鲜的 .切换 消息'}`;
         }
 
         function duelMultiTargetRowHtml(target = {}) {
