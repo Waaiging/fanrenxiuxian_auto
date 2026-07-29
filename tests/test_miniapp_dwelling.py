@@ -9,6 +9,7 @@ from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
     miniapp_command_allowed,
+    sect_farm_action_result_ok,
     sect_farm_snapshot_status,
 )
 from miniapp_command_routing import MiniAppCommandRouter
@@ -77,6 +78,17 @@ class MiniAppDwellingTests(unittest.TestCase):
         })
 
         self.assertEqual(status["next_wait_seconds"], 80)
+
+    def test_star_farm_accepts_harmless_noop_results(self):
+        self.assertTrue(sect_farm_action_result_ok({
+            "actionResult": {"ok": False, "error": "nothing_to_soothe"},
+        }, "soothe"))
+        self.assertTrue(sect_farm_action_result_ok({
+            "actionResult": {"ok": False, "error": "nothing_ready"},
+        }, "collect"))
+        self.assertFalse(sect_farm_action_result_ok({
+            "actionResult": {"ok": False, "error": "permission_denied"},
+        }, "collect"))
 
     def test_command_whitelist_rejects_group_only_actions(self):
         for command in (
@@ -803,6 +815,42 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["star_name"] == "天雷星" for call in pull_calls))
         self.assertEqual(actor.rewards[0][0:2], ("素缘子", ".收集精华"))
 
+    def test_router_star_farm_skips_collect_when_soothed_stars_are_still_maturing(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={"avatars": {"素缘子": {}}},
+            avatars=["素缘子"],
+            identity_sect_names={"素缘子": "星宫"},
+            save_state=lambda: None,
+        )
+        actor.get_avatar_state = lambda identity: actor.state["avatars"][identity]
+        router = MiniAppCommandRouter(actor, "main")
+        router.transport.sect_farm_snapshot = AsyncMock(return_value={
+            "domain": {
+                "mode": "stars",
+                "plots": [{"key": "1", "status": "元磁紊乱"}],
+            }
+        })
+        router.transport.sect_farm_action = AsyncMock(return_value={
+            "ok": True,
+            "actionResult": {"ok": True, "message": "安抚完成"},
+            "domain": {
+                "mode": "stars",
+                "plots": [{"key": "1", "status": "正常", "remainingSeconds": 3600}],
+            },
+        })
+
+        wait = asyncio.run(router.run_star_farm_cycle("素缘子"))
+
+        self.assertEqual(wait, 3605)
+        router.transport.sect_farm_action.assert_awaited_once_with(
+            "素缘子",
+            "soothe",
+            plot_key="",
+            star_name="",
+        )
+
     def test_command_center_placeholder_does_not_clear_deep_meditation(self):
         actor = SimpleNamespace(
             state={
@@ -983,6 +1031,30 @@ class MiniAppDwellingTests(unittest.TestCase):
             star_name="",
         )
         self.assertEqual(actor.state["avatars"]["素心子"]["star_miniapp_last_action"], "soothe")
+
+    def test_restricted_star_farm_continues_after_nothing_to_soothe(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}, "restricted_miniapp": {}},
+            state={"avatars": {"素心子": {}}},
+            save_state=lambda: None,
+        )
+        actor.get_avatar_state = lambda identity: actor.state["avatars"][identity]
+        worker = RestrictedMiniAppWorker(actor, "xiaohao")
+        worker.transport.sect_farm_action = AsyncMock(return_value={
+            "ok": False,
+            "actionResult": {"ok": False, "error": "nothing_to_soothe"},
+            "domain": {
+                "mode": "stars",
+                "plots": [{"key": "1", "status": "可收集"}],
+            },
+        })
+
+        payload, status = asyncio.run(worker._star_action("soothe"))
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(status[0], 1)
+        self.assertEqual(actor.state["avatars"]["素心子"]["star_miniapp_last_error"], "")
 
     def test_unknown_identity_is_rejected(self):
         transport = MiniAppDwellingTransport(object(), ENTRY)

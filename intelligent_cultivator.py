@@ -5569,6 +5569,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             if (
                 msg_id
                 and manifest_dt
+                and self.star_gazing_good_opportunity(text)
                 and self.get_avatar_state(avatar).get("last_star_shift_date") != gazing_date
                 and self.common_star_gazing_reply_target_matches_identity(msg_id, avatar, logger=log)
             ):
@@ -6292,6 +6293,25 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     )
                     pending_manifest_dt = safe_str_to_dt(pending_manifest)
                     current_manifest_dt = self.current_star_report_manifest_dt(now)
+                    claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+                    claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+                    claimed_manifest_dt = safe_str_to_dt(claimed_manifest)
+                    claimed_date = self.state.get("pending_star_gazing_date", "") or now.strftime("%Y-%m-%d")
+                    if (
+                        claimed_manifest == manifest_key
+                        and claimed_manifest_dt
+                        and claimed_avatar
+                        and claimed_avatar in (getattr(self, "avatars", []) or [])
+                        and self.common_star_gazing_observer_identity(text) == claimed_avatar
+                        and self.maybe_record_passive_claimed_star_gazing_result(
+                            claimed_avatar,
+                            claimed_manifest_dt,
+                            claimed_date,
+                            msg,
+                            text,
+                        )
+                    ):
+                        return True
                     cancels_pending_manifest = (
                         pending_manifest == manifest_key
                         or bool(pending_manifest_dt and pending_manifest_dt <= current_manifest_dt)

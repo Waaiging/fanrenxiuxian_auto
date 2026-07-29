@@ -2144,7 +2144,11 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             f"Star gazing [{avatar}]: passive .观星 result observed for "
             f"{dt_to_str(manifest_dt)}; marked {gazing_date}."
         )
-        if manifest_dt and self.get_avatar_state(avatar).get("last_star_shift_date") != gazing_date:
+        if (
+            manifest_dt
+            and self.star_gazing_good_opportunity(text)
+            and self.get_avatar_state(avatar).get("last_star_shift_date") != gazing_date
+        ):
             asyncio.create_task(self.avatar_schedule_star_shift(avatar, reply_msg_id, manifest_dt, gazing_date))
         return True
 
@@ -2789,6 +2793,25 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 )
                 pending_manifest_dt = str_to_dt(pending_manifest)
                 current_manifest_dt = self.current_star_report_manifest_dt(now)
+                claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+                claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+                claimed_manifest_dt = str_to_dt(claimed_manifest)
+                claimed_date = self.state.get("pending_star_gazing_date", "") or now.strftime("%Y-%m-%d")
+                if (
+                    claimed_manifest == manifest_key
+                    and claimed_manifest_dt
+                    and claimed_avatar
+                    and claimed_avatar in (getattr(self, "avatars", []) or [])
+                    and self.common_star_gazing_observer_identity(text) == claimed_avatar
+                    and self.maybe_record_passive_claimed_star_gazing_result(
+                        claimed_avatar,
+                        claimed_manifest_dt,
+                        claimed_date,
+                        msg,
+                        text,
+                    )
+                ):
+                    return True
                 cancels_pending_manifest = (
                     pending_manifest == manifest_key
                     or bool(pending_manifest_dt and pending_manifest_dt <= current_manifest_dt)

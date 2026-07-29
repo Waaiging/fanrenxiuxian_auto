@@ -44,6 +44,8 @@ MAX_HANDLED_MESSAGE_IDS = 200
 MAX_NOTIFIED_RECEIPT_IDS = 200
 MAX_DIAGNOSTIC_TEXT_LENGTH = 2000
 PENDING_CLAIM_TTL_SECONDS = 120
+NOTIFICATION_RETRY_DELAYS = (0, 2, 5)
+NOTIFICATION_BACKGROUND_RETRY_SECONDS = 60
 
 _AMOUNT_TOKEN = r"(?<![0-9])([0-9]+(?:[,.\s][0-9]{3})*(?:\.[0-9]+)?)(?![0-9])"
 _CURRENCY_CODE = r"(?:USDT|USDC|LDC|CNY|RMB|USD|TRX|TON|BNB|ETH|BTC|SOL|DOGE|EUR|GBP|HKD|TWD|JPY|U|元|块|币)(?![A-Za-z])"
@@ -391,22 +393,24 @@ class RedPacketMonitor:
         self._notified_receipts: list[int] = []
         self._notified_receipt_set: set[int] = set()
         self._pending_claims: list[dict[str, Any]] = []
+        self._pending_notifications: list[dict[str, Any]] = []
+        self._notification_retry_task: asyncio.Task[Any] | None = None
+        self._notification_lock = asyncio.Lock()
         self._inflight: set[int] = set()
         self._load_handled()
 
     def _load_handled(self) -> None:
         status = load_red_packet_status(self.account)
         values = status.get("handled_message_ids") if isinstance(status, dict) else []
-        if not isinstance(values, list):
-            return
-        for value in values[-MAX_HANDLED_MESSAGE_IDS:]:
-            try:
-                message_id = int(value)
-            except (TypeError, ValueError):
-                continue
-            if message_id not in self._handled_set:
-                self._handled.append(message_id)
-                self._handled_set.add(message_id)
+        if isinstance(values, list):
+            for value in values[-MAX_HANDLED_MESSAGE_IDS:]:
+                try:
+                    message_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if message_id not in self._handled_set:
+                    self._handled.append(message_id)
+                    self._handled_set.add(message_id)
         receipt_values = status.get("notified_receipt_ids") if isinstance(status, dict) else []
         if isinstance(receipt_values, list):
             for value in receipt_values[-MAX_NOTIFIED_RECEIPT_IDS:]:
@@ -417,6 +421,44 @@ class RedPacketMonitor:
                 if receipt_id not in self._notified_receipt_set:
                     self._notified_receipts.append(receipt_id)
                     self._notified_receipt_set.add(receipt_id)
+
+        pending_values = status.get("pending_notifications") if isinstance(status, dict) else []
+        if not isinstance(pending_values, list):
+            pending_values = []
+        if not pending_values and status.get("last_notification_error"):
+            pending_values = [{
+                "receipt_id": status.get("last_claim_receipt_id"),
+                "claim_message_id": status.get("last_claim_message_id"),
+                "amount": status.get("last_claimed_amount"),
+                "currency": status.get("last_claimed_currency"),
+                "created_at": status.get("updated_at") or _now_text(),
+            }]
+        seen_pending = set()
+        for raw in pending_values:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                receipt_id = int(raw.get("receipt_id") or 0)
+                claim_message_id = int(raw.get("claim_message_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            amount = str(raw.get("amount") or "").strip()
+            currency = str(raw.get("currency") or "").strip().upper()
+            if receipt_id <= 0 or not amount or not currency or receipt_id in seen_pending:
+                continue
+            seen_pending.add(receipt_id)
+            if receipt_id in self._notified_receipt_set:
+                self._notified_receipt_set.discard(receipt_id)
+                self._notified_receipts = [
+                    value for value in self._notified_receipts if value != receipt_id
+                ]
+            self._pending_notifications.append({
+                "receipt_id": receipt_id,
+                "claim_message_id": claim_message_id,
+                "amount": amount,
+                "currency": currency,
+                "created_at": str(raw.get("created_at") or _now_text()),
+            })
 
     def _remember(self, message_id: int) -> None:
         if message_id in self._handled_set:
@@ -435,6 +477,116 @@ class RedPacketMonitor:
         while len(self._notified_receipts) > MAX_NOTIFIED_RECEIPT_IDS:
             old = self._notified_receipts.pop(0)
             self._notified_receipt_set.discard(old)
+
+    @staticmethod
+    def _notification_text(record: dict[str, Any], account: str) -> str:
+        return (
+            "🧧 自动抢红包成功\n"
+            f"账号：{RED_PACKET_ACCOUNT_NAMES[account]}\n"
+            f"金额：{record['amount']} {record['currency']}"
+        )
+
+    def _pending_notification_ids(self) -> set[int]:
+        return {
+            int(item.get("receipt_id") or 0)
+            for item in self._pending_notifications
+            if isinstance(item, dict)
+        }
+
+    def _enqueue_notification(self, record: dict[str, Any]) -> None:
+        receipt_id = int(record.get("receipt_id") or 0)
+        if receipt_id <= 0 or receipt_id in self._pending_notification_ids():
+            return
+        self._pending_notifications.append(record)
+
+    def _remove_pending_notification(self, receipt_id: int) -> None:
+        self._pending_notifications = [
+            item
+            for item in self._pending_notifications
+            if int(item.get("receipt_id") or 0) != int(receipt_id or 0)
+        ]
+
+    def _ensure_notification_retry_task(self, initial_delay: int) -> None:
+        if not self._pending_notifications:
+            return
+        task = self._notification_retry_task
+        if task is not None and not task.done():
+            return
+        try:
+            self._notification_retry_task = asyncio.create_task(
+                self._notification_retry_loop(initial_delay),
+                name=f"red_packet_notify_{self.account}",
+            )
+        except RuntimeError:
+            self._notification_retry_task = None
+
+    async def _deliver_notification(
+        self,
+        record: dict[str, Any],
+        retry_delays: tuple[int, ...] = NOTIFICATION_RETRY_DELAYS,
+    ) -> bool:
+        receipt_id = int(record.get("receipt_id") or 0)
+        if receipt_id <= 0 or receipt_id in self._notified_receipt_set:
+            self._remove_pending_notification(receipt_id)
+            return True
+        target = self.notify_entity or RED_PACKET_NOTIFY_TARGET
+        notification = self._notification_text(record, self.account)
+        last_error = ""
+        async with self._notification_lock:
+            if receipt_id in self._notified_receipt_set:
+                self._remove_pending_notification(receipt_id)
+                return True
+            for attempt, retry_delay in enumerate(retry_delays, start=1):
+                if retry_delay:
+                    await asyncio.sleep(retry_delay)
+                try:
+                    await asyncio.wait_for(
+                        self.client.send_message(target, notification),
+                        timeout=12,
+                    )
+                    self._remember_receipt(receipt_id)
+                    self._remove_pending_notification(receipt_id)
+                    self._write_status(
+                        last_claimed_amount=record["amount"],
+                        last_claimed_currency=record["currency"],
+                        last_claim_receipt_id=receipt_id,
+                        last_claim_message_id=int(record.get("claim_message_id") or 0),
+                        last_notification_at=_now_text(),
+                        last_notification_error="",
+                    )
+                    self.log.warning(
+                        "[%s] Red-packet claim notification sent: amount=%s %s receipt=%s",
+                        self.account,
+                        record["amount"],
+                        record["currency"],
+                        receipt_id,
+                    )
+                    return True
+                except Exception as exc:
+                    last_error = str(exc)
+                    self.log.warning(
+                        "[%s] Red-packet notification attempt %s failed: %s",
+                        self.account,
+                        attempt,
+                        exc,
+                    )
+            self._write_status(
+                last_claimed_amount=record["amount"],
+                last_claimed_currency=record["currency"],
+                last_claim_receipt_id=receipt_id,
+                last_claim_message_id=int(record.get("claim_message_id") or 0),
+                last_notification_error=last_error,
+            )
+            return False
+
+    async def _notification_retry_loop(self, initial_delay: int = 0) -> None:
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+        while self._pending_notifications:
+            record = dict(self._pending_notifications[0])
+            if await self._deliver_notification(record, retry_delays=(0,)):
+                continue
+            await asyncio.sleep(NOTIFICATION_BACKGROUND_RETRY_SECONDS)
 
     def _purge_pending_claims(self) -> None:
         cutoff = datetime.now() - timedelta(seconds=PENDING_CLAIM_TTL_SECONDS)
@@ -470,6 +622,7 @@ class RedPacketMonitor:
                 "anchor_missing": self.anchor_missing,
                 "handled_message_ids": self._handled,
                 "notified_receipt_ids": self._notified_receipts,
+                "pending_notifications": self._pending_notifications,
                 "updated_at": _now_text(),
             }
         )
@@ -544,6 +697,7 @@ class RedPacketMonitor:
             await self.process_message(event.message, source="edited")
 
         self._write_status(listening=True, last_action="listening", last_error="")
+        self._ensure_notification_retry_task(initial_delay=0)
         self.log.info(
             "[%s] Red-packet monitor ready: chat=@%s topic=%s anchor=%s buttons=%s",
             self.account,
@@ -584,7 +738,11 @@ class RedPacketMonitor:
         if not trusted_sender:
             return
         message_id = int(getattr(message, "id", 0) or 0)
-        if not message_id or message_id in self._notified_receipt_set:
+        if (
+            not message_id
+            or message_id in self._notified_receipt_set
+            or message_id in self._pending_notification_ids()
+        ):
             return
         if not name_matches:
             # 有待确认的点击、回执可信但名字对不上——大概率是论坛账户名变了。
@@ -599,52 +757,27 @@ class RedPacketMonitor:
         if not self._pending_claims:
             return
         pending = self._pending_claims.pop(0)
-        self._remember_receipt(message_id)
         amount_text = format(receipt["amount"], "f")
         currency = receipt["currency"]
-        notification = (
-            "🧧 自动抢红包成功\n"
-            f"账号：{RED_PACKET_ACCOUNT_NAMES[self.account]}\n"
-            f"金额：{amount_text} {currency}"
-        )
-        target = self.notify_entity or RED_PACKET_NOTIFY_TARGET
-        last_error = ""
-        for attempt, retry_delay in enumerate((0, 2, 5), start=1):
-            if retry_delay:
-                await asyncio.sleep(retry_delay)
-            try:
-                await asyncio.wait_for(self.client.send_message(target, notification), timeout=12)
-                self._write_status(
-                    last_claimed_amount=amount_text,
-                    last_claimed_currency=currency,
-                    last_claim_receipt_id=message_id,
-                    last_claim_message_id=pending["message_id"],
-                    last_notification_at=_now_text(),
-                    last_notification_error="",
-                )
-                self.log.warning(
-                    "[%s] Red-packet claim notification sent: amount=%s %s receipt=%s",
-                    self.account,
-                    amount_text,
-                    currency,
-                    message_id,
-                )
-                return
-            except Exception as exc:
-                last_error = str(exc)
-                self.log.warning(
-                    "[%s] Red-packet notification attempt %s failed: %s",
-                    self.account,
-                    attempt,
-                    exc,
-                )
+        record = {
+            "receipt_id": message_id,
+            "claim_message_id": int(pending.get("message_id") or 0),
+            "amount": amount_text,
+            "currency": currency,
+            "created_at": _now_text(),
+        }
+        self._enqueue_notification(record)
         self._write_status(
             last_claimed_amount=amount_text,
             last_claimed_currency=currency,
             last_claim_receipt_id=message_id,
-            last_claim_message_id=pending["message_id"],
-            last_notification_error=last_error,
+            last_claim_message_id=record["claim_message_id"],
+            last_notification_error="",
         )
+        if not await self._deliver_notification(record):
+            self._ensure_notification_retry_task(
+                initial_delay=NOTIFICATION_BACKGROUND_RETRY_SECONDS,
+            )
 
     async def process_message(self, message: Any, *, source: str) -> None:
         if not self._is_target_topic(message):
@@ -866,6 +999,8 @@ class RedPacketMonitor:
             self._inflight.discard(message_id)
 
     def mark_stopped(self, action: str = "stopped") -> None:
+        if self._notification_retry_task is not None:
+            self._notification_retry_task.cancel()
         self._write_status(listening=False, last_action=action)
 
 

@@ -20,12 +20,12 @@ from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
-    command_result_ok,
     command_result_text,
     identity_state,
     miniapp_command_allowed,
     miniapp_operation_result_text,
     normalize_miniapp_command,
+    sect_farm_action_result_ok,
     sect_farm_snapshot_status,
 )
 from miniapp_daily_activities import MiniAppDailyActivities
@@ -314,7 +314,7 @@ class MiniAppCommandRouter:
             plot_key=plot_key,
             star_name=self.star_farm_target if action == "pull" else "",
         )
-        if not command_result_ok(payload):
+        if not sect_farm_action_result_ok(payload, action):
             raise MiniAppBeastError(f"star_farm_{action}_failed")
         now = _now_text()
         text = command_result_text(payload) or miniapp_operation_result_text(payload)
@@ -358,10 +358,11 @@ class MiniAppCommandRouter:
                 identity,
                 "soothe",
             )
-            _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
-                identity,
-                "collect",
-            )
+            if ready > 0:
+                _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
+                    identity,
+                    "collect",
+                )
         for plot_key in empty:
             _, (ready, troubled, _, next_wait) = await self._star_farm_action(
                 identity,

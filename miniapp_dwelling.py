@@ -135,6 +135,18 @@ def command_result_ok(payload: dict[str, Any]) -> bool:
     return not isinstance(result, dict) or result.get("ok") is not False
 
 
+def sect_farm_action_result_ok(payload: dict[str, Any], action: str) -> bool:
+    """Accept harmless star-farm no-ops while preserving real failures."""
+    if command_result_ok(payload):
+        return True
+    text = (command_result_text(payload) or miniapp_operation_result_text(payload)).strip().casefold()
+    benign = {
+        "soothe": {"nothing_to_soothe"},
+        "collect": {"nothing_ready"},
+    }
+    return text in benign.get(str(action or "").strip().casefold(), set())
+
+
 def small_world_data(payload: Any) -> dict[str, Any]:
     """Return the Mini App small-world block from a dwelling response."""
     if not isinstance(payload, dict):

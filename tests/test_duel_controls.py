@@ -246,6 +246,23 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(multi["last_result"], "一对多计划已全部完成")
         self.assertEqual([item["remaining"] for item in multi["targets"]], [0, 0])
 
+    def test_enabling_one_to_many_plan_restores_global_scheduler(self):
+        duel_features.set_duel_control(False)
+
+        state = duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ExternalTarget", "count": 1}],
+            enabled=True,
+        )
+
+        self.assertTrue(state["enabled"])
+        self.assertIsNotNone(duel_features.reserve_duel_for_account("main"))
+
+        duel_features.set_duel_control(False)
+        state = duel_features.set_duel_multi_control(True)
+        self.assertTrue(state["enabled"])
+
     def test_one_to_many_target_interval_is_at_least_eleven_minutes(self):
         duel_features.configure_duel_multi_plan(
             "sub",

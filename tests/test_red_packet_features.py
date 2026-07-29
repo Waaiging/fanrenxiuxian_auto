@@ -418,6 +418,74 @@ class RedPacketFeatureTests(unittest.TestCase):
         self.assertEqual(status["last_claimed_currency"], "LDC")
         self.assertEqual(status["last_claim_message_id"], 100)
 
+    def test_failed_notification_stays_pending_and_is_not_marked_sent(self):
+        client = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("Too many requests")))
+        monitor = red_packet_features.RedPacketMonitor(client, "xiaohao")
+        monitor.topic_id = 42
+        monitor.self_names = {"waaiging"}
+        monitor._register_pending_claim(100, Decimal("10"))
+        receipt_message = SimpleNamespace(
+            id=101,
+            sender_id=8547797815,
+            reply_to=SimpleNamespace(
+                reply_to_top_id=None,
+                reply_to_msg_id=42,
+                forum_topic=True,
+            ),
+            raw_text="🧧 恭喜 Waaiging 抢到 73.19 LDC！",
+            text="",
+        )
+
+        with (
+            patch.object(red_packet_features.asyncio, "sleep", new=AsyncMock()),
+            patch.object(monitor, "_ensure_notification_retry_task") as retry_task,
+        ):
+            asyncio.run(monitor.process_receipt(receipt_message))
+
+        self.assertEqual(client.send_message.await_count, 3)
+        self.assertNotIn(101, monitor._notified_receipt_set)
+        self.assertEqual(monitor._pending_notification_ids(), {101})
+        retry_task.assert_called_once_with(
+            initial_delay=red_packet_features.NOTIFICATION_BACKGROUND_RETRY_SECONDS,
+        )
+        status = red_packet_features.load_red_packet_status("xiaohao")
+        self.assertEqual(status["pending_notifications"][0]["receipt_id"], 101)
+        self.assertEqual(status["last_notification_error"], "Too many requests")
+
+    def test_failed_notification_is_recovered_after_restart(self):
+        red_packet_features._atomic_write_json(
+            red_packet_features._status_path("xiaohao"),
+            {
+                "account": "xiaohao",
+                "notified_receipt_ids": [101],
+                "last_claimed_amount": "73.19",
+                "last_claimed_currency": "LDC",
+                "last_claim_receipt_id": 101,
+                "last_claim_message_id": 100,
+                "last_notification_error": "Too many requests",
+                "updated_at": "2026-07-29 20:31:08",
+            },
+        )
+        client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=1)))
+        monitor = red_packet_features.RedPacketMonitor(client, "xiaohao")
+
+        self.assertNotIn(101, monitor._notified_receipt_set)
+        self.assertEqual(monitor._pending_notification_ids(), {101})
+
+        delivered = asyncio.run(
+            monitor._deliver_notification(
+                dict(monitor._pending_notifications[0]),
+                retry_delays=(0,),
+            )
+        )
+
+        self.assertTrue(delivered)
+        self.assertIn(101, monitor._notified_receipt_set)
+        self.assertEqual(monitor._pending_notifications, [])
+        status = red_packet_features.load_red_packet_status("xiaohao")
+        self.assertEqual(status["last_notification_error"], "")
+        self.assertEqual(status["pending_notifications"], [])
+
     def test_rejected_callback_does_not_leave_pending_notification(self):
         class FakeButton:
             text = "抢红包"

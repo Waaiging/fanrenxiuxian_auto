@@ -391,7 +391,11 @@ class YinluoMixin:
             if not isinstance(item, dict) or item.get("status") != "炼化中":
                 continue
             due_at = item.get("due_at") or ""
-            if due_at and not is_future(due_at):
+            try:
+                remaining = int(item.get("remaining_seconds") or 0)
+            except (TypeError, ValueError):
+                remaining = 0
+            if (due_at and not is_future(due_at)) or (not due_at and remaining <= 0):
                 due.append(int(slot))
         return sorted(due)
 
@@ -471,8 +475,15 @@ class YinluoMixin:
         for slot in state.get("slots", {}).values():
             if not isinstance(slot, dict):
                 continue
-            if slot.get("status") == "炼化中" and int(slot.get("remaining_seconds") or 0) > 0:
-                slot["due_at"] = add_seconds_str(now, int(slot.get("remaining_seconds") or 0))
+            if slot.get("status") == "炼化中":
+                try:
+                    remaining = int(slot.get("remaining_seconds") or 0)
+                except (TypeError, ValueError):
+                    remaining = 0
+                slot["due_at"] = add_seconds_str(
+                    now,
+                    remaining if remaining > 0 else YINLUO_RETRY_SECONDS,
+                )
             else:
                 slot["due_at"] = ""
         suppressed = state.get("appease_suppressed_until")

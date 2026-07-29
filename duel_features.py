@@ -665,6 +665,8 @@ def configure_duel_multi_plan(initiator_account, initiator_identity, targets, en
             "targets": normalized,
         })
         data["multi"] = multi
+        if enabled:
+            data["enabled"] = True
         data["updated_at"] = duel_time()
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
@@ -680,6 +682,8 @@ def set_duel_multi_control(enabled):
         ):
             raise ValueError("duel multi plan is not configured")
         multi["enabled"] = bool(enabled)
+        if enabled:
+            data["enabled"] = True
         multi["next_at"] = ""
         if not enabled:
             multi["in_flight"] = {}

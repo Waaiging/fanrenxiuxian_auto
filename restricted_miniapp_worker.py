@@ -27,12 +27,12 @@ from miniapp_dwelling import (
     MiniAppCommandResponse,
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
-    command_result_ok,
     command_result_text,
     identity_state,
     miniapp_command_allowed,
     miniapp_operation_result_text,
     normalize_miniapp_command,
+    sect_farm_action_result_ok,
     sect_farm_snapshot_status,
 )
 
@@ -510,7 +510,7 @@ class RestrictedMiniAppWorker:
             plot_key=plot_key,
             star_name=STAR_TARGET if action == "pull" else "",
         )
-        if not command_result_ok(payload):
+        if not sect_farm_action_result_ok(payload, action):
             raise MiniAppBeastError(f"star_farm_{action}_failed")
         state = identity_state(self.actor, STAR_IDENTITY)
         state["star_miniapp_last_action"] = action
@@ -530,7 +530,8 @@ class RestrictedMiniAppWorker:
                 collection_due = ready > 0 or (troubled > 0 and next_wait <= 0)
                 if collection_due:
                     _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
-                    _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
+                    if ready > 0:
+                        _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
                 for plot_key in empty:
                     _, (ready, troubled, _, next_wait) = await self._star_action(
                         "pull",

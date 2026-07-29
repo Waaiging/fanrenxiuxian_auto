@@ -4674,6 +4674,23 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(appease_noop["status"], "success")
         self.assertEqual(appease_noop["count"], 0)
 
+    def test_yinluo_zero_second_refining_slot_is_resynchronized(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            pass
+
+        actor = DummyYinluo()
+        state = actor.get_yinluo_state("缘生子")
+        state["slots"] = {
+            "1": {
+                "status": "炼化中",
+                "remaining_seconds": 0,
+                "remaining_text": "0秒",
+                "due_at": "",
+            }
+        }
+
+        self.assertEqual(actor.yinluo_refining_slots_due("缘生子"), [1])
+
     def test_yinluo_tick_ignores_deep_meditation_and_does_not_periodic_sync(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
@@ -6469,6 +6486,115 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state["avatars"]["素心子"]["last_gazing_date"], "2026-06-23")
         self.assertEqual(xiaohao_state["avatars"]["素心子"]["pending_star_gazing_target_time"], "")
         self.assertEqual(xiaohao_scheduled, [("素心子", 7311, manifest_key, "2026-06-23")])
+
+    def test_passive_bad_star_gazing_result_marks_claim_without_scheduling_shift(self):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 6, 23, 8, 59, 6)
+                return value.replace(tzinfo=tz) if tz else value
+
+        manifest_key = "2026-06-23 09:00:00"
+        send_key = "2026-06-23 08:59:00"
+        text = """
+**【星盘显化】**
+@foo 闭目凝神，推演天机...星盘之上，天机已然显现！
+
+**下一次天道演化将是**: **【Bad - 丹炉炸裂】**
+**当前天命所归**: **@bar**
+"""
+        sender = SimpleNamespace(username="hantianzzz_bot")
+
+        async def run_main_like(cls, module, avatar):
+            actor = cls.__new__(cls)
+            actor.avatars = [avatar]
+            actor.avatar_nicknames = {avatar: ""}
+            actor.avatar_usernames = {"foo": avatar}
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.star_gazing_task = None
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_shift(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.avatar_schedule_star_shift = fake_shift
+            actor.state = {
+                "pending_star_gazing_date": "2026-06-23",
+                "pending_star_gazing_target_time": send_key,
+                "pending_star_gazing_scheduled_time": send_key,
+                "pending_star_gazing_manifest_time": manifest_key,
+                "pending_star_gazing_fate_type": "fallback",
+                "star_gazing_claimed_manifest_time": manifest_key,
+                "star_gazing_claimed_avatar": avatar,
+                "next_star_gazing_time": send_key,
+                "avatars": {avatar: {}},
+            }
+            with patch.object(module, "datetime", FixedDatetime):
+                handled = await actor.maybe_handle_star_gazing_opportunity(
+                    DummyMessage(7312, text=text),
+                    text,
+                    sender,
+                )
+                await asyncio.sleep(0)
+            return handled, actor.state, scheduled
+
+        for cls, module, avatar in (
+            (Cultivator, intelligent_cultivator, "素缘子"),
+            (SubCultivator, sub_cultivator, "厚土"),
+        ):
+            with self.subTest(cls=cls.__name__):
+                handled, state, scheduled = asyncio.run(run_main_like(cls, module, avatar))
+                self.assertTrue(handled)
+                self.assertEqual(state["avatars"][avatar]["last_gazing_date"], "2026-06-23")
+                self.assertEqual(state["pending_star_gazing_target_time"], "")
+                self.assertEqual(scheduled, [])
+
+        async def run_xiaohao():
+            actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+            actor.avatars = ["素心子"]
+            actor.avatar_usernames = {"foo": "素心子"}
+            actor.star_gazing_lock = asyncio.Lock()
+            actor.save_state = lambda: None
+            scheduled = []
+
+            async def fake_shift(*args, **kwargs):
+                scheduled.append((args, kwargs))
+
+            actor.avatar_schedule_star_shift = fake_shift
+            actor.state = {
+                "pending_star_gazing_manifest_time": manifest_key,
+                "pending_star_gazing_fate_type": "fallback",
+                "star_gazing_claimed_manifest_time": manifest_key,
+                "star_gazing_claimed_avatar": "素心子",
+                "avatars": {
+                    "素心子": {
+                        "pending_star_gazing_date": "2026-06-23",
+                        "pending_star_gazing_target_time": send_key,
+                        "next_star_gazing_time": send_key,
+                    }
+                },
+            }
+            with patch.object(cultivator_xiaohao, "datetime", FixedDatetime):
+                await actor.avatar_handle_star_gazing_opportunity(
+                    None,
+                    DummyMessage(7313, text=text),
+                    text,
+                    sender,
+                )
+                await asyncio.sleep(0)
+            return actor.state, scheduled
+
+        xiaohao_state, xiaohao_scheduled = asyncio.run(run_xiaohao())
+        self.assertEqual(
+            xiaohao_state["avatars"]["素心子"]["last_gazing_date"],
+            "2026-06-23",
+        )
+        self.assertEqual(
+            xiaohao_state["avatars"]["素心子"]["pending_star_gazing_target_time"],
+            "",
+        )
+        self.assertEqual(xiaohao_scheduled, [])
 
     def test_main_passive_star_gazing_rejects_other_account_reply_target(self):
         class FixedDatetime(datetime):
