@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import (
+    MiniAppCommandResponse,
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
     miniapp_command_allowed,
@@ -82,6 +83,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".闭关修炼",
             ".元婴出窍",
             ".我的侍妾",
+            ".拼图",
             ".登天阶",
             ".观命",
             ".定命 紫微",
@@ -221,19 +223,23 @@ class MiniAppDwellingTests(unittest.TestCase):
         with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
             asyncio.run(transport.initialize())
             response = asyncio.run(transport.command(".元婴出窍", identity="素心子"))
+            puzzle = asyncio.run(transport.command(".拼图", identity="素心子"))
             status = asyncio.run(transport.command(".查看闭关", identity="主魂"))
             manifest = asyncio.run(transport.command(".显灵", identity="主魂"))
 
         self.assertEqual(transport.player_id("主魂"), 100)
         self.assertEqual(transport.player_id("素心子"), -200)
         self.assertEqual(response.text, "reply:.元婴出窍")
+        self.assertEqual(puzzle.text, "reply:.拼图")
         self.assertEqual(status.text, "reply:status")
         self.assertEqual(manifest.text, "reply:manifest")
         self.assertEqual(calls[1][0], "/api/miniapp/xianxia-dwelling/command-center")
         self.assertEqual(calls[1][1]["playerId"], -200)
-        self.assertEqual(calls[2][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
-        self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/small-world")
-        self.assertEqual(calls[3][1]["action"], "manifest")
+        self.assertEqual(calls[2][0], "/api/miniapp/xianxia-dwelling/command-center")
+        self.assertEqual(calls[2][1]["command"], ".拼图")
+        self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
+        self.assertEqual(calls[4][0], "/api/miniapp/xianxia-dwelling/small-world")
+        self.assertEqual(calls[4][1]["action"], "manifest")
 
     def test_completed_status_is_settled_for_maintenance_loop(self):
         calls = []
@@ -809,6 +815,45 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertIsNone(response)
         worker.transport.command.assert_not_awaited()
         self.assertEqual(actor.state["restricted_miniapp_last_blocked_command"], ".切换 主魂")
+
+    def test_restricted_worker_routes_puzzle_through_miniapp(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {
+                    "miniapp_beast": {"entry_url": ENTRY},
+                    "restricted_miniapp": {},
+                }
+                self.state = {"avatars": {"缘生子": {}}}
+                self.pause_event = asyncio.Event()
+                self.pause_event.set()
+
+            def save_state(self):
+                pass
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def dashboard_command_paused(self, command, identity):
+                return False
+
+        actor = Actor()
+        worker = RestrictedMiniAppWorker(actor, "xiaohao")
+        response = MiniAppCommandResponse("拼图成功", {"actionResult": {"ok": True}})
+        worker.transport.command = AsyncMock(return_value=response)
+
+        result = asyncio.run(worker._send("缘生子", ".拼图", return_response_msg=True))
+
+        self.assertIs(result, response)
+        worker.transport.command.assert_awaited_once_with(
+            ".拼图",
+            identity="缘生子",
+            meditation_prefix=False,
+        )
+        self.assertNotIn("restricted_miniapp_last_blocked_command", actor.state)
 
     def test_star_farm_ignores_retired_chat_command_controls(self):
         class Actor:

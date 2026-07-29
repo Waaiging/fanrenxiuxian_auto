@@ -1631,6 +1631,72 @@ class ParserFixtureTests(unittest.TestCase):
         ))
         self.assertTrue(log_utils.feedback_response_conflicts(".闯塔", text))
 
+    def test_mulan_support_window_starts_at_ten(self):
+        before = datetime(2026, 7, 29, 9, 59, 0)
+        at_start = datetime(2026, 7, 29, 10, 0, 0)
+
+        self.assertGreater(
+            common_command_features.seconds_until_mulan_support_start(before),
+            0,
+        )
+        self.assertEqual(
+            common_command_features.seconds_until_mulan_support_start(at_start),
+            0,
+        )
+        self.assertEqual(common_command_features.mulan_support_start_label(), "10:00")
+
+    def test_mulan_support_does_not_send_before_ten(self):
+        class DummyMulan(DummyCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return "支援慕兰奇袭成功。"
+
+        actor = DummyMulan()
+        with patch.object(
+            common_command_features,
+            "seconds_until_mulan_support_start",
+            return_value=60,
+        ):
+            result = asyncio.run(actor.maybe_run_mulan_support("主魂"))
+
+        self.assertFalse(result)
+        self.assertEqual(actor.sent, [])
+
+    def test_mulan_support_at_ten_is_not_deferred_by_other_daily_work(self):
+        class DummyMulan(DummyCommon):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def dashboard_command_paused(self, command, identity="主魂"):
+                return False
+
+            def daily_one_shot_should_defer(self, *args, **kwargs):
+                raise AssertionError("10:00 Mulan support must not use the ordinary daily defer gate")
+
+            async def send_and_wait_feedback(self, command, **kwargs):
+                self.sent.append(command)
+                return "支援慕兰奇袭成功，获得灵石x100。"
+
+        actor = DummyMulan()
+        with patch.object(
+            common_command_features,
+            "seconds_until_mulan_support_start",
+            return_value=0,
+        ):
+            result = asyncio.run(actor.maybe_run_mulan_support("主魂", today="2026-07-29"))
+
+        self.assertTrue(result)
+        self.assertEqual(actor.sent, [common_command_features.MULAN_SUPPORT_COMMAND])
+        self.assertEqual(actor.state["last_mulan_support_date"], "2026-07-29")
+
     def test_common_avatar_tower_send_can_require_meditation_ready(self):
         class DummyTowerAvatar(DummyAvatarCommon):
             def __init__(self):
@@ -1770,10 +1836,15 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor = DummyDailyAvatar()
 
-        self.assertTrue(asyncio.run(actor.common_avatar_daily_checkin(
-            "缘生子",
-            daily_start_wait_func=lambda now: 0,
-        )))
+        with patch.object(
+            common_command_features,
+            "seconds_until_mulan_support_start",
+            return_value=0,
+        ):
+            self.assertTrue(asyncio.run(actor.common_avatar_daily_checkin(
+                "缘生子",
+                daily_start_wait_func=lambda now: 0,
+            )))
         self.assertEqual(
             [item[1] for item in actor.sent],
             [".宗门点卯", common_command_features.MULAN_SUPPORT_COMMAND],
@@ -1812,7 +1883,11 @@ class ParserFixtureTests(unittest.TestCase):
         async def no_wait_main():
             return None
 
-        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep), patch.object(
+            common_command_features,
+            "seconds_until_mulan_support_start",
+            return_value=0,
+        ):
             asyncio.run(actor.run_common_daily_tasks_loop(
                 lambda now: 0,
                 lambda: "07:00",
@@ -1858,7 +1933,11 @@ class ParserFixtureTests(unittest.TestCase):
         async def no_wait_main():
             return None
 
-        with patch.object(common_command_features.asyncio, "sleep", fake_sleep):
+        with patch.object(common_command_features.asyncio, "sleep", fake_sleep), patch.object(
+            common_command_features,
+            "seconds_until_mulan_support_start",
+            return_value=0,
+        ):
             asyncio.run(actor.run_common_daily_tasks_loop(
                 lambda now: 0,
                 lambda: "07:15",
@@ -2786,7 +2865,10 @@ class ParserFixtureTests(unittest.TestCase):
         actor.custom_command_impending_wait = lambda identity: -1
 
         with patch.object(intelligent_cultivator, "seconds_until_daily_task_start", lambda now: 0):
-            wait = actor._state_impending_command_wait({"done": []}, identity="主魂")
+            wait = actor._state_impending_command_wait({
+                "done": [],
+                "last_mulan_support_date": datetime.now().strftime("%Y-%m-%d"),
+            }, identity="主魂")
 
         self.assertEqual(wait, -1)
 
@@ -5065,7 +5147,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertIn(common_command_features.MULAN_SUPPORT_COMMAND, rows)
         self.assertEqual(
             rows[common_command_features.MULAN_SUPPORT_COMMAND]["detail"],
-            "每日独立执行",
+            "每日 10:00 独立执行",
         )
 
     def test_dashboard_sub_main_yuanying_retreat_active_unknown_is_not_due(self):
@@ -7400,11 +7482,25 @@ class ParserFixtureTests(unittest.TestCase):
         actor.daily_one_shot_should_defer = lambda identity, command: False
         state = {"last_mulan_support_date": ""}
 
-        with patch.object(sub_cultivator, "seconds_until_daily_task_start", return_value=0):
+        with patch.object(sub_cultivator, "seconds_until_mulan_support_start", return_value=0):
             wait = actor._state_impending_command_wait(state, identity="主魂")
 
         self.assertEqual(wait, 0)
         self.assertEqual(sub_cultivator.MULAN_SUPPORT_COMMAND, ".支援慕兰 奇袭")
+
+    def test_sub_impending_wait_tracks_ten_oclock_before_mulan_is_due(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.avatars = []
+        actor.main_star_palace_enabled = False
+        actor.main_formation_enabled = False
+        actor.main_concubine_enabled = False
+        actor.dashboard_command_paused = lambda command, identity="": False
+        state = {"last_mulan_support_date": ""}
+
+        with patch.object(sub_cultivator, "seconds_until_mulan_support_start", return_value=301):
+            wait = actor._state_impending_command_wait(state, identity="主魂")
+
+        self.assertEqual(wait, 301)
 
     def test_xiaohao_main_soul_pause_does_not_make_main_impending(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

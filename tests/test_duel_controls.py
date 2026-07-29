@@ -1,6 +1,8 @@
+import asyncio
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 import duel_features
@@ -62,6 +64,27 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(participant["target_username"], "RememberMe")
         self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT)
 
+    def test_version_one_state_migrates_without_resetting_legacy_preferences(self):
+        state = duel_features.duel_default_state()
+        state["version"] = 1
+        state.pop("multi", None)
+        participant = state["queues"]["waaiging"]["participants"]["main|无咎子"]
+        participant["enabled"] = False
+        participant["target_username"] = "RememberLegacyTarget"
+
+        migrated = duel_features._ensure_duel_state_shape(state, reset_daily=False)
+
+        self.assertEqual(migrated["version"], 2)
+        self.assertFalse(
+            migrated["queues"]["waaiging"]["participants"]["main|无咎子"]["enabled"]
+        )
+        self.assertEqual(
+            migrated["queues"]["waaiging"]["participants"]["main|无咎子"]["target_username"],
+            "RememberLegacyTarget",
+        )
+        self.assertFalse(migrated["multi"]["enabled"])
+        self.assertEqual(migrated["multi"]["targets"], [])
+
     def test_titan_beast_mode_is_deploy_only_and_survives_daily_reset(self):
         with self.assertRaises(ValueError):
             duel_features.set_titan_beast_mode("pasture")
@@ -112,6 +135,183 @@ class DuelControlTests(unittest.TestCase):
     def test_invalid_titan_beast_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "invalid titan beast mode"):
             duel_features.set_titan_beast_mode("rest")
+
+    def test_one_to_many_plan_cycles_targets_and_stops_when_complete(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [
+                {"username": "TitanCreeper", "count": 2},
+                {"username": "Gamling33", "count": 1},
+            ],
+            enabled=True,
+        )
+
+        first = duel_features.reserve_duel_for_account("main")
+        self.assertEqual((first["queue_key"], first["target_username"]), ("multi", "TitanCreeper"))
+        duel_features.finish_duel_reservation(first, {
+            "status": "settled", "outcome": "胜利", "remaining": 9,
+        })
+
+        state = duel_features.load_duel_state()
+        state["multi"]["next_at"] = ""
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+        second = duel_features.reserve_duel_for_account("main")
+        self.assertEqual(second["target_username"], "Gamling33")
+        duel_features.finish_duel_reservation(second, {
+            "status": "settled", "outcome": "失败", "remaining": 8,
+        })
+
+        state = duel_features.load_duel_state()
+        state["multi"]["next_at"] = ""
+        state["target_next_at"].pop("titancreeper", None)
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+        third = duel_features.reserve_duel_for_account("main")
+        self.assertEqual(third["target_username"], "TitanCreeper")
+        duel_features.finish_duel_reservation(third, {
+            "status": "settled", "outcome": "胜利", "remaining": 7,
+        })
+
+        multi = duel_features.load_duel_state()["multi"]
+        self.assertFalse(multi["enabled"])
+        self.assertEqual(multi["last_result"], "一对多计划已全部完成")
+        self.assertEqual([item["remaining"] for item in multi["targets"]], [0, 0])
+
+    def test_one_to_many_target_interval_is_at_least_eleven_minutes(self):
+        duel_features.configure_duel_multi_plan(
+            "sub",
+            "厚土",
+            [{"username": "ExternalTarget", "count": 2}],
+            enabled=True,
+        )
+
+        reservation = duel_features.reserve_duel_for_account("sub")
+        state = duel_features.load_duel_state()
+        ready_at = duel_features.parse_duel_time(state["target_next_at"]["externaltarget"])
+        reserved_at = duel_features.parse_duel_time(reservation["reserved_at"])
+
+        self.assertGreaterEqual(
+            (ready_at - reserved_at).total_seconds(),
+            duel_features.DUEL_TARGET_INTERVAL_SECONDS,
+        )
+        self.assertGreaterEqual(
+            (ready_at - datetime.now()).total_seconds(),
+            duel_features.DUEL_TARGET_INTERVAL_SECONDS - 2,
+        )
+
+    def test_busy_result_does_not_shorten_one_to_many_target_interval(self):
+        duel_features.configure_duel_multi_plan(
+            "sub",
+            "厚土",
+            [{"username": "ExternalTarget", "count": 2}],
+            enabled=True,
+        )
+
+        reservation = duel_features.reserve_duel_for_account("sub")
+        reserved_ready = duel_features.parse_duel_time(
+            duel_features.load_duel_state()["target_next_at"]["externaltarget"]
+        )
+        duel_features.finish_duel_reservation(reservation, {
+            "status": "busy",
+            "outcome": "目标繁忙",
+            "wait_seconds": duel_features.DUEL_BUSY_RETRY_SECONDS,
+        })
+
+        ready_at = duel_features.parse_duel_time(
+            duel_features.load_duel_state()["target_next_at"]["externaltarget"]
+        )
+        self.assertGreaterEqual(ready_at, reserved_ready)
+        self.assertGreaterEqual(
+            (ready_at - datetime.now()).total_seconds(),
+            duel_features.DUEL_TARGET_INTERVAL_SECONDS - 2,
+        )
+
+    def test_avatar_target_must_be_prepared_before_one_to_many_reservation(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+        )
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        preparation = duel_features.load_duel_state()["multi"]["preparation"]
+        self.assertEqual(
+            (preparation["owner"], preparation["target_identity"], preparation["status"]),
+            ("sub", "寻真子", "pending"),
+        )
+
+        claim = duel_features.claim_duel_target_preparation("sub")
+        self.assertIsNotNone(claim)
+        self.assertTrue(duel_features.finish_duel_target_preparation(claim, True, "寻真子已激活"))
+
+        reservation = duel_features.reserve_duel_for_account("main")
+        self.assertEqual((reservation["queue_key"], reservation["target_username"]), ("multi", "ding303"))
+        self.assertEqual(
+            duel_features.load_duel_state()["multi"]["preparation"]["status"],
+            "holding",
+        )
+        duel_features.finish_duel_reservation(reservation, {
+            "status": "settled", "outcome": "胜利", "remaining": 9,
+        })
+        self.assertEqual(duel_features.load_duel_state()["multi"]["preparation"], {})
+
+    def test_target_preparation_switches_and_confirms_requested_avatar(self):
+        class Actor(duel_features.DuelMixin):
+            account_key = "sub"
+            avatars = ["寻真子"]
+
+            def __init__(self):
+                self.current_identity = "主魂"
+                self.calls = []
+
+            async def prepare_identity_for_time_critical_command(self, identity, command="", timeout=0):
+                self.calls.append((identity, command, timeout))
+                self.current_identity = identity
+                return True
+
+        actor = Actor()
+        success, detail = asyncio.run(actor.prepare_duel_target_identity({
+            "owner": "sub",
+            "target_identity": "寻真子",
+            "target_username": "ding303",
+        }))
+
+        self.assertTrue(success, detail)
+        self.assertEqual(actor.current_identity, "寻真子")
+        self.assertEqual(actor.calls, [("寻真子", ".斗法 @ding303", 30)])
+
+    def test_one_to_many_rejects_target_on_same_account(self):
+        with self.assertRaisesRegex(ValueError, "same account duel target"):
+            duel_features.configure_duel_multi_plan(
+                "main",
+                "无咎子",
+                [{"username": "kulipabp", "count": 1}],
+            )
+
+    def test_one_to_many_rejects_empty_target(self):
+        with self.assertRaisesRegex(ValueError, "invalid duel target username"):
+            duel_features.configure_duel_multi_plan(
+                "main",
+                "无咎子",
+                [{"username": "", "count": 1}],
+            )
+
+    def test_dashboard_payload_exposes_one_to_many_plan(self):
+        duel_features.configure_duel_multi_plan(
+            "xiaohao",
+            "素心子",
+            [{"username": "Waaiging", "count": 3}],
+            enabled=False,
+        )
+
+        payload = duel_features.duel_dashboard_payload()
+
+        self.assertTrue(payload["multi"]["configured"])
+        self.assertEqual(payload["multi"]["initiator"]["identity"], "素心子")
+        self.assertEqual(payload["multi"]["targets"][0]["count"], 3)
+        self.assertEqual(payload["target_interval_seconds"], 11 * 60)
+        self.assertTrue(any(item["username"] == "ding303" for item in payload["identity_options"]))
 
 
 if __name__ == "__main__":

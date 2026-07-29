@@ -35,6 +35,7 @@ from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
+from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
 from log_utils import command_control_key
 from command_modules import (
     ASK_DAO_COMMAND,
@@ -47,8 +48,10 @@ from command_modules import (
     yuanying_out_plan,
 )
 from duel_features import (
+    configure_duel_multi_plan,
     duel_dashboard_payload,
     set_duel_control,
+    set_duel_multi_control,
     set_duel_participant_control,
     set_titan_beast_mode,
     titan_target_status,
@@ -819,12 +822,35 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
 
 
 def mulan_support_daily_command(state):
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    target = now.replace(
+        hour=MULAN_SUPPORT_START_HOUR,
+        minute=MULAN_SUPPORT_START_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    detail = f"每日 {MULAN_SUPPORT_START_HOUR:02d}:{MULAN_SUPPORT_START_MINUTE:02d} 独立执行"
+    if str(state.get("last_mulan_support_date") or "") != today and now < target:
+        wait_seconds = max(1, int((target - now).total_seconds()))
+        return command_row(
+            MULAN_SUPPORT_COMMAND,
+            "支援慕兰 奇袭",
+            "等待 10:00",
+            "waiting",
+            remaining=format_remaining(wait_seconds),
+            at=target.strftime(TIME_FORMAT),
+            detail=detail,
+            group="每日",
+            schedule_type="daily",
+            next_seconds=wait_seconds,
+        )
     return daily_done_command(
         state,
         MULAN_SUPPORT_COMMAND,
         "支援慕兰 奇袭",
         date_key="last_mulan_support_date",
-        detail="每日独立执行",
+        detail=detail,
         group="每日",
     )
 
@@ -4557,6 +4583,46 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
             bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
             if queue_key else None
         ),
+        "updated_by": username,
+    }
+
+
+@app.post("/api/duels/multi")
+async def duel_multi_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Create, replace, pause, or resume the active one-to-many duel plan."""
+    try:
+        if "targets" in payload:
+            data = configure_duel_multi_plan(
+                payload.get("initiator_account"),
+                payload.get("initiator_identity"),
+                payload.get("targets"),
+                enabled=bool(payload.get("enabled", True)),
+            )
+        else:
+            data = set_duel_multi_control(bool(payload.get("enabled")))
+    except ValueError as exc:
+        messages = {
+            "unknown duel initiator": "请选择有效的斗法发起身份",
+            "duel targets required": "请至少添加一个斗法对象",
+            "too many duel targets": "斗法对象最多 20 个",
+            "invalid duel target": "斗法对象格式错误",
+            "invalid duel target username": "斗法对象必须是有效的 Telegram 用户名",
+            "duplicate duel target": "同一个斗法对象不能重复添加",
+            "invalid duel count": "每个对象的斗法次数必须是 1 到 999",
+            "duel target matches initiator": "不能把发起身份自己设为斗法对象",
+            "same account duel target": "同一账号内无法同时保持发起身份和目标分身激活",
+            "duel multi plan is not configured": "请先保存一对多斗法计划",
+        }
+        return {"success": False, "msg": messages.get(str(exc), str(exc))}
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    multi = data.get("multi") or {}
+    return {
+        "success": True,
+        "enabled": bool(multi.get("enabled")),
+        "initiator_account": multi.get("initiator_account") or "",
+        "initiator_identity": multi.get("initiator_identity") or "",
+        "target_count": len(multi.get("targets") or []),
         "updated_by": username,
     }
 

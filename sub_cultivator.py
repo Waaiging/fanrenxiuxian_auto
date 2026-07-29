@@ -76,7 +76,12 @@ from miniapp_command_routing import install_miniapp_command_router
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 #   自动回复辅助：判断消息是否为自动回复链的一部分，并处理私聊互动
 
-from common_command_features import CommonCommandMixin, MULAN_SUPPORT_COMMAND, common_command_default_state
+from common_command_features import (
+    CommonCommandMixin,
+    MULAN_SUPPORT_COMMAND,
+    common_command_default_state,
+    seconds_until_mulan_support_start,
+)
 from duel_features import DuelMixin
 #   通用指令混入类：提供 send_and_wait_feedback 等共用方法的基础实现与默认状态
 
@@ -1100,22 +1105,18 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
                 and not (support_retry and is_future(support_retry))
             )
-            if (
-                seconds_until_daily_task_start(datetime.now()) <= 0
-                and support_due
-                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
-            ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
+            if support_due:
+                support_wait = seconds_until_mulan_support_start(datetime.now())
+                min_wait = support_wait if min_wait is None else min(min_wait, support_wait)
         elif identity in self.avatars:
             support_retry = str(state.get("next_mulan_support_time") or "")
             if (
                 state.get("last_mulan_support_date") != today
                 and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
                 and not (support_retry and is_future(support_retry))
-                and seconds_until_daily_task_start(datetime.now()) <= 0
-                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
             ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
+                support_wait = seconds_until_mulan_support_start(datetime.now())
+                min_wait = support_wait if min_wait is None else min(min_wait, support_wait)
             if (
                 not state.get("in_deep_meditation")
                 and not state.get("deep_meditation_end_time")
@@ -3238,10 +3239,8 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             await asyncio.sleep(60)
 
     async def run_daily_support_tasks(self):
-        """每天 07:15 后执行仍有效的慕兰支援。"""
+        """每天 10:00 后执行仍有效的慕兰支援。"""
         return await self.run_common_mulan_support_loop(
-            seconds_until_daily_task_start,
-            daily_task_start_label,
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
         )
@@ -5607,10 +5606,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         return cd > 0
 
     async def _avatar_mulan_support(self, avatar):
-        return await self.common_avatar_mulan_support(
-            avatar,
-            daily_start_wait_func=seconds_until_daily_task_start,
-        )
+        return await self.common_avatar_mulan_support(avatar)
 
     async def run_avatar_loop(self, avatar, initial_delay=0):
         """
@@ -5751,7 +5747,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 support_retry = str(a_state.get("next_mulan_support_time") or "")
                 if (
                     a_state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
-                    and seconds_until_daily_task_start(datetime.now()) <= 0
+                    and seconds_until_mulan_support_start(datetime.now()) <= 0
                     and not (support_retry and is_future(support_retry))
                 ):
                     wait_candidates.append(60)

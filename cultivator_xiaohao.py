@@ -65,7 +65,12 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
-from common_command_features import CommonCommandMixin, MULAN_SUPPORT_COMMAND, common_command_default_state
+from common_command_features import (
+    CommonCommandMixin,
+    MULAN_SUPPORT_COMMAND,
+    common_command_default_state,
+    seconds_until_mulan_support_start,
+)
 from duel_features import DuelMixin
 from command_feedback import (
     _handle_telegram_send_protection,
@@ -1598,12 +1603,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
                 and not (support_retry and is_future(support_retry))
             )
-            if (
-                seconds_until_daily_task_start(datetime.now()) <= 0
-                and support_due
-                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
-            ):
-                min_wait = min(min_wait, 0)
+            if support_due:
+                min_wait = min(
+                    min_wait,
+                    seconds_until_mulan_support_start(datetime.now()),
+                )
 
         support_retry = str(state.get("next_mulan_support_time") or "")
         if (
@@ -1611,10 +1615,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             and state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
             and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
             and not (support_retry and is_future(support_retry))
-            and seconds_until_daily_task_start(datetime.now()) <= 0
-            and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
         ):
-            min_wait = min(min_wait, 0)
+            min_wait = min(
+                min_wait,
+                seconds_until_mulan_support_start(datetime.now()),
+            )
 
         if not state.get("in_deep_meditation") and not state.get("deep_meditation_end_time") and not state.get("next_meditation_retry_time"):
             min_wait = 0
@@ -2208,10 +2213,8 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     # ---- 每日任务 ----
 
     async def run_daily_support_tasks(self):
-        """每天 07:00 后执行仍有效的慕兰支援。"""
+        """每天 10:00 后执行仍有效的慕兰支援。"""
         return await self.run_common_mulan_support_loop(
-            seconds_until_daily_task_start,
-            daily_task_start_label,
             pre_loop_func=lambda: self.sleep_if_main_soul_paused("Daily tasks"),
             sleep_func=scheduler_sleep_seconds,
         )
@@ -7215,10 +7218,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     # ============================================================
 
     async def _avatar_mulan_support(self, avatar):
-        return await self.common_avatar_mulan_support(
-            avatar,
-            daily_start_wait_func=seconds_until_daily_task_start,
-        )
+        return await self.common_avatar_mulan_support(avatar)
 
     @safe_bg_task
     async def delayed_avatar_force_exit(self, avatar, delay_sec):

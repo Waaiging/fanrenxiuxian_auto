@@ -100,7 +100,12 @@ from miniapp_dwelling import (
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
-from common_command_features import CommonCommandMixin, MULAN_SUPPORT_COMMAND, common_command_default_state
+from common_command_features import (
+    CommonCommandMixin,
+    MULAN_SUPPORT_COMMAND,
+    common_command_default_state,
+    seconds_until_mulan_support_start,
+)
 from duel_features import DuelMixin
 from main_beast_features import MainBeastMixin, main_beast_default_state, main_beast_feedback_candidate
 from command_feedback import (
@@ -2440,10 +2445,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
     # ------------------------------------------------------------------
 
     async def run_daily_support_tasks(self):
-        """每天 7:00 后执行仍有效的慕兰支援。"""
+        """每天 10:00 后执行仍有效的慕兰支援。"""
         return await self.run_common_mulan_support_loop(
-            seconds_until_daily_task_start,
-            daily_task_start_label,
             pre_loop_func=self._wait_for_main_identity,
             sleep_func=scheduler_sleep_seconds,
         )
@@ -4124,22 +4127,18 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
                 and not (support_retry and is_future(support_retry))
             )
-            if (
-                seconds_until_daily_task_start(datetime.now()) <= 0
-                and support_due
-                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
-            ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
+            if support_due:
+                support_wait = seconds_until_mulan_support_start(datetime.now())
+                min_wait = support_wait if min_wait is None else min(min_wait, support_wait)
         elif identity in self.avatars:
             support_retry = str(state.get("next_mulan_support_time") or "")
             if (
                 state.get("last_mulan_support_date") != today
                 and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
                 and not (support_retry and is_future(support_retry))
-                and seconds_until_daily_task_start(datetime.now()) <= 0
-                and not self.daily_one_shot_should_defer(identity, MULAN_SUPPORT_COMMAND)
             ):
-                min_wait = 0 if min_wait is None else min(min_wait, 0)
+                support_wait = seconds_until_mulan_support_start(datetime.now())
+                min_wait = support_wait if min_wait is None else min(min_wait, support_wait)
             if (
                 not state.get("in_deep_meditation")
                 and not state.get("deep_meditation_end_time")
@@ -4509,10 +4508,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             await asyncio.sleep(scheduler_sleep_seconds(cd, minimum=1))
 
     async def _avatar_mulan_support(self, avatar):
-        return await self.common_avatar_mulan_support(
-            avatar,
-            daily_start_wait_func=seconds_until_daily_task_start,
-        )
+        return await self.common_avatar_mulan_support(avatar)
 
     def _avatar_destiny_window(self, now=None):
         now = now or datetime.now()
@@ -4999,7 +4995,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             support_retry = str(a_state.get("next_mulan_support_time") or "")
             if (
                 a_state.get("last_mulan_support_date") != today
-                and seconds_until_daily_task_start(now) <= 0
+                and seconds_until_mulan_support_start(now) <= 0
                 and not (support_retry and is_future(support_retry))
             ):
                 min_cd = min(min_cd, 60)

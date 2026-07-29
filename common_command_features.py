@@ -97,6 +97,8 @@ HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
 # .支援慕兰 奇袭 is an independent daily command for each identity.
 MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
 MULAN_SUPPORT_RETRY_SECONDS = 10 * 60
+MULAN_SUPPORT_START_HOUR = 10
+MULAN_SUPPORT_START_MINUTE = 0
 AVATAR_TOWER_SETTLEMENT_WAIT_SECONDS = 30
 AVATAR_TOWER_SETTLEMENT_TIMEOUT_SECONDS = 45
 TIME_CRITICAL_COMMAND_PREFIXES = (
@@ -112,6 +114,24 @@ STALE_STAR_TIME_CRITICAL_KEYS = {
     "pending_star_shift_target_time",
 }
 STALE_STAR_TIME_CRITICAL_GRACE_SECONDS = 180
+
+
+def seconds_until_mulan_support_start(now=None):
+    """Return seconds until today's independent 10:00 Mulan support window."""
+    now = now or datetime.now()
+    target = now.replace(
+        hour=MULAN_SUPPORT_START_HOUR,
+        minute=MULAN_SUPPORT_START_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if now >= target:
+        return 0
+    return max(1, int((target - now).total_seconds()) + 1)
+
+
+def mulan_support_start_label():
+    return f"{MULAN_SUPPORT_START_HOUR:02d}:{MULAN_SUPPORT_START_MINUTE:02d}"
 
 STATE_TIME_COMMAND_MAP = {
     "next_rift_search_time": ".探寻裂缝",
@@ -4219,6 +4239,8 @@ class CommonCommandMixin:
     async def maybe_run_mulan_support(self, identity="主魂", today=None, timeout=60):
         """Send the independent daily .支援慕兰 奇袭 command once per identity."""
         identity = str(identity or "主魂").strip() or "主魂"
+        if seconds_until_mulan_support_start(datetime.now()) > 0:
+            return False
         today = today or datetime.now().strftime("%Y-%m-%d")
         state = self.state if identity == "主魂" else self.get_avatar_state(identity)
         log = self.common_command_logger()
@@ -4233,13 +4255,6 @@ class CommonCommandMixin:
         ):
             log.info(f"[{identity}] Mulan support skipped: dashboard command paused.")
             return False
-        if self.daily_one_shot_should_defer(
-            identity,
-            MULAN_SUPPORT_COMMAND,
-            logger=log,
-        ):
-            return False
-
         if identity == "主魂":
             resp = await self.send_and_wait_feedback(
                 MULAN_SUPPORT_COMMAND,
@@ -4505,7 +4520,7 @@ class CommonCommandMixin:
 
     async def common_avatar_mulan_support(self, avatar, daily_start_wait_func=None):
         """Run the remaining avatar daily support command without sect check-in."""
-        if daily_start_wait_func is not None and daily_start_wait_func(datetime.now()) > 0:
+        if seconds_until_mulan_support_start(datetime.now()) > 0:
             return False
         return await self.maybe_run_mulan_support(
             avatar,
@@ -4514,14 +4529,16 @@ class CommonCommandMixin:
 
     async def run_common_mulan_support_loop(
         self,
-        daily_start_wait_func,
-        daily_start_label_func,
+        daily_start_wait_func=None,
+        daily_start_label_func=None,
         pre_loop_func=None,
         sleep_func=None,
     ):
         """Run the valid daily Mulan support command after retired check-in removal."""
         await self.startup_done.wait()
         log = self.common_command_logger()
+        daily_start_wait_func = daily_start_wait_func or seconds_until_mulan_support_start
+        daily_start_label_func = daily_start_label_func or mulan_support_start_label
         while getattr(self, "is_running", True):
             if pre_loop_func is not None:
                 should_continue = await pre_loop_func()
@@ -4538,7 +4555,7 @@ class CommonCommandMixin:
                 )
                 await asyncio.sleep(
                     self.common_scheduler_sleep_seconds(
-                        daily_wait + random.randint(0, 30),
+                        daily_wait,
                         sleep_func=sleep_func,
                     )
                 )

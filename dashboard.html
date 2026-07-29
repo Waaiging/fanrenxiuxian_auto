@@ -243,6 +243,19 @@
         .duel-toolbar { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border-color); display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
         .duel-global-control { margin-left: auto; display: inline-flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.76rem; font-weight: 700; }
         .duel-global-control input, .duel-queue-toggle input, .duel-participant-toggle input { width: 1rem; height: 1rem; accent-color: var(--success-color); }
+        .duel-multi-card { margin: 1rem; border: 1px solid rgba(56,189,248,0.38); border-radius: 10px; background: rgba(14,116,144,0.08); overflow: hidden; }
+        .duel-multi-head { padding: 0.8rem 0.9rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border-bottom: 1px solid var(--border-color); }
+        .duel-multi-title { color: #bae6fd; font-size: 0.86rem; font-weight: 900; }
+        .duel-multi-summary { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.7rem; }
+        .duel-multi-form { padding: 0.85rem 0.9rem; }
+        .duel-multi-settings { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.75rem; align-items: end; }
+        .duel-multi-targets { margin-top: 0.75rem; display: grid; gap: 0.5rem; }
+        .duel-multi-target-row { display: grid; grid-template-columns: minmax(10rem, 1fr) 7rem auto; gap: 0.55rem; align-items: end; padding: 0.62rem; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0,0,0,0.16); }
+        .duel-multi-target-meta { margin-top: 0.22rem; color: var(--text-secondary); font-size: 0.66rem; }
+        .duel-multi-actions { margin-top: 0.75rem; display: flex; gap: 0.55rem; flex-wrap: wrap; align-items: center; }
+        .duel-multi-hint { color: var(--text-secondary); font-size: 0.68rem; }
+        .duel-multi-remove { min-width: 2.1rem; height: 2rem; border: 1px solid rgba(248,113,113,0.4); border-radius: 6px; background: rgba(127,29,29,0.18); color: #fca5a5; cursor: pointer; }
+        .duel-multi-remove:disabled { opacity: 0.45; cursor: wait; }
         .duel-queue-grid { padding: 1rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; border-bottom: 1px solid var(--border-color); }
         .duel-queue-card { min-width: 0; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0,0,0,0.18); }
         .duel-queue-head { min-height: 3.2rem; padding: 0.7rem 0.8rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; border-bottom: 1px solid var(--border-color); }
@@ -345,6 +358,7 @@
             .duel-queue-grid { grid-template-columns: 1fr; }
             .duel-global-control { margin-left: 0; }
             .duel-queue-foot { align-items: flex-start; flex-direction: column; }
+            .duel-multi-settings, .duel-multi-target-row { grid-template-columns: 1fr; }
             .log-search-row { flex-wrap: wrap; }
             .log-search-row .log-input { flex-basis: 100%; }
             .command-row { grid-template-columns: 1fr auto; gap: 0.5rem 0.65rem; font-size: 0.88rem; }
@@ -1222,6 +1236,33 @@
                     自动斗法
                 </label>
             </div>
+            <div class="duel-multi-card">
+                <div class="duel-multi-head">
+                    <div>
+                        <div class="duel-multi-title">主动一对多斗法</div>
+                        <div class="duel-multi-summary" id="duel-multi-summary">尚未配置</div>
+                    </div>
+                    <label class="duel-queue-toggle">
+                        <input id="duel-multi-enabled" type="checkbox" onchange="setDuelMultiEnabled(this.checked)">
+                        启用计划
+                    </label>
+                </div>
+                <div class="duel-multi-form">
+                    <div class="duel-multi-settings">
+                        <label class="record-field">
+                            发起身份
+                            <select id="duel-multi-initiator" class="record-select" onchange="markDuelMultiDirty()"></select>
+                        </label>
+                        <button class="reward-refresh" type="button" onclick="addDuelMultiTarget()"><i data-lucide="plus" aria-hidden="true"></i>添加对象</button>
+                    </div>
+                    <div class="duel-multi-targets" id="duel-multi-targets"></div>
+                    <div class="duel-multi-actions">
+                        <button class="reward-refresh" type="button" id="duel-multi-save" onclick="saveDuelMultiPlan()"><i data-lucide="save" aria-hidden="true"></i>保存计划</button>
+                        <button class="reward-refresh" type="button" onclick="resetDuelMultiDraft()">放弃修改</button>
+                        <span class="duel-multi-hint">列表每 6 分钟轮换；同一对象至少间隔 11 分钟。已知分身会先切换激活并保持到斗法完成。</span>
+                    </div>
+                </div>
+            </div>
             <div class="duel-queue-grid" id="duel-queue-grid">
                 <div class="record-empty">加载中...</div>
             </div>
@@ -1352,6 +1393,7 @@
         let dailyRewardUpdatedAt = '';
         let duelDashboardData = {enabled: false, queues: [], rows: [], summary: {}};
         let duelControlPending = false;
+        let duelMultiDirty = false;
         let redPacketDashboardData = {settings: {}, accounts: []};
         let redPacketSettingsDirty = false;
         let redPacketSavePending = false;
@@ -2918,6 +2960,184 @@
             return 'blocked';
         }
 
+        function duelMultiTargetMeta(username) {
+            const clean = String(username || '').trim().replace(/^@+/, '').toLowerCase();
+            const match = (duelDashboardData.identity_options || []).find(item => String(item.username || '').toLowerCase() === clean);
+            if (!match) return clean ? '外部用户名 · 无需分身预切换' : '填写 Telegram 用户名';
+            return `${match.account_name || match.account} · ${match.identity}${match.identity === '主魂' ? '' : ' · 斗法前自动激活'}`;
+        }
+
+        function duelMultiTargetRowHtml(target = {}) {
+            const username = String(target.username || '');
+            const count = Math.max(1, Number(target.count || 1));
+            const progress = Number(target.count || 0) > 0
+                ? ` · 已完成 ${Number(target.attempts || 0)}/${Number(target.count || 0)}${target.last_result ? ` · ${target.last_result}` : ''}`
+                : '';
+            return `
+                <div class="duel-multi-target-row" data-target-id="${escapeHtml(target.id || '')}">
+                    <label class="record-field">
+                        斗法对象
+                        <input class="record-input duel-multi-target-username" type="text" value="${escapeHtml(username)}" list="duel-target-options" maxlength="64" spellcheck="false" oninput="markDuelMultiDirty(); updateDuelMultiTargetMeta(this)">
+                        <span class="duel-multi-target-meta">${escapeHtml(duelMultiTargetMeta(username) + progress)}</span>
+                    </label>
+                    <label class="record-field">
+                        总次数
+                        <input class="record-input duel-multi-target-count" type="number" min="1" max="999" step="1" value="${count}" oninput="markDuelMultiDirty()">
+                    </label>
+                    <button class="duel-multi-remove" type="button" title="移除对象" ${duelControlPending ? 'disabled' : ''} onclick="removeDuelMultiTarget(this)"><i data-lucide="trash-2" aria-hidden="true"></i></button>
+                </div>
+            `;
+        }
+
+        function renderDuelMultiPlan(force = false) {
+            const multi = duelDashboardData.multi || {};
+            const summary = document.getElementById('duel-multi-summary');
+            if (summary) {
+                summary.textContent = multi.configured
+                    ? `${multi.enabled ? '运行中' : '已暂停'} · 完成 ${Number(multi.total_completed || 0)}/${Number(multi.total_planned || 0)} · 今日神念 ${Number(multi.daily_remaining ?? 10)}/10 · 下次 ${duelTimeText(multi.next_at)} · ${multi.last_result || '等待调度'}`
+                    : '尚未配置发起身份和目标列表';
+            }
+            if ((duelMultiDirty || duelControlPending) && !force) return;
+
+            const initiatorSelect = document.getElementById('duel-multi-initiator');
+            const options = Array.isArray(duelDashboardData.identity_options) ? duelDashboardData.identity_options : [];
+            if (initiatorSelect) {
+                initiatorSelect.innerHTML = '<option value="">请选择发起身份</option>' + options.map(item =>
+                    `<option value="${escapeHtml(`${item.account}|${item.identity}`)}">${escapeHtml(item.label || `${item.account_name} · ${item.identity}`)}</option>`
+                ).join('');
+                initiatorSelect.value = multi.initiator_account && multi.initiator_identity
+                    ? `${multi.initiator_account}|${multi.initiator_identity}`
+                    : '';
+                initiatorSelect.disabled = duelControlPending;
+            }
+            const enabled = document.getElementById('duel-multi-enabled');
+            if (enabled) {
+                enabled.checked = Boolean(multi.enabled);
+                enabled.disabled = duelControlPending;
+            }
+            const targetBox = document.getElementById('duel-multi-targets');
+            if (targetBox) {
+                const targets = Array.isArray(multi.targets) && multi.targets.length ? multi.targets : [{}];
+                targetBox.innerHTML = targets.map(duelMultiTargetRowHtml).join('');
+            }
+            const save = document.getElementById('duel-multi-save');
+            if (save) save.disabled = duelControlPending;
+            refreshIcons();
+        }
+
+        function markDuelMultiDirty() {
+            duelMultiDirty = true;
+            const save = document.getElementById('duel-multi-save');
+            if (save) save.textContent = '保存修改';
+        }
+
+        async function setDuelMultiEnabled(enabled) {
+            const multi = duelDashboardData.multi || {};
+            if (duelMultiDirty || !multi.configured) {
+                markDuelMultiDirty();
+                return;
+            }
+            if (duelControlPending) return;
+            duelControlPending = true;
+            try {
+                const response = await fetch(apiUrl('/api/duels/multi'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: Boolean(enabled)})
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+            } catch (error) {
+                console.error('One-to-many duel control failed:', error);
+                alert(`一对多斗法开关失败：${error.message || error}`);
+            } finally {
+                duelControlPending = false;
+                await updateDuelDashboard(true);
+            }
+        }
+
+        function updateDuelMultiTargetMeta(input) {
+            const meta = input?.closest('.record-field')?.querySelector('.duel-multi-target-meta');
+            if (meta) meta.textContent = duelMultiTargetMeta(input.value);
+        }
+
+        function addDuelMultiTarget() {
+            const targetBox = document.getElementById('duel-multi-targets');
+            if (!targetBox || duelControlPending) return;
+            const rows = targetBox.querySelectorAll('.duel-multi-target-row');
+            if (rows.length >= 20) {
+                alert('斗法对象最多 20 个。');
+                return;
+            }
+            targetBox.insertAdjacentHTML('beforeend', duelMultiTargetRowHtml({count: 1}));
+            markDuelMultiDirty();
+            refreshIcons();
+            targetBox.querySelector('.duel-multi-target-row:last-child input')?.focus();
+        }
+
+        function removeDuelMultiTarget(button) {
+            if (duelControlPending) return;
+            const targetBox = document.getElementById('duel-multi-targets');
+            button?.closest('.duel-multi-target-row')?.remove();
+            if (targetBox && !targetBox.querySelector('.duel-multi-target-row')) {
+                targetBox.innerHTML = duelMultiTargetRowHtml({count: 1});
+            }
+            markDuelMultiDirty();
+            refreshIcons();
+        }
+
+        function resetDuelMultiDraft() {
+            duelMultiDirty = false;
+            renderDuelMultiPlan(true);
+        }
+
+        async function saveDuelMultiPlan() {
+            if (duelControlPending) return;
+            const initiator = String(document.getElementById('duel-multi-initiator')?.value || '');
+            const enabled = Boolean(document.getElementById('duel-multi-enabled')?.checked);
+            const [initiatorAccount, initiatorIdentity] = initiator.split('|');
+            if (!initiatorAccount || !initiatorIdentity) {
+                alert('请选择斗法发起身份。');
+                return;
+            }
+            const targets = Array.from(document.querySelectorAll('#duel-multi-targets .duel-multi-target-row')).map(row => ({
+                username: String(row.querySelector('.duel-multi-target-username')?.value || '').trim().replace(/^@+/, ''),
+                count: Number(row.querySelector('.duel-multi-target-count')?.value || 0),
+            })).filter(item => item.username);
+            if (!targets.length) {
+                alert('请至少添加一个斗法对象。');
+                return;
+            }
+            const invalid = targets.find(item => !/^[A-Za-z0-9_]{2,64}$/.test(item.username) || !Number.isInteger(item.count) || item.count < 1 || item.count > 999);
+            if (invalid) {
+                alert('用户名需为有效 Telegram 用户名，每个对象次数需为 1 到 999 的整数。');
+                return;
+            }
+            duelControlPending = true;
+            renderDuelMultiPlan(true);
+            try {
+                const response = await fetch(apiUrl('/api/duels/multi'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        enabled,
+                        initiator_account: initiatorAccount,
+                        initiator_identity: initiatorIdentity,
+                        targets,
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                duelMultiDirty = false;
+            } catch (error) {
+                console.error('One-to-many duel plan save failed:', error);
+                alert(`一对多斗法计划保存失败：${error.message || error}`);
+            } finally {
+                duelControlPending = false;
+                await updateDuelDashboard(true);
+            }
+        }
+
         function renderDuelDashboard() {
             const data = duelDashboardData || {};
             const queues = Array.isArray(data.queues) ? data.queues : [];
@@ -2932,6 +3152,7 @@
             if (summaryEl) {
                 summaryEl.textContent = `${data.date || duelDateValue()} · ${summary.count || 0} 次 · 胜 ${summary.wins || 0} / 负 ${summary.losses || 0} / 受阻 ${summary.blocked || 0}`;
             }
+            renderDuelMultiPlan();
 
             const queueGrid = document.getElementById('duel-queue-grid');
             const targetOptions = Array.isArray(data.target_options) ? data.target_options : [];

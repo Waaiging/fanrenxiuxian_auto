@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared two-target duel scheduler used by the main, sub, and xiaohao accounts."""
+"""Shared duel schedulers for legacy rotations and active one-to-many plans."""
 
 import asyncio
 import json
@@ -26,6 +26,7 @@ DUEL_LOCK_FILE = os.path.join(CONFIG_DIR, "duel_state.lock")
 DUEL_DB_FILE = os.path.join(CONFIG_DIR, "message_events.sqlite3")
 XIAOHAO_STATE_FILE = os.path.join(CONFIG_DIR, "state_xiaohao.json")
 DUEL_INTERVAL_SECONDS = 6 * 60
+DUEL_TARGET_INTERVAL_SECONDS = 11 * 60
 DUEL_DAILY_LIMIT = 10
 DUEL_LEASE_SECONDS = 4 * 60
 DUEL_RESULT_WAIT_SECONDS = 90
@@ -33,6 +34,8 @@ DUEL_POLL_SECONDS = 3
 DUEL_RETENTION_DAYS = 30
 DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
 DUEL_BUSY_RETRY_SECONDS = 60
+DUEL_MULTI_MAX_TARGETS = 20
+DUEL_MULTI_MAX_COUNT = 999
 DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
 TITAN_BEAST_MODE_DEFAULT = "deploy"
 TITAN_BEAST_MODE_LABELS = {
@@ -43,6 +46,31 @@ DUEL_ACCOUNT_LABELS = {
     "main": "主号",
     "sub": "副号",
     "xiaohao": "小号",
+    "waaiging": "Waaiging",
+}
+
+DUEL_IDENTITIES = {
+    "main": (
+        {"identity": "主魂", "username": "Weeguu"},
+        {"identity": "无咎子", "username": "wuxinglinggen"},
+        {"identity": "缘生子", "username": "kulipabp"},
+        {"identity": "素缘子", "username": "OldEinstein"},
+    ),
+    "sub": (
+        {"identity": "主魂", "username": "Gamling33"},
+        {"identity": "厚土", "username": "crayonxxin"},
+        {"identity": "缘生子", "username": "Lvdoumiao"},
+        {"identity": "寻真子", "username": "ding303"},
+    ),
+    "xiaohao": (
+        {"identity": "主魂", "username": "TitanCreeper"},
+        {"identity": "问心子", "username": "lianqi10000"},
+        {"identity": "素心子", "username": "hajiimiii"},
+        {"identity": "缘生子", "username": "adai925"},
+    ),
+    "waaiging": (
+        {"identity": "主魂", "username": "Waaiging"},
+    ),
 }
 
 DUEL_QUEUES = {
@@ -99,6 +127,44 @@ def duel_participant_config(queue_key, participant_key):
     return None
 
 
+def duel_identity_config(account, identity):
+    account = str(account or "").strip().lower()
+    identity = str(identity or "主魂").strip() or "主魂"
+    for item in DUEL_IDENTITIES.get(account, ()):
+        if item["identity"] == identity:
+            return {
+                **item,
+                "account": account,
+                "account_name": DUEL_ACCOUNT_LABELS.get(account, account),
+                "key": duel_participant_key(account, identity),
+            }
+    return None
+
+
+def duel_identity_for_username(username):
+    try:
+        target = normalize_duel_target(username)
+    except ValueError:
+        return None
+    for account, identities in DUEL_IDENTITIES.items():
+        for item in identities:
+            if item["username"].lower() == target.lower():
+                return duel_identity_config(account, item["identity"])
+    return None
+
+
+def duel_identity_options():
+    rows = []
+    for account, identities in DUEL_IDENTITIES.items():
+        for item in identities:
+            config = duel_identity_config(account, item["identity"])
+            rows.append({
+                **config,
+                "label": f"{config['account_name']} · {config['identity']} · @{config['username']}",
+            })
+    return rows
+
+
 def normalize_duel_target(value, fallback=""):
     """Return a Telegram username without @, or an empty value for the default."""
     target = str(value or "").strip().lstrip("@").strip()
@@ -153,14 +219,47 @@ def _new_queue_state(queue_key):
     return state
 
 
+def _new_multi_target_state(username, count, target_id=None):
+    count = max(1, min(DUEL_MULTI_MAX_COUNT, int(count)))
+    return {
+        "id": str(target_id or uuid.uuid4().hex),
+        "username": normalize_duel_target(username),
+        "count": count,
+        "attempts": 0,
+        "remaining": count,
+        "status": "ready",
+        "last_attempt_at": "",
+        "last_result": "",
+    }
+
+
+def _new_multi_state():
+    return {
+        "enabled": False,
+        "initiator_account": "",
+        "initiator_identity": "",
+        "cursor": 0,
+        "next_at": "",
+        "last_attempt_at": "",
+        "last_success_at": "",
+        "last_result": "尚未配置",
+        "daily_remaining": DUEL_DAILY_LIMIT,
+        "daily_exhausted_date": "",
+        "in_flight": {},
+        "preparation": {},
+        "targets": [],
+    }
+
+
 def duel_default_state():
     return {
-        "version": 1,
+        "version": 2,
         "enabled": True,
         "date": duel_date(),
         "updated_at": duel_time(),
         "target_next_at": {},
         "queues": {key: _new_queue_state(key) for key in DUEL_QUEUES},
+        "multi": _new_multi_state(),
     }
 
 
@@ -208,7 +307,7 @@ def _read_duel_state_unlocked():
 def _ensure_duel_state_shape(data, reset_daily=True):
     if not isinstance(data, dict):
         data = duel_default_state()
-    data.setdefault("version", 1)
+    data["version"] = 2
     data.setdefault("enabled", True)
     target_next_at = data.setdefault("target_next_at", {})
     if not isinstance(target_next_at, dict):
@@ -258,6 +357,84 @@ def _ensure_duel_state_shape(data, reset_daily=True):
             if key not in expected_keys:
                 participants.pop(key, None)
 
+    multi = data.setdefault("multi", _new_multi_state())
+    if not isinstance(multi, dict):
+        multi = _new_multi_state()
+        data["multi"] = multi
+    for field, value in _new_multi_state().items():
+        multi.setdefault(field, value)
+    multi["enabled"] = bool(multi.get("enabled", False))
+    initiator_account = str(multi.get("initiator_account") or "").strip().lower()
+    initiator_identity = str(multi.get("initiator_identity") or "").strip()
+    if duel_identity_config(initiator_account, initiator_identity):
+        multi["initiator_account"] = initiator_account
+        multi["initiator_identity"] = initiator_identity
+    else:
+        multi["enabled"] = False
+        multi["initiator_account"] = ""
+        multi["initiator_identity"] = ""
+    try:
+        multi["cursor"] = max(0, int(multi.get("cursor") or 0))
+    except Exception:
+        multi["cursor"] = 0
+    try:
+        multi["daily_remaining"] = max(
+            0,
+            min(DUEL_DAILY_LIMIT, int(multi.get("daily_remaining", DUEL_DAILY_LIMIT))),
+        )
+    except Exception:
+        multi["daily_remaining"] = DUEL_DAILY_LIMIT
+    for field in ("in_flight", "preparation"):
+        if not isinstance(multi.get(field), dict):
+            multi[field] = {}
+    normalized_multi_targets = []
+    seen_ids = set()
+    seen_usernames = set()
+    raw_targets = multi.get("targets") if isinstance(multi.get("targets"), list) else []
+    for raw in raw_targets[:DUEL_MULTI_MAX_TARGETS]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            username = normalize_duel_target(raw.get("username"))
+            count = max(1, min(DUEL_MULTI_MAX_COUNT, int(raw.get("count") or 1)))
+        except (TypeError, ValueError):
+            continue
+        if not username:
+            continue
+        target_key = username.lower()
+        if target_key in seen_usernames:
+            continue
+        seen_usernames.add(target_key)
+        target_id = str(raw.get("id") or uuid.uuid4().hex)
+        if target_id in seen_ids:
+            target_id = uuid.uuid4().hex
+        seen_ids.add(target_id)
+        try:
+            attempts = max(0, min(count, int(raw.get("attempts") or 0)))
+        except Exception:
+            attempts = 0
+        try:
+            remaining = max(0, min(count, int(raw.get("remaining", count - attempts))))
+        except Exception:
+            remaining = max(0, count - attempts)
+        attempts = max(attempts, count - remaining)
+        normalized_multi_targets.append({
+            "id": target_id,
+            "username": username,
+            "count": count,
+            "attempts": attempts,
+            "remaining": remaining,
+            "status": str(raw.get("status") or ("completed" if remaining <= 0 else "ready")),
+            "last_attempt_at": str(raw.get("last_attempt_at") or ""),
+            "last_result": str(raw.get("last_result") or ""),
+        })
+    multi["targets"] = normalized_multi_targets
+    if not normalized_multi_targets:
+        multi["enabled"] = False
+        multi["in_flight"] = {}
+        multi["preparation"] = {}
+        multi["last_result"] = "尚未配置"
+
     today = duel_date()
     if reset_daily and str(data.get("date") or "") != today:
         data["date"] = today
@@ -272,6 +449,13 @@ def _ensure_duel_state_shape(data, reset_daily=True):
                 reset_state["enabled"] = bool(previous.get("enabled", True))
                 reset_state["target_username"] = normalize_duel_target(previous.get("target_username"))
                 queue["participants"][key] = reset_state
+        multi["daily_remaining"] = DUEL_DAILY_LIMIT
+        multi["daily_exhausted_date"] = ""
+        multi["next_at"] = ""
+        multi["in_flight"] = {}
+        multi["preparation"] = {}
+        for target in multi["targets"]:
+            target["status"] = "completed" if int(target.get("remaining") or 0) <= 0 else "ready"
     return data
 
 
@@ -305,6 +489,80 @@ def set_duel_control(enabled, queue_key=""):
             if enabled:
                 for queue in data["queues"].values():
                     queue["next_at"] = ""
+                data["multi"]["next_at"] = ""
+            else:
+                data["multi"]["in_flight"] = {}
+                data["multi"]["preparation"] = {}
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def configure_duel_multi_plan(initiator_account, initiator_identity, targets, enabled=True):
+    initiator = duel_identity_config(initiator_account, initiator_identity)
+    if not initiator:
+        raise ValueError("unknown duel initiator")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("duel targets required")
+    if len(targets) > DUEL_MULTI_MAX_TARGETS:
+        raise ValueError("too many duel targets")
+
+    normalized = []
+    seen = set()
+    for raw in targets:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid duel target")
+        username = normalize_duel_target(raw.get("username") or raw.get("target"))
+        if not username:
+            raise ValueError("invalid duel target username")
+        target_key = username.lower()
+        if target_key in seen:
+            raise ValueError("duplicate duel target")
+        seen.add(target_key)
+        try:
+            count = int(raw.get("count") or 0)
+        except Exception as exc:
+            raise ValueError("invalid duel count") from exc
+        if count < 1 or count > DUEL_MULTI_MAX_COUNT:
+            raise ValueError("invalid duel count")
+        target_identity = duel_identity_for_username(username)
+        if target_key == initiator["username"].lower():
+            raise ValueError("duel target matches initiator")
+        if target_identity and target_identity["account"] == initiator["account"]:
+            raise ValueError("same account duel target")
+        normalized.append(_new_multi_target_state(username, count))
+
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = _new_multi_state()
+        multi.update({
+            "enabled": bool(enabled),
+            "initiator_account": initiator["account"],
+            "initiator_identity": initiator["identity"],
+            "last_result": "已保存，等待调度" if enabled else "已保存并暂停",
+            "targets": normalized,
+        })
+        data["multi"] = multi
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def set_duel_multi_control(enabled):
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = data["multi"]
+        if enabled and (
+            not duel_identity_config(multi.get("initiator_account"), multi.get("initiator_identity"))
+            or not multi.get("targets")
+        ):
+            raise ValueError("duel multi plan is not configured")
+        multi["enabled"] = bool(enabled)
+        multi["next_at"] = ""
+        if not enabled:
+            multi["in_flight"] = {}
+            multi["preparation"] = {}
+        multi["last_result"] = "已恢复" if enabled else "已暂停"
         data["updated_at"] = duel_time()
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
@@ -398,7 +656,266 @@ def _target_blocked_until(data, target_username, now=None):
         lease_until = parse_duel_time(in_flight.get("lease_until"))
         if lease_until and (blocked_until is None or lease_until > blocked_until):
             blocked_until = lease_until
+    multi_in_flight = ((data.get("multi") or {}).get("in_flight") or {})
+    if _lease_active(multi_in_flight, now):
+        try:
+            active_target = normalize_duel_target(
+                multi_in_flight.get("target_username")
+            )
+        except ValueError:
+            active_target = ""
+        if active_target.lower() == target_key:
+            lease_until = parse_duel_time(multi_in_flight.get("lease_until"))
+            if lease_until and (blocked_until is None or lease_until > blocked_until):
+                blocked_until = lease_until
     return blocked_until if blocked_until and blocked_until > now else None
+
+
+def _multi_target_by_id(multi, target_id):
+    target_id = str(target_id or "")
+    for target in multi.get("targets") or []:
+        if str(target.get("id") or "") == target_id:
+            return target
+    return None
+
+
+def _multi_target_activation(target_username):
+    target = duel_identity_for_username(target_username)
+    if not target or target.get("identity") == "主魂":
+        return None
+    return target
+
+
+def claim_duel_target_preparation(account):
+    account = str(account or "").strip().lower()
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = data["multi"]
+        preparation = multi.get("preparation") or {}
+        if (
+            not data.get("enabled")
+            or not multi.get("enabled")
+            or str(preparation.get("owner") or "") != account
+            or str(preparation.get("status") or "") != "pending"
+            or not _lease_active(preparation, now)
+        ):
+            return None
+        preparation["status"] = "claimed"
+        preparation["claimed_at"] = duel_time(now)
+        preparation["lease_until"] = duel_time(
+            now + timedelta(seconds=DUEL_LEASE_SECONDS)
+        )
+        data["updated_at"] = duel_time(now)
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return dict(preparation)
+
+
+def finish_duel_target_preparation(claim, success, detail=""):
+    if not claim:
+        return False
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = data["multi"]
+        preparation = multi.get("preparation") or {}
+        if preparation.get("run_id") != claim.get("run_id"):
+            return False
+        if success:
+            preparation["status"] = "ready"
+            preparation["ready_at"] = duel_time(now)
+            preparation["lease_until"] = duel_time(
+                now + timedelta(seconds=DUEL_LEASE_SECONDS)
+            )
+            multi["last_result"] = detail or (
+                f"@{preparation.get('target_username')} · {preparation.get('target_identity')} 已激活"
+            )
+        else:
+            multi["preparation"] = {}
+            multi["next_at"] = duel_time(
+                now + timedelta(seconds=DUEL_BUSY_RETRY_SECONDS)
+            )
+            multi["last_result"] = detail or "目标身份激活失败"
+        data["updated_at"] = duel_time(now)
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return True
+
+
+def duel_target_preparation_held(claim):
+    if not claim:
+        return False
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = data["multi"]
+        preparation = multi.get("preparation") or {}
+        if preparation.get("run_id") != claim.get("run_id"):
+            return False
+        if not _lease_active(preparation):
+            return False
+        return str(preparation.get("status") or "") in {"claimed", "ready", "holding"}
+
+
+def release_duel_target_preparation(claim, detail=""):
+    if not claim:
+        return False
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        multi = data["multi"]
+        preparation = multi.get("preparation") or {}
+        if preparation.get("run_id") != claim.get("run_id"):
+            return False
+        in_flight = multi.get("in_flight") or {}
+        if in_flight and in_flight.get("preparation_run_id") == claim.get("run_id"):
+            return False
+        multi["preparation"] = {}
+        if detail:
+            multi["last_result"] = detail
+        data["updated_at"] = duel_time(now)
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return True
+
+
+def _reserve_multi_duel_locked(data, account, now):
+    multi = data["multi"]
+    dirty = False
+    if (
+        not multi.get("enabled")
+        or multi.get("initiator_account") != account
+        or not _queue_due(multi, now)
+        or _lease_active(multi.get("in_flight"), now)
+    ):
+        return None, dirty
+    if int(multi.get("daily_remaining", DUEL_DAILY_LIMIT) or 0) <= 0:
+        multi["next_at"] = _next_day_time(now)
+        multi["last_result"] = "发起身份今日主动斗法次数已用尽"
+        return None, True
+
+    targets = multi.get("targets") or []
+    if not targets:
+        multi["enabled"] = False
+        multi["last_result"] = "尚未配置目标"
+        return None, True
+    cursor = int(multi.get("cursor") or 0) % len(targets)
+    selected = None
+    selected_index = None
+    blocked_targets = []
+    for offset in range(len(targets)):
+        index = (cursor + offset) % len(targets)
+        target = targets[index]
+        if int(target.get("remaining") or 0) <= 0:
+            if target.get("status") != "completed":
+                target["status"] = "completed"
+                dirty = True
+            continue
+        target_username = normalize_duel_target(target.get("username"))
+        blocked_until = _target_blocked_until(data, target_username, now)
+        if blocked_until:
+            blocked_targets.append((blocked_until, target_username))
+            continue
+        selected = target
+        selected_index = index
+        break
+
+    if selected is None:
+        if all(int(target.get("remaining") or 0) <= 0 for target in targets):
+            multi["enabled"] = False
+            multi["next_at"] = ""
+            multi["in_flight"] = {}
+            multi["preparation"] = {}
+            multi["last_result"] = "一对多计划已全部完成"
+            return None, True
+        if blocked_targets:
+            blocked_until, target_username = min(blocked_targets, key=lambda item: item[0])
+            multi["next_at"] = duel_time(blocked_until)
+            multi["last_result"] = f"等待 @{target_username} 满足 11 分钟间隔"
+            return None, True
+        return None, dirty
+
+    target_username = normalize_duel_target(selected.get("username"))
+    activation = _multi_target_activation(target_username)
+    preparation = multi.get("preparation") or {}
+    if preparation and not _lease_active(preparation, now):
+        multi["preparation"] = {}
+        preparation = {}
+        dirty = True
+    if activation:
+        matching_preparation = (
+            preparation.get("target_id") == selected.get("id")
+            and preparation.get("target_username", "").lower() == target_username.lower()
+            and preparation.get("target_identity") == activation["identity"]
+        )
+        if not matching_preparation:
+            run_id = uuid.uuid4().hex
+            multi["preparation"] = {
+                "run_id": run_id,
+                "owner": activation["account"],
+                "status": "pending",
+                "target_id": selected["id"],
+                "target_username": target_username,
+                "target_identity": activation["identity"],
+                "started_at": duel_time(now),
+                "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
+            }
+            selected["status"] = "preparing"
+            multi["last_result"] = (
+                f"等待 {activation['account_name']} · {activation['identity']} 激活后斗法"
+            )
+            return None, True
+        if str(preparation.get("status") or "") != "ready":
+            multi["last_result"] = (
+                f"正在激活 {activation['account_name']} · {activation['identity']}"
+            )
+            return None, True
+
+    initiator = duel_identity_config(
+        multi.get("initiator_account"),
+        multi.get("initiator_identity"),
+    )
+    if not initiator:
+        multi["enabled"] = False
+        multi["last_result"] = "发起身份配置无效"
+        return None, True
+
+    run_id = uuid.uuid4().hex
+    multi["cursor"] = (selected_index + 1) % len(targets)
+    multi["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
+    multi["last_attempt_at"] = duel_time(now)
+    data.setdefault("target_next_at", {})[target_username.lower()] = duel_time(
+        now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
+    )
+    preparation_run_id = ""
+    if activation:
+        preparation = multi.get("preparation") or {}
+        preparation["status"] = "holding"
+        preparation["lease_until"] = duel_time(
+            now + timedelta(seconds=DUEL_LEASE_SECONDS)
+        )
+        preparation_run_id = str(preparation.get("run_id") or "")
+    multi["in_flight"] = {
+        "run_id": run_id,
+        "owner": account,
+        "target_id": selected["id"],
+        "target_username": target_username,
+        "preparation_run_id": preparation_run_id,
+        "started_at": duel_time(now),
+        "lease_until": duel_time(now + timedelta(seconds=DUEL_LEASE_SECONDS)),
+    }
+    selected["status"] = "in_flight"
+    selected["last_attempt_at"] = duel_time(now)
+    return {
+        "queue_key": "multi",
+        "run_id": run_id,
+        "participant_key": initiator["key"],
+        "account": account,
+        "identity": initiator["identity"],
+        "challenger_username": initiator["username"],
+        "target_id": selected["id"],
+        "target_username": target_username,
+        "preparation_run_id": preparation_run_id,
+        "command": f".斗法 @{target_username}",
+        "reserved_at": duel_time(now),
+    }, True
 
 
 def _next_day_time(now=None):
@@ -553,8 +1070,23 @@ def reserve_duel_for_account(account):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
-        dirty = False
         if not data.get("enabled"):
+            return None
+        multi_reservation, dirty = _reserve_multi_duel_locked(data, account, now)
+        if multi_reservation:
+            data["updated_at"] = duel_time(now)
+            _atomic_write_json(DUEL_STATE_FILE, data)
+            return multi_reservation
+        multi = data["multi"]
+        if (
+            multi.get("enabled")
+            and multi.get("initiator_account") == account
+            and _queue_due(multi, now)
+            and _lease_active(multi.get("preparation"), now)
+        ):
+            if dirty:
+                data["updated_at"] = duel_time(now)
+                _atomic_write_json(DUEL_STATE_FILE, data)
             return None
         for queue_key, config in DUEL_QUEUES.items():
             queue = data["queues"][queue_key]
@@ -652,7 +1184,7 @@ def reserve_duel_for_account(account):
             queue["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
             queue["last_attempt_at"] = duel_time(now)
             data.setdefault("target_next_at", {})[target_username.lower()] = duel_time(
-                now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+                now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
             )
             queue["in_flight"] = {
                 "run_id": run_id,
@@ -690,6 +1222,84 @@ def finish_duel_reservation(reservation, result):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        if reservation.get("queue_key") == "multi":
+            multi = data["multi"]
+            in_flight = multi.get("in_flight") or {}
+            if in_flight.get("run_id") != reservation.get("run_id"):
+                return
+            target = _multi_target_by_id(multi, reservation.get("target_id"))
+            status = str(result.get("status") or "unknown")
+            outcome = str(result.get("outcome") or status)
+            if target is not None:
+                target["last_result"] = outcome
+                if status == "settled":
+                    target["attempts"] = min(
+                        int(target.get("count") or 0),
+                        int(target.get("attempts") or 0) + 1,
+                    )
+                    target["remaining"] = max(0, int(target.get("remaining") or 0) - 1)
+                    target["status"] = "completed" if target["remaining"] <= 0 else "ready"
+                    multi["last_success_at"] = duel_time(now)
+                else:
+                    target["status"] = "ready"
+
+            reported_remaining = result.get("remaining")
+            if status == "settled":
+                if reported_remaining is None:
+                    reported_remaining = max(
+                        0,
+                        int(multi.get("daily_remaining", DUEL_DAILY_LIMIT) or 0) - 1,
+                    )
+                multi["daily_remaining"] = max(
+                    0,
+                    min(DUEL_DAILY_LIMIT, int(reported_remaining)),
+                )
+            elif status == "exhausted":
+                multi["daily_remaining"] = 0
+                multi["daily_exhausted_date"] = duel_date(now)
+
+            multi["last_result"] = f"@{reservation['target_username']} · {outcome}"
+            multi["in_flight"] = {}
+            preparation = multi.get("preparation") or {}
+            if preparation.get("run_id") == reservation.get("preparation_run_id"):
+                multi["preparation"] = {}
+
+            all_completed = bool(multi.get("targets")) and all(
+                int(item.get("remaining") or 0) <= 0
+                for item in multi.get("targets") or []
+            )
+            if all_completed:
+                multi["enabled"] = False
+                multi["next_at"] = ""
+                multi["last_result"] = "一对多计划已全部完成"
+            elif status == "exhausted" or int(multi.get("daily_remaining") or 0) <= 0:
+                multi["next_at"] = _next_day_time(now)
+            else:
+                multi["next_at"] = duel_time(
+                    now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+                )
+
+            target_key = normalize_duel_target(
+                reservation.get("target_username")
+            ).lower()
+            target_next_at = data.setdefault("target_next_at", {})
+            if status == "cooldown":
+                target_ready = now + timedelta(
+                    seconds=max(
+                        DUEL_TARGET_INTERVAL_SECONDS,
+                        int(result.get("wait_seconds") or 0),
+                    )
+                )
+            else:
+                target_ready = now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
+            reserved_ready = parse_duel_time(target_next_at.get(target_key))
+            target_next_at[target_key] = duel_time(
+                max(target_ready, reserved_ready) if reserved_ready else target_ready
+            )
+            data["updated_at"] = duel_time(now)
+            _atomic_write_json(DUEL_STATE_FILE, data)
+            return
+
         queue = data["queues"].get(reservation.get("queue_key"), {})
         in_flight = queue.get("in_flight") or {}
         if in_flight.get("run_id") != reservation.get("run_id"):
@@ -732,13 +1342,13 @@ def finish_duel_reservation(reservation, result):
         target_key = normalize_duel_target(reservation.get("target_username")).lower()
         target_next_at = data.setdefault("target_next_at", {})
         reserved_target_next_at = parse_duel_time(target_next_at.get(target_key))
-        if status == "busy":
-            target_next_at[target_key] = duel_time(completed_next_at)
-        else:
-            target_next_at[target_key] = (
-                duel_time(max(completed_next_at, reserved_target_next_at))
-                if reserved_target_next_at else duel_time(completed_next_at)
-            )
+        target_completed_at = now + timedelta(
+            seconds=max(DUEL_TARGET_INTERVAL_SECONDS, retry_seconds)
+        )
+        target_next_at[target_key] = (
+            duel_time(max(target_completed_at, reserved_target_next_at))
+            if reserved_target_next_at else duel_time(target_completed_at)
+        )
         data["updated_at"] = duel_time(now)
         _atomic_write_json(DUEL_STATE_FILE, data)
 
@@ -1024,7 +1634,14 @@ def duel_dashboard_payload(date="", limit=200):
     titan_mode = data["queues"]["titan"].get("beast_mode", TITAN_BEAST_MODE_DEFAULT)
     titan_status = titan_target_status(titan_mode)
     queues = []
-    target_options = sorted({config["target"] for config in DUEL_QUEUES.values()}, key=str.lower)
+    identity_options = duel_identity_options()
+    target_options = sorted(
+        {
+            *(config["target"] for config in DUEL_QUEUES.values()),
+            *(item["username"] for item in identity_options),
+        },
+        key=str.lower,
+    )
     for queue_key, config in DUEL_QUEUES.items():
         queue_state = data["queues"][queue_key]
         cursor = int(queue_state.get("cursor") or 0) % len(config["participants"])
@@ -1072,6 +1689,59 @@ def duel_dashboard_payload(date="", limit=200):
             "target_status": titan_status if queue_key == "titan" else {"ready": True},
             "requires_titan_preparation": queue_key == "titan" and titan_required,
         })
+
+    multi_state = data["multi"]
+    initiator = duel_identity_config(
+        multi_state.get("initiator_account"),
+        multi_state.get("initiator_identity"),
+    )
+    multi_targets = []
+    raw_multi_targets = multi_state.get("targets") or []
+    next_multi_index = None
+    if raw_multi_targets:
+        cursor = int(multi_state.get("cursor") or 0) % len(raw_multi_targets)
+        for offset in range(len(raw_multi_targets)):
+            index = (cursor + offset) % len(raw_multi_targets)
+            if int(raw_multi_targets[index].get("remaining") or 0) > 0:
+                next_multi_index = index
+                break
+    for index, target in enumerate(raw_multi_targets):
+        target_identity = duel_identity_for_username(target.get("username"))
+        multi_targets.append({
+            **target,
+            "is_next": index == next_multi_index,
+            "known_identity": bool(target_identity),
+            "activation_required": bool(
+                target_identity and target_identity.get("identity") != "主魂"
+            ),
+            "target_account": (target_identity or {}).get("account", ""),
+            "target_account_name": (target_identity or {}).get("account_name", ""),
+            "target_identity": (target_identity or {}).get("identity", ""),
+            "target_label": (
+                f"{target_identity['account_name']} · {target_identity['identity']}"
+                if target_identity else "外部用户名"
+            ),
+        })
+    total_planned = sum(int(item.get("count") or 0) for item in multi_targets)
+    total_remaining = sum(int(item.get("remaining") or 0) for item in multi_targets)
+    multi_payload = {
+        "configured": bool(initiator and multi_targets),
+        "enabled": bool(multi_state.get("enabled")),
+        "initiator_account": multi_state.get("initiator_account") or "",
+        "initiator_identity": multi_state.get("initiator_identity") or "",
+        "initiator": initiator or {},
+        "next_at": multi_state.get("next_at") or "",
+        "last_attempt_at": multi_state.get("last_attempt_at") or "",
+        "last_success_at": multi_state.get("last_success_at") or "",
+        "last_result": multi_state.get("last_result") or "",
+        "daily_remaining": int(multi_state.get("daily_remaining", DUEL_DAILY_LIMIT) or 0),
+        "in_flight": multi_state.get("in_flight") or {},
+        "preparation": multi_state.get("preparation") or {},
+        "targets": multi_targets,
+        "total_planned": total_planned,
+        "total_completed": total_planned - total_remaining,
+        "total_remaining": total_remaining,
+    }
     rows = _duel_event_rows(query_date, limit)
     summary = {
         "count": len(rows),
@@ -1083,9 +1753,12 @@ def duel_dashboard_payload(date="", limit=200):
         "enabled": bool(data.get("enabled")),
         "date": query_date,
         "interval_seconds": DUEL_INTERVAL_SECONDS,
+        "target_interval_seconds": DUEL_TARGET_INTERVAL_SECONDS,
         "daily_limit": DUEL_DAILY_LIMIT,
         "target_options": target_options,
+        "identity_options": identity_options,
         "updated_at": data.get("updated_at") or duel_time(),
+        "multi": multi_payload,
         "queues": queues,
         "rows": rows,
         "summary": summary,
@@ -1098,6 +1771,64 @@ class DuelMixin:
     def duel_logger(self):
         logger = getattr(self, "log", None)
         return logger if logger is not None else logging.getLogger(self.__class__.__name__)
+
+    async def prepare_duel_target_identity(self, claim):
+        account = str(getattr(self, "account_key", "") or "")
+        if str(claim.get("owner") or "") != account:
+            return False, "目标身份准备账号不匹配"
+        identity = str(claim.get("target_identity") or "").strip()
+        username = str(claim.get("target_username") or "").strip()
+        if not identity or identity == "主魂" or identity not in getattr(self, "avatars", []):
+            return False, "目标不是可切换分身"
+        prepare = getattr(self, "prepare_identity_for_time_critical_command", None)
+        if not callable(prepare):
+            return False, "账号缺少分身预切换能力"
+        success = await prepare(
+            identity,
+            command=f".斗法 @{username}",
+            timeout=30,
+        )
+        if not success or str(getattr(self, "current_identity", "") or "") != identity:
+            return False, f"{identity} 激活未确认"
+        return True, f"@{username} · {identity} 已激活并保持等待斗法"
+
+    async def _run_duel_target_preparation_if_due(self):
+        claim = claim_duel_target_preparation(getattr(self, "account_key", ""))
+        if not claim:
+            return False
+        logger = self.duel_logger()
+
+        async def prepare_and_hold():
+            success, detail = await self.prepare_duel_target_identity(claim)
+            finish_duel_target_preparation(claim, success, detail)
+            logger.info(
+                "Duel target preparation: target=@%s identity=%s success=%s detail=%s",
+                claim.get("target_username"), claim.get("target_identity"), success, detail,
+            )
+            if not success:
+                return
+            deadline = time.monotonic() + DUEL_LEASE_SECONDS
+            while (
+                getattr(self, "is_running", True)
+                and time.monotonic() < deadline
+                and duel_target_preparation_held(claim)
+            ):
+                await asyncio.sleep(1)
+            release_duel_target_preparation(
+                claim,
+                detail=(
+                    f"@{claim.get('target_username')} 分身激活等待超时，稍后重试"
+                    if time.monotonic() >= deadline else ""
+                ),
+            )
+
+        atomic = getattr(self, "common_atomic_task", None)
+        if callable(atomic):
+            async with atomic(f"Duel-target-{claim.get('target_identity')}"):
+                await prepare_and_hold()
+        else:
+            await prepare_and_hold()
+        return True
 
     async def prepare_titan_target_for_duel(self):
         if str(getattr(self, "account_key", "") or "") != "xiaohao":
@@ -1237,6 +1968,8 @@ class DuelMixin:
         logger.info("Shared duel scheduler started for account=%s", getattr(self, "account_key", ""))
         while getattr(self, "is_running", True):
             try:
+                if await self._run_duel_target_preparation_if_due():
+                    await asyncio.sleep(1)
                 if str(getattr(self, "account_key", "") or "") == "xiaohao":
                     if await self._run_titan_preparation_if_due():
                         await asyncio.sleep(1)

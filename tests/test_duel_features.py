@@ -112,11 +112,21 @@ class DuelFeatureTests(unittest.TestCase):
         queue = state["queues"][reservation["queue_key"]]
         participant = queue["participants"][reservation["participant_key"]]
         retry_delay = (duel_features.parse_duel_time(queue["next_at"]) - datetime.now()).total_seconds()
+        target_delay = (
+            duel_features.parse_duel_time(
+                state["target_next_at"][reservation["target_username"].lower()]
+            )
+            - datetime.now()
+        ).total_seconds()
         self.assertEqual(participant["attempts"], 0)
         self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT)
         self.assertEqual(participant["last_result"], "目标繁忙")
         self.assertGreaterEqual(retry_delay, duel_features.DUEL_BUSY_RETRY_SECONDS - 2)
         self.assertLessEqual(retry_delay, duel_features.DUEL_BUSY_RETRY_SECONDS)
+        self.assertGreaterEqual(
+            target_delay,
+            duel_features.DUEL_TARGET_INTERVAL_SECONDS - 2,
+        )
 
     def test_escape_result_is_settled_and_consumes_one_attempt(self):
         text = "面对境界压制，@Ding303 凭借神通侥幸逃脱！(成功率: 16%)"
