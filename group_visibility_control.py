@@ -7,6 +7,7 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -15,6 +16,30 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 XIAOHAO_SCRIPT = "cultivator_xiaohao.py"
 XIAOHAO_TMUX_TARGET = "xiuxian:2"
 XIAOHAO_WRITE_RETRY_SECONDS = 15 * 60
+TMUX_MISSING_TARGET_MARKERS = (
+    "can't find window",
+    "can't find session",
+    "can't find pane",
+    "no server running",
+)
+_TMUX_STRUCTURE_LOCK = threading.RLock()
+
+
+def tmux_target_parts(value):
+    """Split a configured ``session:window`` target into stable components."""
+    text = str(value or "").strip()
+    if ":" not in text:
+        raise ValueError(f"invalid tmux target: {text or '<empty>'}")
+    session, window = text.rsplit(":", 1)
+    window = window.split(".", 1)[0]
+    if not session or not window:
+        raise ValueError(f"invalid tmux target: {text}")
+    return session, window
+
+
+def is_missing_tmux_target_error(value):
+    text = str(value or "").strip().casefold()
+    return any(marker in text for marker in TMUX_MISSING_TARGET_MARKERS)
 
 
 def telegram_group_visibility(entity):
@@ -284,6 +309,124 @@ class TmuxXiaohaoProcessManager:
         )
         if result.returncode != 0:
             raise RuntimeError(str(result.stderr or result.stdout or "tmux command failed").strip())
+        return result
+
+    def _tmux_session_exists_sync(self, session):
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1 or is_missing_tmux_target_error(result.stderr or result.stdout):
+            return False
+        raise RuntimeError(str(result.stderr or result.stdout or "tmux has-session failed").strip())
+
+    def _tmux_window_exists_sync(self, session, window):
+        result = subprocess.run(
+            ["tmux", "list-windows", "-t", session, "-F", "#{window_index}\t#{window_name}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            if is_missing_tmux_target_error(result.stderr or result.stdout):
+                return False
+            raise RuntimeError(str(result.stderr or result.stdout or "tmux list-windows failed").strip())
+        for line in str(result.stdout or "").splitlines():
+            index, _, name = line.partition("\t")
+            if (window.isdigit() and index.strip() == window) or name.strip() == window:
+                return True
+        return False
+
+    def _ensure_tmux_target_sync(self):
+        """Create a missing tmux session/window without disturbing existing panes."""
+        session, window = tmux_target_parts(self.tmux_target)
+        created_session = False
+        created_window = False
+        with _TMUX_STRUCTURE_LOCK:
+            if not self._tmux_session_exists_sync(session):
+                initial_name = (
+                    self.account_label
+                    if window == "0"
+                    else window if not window.isdigit() else "Bootstrap"
+                )
+                try:
+                    self._run_tmux_sync([
+                        "new-session",
+                        "-d",
+                        "-s",
+                        session,
+                        "-n",
+                        initial_name,
+                        "exec sleep infinity",
+                    ])
+                    created_session = True
+                except RuntimeError as exc:
+                    if "duplicate session" not in str(exc).casefold():
+                        raise
+            self._run_tmux_sync(["set-window-option", "-g", "remain-on-exit", "on"])
+            if not self._tmux_window_exists_sync(session, window):
+                target = f"{session}:{window}" if window.isdigit() else f"{session}:"
+                try:
+                    self._run_tmux_sync([
+                        "new-window",
+                        "-d",
+                        "-t",
+                        target,
+                        "-n",
+                        self.account_label,
+                        "exec sleep infinity",
+                    ])
+                    created_window = True
+                except RuntimeError:
+                    if not self._tmux_window_exists_sync(session, window):
+                        raise
+            self._run_tmux_sync([
+                "set-window-option",
+                "-t",
+                self.tmux_target,
+                "remain-on-exit",
+                "on",
+            ])
+        if created_session or created_window:
+            self.logger.warning(
+                "%s tmux target %s was missing; recreated automatically.",
+                self.account_label,
+                self.tmux_target,
+            )
+        return created_session or created_window
+
+    def _respawn_window_sync(self, tmux_command):
+        """Respawn a target, repairing a disappearance race and retrying once."""
+        with _TMUX_STRUCTURE_LOCK:
+            for attempt in range(2):
+                self._ensure_tmux_target_sync()
+                try:
+                    self._run_tmux_sync(
+                        ["respawn-window", "-k", "-t", self.tmux_target, tmux_command]
+                    )
+                    return
+                except RuntimeError as exc:
+                    if attempt == 0 and is_missing_tmux_target_error(exc):
+                        continue
+                    raise
+
+    def _send_interrupt_sync(self):
+        try:
+            self._run_tmux_sync(["send-keys", "-t", self.tmux_target, "C-c"])
+            return True
+        except RuntimeError as exc:
+            if not is_missing_tmux_target_error(exc):
+                raise
+            self.logger.warning(
+                "%s tmux target %s disappeared before stop; falling back to PID signals.",
+                self.account_label,
+                self.tmux_target,
+            )
+            return False
 
     async def _start(self):
         run_command = (
@@ -292,8 +435,8 @@ class TmuxXiaohaoProcessManager:
         )
         tmux_command = f"bash -lc {shlex.quote(run_command)}"
         await asyncio.to_thread(
-            self._run_tmux_sync,
-            ["respawn-window", "-k", "-t", self.tmux_target, tmux_command],
+            self._respawn_window_sync,
+            tmux_command,
         )
         if not await self._wait_for_running(True):
             raise RuntimeError(f"{self.account_label} did not start within 12 seconds")
@@ -308,8 +451,8 @@ class TmuxXiaohaoProcessManager:
         )
         tmux_command = f"bash -lc {shlex.quote(run_command)}"
         await asyncio.to_thread(
-            self._run_tmux_sync,
-            ["respawn-window", "-k", "-t", self.tmux_target, tmux_command],
+            self._respawn_window_sync,
+            tmux_command,
         )
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
@@ -326,11 +469,8 @@ class TmuxXiaohaoProcessManager:
         return await self._start_fallback()
 
     async def _stop(self):
-        await asyncio.to_thread(
-            self._run_tmux_sync,
-            ["send-keys", "-t", self.tmux_target, "C-c"],
-        )
-        if await self._wait_for_running(False, timeout=6):
+        sent_interrupt = await asyncio.to_thread(self._send_interrupt_sync)
+        if sent_interrupt and await self._wait_for_running(False, timeout=6):
             return
         for sig in (signal.SIGINT, signal.SIGTERM):
             for pid in await self.process_pids():
@@ -345,6 +485,7 @@ class TmuxXiaohaoProcessManager:
     async def ensure_running(self, desired_running):
         """Return started/stopped/already_running/already_stopped."""
         async with self._lock:
+            await asyncio.to_thread(self._ensure_tmux_target_sync)
             running = bool(await self.process_pids())
             if desired_running:
                 if running:
@@ -461,7 +602,8 @@ class TelegramGroupXiaohaoController:
                 message = f"{type(exc).__name__}: {exc}"
                 if message != self._last_error:
                     self.logger.error(
-                        "Xiaohao visibility control check failed (%s): %s",
+                        "%s visibility control check failed (%s): %s",
+                        self.account_label,
                         source,
                         message,
                         exc_info=True,

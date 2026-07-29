@@ -2,16 +2,18 @@ import asyncio
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from group_visibility_control import (
     TmuxXiaohaoProcessManager,
     TelegramGroupXiaohaoController,
+    is_missing_tmux_target_error,
     normalize_telegram_chat_id,
     telegram_chat_ids_match,
     telegram_group_visibility,
     telegram_write_permission_status,
     telegram_update_targets_chat,
+    tmux_target_parts,
     xiaohao_write_restriction_retry_wait,
 )
 
@@ -81,6 +83,11 @@ class GroupVisibilityControlTests(unittest.TestCase):
         self.assertEqual(normalize_telegram_chat_id(-1002083016447), 2083016447)
         self.assertTrue(telegram_chat_ids_match(-1002083016447, 2083016447))
         self.assertFalse(telegram_chat_ids_match(-1002083016447, 2083016448))
+
+    def test_tmux_target_helpers_parse_and_recognize_missing_window(self):
+        self.assertEqual(tmux_target_parts("xiuxian:3"), ("xiuxian", "3"))
+        self.assertTrue(is_missing_tmux_target_error("can't find window: 3"))
+        self.assertTrue(is_missing_tmux_target_error("no server running on /tmp/tmux"))
 
     def test_write_permission_status_detects_block(self):
         self.assertEqual(
@@ -168,6 +175,7 @@ class GroupVisibilityControlTests(unittest.TestCase):
             fallback_account="xiaohao",
         )
         with (
+            patch.object(manager, "_ensure_tmux_target_sync", return_value=False),
             patch.object(manager, "process_pids", AsyncMock(return_value=[])),
             patch.object(manager, "fallback_process_pids", AsyncMock(return_value=[])),
             patch.object(manager, "_start_fallback", AsyncMock(return_value=True)) as start_fallback,
@@ -176,6 +184,57 @@ class GroupVisibilityControlTests(unittest.TestCase):
 
         self.assertEqual(action, "already_stopped")
         start_fallback.assert_awaited_once()
+
+    def test_missing_tmux_window_is_created_before_respawn(self):
+        manager = TmuxXiaohaoProcessManager(
+            "/tmp/deploy",
+            FakeLogger(),
+            "/tmp/deploy/venv/bin/python",
+            script="cultivator_waaiging.py",
+            tmux_target="xiuxian:3",
+            account_label="Waaiging",
+        )
+        with (
+            patch.object(manager, "_tmux_session_exists_sync", return_value=True),
+            patch.object(manager, "_tmux_window_exists_sync", return_value=False),
+            patch.object(manager, "_run_tmux_sync") as run_tmux,
+        ):
+            created = manager._ensure_tmux_target_sync()
+
+        self.assertTrue(created)
+        self.assertIn(
+            call([
+                "new-window",
+                "-d",
+                "-t",
+                "xiuxian:3",
+                "-n",
+                "Waaiging",
+                "exec sleep infinity",
+            ]),
+            run_tmux.mock_calls,
+        )
+
+    def test_respawn_retries_if_window_disappears_after_repair(self):
+        manager = TmuxXiaohaoProcessManager(
+            "/tmp/deploy",
+            FakeLogger(),
+            "/tmp/deploy/venv/bin/python",
+            tmux_target="xiuxian:3",
+            account_label="Waaiging",
+        )
+        with (
+            patch.object(manager, "_ensure_tmux_target_sync") as ensure_target,
+            patch.object(
+                manager,
+                "_run_tmux_sync",
+                side_effect=[RuntimeError("can't find window: 3"), None],
+            ) as run_tmux,
+        ):
+            manager._respawn_window_sync("bash -lc 'exec python worker.py'")
+
+        self.assertEqual(ensure_target.call_count, 2)
+        self.assertEqual(run_tmux.call_count, 2)
 
 
 if __name__ == "__main__":
