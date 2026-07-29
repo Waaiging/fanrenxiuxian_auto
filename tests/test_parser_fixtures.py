@@ -4989,6 +4989,7 @@ class ParserFixtureTests(unittest.TestCase):
                 super().__init__()
                 self.sent = []
                 self.get_yinluo_state("缘生子").update({
+                    "next_action_at": add_seconds_str(now_str(), 3600),
                     "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
                     "next_blood_wash_time": add_seconds_str(now_str(), 3600),
                     "next_summon_shadow_time": add_seconds_str(now_str(), 3600),
@@ -4998,8 +4999,8 @@ class ParserFixtureTests(unittest.TestCase):
                             "status": "炼化中",
                             "soul": YINLUO_SOUL,
                             "remaining_seconds": 0,
-                            "remaining_text": "",
-                            "due_at": add_seconds_str(now_str(), -60),
+                            "remaining_text": "0秒",
+                            "due_at": "",
                         }
                     },
                 })
