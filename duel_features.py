@@ -1875,24 +1875,6 @@ class DuelMixin:
                     if time.monotonic() >= deadline else ""
                 ),
             )
-            if reply_to_msg_id:
-                try:
-                    await self.client.delete_messages(
-                        self.target_chat_id,
-                        [int(reply_to_msg_id)],
-                    )
-                    logger.info(
-                        "Duel target switch anchor deleted after use: msg=%s target=@%s",
-                        reply_to_msg_id,
-                        claim.get("target_username"),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Duel target switch anchor cleanup failed: msg=%s target=@%s",
-                        reply_to_msg_id,
-                        claim.get("target_username"),
-                        exc_info=True,
-                    )
 
         atomic = getattr(self, "common_atomic_task", None)
         if callable(atomic):
