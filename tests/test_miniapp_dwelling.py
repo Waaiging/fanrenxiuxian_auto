@@ -855,6 +855,53 @@ class MiniAppDwellingTests(unittest.TestCase):
         )
         self.assertNotIn("restricted_miniapp_last_blocked_command", actor.state)
 
+    def test_restricted_worker_recovers_previously_blocked_puzzle(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {
+                    "miniapp_beast": {"entry_url": ENTRY},
+                    "restricted_miniapp": {},
+                }
+                self.state = {
+                    "avatars": {"缘生子": {}},
+                    "restricted_miniapp_last_blocked_command": ".拼图",
+                    "restricted_miniapp_last_blocked_identity": "缘生子",
+                    "restricted_miniapp_last_blocked_at": "2026-07-29 08:25:14",
+                }
+                self.avatars = ["缘生子"]
+                self.pause_event = asyncio.Event()
+                self.pause_event.set()
+
+            def save_state(self):
+                pass
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def dashboard_command_paused(self, command, identity):
+                return False
+
+        actor = Actor()
+        worker = RestrictedMiniAppWorker(actor, "xiaohao")
+        response = MiniAppCommandResponse("拼图成功", {"actionResult": {"ok": True}})
+        worker.transport.command = AsyncMock(return_value=response)
+
+        recovered = asyncio.run(worker.recover_last_blocked_command())
+
+        self.assertTrue(recovered)
+        worker.transport.command.assert_awaited_once_with(
+            ".拼图",
+            identity="缘生子",
+            meditation_prefix=False,
+        )
+        self.assertNotIn("restricted_miniapp_last_blocked_command", actor.state)
+        self.assertNotIn("restricted_miniapp_last_blocked_identity", actor.state)
+        self.assertNotIn("restricted_miniapp_last_blocked_at", actor.state)
+
     def test_star_farm_ignores_retired_chat_command_controls(self):
         class Actor:
             def __init__(self):

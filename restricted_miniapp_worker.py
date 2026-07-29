@@ -45,6 +45,7 @@ STAR_FARM_WAKE_GRACE_SECONDS = 5
 STAR_IDENTITY = "素心子"
 STAR_TARGET = "天雷星"
 XIAOHAO_YUANYING_AVATARS = ("缘生子",)
+RECOVERABLE_BLOCKED_COMMANDS = {".拼图"}
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -276,6 +277,16 @@ class RestrictedMiniAppWorker:
             )
             apply_dwelling_snapshot(self.actor, identity, response.payload)
             self._sync_concubine_response(identity, command, response.text)
+            state = self.actor.state
+            if (
+                normalize_miniapp_command(state.get("restricted_miniapp_last_blocked_command"))
+                == command
+                and str(state.get("restricted_miniapp_last_blocked_identity") or "")
+                == identity
+            ):
+                state.pop("restricted_miniapp_last_blocked_command", None)
+                state.pop("restricted_miniapp_last_blocked_identity", None)
+                state.pop("restricted_miniapp_last_blocked_at", None)
             self._record_worker_state(
                 restricted_miniapp_last_command=command,
                 restricted_miniapp_last_identity=identity,
@@ -299,6 +310,40 @@ class RestrictedMiniAppWorker:
         if kwargs.get("return_response_msg") or kwargs.get("return_msg"):
             return response
         return response.text
+
+    async def recover_last_blocked_command(self) -> bool:
+        """Retry a previously blocked command after Mini App support is added."""
+        state = self.actor.state
+        command = normalize_miniapp_command(
+            state.get("restricted_miniapp_last_blocked_command")
+        )
+        identity = str(
+            state.get("restricted_miniapp_last_blocked_identity") or ""
+        ).strip()
+        if (
+            command not in RECOVERABLE_BLOCKED_COMMANDS
+            or not miniapp_command_allowed(command)
+            or identity not in self.identities()
+        ):
+            return False
+        self.log.info(
+            "[%s] Recovering previously blocked Mini App command: %s",
+            identity,
+            command,
+        )
+        response = await self._send(
+            identity,
+            command,
+            return_response_msg=True,
+        )
+        if response is None:
+            return False
+        self.log.info(
+            "[%s] Recovered previously blocked Mini App command: %s",
+            identity,
+            command,
+        )
+        return True
 
     async def sync_all_details(self) -> None:
         synced = 0
@@ -374,6 +419,7 @@ class RestrictedMiniAppWorker:
         await asyncio.sleep(random.randint(5, 15))
         while self.actor.is_running:
             try:
+                await self.recover_last_blocked_command()
                 for identity in self.identities():
                     if self._concubine_status_due(identity):
                         if not self.actor.dashboard_command_paused(".我的侍妾", identity):
