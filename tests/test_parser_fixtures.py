@@ -5026,12 +5026,15 @@ class ParserFixtureTests(unittest.TestCase):
                             "**1号槽**: [精华已成] - 凶兽戾魄\n"
                         ),
                     )
+                if command == ".一键收取精华":
+                    return DummyMessage(703, text="收取成功！凶兽戾魄+1")
                 raise AssertionError(f"unexpected command: {command}")
 
         actor = DummyYinluo()
         self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
-        self.assertEqual(actor.sent, [YINLUO_MASTER_COMMAND])
-        self.assertEqual(actor.get_yinluo_state("缘生子")["slots"][1]["status"], "精华已成")
+        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        self.assertEqual(actor.sent, [YINLUO_MASTER_COMMAND, ".一键收取精华"])
+        self.assertEqual(actor.get_yinluo_state("缘生子")["slots"][1]["status"], "空闲")
 
     def test_yinluo_stale_next_action_is_recomputed_to_future_trigger(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):

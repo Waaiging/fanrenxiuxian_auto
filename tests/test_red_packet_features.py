@@ -450,7 +450,33 @@ class RedPacketFeatureTests(unittest.TestCase):
         )
         status = red_packet_features.load_red_packet_status("xiaohao")
         self.assertEqual(status["pending_notifications"][0]["receipt_id"], 101)
-        self.assertEqual(status["last_notification_error"], "Too many requests")
+        self.assertIn("Too many requests", status["last_notification_error"])
+
+    def test_restricted_notification_uses_bot_api_before_limited_client(self):
+        (red_packet_features.CONFIG_DIR / "config.json").write_text(
+            '{"notify_bot_token":"test-token","notify_target":"12345"}',
+            encoding="utf-8",
+        )
+        client = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("Too many requests")))
+        monitor = red_packet_features.RedPacketMonitor(client, "xiaohao")
+        record = {
+            "receipt_id": 101,
+            "claim_message_id": 100,
+            "amount": "73.19",
+            "currency": "LDC",
+            "created_at": "2026-07-30 01:33:55",
+        }
+        monitor._enqueue_notification(record)
+
+        with patch.object(red_packet_features, "_send_notification_bot_sync") as bot_send:
+            delivered = asyncio.run(monitor._deliver_notification(record, retry_delays=(0,)))
+
+        self.assertTrue(delivered)
+        bot_send.assert_called_once()
+        self.assertEqual(bot_send.call_args.args[1], 12345)
+        client.send_message.assert_not_awaited()
+        self.assertIn(101, monitor._notified_receipt_set)
+        self.assertEqual(monitor._pending_notifications, [])
 
     def test_failed_notification_is_recovered_after_restart(self):
         red_packet_features._atomic_write_json(

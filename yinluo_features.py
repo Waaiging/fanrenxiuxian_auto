@@ -721,6 +721,15 @@ class YinluoMixin:
             await self.yinluo_sync_banner(identity)
             return 5
 
+        if self.yinluo_completed_slots(identity):
+            await self.yinluo_collect_essence(identity)
+            return 5
+
+        exhausted = self.yinluo_exhausted_slots(identity)
+        if exhausted:
+            await self.yinluo_appease_slot(identity, exhausted[0])
+            return 5
+
         if is_future(state.get("next_action_at", "")):
             return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 3600))
 
@@ -731,15 +740,6 @@ class YinluoMixin:
                 state = self.get_yinluo_state(identity)
                 state["imprison_sync_pending"] = False
                 self.save_state()
-            return 5
-
-        if self.yinluo_completed_slots(identity):
-            await self.yinluo_collect_essence(identity)
-            return 5
-
-        exhausted = self.yinluo_exhausted_slots(identity)
-        if exhausted:
-            await self.yinluo_appease_slot(identity, exhausted[0])
             return 5
 
         if state.get("last_daily_sacrifice_date") != _today() and not is_future(state.get("next_daily_sacrifice_time", "")):

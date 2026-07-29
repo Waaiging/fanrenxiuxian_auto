@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import unicodedata
+import urllib.request
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -93,6 +94,36 @@ def _read_json(path: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def _notification_bot_config() -> tuple[str, Any]:
+    config = _read_json(CONFIG_DIR / "config.json")
+    token = str(config.get("notify_bot_token") or "").strip()
+    if not token or "在这里填入" in token:
+        return "", ""
+    target = config.get("notify_target") or RED_PACKET_NOTIFY_TARGET
+    if isinstance(target, str) and target.lstrip("-").isdigit():
+        target = int(target)
+    return token, target
+
+
+def _send_notification_bot_sync(bot_token: str, target: Any, text: str, timeout: int = 8) -> None:
+    payload = json.dumps({"chat_id": target, "text": text}).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+    except Exception as exc:
+        code = getattr(exc, "code", "")
+        suffix = f"_{code}" if code else ""
+        raise RuntimeError(f"bot_api_{type(exc).__name__}{suffix}") from None
+    if result.get("ok") is not True:
+        description = str(result.get("description") or "rejected").strip()
+        raise RuntimeError(f"bot_api_rejected: {description[:200]}")
 
 
 def _decimal_text(value: Any) -> str:
@@ -520,6 +551,44 @@ class RedPacketMonitor:
         except RuntimeError:
             self._notification_retry_task = None
 
+    async def _send_notification_once(self, notification: str) -> str:
+        bot_token, bot_target = _notification_bot_config()
+        prefer_bot = self.account in RESTRICTED_MINIAPP_STATE_FILES and bool(bot_token)
+        transports = ("bot", "client") if prefer_bot else ("client", "bot")
+        errors = []
+        for transport in transports:
+            if transport == "bot":
+                if not bot_token:
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _send_notification_bot_sync,
+                            bot_token,
+                            bot_target,
+                            notification,
+                        ),
+                        timeout=12,
+                    )
+                    return "bot"
+                except Exception as exc:
+                    errors.append(f"bot={exc}")
+                    continue
+
+            if self.client is None:
+                continue
+            target = self.notify_entity or RED_PACKET_NOTIFY_TARGET
+            try:
+                await asyncio.wait_for(
+                    self.client.send_message(target, notification),
+                    timeout=12,
+                )
+                return "client"
+            except Exception as exc:
+                errors.append(f"client={exc}")
+
+        raise RuntimeError("; ".join(errors) or "no notification transport configured")
+
     async def _deliver_notification(
         self,
         record: dict[str, Any],
@@ -529,7 +598,6 @@ class RedPacketMonitor:
         if receipt_id <= 0 or receipt_id in self._notified_receipt_set:
             self._remove_pending_notification(receipt_id)
             return True
-        target = self.notify_entity or RED_PACKET_NOTIFY_TARGET
         notification = self._notification_text(record, self.account)
         last_error = ""
         async with self._notification_lock:
@@ -540,10 +608,7 @@ class RedPacketMonitor:
                 if retry_delay:
                     await asyncio.sleep(retry_delay)
                 try:
-                    await asyncio.wait_for(
-                        self.client.send_message(target, notification),
-                        timeout=12,
-                    )
+                    transport = await self._send_notification_once(notification)
                     self._remember_receipt(receipt_id)
                     self._remove_pending_notification(receipt_id)
                     self._write_status(
@@ -555,8 +620,9 @@ class RedPacketMonitor:
                         last_notification_error="",
                     )
                     self.log.warning(
-                        "[%s] Red-packet claim notification sent: amount=%s %s receipt=%s",
+                        "[%s] Red-packet claim notification sent via %s: amount=%s %s receipt=%s",
                         self.account,
+                        transport,
                         record["amount"],
                         record["currency"],
                         receipt_id,
