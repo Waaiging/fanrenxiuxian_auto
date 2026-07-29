@@ -111,6 +111,42 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "目标繁忙")
         self.assertEqual(result["wait_seconds"], duel_features.DUEL_BUSY_RETRY_SECONDS)
 
+    def test_rolling_target_limit_blocks_one_to_many_target_for_24_hours(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ExternalTarget", "count": 2}],
+            enabled=True,
+        )
+        reservation = duel_features.reserve_duel_for_account("main")
+        text = "天道有则！你与 @ExternalTarget 在24小时内已交锋过多，暂不可再次斗法！"
+
+        self.assertTrue(duel_features.duel_text_is_final(text))
+        result = duel_features.parse_duel_result(
+            text,
+            reservation["challenger_username"],
+            reservation["target_username"],
+        )
+        self.assertEqual(result["status"], "cooldown")
+        self.assertEqual(result["outcome"], "目标24小时冷却")
+        self.assertEqual(
+            result["wait_seconds"],
+            duel_features.DUEL_ROLLING_TARGET_COOLDOWN_SECONDS,
+        )
+
+        duel_features.finish_duel_reservation(reservation, result)
+        state = duel_features.load_duel_state()
+        target = state["multi"]["targets"][0]
+        target_ready = duel_features.parse_duel_time(
+            state["target_next_at"]["externaltarget"]
+        )
+        self.assertEqual(target["attempts"], 0)
+        self.assertEqual(target["remaining"], 2)
+        self.assertGreaterEqual(
+            (target_ready - datetime.now()).total_seconds(),
+            duel_features.DUEL_ROLLING_TARGET_COOLDOWN_SECONDS - 2,
+        )
+
     def test_busy_target_does_not_consume_attempt_and_retries_soon(self):
         reservation = duel_features.reserve_duel_for_account("main")
         result = duel_features.parse_duel_result(

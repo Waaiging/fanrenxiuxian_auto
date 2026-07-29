@@ -34,6 +34,7 @@ DUEL_POLL_SECONDS = 3
 DUEL_RETENTION_DAYS = 30
 DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
 DUEL_BUSY_RETRY_SECONDS = 60
+DUEL_ROLLING_TARGET_COOLDOWN_SECONDS = 24 * 3600
 DUEL_MULTI_MAX_TARGETS = 20
 DUEL_MULTI_MAX_COUNT = 999
 DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
@@ -1731,7 +1732,7 @@ def duel_text_is_final(text):
         "胜者：", "胜者:", "胜负已分", "今日神念", "今日剩余神念",
         "元神尚未平复", "每日可主动斗法", "无力再战",
         "尚未踏入仙途", "无法再次斗法", "不可斗法", "不能斗法",
-        "天机繁忙", "因果纠缠", "侥幸逃脱",
+        "天机繁忙", "因果纠缠", "侥幸逃脱", "已交锋过多",
     )) and not duel_text_is_pending(clean))
 
 
@@ -1767,6 +1768,16 @@ def parse_duel_result(text, challenger_username, target_username):
         return result
     if "元神尚未平复" in clean or "无法再次斗法" in clean:
         result.update(status="cooldown", outcome="目标冷却", wait_seconds=duel_wait_seconds(clean))
+        return result
+    if "已交锋过多" in clean and "24小时" in clean:
+        result.update(
+            status="cooldown",
+            outcome="目标24小时冷却",
+            wait_seconds=max(
+                DUEL_ROLLING_TARGET_COOLDOWN_SECONDS,
+                duel_wait_seconds(clean),
+            ),
+        )
         return result
     if "天机繁忙" in clean or "因果纠缠" in clean:
         result.update(status="busy", outcome="目标繁忙", wait_seconds=DUEL_BUSY_RETRY_SECONDS)
