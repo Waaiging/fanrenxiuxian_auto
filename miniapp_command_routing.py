@@ -29,6 +29,7 @@ from miniapp_dwelling import (
     sect_farm_snapshot_status,
 )
 from miniapp_daily_activities import MiniAppDailyActivities
+from miniapp_journey import MiniAppTianxingJourney
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -84,6 +85,12 @@ class MiniAppCommandRouter:
             logger=self.log,
         )
         self.daily_activities = MiniAppDailyActivities(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
+        self.tianxing_journey = MiniAppTianxingJourney(
             actor,
             self.transport,
             self.account,
@@ -150,7 +157,11 @@ class MiniAppCommandRouter:
         # Overview sync is authoritative for sect membership.  Select Star
         # Palace identities only after it has corrected stale local mappings.
         star_identities = self.star_farm_identities(known)
-        self._record(miniapp_star_farm_identities=star_identities)
+        journey_identities = self.tianxing_journey.identities(known)
+        self._record(
+            miniapp_star_farm_identities=star_identities,
+            miniapp_journey_identities=journey_identities,
+        )
         self._profile_task = asyncio.create_task(
             self.run_profile_sync_loop(),
             name=f"miniapp_{self.account}_profiles",
@@ -174,6 +185,13 @@ class MiniAppCommandRouter:
                 asyncio.create_task(
                     self.daily_activities.run_hunt_loop(),
                     name=f"miniapp_{self.account}_hunt",
+                )
+            )
+        if self.tianxing_journey.enabled:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.tianxing_journey.run_loop(),
+                    name=f"miniapp_{self.account}_journey",
                 )
             )
         self.log.warning(

@@ -938,6 +938,52 @@ def miniapp_beast_contract_command(state):
     )
 
 
+def miniapp_tianxing_journey_command(state):
+    """Display the server-backed twice-daily Tianxing journey automation."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    count = max(0, int(state.get("miniapp_journey_daily_count") or 0))
+    limit = max(1, int(state.get("miniapp_journey_daily_limit") or 2))
+    count = min(count, limit)
+    error = clean_custom_text(state.get("miniapp_journey_last_error") or "", 100)
+    result = clean_custom_text(state.get("miniapp_journey_last_result") or "", 120)
+    next_time = str(state.get("miniapp_journey_next_run_time") or "").strip()
+    target = parse_state_time(next_time)
+    detail_parts = [f"今日 {count}/{limit}", "每次先执行 .改命 探索", "固定选择深入"]
+    if result:
+        detail_parts.append(result)
+    if error:
+        status = "执行异常"
+        tone = "error"
+        detail_parts.insert(0, f"Mini App 错误：{error}")
+    elif str(state.get("miniapp_journey_last_date") or "") == today or count >= limit:
+        status = f"今日已完成 {count}/{limit}"
+        tone = "done"
+    elif target and target > datetime.now():
+        status = "等待执行" if count <= 0 else "等待下一次"
+        tone = "cooldown"
+    else:
+        status = f"待执行 {count}/{limit}"
+        tone = "ready"
+    next_seconds = (
+        max(0, int((target - datetime.now()).total_seconds()))
+        if target and target > datetime.now()
+        else 0
+    )
+    return command_row(
+        "miniapp:journey-deep",
+        "游历·深入",
+        status,
+        tone,
+        remaining=format_remaining(next_seconds) if next_seconds else "0秒",
+        at=next_time,
+        detail=" · ".join(detail_parts),
+        group="游历",
+        schedule_type="daily",
+        next_seconds=next_seconds,
+        actionable=False,
+    )
+
+
 def flow_command(command, label=None, detail="流程内自动发送", group=""):
     return command_row(command, label, "流程内", "flow", detail=detail, group=group, actionable=False)
 
@@ -2007,6 +2053,7 @@ def main_soul_panel(account, state):
             ),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            miniapp_tianxing_journey_command(state),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -2037,6 +2084,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
                 detail=f"上次定命：{state.get('last_destiny_choice') or '未记录'}",
                 group="每日",
             ),
+            miniapp_tianxing_journey_command(state),
         ])
     if name == "缘生子":
         rows.extend([

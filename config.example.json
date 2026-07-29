@@ -25,6 +25,9 @@
     "hunt_daily_enabled": true,
     "hunt_daily_hour": 7,
     "hunt_target_reward": "阴凝之晶",
+    "journey_daily_enabled": true,
+    "journey_daily_hour": 7,
+    "journey_retry_seconds": 900,
     "miniapp_daily_retry_seconds": 900
   },
   "restricted_miniapp": {

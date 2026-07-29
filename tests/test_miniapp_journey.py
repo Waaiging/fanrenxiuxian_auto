@@ -1,0 +1,389 @@
+import asyncio
+import unittest
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from dashboard_server import build_command_panels
+from miniapp_dwelling import MiniAppCommandResponse, MiniAppDwellingTransport
+from miniapp_journey import MiniAppTianxingJourney, journey_counter
+from restricted_miniapp_worker import RestrictedMiniAppWorker
+
+
+ENTRY = "https://t.me/fanrenxiuxian_bot?startapp=df_fixture"
+START = {
+    "ok": True,
+    "identity": {
+        "selectedPlayerId": 100,
+        "choices": [
+            {
+                "playerId": 100,
+                "daoName": "主号道名",
+                "username": "MainUser",
+                "source": "personal",
+            },
+            {
+                "playerId": -201,
+                "daoName": "无咎子",
+                "username": "wuxinglinggen",
+                "source": "bound_character",
+            },
+        ],
+    },
+}
+
+
+def journey_payload(count=0, *, available=True, remaining_seconds=0, message=""):
+    payload = {
+        "ok": True,
+        "account": {
+            "journey": {
+                "wildExperience": {
+                    "available": available,
+                    "dailyCount": count,
+                    "dailyLimit": 2,
+                    "dailyRemaining": max(0, 2 - count),
+                    "remainingSeconds": remaining_seconds,
+                    "modes": [{"key": "deep", "label": "深入"}],
+                }
+            }
+        },
+    }
+    if message:
+        payload["actionResult"] = {"ok": True, "rawMessage": message}
+    return payload
+
+
+class FakeLogger:
+    def __init__(self):
+        self.info_messages = []
+
+    def info(self, message, *args, **kwargs):
+        self.info_messages.append(message % args if args else message)
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+    def critical(self, *args, **kwargs):
+        pass
+
+
+class FakeActor:
+    def __init__(self, account="main", avatars=None, sects=None):
+        self.account_key = account
+        self.client = object()
+        self.config = {
+            "miniapp_beast": {
+                "entry_url": ENTRY,
+                "journey_action_delay_seconds": 0,
+            }
+        }
+        self.avatars = list(avatars or [])
+        self.state = {"avatars": {name: {} for name in self.avatars}}
+        self.identity_sect_names = dict(sects or {})
+        self.state["identity_sect_names"] = dict(self.identity_sect_names)
+        self.saved = 0
+        self.rewards = []
+        self.is_running = True
+        self.startup_done = asyncio.Event()
+        self.startup_done.set()
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()
+
+    def get_avatar_state(self, identity):
+        return self.state["avatars"][identity]
+
+    def save_state(self):
+        self.saved += 1
+
+    def identity_pause_seconds(self, identity):
+        return 0
+
+    def record_daily_reward_event(self, identity, command, text, **kwargs):
+        self.rewards.append((identity, command, text, kwargs))
+        return True
+
+
+class SequenceTransport:
+    def __init__(self, count=0, *, prefix_ok=True, available=True, remaining_seconds=0):
+        self.identity_player_ids = {"无咎子": -201, "主魂": 100}
+        self.count = count
+        self.prefix_ok = prefix_ok
+        self.available = available
+        self.remaining_seconds = remaining_seconds
+        self.calls = []
+
+    async def initialize(self):
+        self.calls.append(("initialize",))
+        return START
+
+    async def journey_snapshot(self, identity):
+        self.calls.append(("snapshot", identity))
+        available = self.available and self.count < 2
+        return journey_payload(
+            self.count,
+            available=available,
+            remaining_seconds=self.remaining_seconds,
+        )
+
+    async def command(self, command, identity="主魂"):
+        self.calls.append(("command", identity, command))
+        payload = {
+            "ok": True,
+            "actionResult": {
+                "ok": self.prefix_ok,
+                "rawMessage": "探索命格已改定" if self.prefix_ok else "命格改定失败",
+            },
+        }
+        return MiniAppCommandResponse(payload["actionResult"]["rawMessage"], payload)
+
+    async def journey_action(self, identity, mode="deep"):
+        self.calls.append(("journey", identity, mode))
+        self.count += 1
+        return journey_payload(
+            self.count,
+            available=self.count < 2,
+            message=f"深入历练完成，第 {self.count} 次奖励",
+        )
+
+    async def journey_with_destiny_prefix(
+        self,
+        identity,
+        prefix_command=".改命 探索",
+        mode="deep",
+    ):
+        prefix = await self.command(prefix_command, identity=identity)
+        if not self.prefix_ok:
+            return prefix, None
+        return prefix, await self.journey_action(identity, mode=mode)
+
+
+class MiniAppJourneyTests(unittest.TestCase):
+    def test_counter_caps_execution_at_two_even_if_server_limit_is_higher(self):
+        payload = journey_payload(0)
+        wild = payload["account"]["journey"]["wildExperience"]
+        wild.update({"dailyLimit": 3, "dailyRemaining": 3})
+
+        counter = journey_counter(payload)
+
+        self.assertEqual(counter["daily_limit"], 2)
+        self.assertEqual(counter["daily_remaining"], 2)
+
+    def test_transport_uses_journey_endpoint_and_deep_mode(self):
+        calls = []
+        logger = FakeLogger()
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/start"):
+                return START
+            if path.endswith("/details"):
+                return journey_payload(0)
+            if path.endswith("/command-center"):
+                return {
+                    "ok": True,
+                    "actionResult": {"ok": True, "rawMessage": "探索命格已改定"},
+                }
+            if path.endswith("/journey"):
+                return journey_payload(1, message="深入历练完成")
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            snapshot = asyncio.run(transport.journey_snapshot("无咎子"))
+            prefix, result = asyncio.run(
+                transport.journey_with_destiny_prefix("无咎子", mode="deep")
+            )
+
+        self.assertEqual(journey_counter(snapshot)["daily_remaining"], 2)
+        action = next(call for call in calls if call[0].endswith("/journey"))
+        self.assertEqual(action[1]["playerId"], -201)
+        self.assertEqual(action[1]["action"], "wild_experience")
+        self.assertEqual(action[1]["mode"], "deep")
+        self.assertEqual(prefix.text, "探索命格已改定")
+        self.assertEqual(result["actionResult"]["rawMessage"], "深入历练完成")
+        combined = "\n".join(logger.info_messages)
+        self.assertNotIn("同步洞府详情", combined)
+        self.assertIn("OUT [Mini App | 无咎子]:\n游历·野外历练（深入）", combined)
+        self.assertIn("IN [Mini App | 无咎子]:\n游历·野外历练（深入） -> 深入历练完成", combined)
+
+    def test_only_explicit_tianxing_identities_are_selected(self):
+        main_actor = FakeActor(
+            "main",
+            avatars=["无咎子", "其他天星"],
+            sects={"主魂": "天星宗", "无咎子": "天星宗", "其他天星": "天星宗"},
+        )
+        main_transport = SequenceTransport()
+        main_transport.identity_player_ids["其他天星"] = -202
+        main_runner = MiniAppTianxingJourney(main_actor, main_transport, "main", FakeLogger())
+
+        waaiging_actor = FakeActor("waaiging", sects={"主魂": "天星宗"})
+        waaiging_runner = MiniAppTianxingJourney(
+            waaiging_actor,
+            SequenceTransport(),
+            "waaiging",
+            FakeLogger(),
+        )
+        sub_actor = FakeActor("sub", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        sub_runner = MiniAppTianxingJourney(sub_actor, SequenceTransport(), "sub", FakeLogger())
+
+        self.assertEqual(main_runner.identities(), ["无咎子"])
+        self.assertEqual(waaiging_runner.identities(), ["主魂"])
+        self.assertEqual(sub_runner.identities(), [])
+        self.assertFalse(sub_runner.enabled)
+
+    def test_two_attempts_each_have_a_confirmed_destiny_prefix(self):
+        actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        transport = SequenceTransport(count=0)
+        runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+
+        complete, retry = asyncio.run(
+            runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(retry, 0)
+        actions = [call for call in transport.calls if call[0] in {"command", "journey"}]
+        self.assertEqual(
+            actions,
+            [
+                ("command", "无咎子", ".改命 探索"),
+                ("journey", "无咎子", "deep"),
+                ("command", "无咎子", ".改命 探索"),
+                ("journey", "无咎子", "deep"),
+            ],
+        )
+        state = actor.state["avatars"]["无咎子"]
+        self.assertEqual(state["miniapp_journey_daily_count"], 2)
+        self.assertEqual(state["miniapp_journey_last_date"], "2026-07-29")
+        self.assertEqual(len(actor.rewards), 2)
+
+    def test_restart_with_one_used_attempt_only_runs_the_remaining_one(self):
+        actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        transport = SequenceTransport(count=1)
+        runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+
+        complete, _ = asyncio.run(
+            runner.run_daily_once(datetime(2026, 7, 29, 8, 0, 1))
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(
+            [call[0] for call in transport.calls if call[0] in {"command", "journey"}],
+            ["command", "journey"],
+        )
+
+    def test_prefix_failure_blocks_the_deep_click(self):
+        actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        transport = SequenceTransport(prefix_ok=False)
+        runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+
+        complete, retry = asyncio.run(
+            runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(retry, runner.retry_seconds)
+        self.assertFalse(any(call[0] == "journey" for call in transport.calls))
+        self.assertEqual(
+            actor.state["avatars"]["无咎子"]["miniapp_journey_last_error"],
+            "journey_destiny_prefix_failed",
+        )
+
+    def test_server_cooldown_sets_exact_retry_without_clicking(self):
+        actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        transport = SequenceTransport(count=1, available=False, remaining_seconds=1234)
+        runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+
+        complete, retry = asyncio.run(
+            runner.run_daily_once(datetime(2026, 7, 29, 8, 0, 1))
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(retry, 1234)
+        self.assertFalse(any(call[0] in {"command", "journey"} for call in transport.calls))
+
+    def test_dashboard_only_adds_journey_to_the_two_scoped_panels(self):
+        main_state = {
+            "avatars": {
+                "无咎子": {"miniapp_journey_daily_count": 1, "miniapp_journey_daily_limit": 2},
+                "缘生子": {},
+            }
+        }
+        main_panels = {panel["identity"]: panel for panel in build_command_panels("main", main_state)}
+        waaiging_panels = build_command_panels("waaiging", {"sect_name": "天星宗"})
+
+        self.assertIn(
+            "miniapp:journey-deep",
+            {row["command"] for row in main_panels["无咎子"]["commands"]},
+        )
+        self.assertNotIn(
+            "miniapp:journey-deep",
+            {row["command"] for row in main_panels["缘生子"]["commands"]},
+        )
+        waaiging_row = next(
+            row
+            for row in waaiging_panels[0]["commands"]
+            if row["command"] == "miniapp:journey-deep"
+        )
+        self.assertEqual(waaiging_row["execution_channel"], "miniapp")
+        self.assertIn("每次先执行 .改命 探索", waaiging_row["detail"])
+
+    def test_restricted_waaiging_worker_starts_journey_loop(self):
+        class Actor(FakeActor):
+            def __init__(self):
+                super().__init__("waaiging", sects={"主魂": "天星宗"})
+                self.config["miniapp_beast"].update({
+                    "pagoda_daily_enabled": False,
+                    "hunt_daily_enabled": False,
+                })
+                self.config["restricted_miniapp"] = {"enabled": True}
+                self._current_identity = ""
+                self._main_confirmed = False
+
+            async def send_and_wait_feedback(self, *args, **kwargs):
+                return None
+
+            async def send_and_wait_feedback_identity(self, *args, **kwargs):
+                return None
+
+            async def run_custom_command_loop(self):
+                return None
+
+            async def run_meditation_timer(self):
+                return None
+
+            async def run_yuanying_out_loop(self):
+                return None
+
+            async def run_tianxing_destiny_loop(self):
+                return None
+
+        actor = Actor()
+        worker = RestrictedMiniAppWorker(actor, "waaiging", logger=FakeLogger())
+        worker.transport.identity_player_ids = {"主魂": 100}
+        worker.transport.initialize = AsyncMock(return_value=START)
+        worker.sync_all_details = AsyncMock()
+        spawned = []
+
+        def capture(name, coroutine):
+            spawned.append(name)
+            coroutine.close()
+            return SimpleNamespace(cancel=lambda: None)
+
+        worker._spawn = capture
+        asyncio.run(worker.start())
+
+        self.assertIn("journey", spawned)
+
+
+if __name__ == "__main__":
+    unittest.main()

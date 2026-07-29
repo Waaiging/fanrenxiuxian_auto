@@ -449,6 +449,74 @@ class MiniAppDwellingTransport:
                 ),
             )
 
+    async def journey_snapshot(self, identity: str = "主魂") -> dict[str, Any]:
+        """Read the dwelling journey state without routine success logs."""
+        async with self._lock:
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/details",
+                identity=identity,
+            )
+
+    async def journey_action(
+        self,
+        identity: str,
+        mode: str = "deep",
+    ) -> dict[str, Any]:
+        """Run one Mini App wild-experience action from the journey tab."""
+        mode = str(mode or "").strip().casefold()
+        if mode != "deep":
+            raise MiniAppBeastError("wild_experience_mode_invalid")
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                "游历·野外历练（深入）",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/journey",
+                    {"action": "wild_experience", "mode": mode},
+                    identity=identity,
+                ),
+            )
+
+    async def journey_with_destiny_prefix(
+        self,
+        identity: str,
+        prefix_command: str = ".改命 探索",
+        mode: str = "deep",
+    ) -> tuple[MiniAppCommandResponse, dict[str, Any] | None]:
+        """Execute the destiny prefix and deep click as one transport transaction."""
+        prefix_command = normalize_miniapp_command(prefix_command)
+        mode = str(mode or "").strip().casefold()
+        if prefix_command != ".改命 探索":
+            raise MiniAppBeastError("journey_prefix_invalid")
+        if mode != "deep":
+            raise MiniAppBeastError("wild_experience_mode_invalid")
+        async with self._lock:
+            prefix_payload = await self._logged_operation(
+                identity,
+                f"指令 {prefix_command}",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/command-center",
+                    {"command": prefix_command},
+                    identity=identity,
+                ),
+            )
+            prefix = MiniAppCommandResponse(
+                command_result_text(prefix_payload),
+                prefix_payload,
+            )
+            if not command_result_ok(prefix_payload):
+                return prefix, None
+            journey_payload = await self._logged_operation(
+                identity,
+                "游历·野外历练（深入）",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/journey",
+                    {"action": "wild_experience", "mode": mode},
+                    identity=identity,
+                ),
+            )
+            return prefix, journey_payload
+
     async def command(
         self,
         command: str,
