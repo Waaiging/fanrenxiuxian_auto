@@ -10,6 +10,9 @@ from unittest.mock import patch
 import duel_features
 
 
+ROTATION = duel_features.DUEL_ROTATION_QUEUE_KEY
+
+
 FINAL_LOSS = """
 【天道战报·文字版】
 胜者：@Waaiging | 净得修为 +3.0万 | 法宝磨损 -5
@@ -42,29 +45,39 @@ class DuelFeatureTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_queue_composition_matches_confirmed_rules(self):
-        waaiging = [(item["account"], item["identity"]) for item in duel_features.DUEL_QUEUES["waaiging"]["participants"]]
-        titan = [(item["account"], item["identity"]) for item in duel_features.DUEL_QUEUES["titan"]["participants"]]
-        self.assertEqual(waaiging, [
-            ("main", "无咎子"), ("main", "缘生子"),
-            ("xiaohao", "素心子"), ("xiaohao", "缘生子"),
-        ])
-        self.assertEqual(titan, [
-            ("main", "素缘子"), ("sub", "厚土"),
+        participants = [
+            (item["account"], item["identity"])
+            for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]
+        ]
+        self.assertEqual(participants, [
+            ("main", "主魂"), ("main", "无咎子"),
+            ("main", "缘生子"), ("main", "素缘子"),
+            ("sub", "主魂"), ("sub", "厚土"),
             ("sub", "缘生子"), ("sub", "寻真子"),
+            ("xiaohao", "主魂"), ("xiaohao", "问心子"),
+            ("xiaohao", "素心子"), ("xiaohao", "缘生子"),
+            ("waaiging", "主魂"),
         ])
 
-    def test_independent_queues_can_be_reserved_for_main(self):
+    def test_single_rotation_advances_across_all_identities(self):
         first = duel_features.reserve_duel_for_account("main")
-        second = duel_features.reserve_duel_for_account("main")
-        self.assertEqual(first["queue_key"], "waaiging")
-        self.assertEqual(first["identity"], "无咎子")
-        self.assertEqual(second["queue_key"], "titan")
-        self.assertEqual(second["identity"], "素缘子")
+        self.assertEqual(first["queue_key"], ROTATION)
+        self.assertEqual(first["identity"], "主魂")
+        duel_features.finish_duel_reservation(first, {
+            "status": "settled", "outcome": "胜利", "remaining": 9,
+        })
         state = duel_features.load_duel_state()
-        for key in ("waaiging", "titan"):
-            next_at = duel_features.parse_duel_time(state["queues"][key]["next_at"])
-            started = duel_features.parse_duel_time(state["queues"][key]["last_attempt_at"])
-            self.assertGreaterEqual((next_at - started).total_seconds(), 359)
+        state["queues"][ROTATION]["next_at"] = ""
+        state["target_next_at"] = {}
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        second = duel_features.reserve_duel_for_account("main")
+        self.assertEqual(second["queue_key"], ROTATION)
+        self.assertEqual(second["identity"], "无咎子")
+        state = duel_features.load_duel_state()
+        next_at = duel_features.parse_duel_time(state["queues"][ROTATION]["next_at"])
+        started = duel_features.parse_duel_time(state["queues"][ROTATION]["last_attempt_at"])
+        self.assertGreaterEqual((next_at - started).total_seconds(), 359)
 
     def test_lease_prevents_duplicate_reservation(self):
         first = duel_features.reserve_duel_for_account("main")
@@ -137,32 +150,33 @@ class DuelFeatureTests(unittest.TestCase):
 
         reservation = duel_features.reserve_duel_for_account("main")
         duel_features.finish_duel_reservation(reservation, result)
-        participant = duel_features.load_duel_state()["queues"]["waaiging"]["participants"][
+        participant = duel_features.load_duel_state()["queues"][ROTATION]["participants"][
             reservation["participant_key"]
         ]
         self.assertEqual(participant["attempts"], 1)
         self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT - 1)
 
-    def test_same_target_is_blocked_across_queues_after_completion(self):
+    def test_same_target_is_blocked_within_rotation_after_completion(self):
         state = duel_features.load_duel_state(write_back=True)
-        titan = state["queues"]["titan"]
-        for key, participant in titan["participants"].items():
-            participant["enabled"] = key == "main|素缘子"
-        titan["participants"]["main|素缘子"]["target_username"] = "Waaiging"
+        rotation = state["queues"][ROTATION]
+        for key, participant in rotation["participants"].items():
+            participant["enabled"] = key in {"main|主魂", "main|无咎子"}
+            if participant["enabled"]:
+                participant["target_username"] = "Waaiging"
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
 
         first = duel_features.reserve_duel_for_account("main")
-        self.assertEqual(first["queue_key"], "waaiging")
+        self.assertEqual(first["queue_key"], ROTATION)
         duel_features.finish_duel_reservation(first, {
             "status": "settled", "outcome": "失败", "remaining": 9,
         })
 
         state = duel_features.load_duel_state()
-        state["queues"]["titan"]["next_at"] = ""
+        state["queues"][ROTATION]["next_at"] = ""
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
 
         self.assertIsNone(duel_features.reserve_duel_for_account("main"))
-        blocked = duel_features.load_duel_state()["queues"]["titan"]
+        blocked = duel_features.load_duel_state()["queues"][ROTATION]
         self.assertIn("@Waaiging", blocked["last_result"])
         self.assertGreater(
             duel_features.parse_duel_time(blocked["next_at"]),
@@ -172,12 +186,12 @@ class DuelFeatureTests(unittest.TestCase):
     def test_finish_reanchors_interval_after_a_delayed_execution(self):
         reservation = duel_features.reserve_duel_for_account("main")
         state = duel_features.load_duel_state()
-        state["queues"]["waaiging"]["next_at"] = "2000-01-01 00:00:00"
+        state["queues"][ROTATION]["next_at"] = "2000-01-01 00:00:00"
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         duel_features.finish_duel_reservation(reservation, {
             "status": "settled", "outcome": "胜利", "remaining": 9,
         })
-        finished = duel_features.load_duel_state()["queues"]["waaiging"]
+        finished = duel_features.load_duel_state()["queues"][ROTATION]
         self.assertGreaterEqual(
             (duel_features.parse_duel_time(finished["next_at"]) - datetime.now()).total_seconds(),
             duel_features.DUEL_INTERVAL_SECONDS - 2,
@@ -296,8 +310,36 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertTrue(status["preparation_blocked"])
         self.assertEqual(status["preparation_reason"], "小号当前无群组发送权限")
 
-    def test_titan_queue_exposes_send_restriction_in_waiting_result(self):
-        duel_features.set_duel_control(False, "waaiging")
+    def test_titan_preparation_only_runs_when_next_rotation_target_is_titan(self):
+        with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
+            json.dump({
+                "current_identity": "缘生子",
+                "beasts_cache": [{"full_name": "六翼", "status": "放养中"}],
+            }, handle, ensure_ascii=False)
+
+        self.assertIsNone(duel_features.claim_titan_preparation("xiaohao"))
+
+        state = duel_features.load_duel_state(write_back=True)
+        rotation = state["queues"][ROTATION]
+        for key, participant in rotation["participants"].items():
+            participant["enabled"] = key == "sub|主魂"
+        rotation["cursor"] = next(
+            index
+            for index, item in enumerate(duel_features.DUEL_QUEUES[ROTATION]["participants"])
+            if (item["account"], item["identity"]) == ("sub", "主魂")
+        )
+        rotation["next_at"] = ""
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        claim = duel_features.claim_titan_preparation("xiaohao")
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim["queue_key"], ROTATION)
+
+    def test_rotation_exposes_titan_send_restriction_in_waiting_result(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|主魂", key)
+        duel_features.set_duel_participant_control(True, "main|主魂", "TitanCreeper")
         duel_features.set_titan_beast_mode("deploy")
         with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
             json.dump({
@@ -312,7 +354,7 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertIsNone(duel_features.reserve_duel_for_account("main"))
         state = duel_features.load_duel_state()
         self.assertEqual(
-            state["queues"]["titan"]["last_result"],
+            state["queues"][ROTATION]["last_result"],
             "等待小号群组发送权限恢复后切换六翼出战",
         )
 
@@ -380,10 +422,18 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertEqual(actor.sent, ["切回主魂", ".灵兽休息 六翼", ".灵兽出战 六翼"])
         self.assertIn("六翼已出战", detail)
 
-    def test_waaiging_queue_skips_xiaohao_only_while_write_restricted(self):
+    def test_rotation_skips_xiaohao_only_while_write_restricted(self):
         state = duel_features.load_duel_state(write_back=True)
-        state["queues"]["waaiging"]["cursor"] = 2
-        state["queues"]["waaiging"]["next_at"] = ""
+        rotation = state["queues"][ROTATION]
+        for key, participant in rotation["participants"].items():
+            participant["enabled"] = key in {"xiaohao|素心子", "main|主魂"}
+        xiaohao_index = next(
+            index
+            for index, item in enumerate(duel_features.DUEL_QUEUES[ROTATION]["participants"])
+            if (item["account"], item["identity"]) == ("xiaohao", "素心子")
+        )
+        rotation["cursor"] = xiaohao_index
+        rotation["next_at"] = ""
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
             json.dump({
@@ -397,14 +447,15 @@ class DuelFeatureTests(unittest.TestCase):
             }, handle, ensure_ascii=False)
 
         restricted = duel_features.reserve_duel_for_account("main")
-        self.assertEqual((restricted["queue_key"], restricted["identity"]), ("waaiging", "无咎子"))
+        self.assertEqual((restricted["queue_key"], restricted["identity"]), (ROTATION, "主魂"))
 
         duel_features.finish_duel_reservation(restricted, {
             "status": "settled", "outcome": "胜利", "remaining": 9,
         })
         state = duel_features.load_duel_state()
-        state["queues"]["waaiging"]["cursor"] = 2
-        state["queues"]["waaiging"]["next_at"] = ""
+        state["queues"][ROTATION]["participants"]["main|主魂"]["enabled"] = False
+        state["queues"][ROTATION]["cursor"] = xiaohao_index
+        state["queues"][ROTATION]["next_at"] = ""
         state["target_next_at"] = {}
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:
@@ -415,7 +466,7 @@ class DuelFeatureTests(unittest.TestCase):
             }, handle, ensure_ascii=False)
 
         recovered = duel_features.reserve_duel_for_account("xiaohao")
-        self.assertEqual((recovered["queue_key"], recovered["identity"]), ("waaiging", "素心子"))
+        self.assertEqual((recovered["queue_key"], recovered["identity"]), (ROTATION, "素心子"))
 
     def test_titan_target_can_be_challenged_while_xiaohao_send_is_restricted(self):
         with open(duel_features.XIAOHAO_STATE_FILE, "w", encoding="utf-8") as handle:

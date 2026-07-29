@@ -10,6 +10,9 @@ import duel_features
 from common_command_features import CommonCommandMixin
 
 
+ROTATION = duel_features.DUEL_ROTATION_QUEUE_KEY
+
+
 class DuelControlTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -30,7 +33,7 @@ class DuelControlTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_disabled_participant_is_skipped_and_custom_target_is_reserved(self):
-        duel_features.set_duel_control(False, "titan")
+        duel_features.set_duel_participant_control(False, "main|主魂", "FirstTarget")
         duel_features.set_duel_participant_control(False, "main|无咎子", "FirstTarget")
         duel_features.set_duel_participant_control(True, "main|缘生子", "ChosenTarget")
 
@@ -40,49 +43,77 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(reservation["target_username"], "ChosenTarget")
         self.assertEqual(reservation["command"], ".斗法 @ChosenTarget")
 
-    def test_custom_titan_queue_target_does_not_require_titan_preparation(self):
-        duel_features.set_duel_control(False, "waaiging")
-        for key in ("sub|厚土", "sub|缘生子", "sub|寻真子"):
-            duel_features.set_duel_participant_control(False, key)
+    def test_custom_non_titan_target_does_not_require_titan_preparation(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|素缘子", key)
         duel_features.set_duel_participant_control(True, "main|素缘子", "FreeTarget")
 
         reservation = duel_features.reserve_duel_for_account("main")
 
-        self.assertEqual(reservation["queue_key"], "titan")
+        self.assertEqual(reservation["queue_key"], ROTATION)
         self.assertEqual(reservation["target_username"], "FreeTarget")
 
     def test_daily_reset_preserves_participant_preferences(self):
         state = duel_features.load_duel_state()
-        participant = state["queues"]["waaiging"]["participants"]["main|无咎子"]
+        participant = state["queues"][ROTATION]["participants"]["main|无咎子"]
         participant["enabled"] = False
         participant["target_username"] = "RememberMe"
         participant["remaining"] = 2
         state["date"] = "2000-01-01"
 
         reset = duel_features._ensure_duel_state_shape(state)
-        participant = reset["queues"]["waaiging"]["participants"]["main|无咎子"]
+        participant = reset["queues"][ROTATION]["participants"]["main|无咎子"]
 
         self.assertFalse(participant["enabled"])
         self.assertEqual(participant["target_username"], "RememberMe")
         self.assertEqual(participant["remaining"], duel_features.DUEL_DAILY_LIMIT)
 
-    def test_version_one_state_migrates_without_resetting_legacy_preferences(self):
-        state = duel_features.duel_default_state()
-        state["version"] = 1
-        state.pop("multi", None)
-        participant = state["queues"]["waaiging"]["participants"]["main|无咎子"]
+    def test_legacy_groups_merge_without_resetting_preferences(self):
+        participant = duel_features._new_participant_state()
         participant["enabled"] = False
         participant["target_username"] = "RememberLegacyTarget"
+        titan_participant = duel_features._new_participant_state()
+        titan_participant["target_username"] = ""
+        state = {
+            "version": 2,
+            "enabled": True,
+            "date": duel_features.duel_date(),
+            "queues": {
+                "waaiging": {
+                    "enabled": False,
+                    "participants": {"main|无咎子": participant},
+                },
+                "titan": {
+                    "enabled": False,
+                    "beast_mode": "deploy",
+                    "participants": {"sub|厚土": titan_participant},
+                },
+            },
+        }
 
         migrated = duel_features._ensure_duel_state_shape(state, reset_daily=False)
 
-        self.assertEqual(migrated["version"], 2)
+        self.assertEqual(migrated["version"], duel_features.DUEL_STATE_VERSION)
+        self.assertEqual(set(migrated["queues"]), {ROTATION})
+        self.assertFalse(migrated["queues"][ROTATION]["enabled"])
         self.assertFalse(
-            migrated["queues"]["waaiging"]["participants"]["main|无咎子"]["enabled"]
+            migrated["queues"][ROTATION]["participants"]["main|无咎子"]["enabled"]
         )
         self.assertEqual(
-            migrated["queues"]["waaiging"]["participants"]["main|无咎子"]["target_username"],
+            migrated["queues"][ROTATION]["participants"]["main|无咎子"]["target_username"],
             "RememberLegacyTarget",
+        )
+        self.assertEqual(
+            migrated["queues"][ROTATION]["participants"]["sub|厚土"]["target_username"],
+            "TitanCreeper",
+        )
+        self.assertTrue(
+            migrated["queues"][ROTATION]["participants"]["sub|厚土"]["enabled"]
+        )
+        self.assertEqual(
+            len(migrated["queues"][ROTATION]["participants"]),
+            sum(len(items) for items in duel_features.DUEL_IDENTITIES.values()),
         )
         self.assertFalse(migrated["multi"]["enabled"])
         self.assertEqual(migrated["multi"]["targets"], [])
@@ -93,17 +124,41 @@ class DuelControlTests(unittest.TestCase):
         duel_features.set_titan_beast_mode("deploy")
 
         state = duel_features.load_duel_state()
-        self.assertEqual(state["queues"]["titan"]["beast_mode"], "deploy")
-        self.assertIn("六翼出战", state["queues"]["titan"]["last_result"])
+        self.assertEqual(state["queues"][ROTATION]["beast_mode"], "deploy")
+        self.assertIn("六翼出战", state["queues"][ROTATION]["last_result"])
 
-        state["queues"]["titan"]["next_at"] = "2099-01-01 00:00:00"
+        state["queues"][ROTATION]["next_at"] = "2099-01-01 00:00:00"
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         state = duel_features.set_titan_beast_mode("deploy")
-        self.assertEqual(state["queues"]["titan"]["next_at"], "")
+        self.assertEqual(state["queues"][ROTATION]["next_at"], "")
 
         state["date"] = "2000-01-01"
         reset = duel_features._ensure_duel_state_shape(state)
-        self.assertEqual(reset["queues"]["titan"]["beast_mode"], "deploy")
+        self.assertEqual(reset["queues"][ROTATION]["beast_mode"], "deploy")
+
+    def test_mixed_legacy_group_pause_is_applied_to_its_participants(self):
+        state = {
+            "version": 2,
+            "enabled": True,
+            "date": duel_features.duel_date(),
+            "queues": {
+                "waaiging": {
+                    "enabled": False,
+                    "participants": {"main|无咎子": duel_features._new_participant_state()},
+                },
+                "titan": {
+                    "enabled": True,
+                    "participants": {"sub|厚土": duel_features._new_participant_state()},
+                },
+            },
+        }
+
+        migrated = duel_features._ensure_duel_state_shape(state, reset_daily=False)
+        participants = migrated["queues"][ROTATION]["participants"]
+
+        self.assertTrue(migrated["queues"][ROTATION]["enabled"])
+        self.assertFalse(participants["main|无咎子"]["enabled"])
+        self.assertTrue(participants["sub|厚土"]["enabled"])
 
     def test_dashboard_payload_returns_identity_controls(self):
         duel_features.set_duel_participant_control(False, "main|无咎子", "DashboardTarget")
@@ -124,11 +179,23 @@ class DuelControlTests(unittest.TestCase):
         duel_features.set_titan_beast_mode("出战")
 
         payload = duel_features.duel_dashboard_payload()
-        titan = next(queue for queue in payload["queues"] if queue["key"] == "titan")
+        rotation = next(queue for queue in payload["queues"] if queue["key"] == ROTATION)
 
-        self.assertEqual(titan["target_status"]["desired_mode"], "deploy")
-        self.assertEqual(titan["target_status"]["desired_label"], "出战")
-        self.assertIn("preparation_blocked", titan["target_status"])
+        self.assertEqual(rotation["target_status"]["desired_mode"], "deploy")
+        self.assertEqual(rotation["target_status"]["desired_label"], "出战")
+        self.assertIn("preparation_blocked", rotation["target_status"])
+
+    def test_dashboard_has_one_rotation_with_every_identity(self):
+        payload = duel_features.duel_dashboard_payload()
+
+        self.assertEqual(len(payload["queues"]), 1)
+        rotation = payload["queues"][0]
+        self.assertEqual(rotation["key"], ROTATION)
+        self.assertEqual(rotation["label"], "斗法轮换")
+        self.assertEqual(
+            len(rotation["participants"]),
+            sum(len(items) for items in duel_features.DUEL_IDENTITIES.values()),
+        )
 
     def test_invalid_target_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "invalid duel target username"):
@@ -266,6 +333,42 @@ class DuelControlTests(unittest.TestCase):
             "status": "settled", "outcome": "胜利", "remaining": 9,
         })
         self.assertEqual(duel_features.load_duel_state()["multi"]["preparation"], {})
+
+    def test_avatar_target_must_be_prepared_before_rotation_reservation(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|无咎子", key)
+        duel_features.set_duel_participant_control(True, "main|无咎子", "ding303")
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        preparation = duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"]
+        self.assertEqual(
+            (preparation["owner"], preparation["target_identity"], preparation["status"]),
+            ("sub", "寻真子", "pending"),
+        )
+
+        claim = duel_features.claim_duel_target_preparation("sub")
+        self.assertEqual(claim["queue_key"], ROTATION)
+        self.assertTrue(
+            duel_features.finish_duel_target_preparation(
+                claim,
+                True,
+                "寻真子已发送切换消息",
+                reply_to_msg_id=8201,
+            )
+        )
+
+        reservation = duel_features.reserve_duel_for_account("main")
+        self.assertEqual((reservation["queue_key"], reservation["target_username"]), (ROTATION, "ding303"))
+        self.assertEqual(reservation["command"], ".斗法")
+        self.assertEqual(reservation["reply_to_msg_id"], 8201)
+        duel_features.finish_duel_reservation(reservation, {
+            "status": "settled", "outcome": "胜利", "remaining": 9,
+        })
+        self.assertEqual(
+            duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"],
+            {},
+        )
 
     def test_stale_ready_preparation_without_reply_anchor_is_recreated(self):
         duel_features.configure_duel_multi_plan(
@@ -405,6 +508,14 @@ class DuelControlTests(unittest.TestCase):
                 "main",
                 "无咎子",
                 [{"username": "kulipabp", "count": 1}],
+            )
+
+    def test_rotation_rejects_target_on_same_account(self):
+        with self.assertRaisesRegex(ValueError, "same account duel target"):
+            duel_features.set_duel_participant_control(
+                True,
+                "main|无咎子",
+                "kulipabp",
             )
 
     def test_one_to_many_rejects_empty_target(self):

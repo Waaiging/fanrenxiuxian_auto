@@ -48,6 +48,7 @@ from command_modules import (
     yuanying_out_plan,
 )
 from duel_features import (
+    DUEL_ROTATION_QUEUE_KEY,
     configure_duel_multi_plan,
     duel_dashboard_payload,
     set_duel_control,
@@ -4605,6 +4606,8 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
             message = "挑战对象必须是有效的 Telegram 用户名"
         elif message == "invalid titan beast mode":
             message = "小号主魂灵兽状态仅支持出战"
+        elif message == "same account duel target":
+            message = "同一账号内无法同时保持挑战身份和目标身份激活"
         else:
             message = "未知斗法队列"
         return {"success": False, "msg": message}
@@ -4623,9 +4626,9 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
         "participant": participant_key,
         "participant_enabled": bool(participant_state.get("enabled")) if participant_state else None,
         "target": participant_state.get("target_username", "") if participant_state else None,
-        "beast_mode": data.get("queues", {}).get("titan", {}).get("beast_mode"),
+        "beast_mode": data.get("queues", {}).get(DUEL_ROTATION_QUEUE_KEY, {}).get("beast_mode"),
         "target_status": titan_target_status(
-            data.get("queues", {}).get("titan", {}).get("beast_mode")
+            data.get("queues", {}).get(DUEL_ROTATION_QUEUE_KEY, {}).get("beast_mode")
         ) if beast_mode is not None else None,
         "queue_enabled": (
             bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
