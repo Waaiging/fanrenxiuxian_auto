@@ -1,6 +1,6 @@
 #!/bin/bash
-# 凡人修仙 AWS 启动管理脚本
-# 先建立稳定的 tmux 结构，再启动进程，避免可见性控制器遇到缺失窗口。
+# Build the complete tmux layout before launching workers. This prevents the
+# visibility controller from racing with missing restricted-account windows.
 
 set -euo pipefail
 
@@ -23,12 +23,16 @@ launch_window() {
 }
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "正在清理旧会话 $SESSION_NAME..."
-    tmux kill-session -t "$SESSION_NAME"
+    echo "Stopping old tmux session $SESSION_NAME..."
+    # Killing the final session can make the tmux server return nonzero.
+    tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 fi
 
-# 窗口 0 先以占位进程建立，使 tmux server 不会因业务脚本瞬时退出而消失。
-tmux new-session -d -s "$SESSION_NAME" -n "Main" "exec sleep infinity"
+# Keep a placeholder alive while the tmux server and all five windows are built.
+if ! tmux new-session -d -s "$SESSION_NAME" -n "Main" "exec sleep infinity"; then
+    sleep 1
+    tmux new-session -d -s "$SESSION_NAME" -n "Main" "exec sleep infinity"
+fi
 tmux set-window-option -g remain-on-exit on
 tmux set-window-option -t "$SESSION_NAME:0" remain-on-exit on
 create_placeholder_window 1 "Sub"
@@ -36,26 +40,26 @@ create_placeholder_window 2 "Xiaohao"
 create_placeholder_window 3 "Waaiging"
 create_placeholder_window 4 "Dashboard"
 
-# 先启动被管理窗口，最后启动带可见性控制器的主号。
-echo "[1/5] 启动 星宫 (Sub)..."
+# Start managed windows first and the main visibility controller last.
+echo "[1/5] Starting Sub..."
 launch_window 1 "sub_cultivator.py"
 
-echo "[2/5] 启动 万灵宗 (Xiaohao)..."
+echo "[2/5] Starting Xiaohao..."
 launch_window 2 "cultivator_xiaohao.py"
 
-echo "[3/5] 启动 天星宗 (Waaiging)..."
+echo "[3/5] Starting Waaiging..."
 launch_window 3 "cultivator_waaiging.py"
 
-echo "[4/5] 启动 云端监控台 (Dashboard)..."
+echo "[4/5] Starting Dashboard..."
 launch_window 4 "dashboard_server.py"
 
-echo "[5/5] 启动 万灵宗 (Main)..."
+echo "[5/5] Starting Main..."
 launch_window 0 "intelligent_cultivator.py"
 
 PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
 echo "======================================"
-echo "修仙大阵已重组完毕。"
+echo "All tmux workers started."
 if [ -n "$PUBLIC_IP" ]; then
-    echo "监控地址: http://$PUBLIC_IP:8000"
+    echo "Dashboard: http://$PUBLIC_IP:8000"
 fi
 echo "======================================"
