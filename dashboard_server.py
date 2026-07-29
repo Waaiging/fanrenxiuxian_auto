@@ -3898,6 +3898,9 @@ def is_suppressed_miniapp_transport_log_entry(entry):
         "同步洞府首页",
         "读取宗门灵圃",
         "万兽谷灵兽安抚（ID ",
+        "洞府寻宝入府",
+        "洞府寻宝探查第 ",
+        "洞府寻宝见好就收",
     ))
 
 

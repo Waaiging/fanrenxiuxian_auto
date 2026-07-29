@@ -6750,6 +6750,14 @@ class ParserFixtureTests(unittest.TestCase):
                     "2026-07-28 19:46:02,500 [INFO] OUT [Mini App | 主魂]:\n万兽谷灵兽安抚（ID 7）",
                     "2026-07-28 19:46:02,600 [INFO] IN [Mini App | 主魂]:\n万兽谷灵兽安抚（ID 7） -> 体力 +10",
                     "2026-07-28 19:46:02,700 [INFO] IN [Mini App | 主魂]:\n万兽谷灵兽安抚 -> 共处理 2 只，成功 2，失败 0",
+                    "2026-07-28 19:46:02,710 [INFO] OUT [Mini App | 主魂]:\n洞府寻宝入府",
+                    "2026-07-28 19:46:02,720 [INFO] IN [Mini App | 主魂]:\n洞府寻宝入府 -> 本局开始，神识 8 / 8",
+                    "2026-07-28 19:46:02,730 [INFO] OUT [Mini App | 主魂]:\n洞府寻宝探查第 7 格",
+                    "2026-07-28 19:46:02,740 [INFO] IN [Mini App | 主魂]:\n洞府寻宝探查第 7 格 -> 主宝匣",
+                    "2026-07-28 19:46:02,750 [INFO] OUT [Mini App | 主魂]:\n洞府寻宝见好就收",
+                    "2026-07-28 19:46:02,760 [INFO] IN [Mini App | 主魂]:\n洞府寻宝见好就收 -> 甲等，90 分",
+                    "2026-07-28 19:46:02,770 [INFO] OUT [Mini App | 主魂]:\n洞府寻宝（每日 3 局）",
+                    "2026-07-28 19:46:02,780 [INFO] IN [Mini App | 主魂]:\n洞府寻宝（每日 3 局） -> 阴凝之晶 x1，灵石 x90",
                     "2026-07-28 19:46:03,000 [INFO] Yuanying out active. Auto-return due at 2026-07-28 20:52:40.",
                     "2026-07-28 19:46:04,000 [WARNING] 指令未收到回复，稍后重试。",
                     "2026-07-28 19:46:05,000 [ERROR] Mini App request failed.",
@@ -6760,12 +6768,13 @@ class ParserFixtureTests(unittest.TestCase):
                 page = dashboard_server.get_log_page("main", limit=20)
                 content = page.get("content") or ""
 
-                self.assertEqual(len(page.get("entries") or []), 6)
+                self.assertEqual(len(page.get("entries") or []), 8)
                 self.assertIn("OUT [主魂]", content)
                 self.assertIn("IN [.查看闭关]", content)
                 self.assertIn("OUT [Mini App | 素心子]", content)
                 self.assertIn("IN [Mini App | 素心子]", content)
                 self.assertIn("万兽谷灵兽安抚 -> 共处理 2 只", content)
+                self.assertIn("洞府寻宝（每日 3 局） -> 阴凝之晶 x1，灵石 x90", content)
                 self.assertIn("[ERROR]", content)
                 self.assertNotIn("[WARNING]", content)
                 self.assertNotIn("Meditation Step 3", content)
@@ -6774,9 +6783,12 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertNotIn("同步洞府首页", content)
                 self.assertNotIn("读取宗门灵圃", content)
                 self.assertNotIn("万兽谷灵兽安抚（ID 7）", content)
+                self.assertNotIn("洞府寻宝入府", content)
+                self.assertNotIn("洞府寻宝探查第 7 格", content)
+                self.assertNotIn("洞府寻宝见好就收", content)
 
                 incoming = dashboard_server.get_log_page("main", limit=20, kind="in")
-                self.assertEqual(len(incoming.get("entries") or []), 3)
+                self.assertEqual(len(incoming.get("entries") or []), 4)
                 issues = dashboard_server.get_log_page("main", limit=20, kind="issue")
                 self.assertEqual(len(issues.get("entries") or []), 1)
         finally:
