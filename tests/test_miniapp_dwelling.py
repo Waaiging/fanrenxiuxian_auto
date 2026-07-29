@@ -88,6 +88,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".推命 闭关",
             ".改命 探索",
             ".问道",
+            ".小世界",
+            ".显灵",
+            ".神迹 布道",
             ".我的阴罗幡",
             ".每日献祭",
             ".血洗山林",
@@ -97,10 +100,6 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".化功为煞 10000",
             ".囚禁魂魄 1 凶兽戾魄",
             ".安抚幡灵 1",
-            ".接取解咒委托 19",
-            ".辨认咒纹 @Weeguu",
-            ".借幡镇魂 @Weeguu",
-            ".剥离咒源 @Weeguu",
         ):
             self.assertTrue(miniapp_command_allowed(command), command)
         for command in (
@@ -110,27 +109,42 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".灵兽巡边 大圣 袭营",
             ".巡边归来",
             ".定命 不存在",
+            ".接取解咒委托 19",
+            ".辨认咒纹 @Weeguu",
+            ".借幡镇魂 @Weeguu",
+            ".剥离咒源 @Weeguu",
         ):
             self.assertFalse(miniapp_command_allowed(command), command)
 
-    def test_dashboard_labels_ask_dao_and_yinluo_commands_as_miniapp_only(self):
-        commands = (
+    def test_dashboard_labels_supported_and_group_only_yinluo_commands(self):
+        miniapp_commands = (
             ".问道",
+            ".小世界",
+            ".显灵",
+            ".神迹 布道",
             ".我的阴罗幡",
             ".每日献祭",
             ".召回魔影",
             ".囚禁魂魄 <槽位> 凶兽戾魄",
+        )
+        group_commands = (
+            ".接取解咒委托 19",
             ".辨认咒纹 @Weeguu",
             ".借幡镇魂 @Weeguu",
             ".剥离咒源 @Weeguu",
         )
+        commands = miniapp_commands + group_commands
         panel = {"commands": [{"command": command} for command in commands]}
 
         apply_command_execution_channels(panel, root_state={"miniapp_route_active": False})
 
-        for row in panel["commands"]:
-            self.assertEqual(row["execution_channel"], "miniapp", row["command"])
-            self.assertIn("不回退群内", row["execution_channel_detail"])
+        rows = {row["command"]: row for row in panel["commands"]}
+        for command in miniapp_commands:
+            self.assertEqual(rows[command]["execution_channel"], "miniapp", command)
+            self.assertIn("不回退群内", rows[command]["execution_channel_detail"])
+        for command in group_commands:
+            self.assertEqual(rows[command]["execution_channel"], "group", command)
+            self.assertIn("继续在群内发送", rows[command]["execution_channel_detail"])
 
     def test_router_install_failure_blocks_supported_commands_without_group_fallback(self):
         class Actor:
@@ -161,7 +175,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(group_only, "group:.洞府")
         self.assertEqual(actor.group_sent, [".洞府"])
 
-    def test_parameterized_yinluo_command_routes_through_miniapp_only(self):
+    def test_soul_curse_chain_routes_to_group(self):
         class Actor:
             def __init__(self):
                 self.client = object()
@@ -181,21 +195,14 @@ class MiniAppDwellingTests(unittest.TestCase):
         actor = Actor()
         router = MiniAppCommandRouter(actor, "sub", logger=FakeLogger())
         router.transport.identity_player_ids = {"主魂": 100, "缘生子": -200}
-        router.transport.command = AsyncMock(
-            return_value=SimpleNamespace(text="借幡镇魂完成", payload={})
-        )
         fallback = AsyncMock(return_value="group fallback")
 
         response = asyncio.run(
             router._route("缘生子", ".借幡镇魂 @Weeguu", fallback, (), {})
         )
 
-        self.assertEqual(response, "借幡镇魂完成")
-        router.transport.command.assert_awaited_once_with(
-            ".借幡镇魂 @Weeguu",
-            identity="缘生子",
-        )
-        fallback.assert_not_awaited()
+        self.assertEqual(response, "group fallback")
+        fallback.assert_awaited_once_with(".借幡镇魂 @Weeguu")
 
     def test_identity_mapping_and_command_routes(self):
         calls = []
@@ -215,14 +222,18 @@ class MiniAppDwellingTests(unittest.TestCase):
             asyncio.run(transport.initialize())
             response = asyncio.run(transport.command(".元婴出窍", identity="素心子"))
             status = asyncio.run(transport.command(".查看闭关", identity="主魂"))
+            manifest = asyncio.run(transport.command(".显灵", identity="主魂"))
 
         self.assertEqual(transport.player_id("主魂"), 100)
         self.assertEqual(transport.player_id("素心子"), -200)
         self.assertEqual(response.text, "reply:.元婴出窍")
         self.assertEqual(status.text, "reply:status")
+        self.assertEqual(manifest.text, "reply:manifest")
         self.assertEqual(calls[1][0], "/api/miniapp/xianxia-dwelling/command-center")
         self.assertEqual(calls[1][1]["playerId"], -200)
         self.assertEqual(calls[2][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
+        self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/small-world")
+        self.assertEqual(calls[3][1]["action"], "manifest")
 
     def test_completed_status_is_settled_for_maintenance_loop(self):
         calls = []
@@ -358,7 +369,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("读取宗门灵圃", combined)
         self.assertIn("IN [Mini App | 素心子]:\n宗门灵圃安抚星辰 -> 安抚完成", combined)
 
-    def test_pagoda_and_hunt_use_their_miniapp_endpoints_and_log_actions(self):
+    def test_pagoda_logs_action_while_hunt_steps_stay_silent(self):
         logger = FakeLogger()
         calls = []
 
@@ -444,8 +455,9 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(reveal[1]["index"], 6)
         combined = "\n".join(logger.info_messages)
         self.assertIn("OUT [Mini App | 素心子]:\n琉璃问心塔一念登塔", combined)
-        self.assertIn("洞府寻宝探查第 7 格 -> 第 7 格：主宝匣", combined)
-        self.assertIn("洞府寻宝见好就收 -> 甲等，90 分，已找到主宝匣", combined)
+        self.assertNotIn("洞府寻宝入府", combined)
+        self.assertNotIn("洞府寻宝探查", combined)
+        self.assertNotIn("洞府寻宝见好就收", combined)
 
     def test_failed_miniapp_operation_is_logged(self):
         logger = FakeLogger()

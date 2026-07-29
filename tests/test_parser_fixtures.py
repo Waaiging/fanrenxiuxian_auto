@@ -7378,6 +7378,22 @@ class ParserFixtureTests(unittest.TestCase):
             ("rift", "缘生子", False),
         ])
 
+    def test_sub_impending_wait_resolves_mulan_support_constant(self):
+        actor = SubCultivator.__new__(SubCultivator)
+        actor.avatars = []
+        actor.main_star_palace_enabled = False
+        actor.main_formation_enabled = False
+        actor.main_concubine_enabled = False
+        actor.dashboard_command_paused = lambda command, identity="": False
+        actor.daily_one_shot_should_defer = lambda identity, command: False
+        state = {"last_mulan_support_date": ""}
+
+        with patch.object(sub_cultivator, "seconds_until_daily_task_start", return_value=0):
+            wait = actor._state_impending_command_wait(state, identity="主魂")
+
+        self.assertEqual(wait, 0)
+        self.assertEqual(sub_cultivator.MULAN_SUPPORT_COMMAND, ".支援慕兰 奇袭")
+
     def test_xiaohao_main_soul_pause_does_not_make_main_impending(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.avatars = ["问心子"]
@@ -12944,33 +12960,51 @@ class ParserFixtureTests(unittest.TestCase):
             )
         )
 
-    def test_small_world_prayer_keywords_trigger_manifest(self):
-        for keyword in intelligent_cultivator.SMALL_WORLD_PRAYER_KEYWORDS:
-            with self.subTest(keyword=keyword):
-                actor = Cultivator.__new__(Cultivator)
-                actor.state = {}
-                actor.active_atomic_task = None
-                actor.save_state = lambda: None
-                actor.dashboard_command_paused = lambda command, identity="": False
-                sent = []
+    def test_small_world_prayer_uses_miniapp_manifest_and_server_cooldown(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
 
-                async def fake_send(command, **kwargs):
-                    sent.append((command, kwargs.get("force_identity_check")))
-                    if command == intelligent_cultivator.SMALL_WORLD_COMMAND:
-                        return f"【小世界】发现{keyword}，可响应祈愿。"
-                    return "显灵成功，愿力已降下。"
+        class Transport:
+            def __init__(self):
+                self.actions = []
 
-                actor.send_and_wait_feedback = fake_send
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"canManifest": True, "prayerRemainingSeconds": 0},
+                            "prayer": {"title": "江河决堤"},
+                        }
+                    }
+                }
 
-                self.assertTrue(asyncio.run(actor.execute_small_world_once()))
-                self.assertEqual(sent, [
-                    (intelligent_cultivator.SMALL_WORLD_COMMAND, True),
-                    (intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND, True),
-                ])
-                self.assertTrue(actor.state["last_manifest_time"])
-                remaining = common_seconds_until(actor.state["next_small_world_time"])
-                self.assertGreater(remaining, 5 * 3600 + 50 * 60)
-                self.assertLessEqual(remaining, intelligent_cultivator.SMALL_WORLD_CD_SECONDS)
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                return {
+                    "actionResult": {"ok": True, "rawMessage": "显灵成功，愿力已降下。"},
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"prayerRemainingSeconds": 21600},
+                            "prayer": None,
+                        }
+                    },
+                }
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
+
+        self.assertTrue(asyncio.run(actor.execute_small_world_once()))
+        self.assertEqual(transport.actions, [("主魂", "manifest")])
+        self.assertTrue(actor.state["last_manifest_time"])
+        self.assertEqual(actor.state["last_manifest_response"], "显灵成功，愿力已降下。")
+        remaining = common_seconds_until(actor.state["next_small_world_time"])
+        self.assertGreater(remaining, 5 * 3600 + 50 * 60)
+        self.assertLessEqual(remaining, 21600)
 
     def test_small_world_without_prayer_does_not_manifest(self):
         actor = Cultivator.__new__(Cultivator)
@@ -12978,82 +13012,109 @@ class ParserFixtureTests(unittest.TestCase):
         actor.active_atomic_task = None
         actor.save_state = lambda: None
         actor.dashboard_command_paused = lambda command, identity="": False
-        sent = []
 
-        async def fake_send(command, **kwargs):
-            sent.append(command)
-            return "【小世界】天地安宁，暂无祈愿。"
+        class Transport:
+            def __init__(self):
+                self.actions = []
 
-        actor.send_and_wait_feedback = fake_send
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"canManifest": False, "prayerRemainingSeconds": 1800},
+                            "prayer": None,
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                raise AssertionError("no Mini App action expected")
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
 
         self.assertTrue(asyncio.run(actor.execute_small_world_once()))
-        self.assertEqual(sent, [intelligent_cultivator.SMALL_WORLD_COMMAND])
+        self.assertEqual(transport.actions, [])
         self.assertFalse(actor.state.get("last_manifest_time"))
+        remaining = common_seconds_until(actor.state["next_small_world_time"])
+        self.assertGreater(remaining, 29 * 60)
+        self.assertLessEqual(remaining, 1800)
 
-    def test_small_world_feedback_families_accept_manifest_and_preaching_results(self):
-        self.assertTrue(log_utils.feedback_response_matches_command(
-            intelligent_cultivator.SMALL_WORLD_COMMAND,
-            "【小世界】一名凡人祈愿，等待神明响应。",
-        ))
-        self.assertTrue(log_utils.feedback_response_matches_command(
-            intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND,
-            "愿力汇聚，香火与功德均有所增长。",
-        ))
-        self.assertTrue(log_utils.feedback_response_matches_command(
-            intelligent_cultivator.MIRACLE_PREACH_COMMAND,
-            "【神迹】布道成功，凡人信仰有所增长。",
-        ))
-
-    def test_small_world_explicit_cooldown_and_empty_response_retry(self):
-        actor = Cultivator.__new__(Cultivator)
-        actor.state = {}
-        actor.save_state = lambda: None
-
-        self.assertFalse(actor.record_small_world_response(
-            "小世界尚在冷却，请在 **2小时15分钟** 后再查看。"
-        ))
-        cooldown = common_seconds_until(actor.state["next_small_world_time"])
-        self.assertGreater(cooldown, 2 * 3600 + 10 * 60)
-        self.assertLessEqual(cooldown, 2 * 3600 + 15 * 60)
-
-        self.assertFalse(actor.record_small_world_response(""))
-        retry = common_seconds_until(actor.state["next_small_world_time"])
-        self.assertGreater(retry, 9 * 60)
-        self.assertLessEqual(retry, intelligent_cultivator.SMALL_WORLD_RETRY_SECONDS)
-
-    def test_miracle_preach_records_three_hour_cooldown(self):
+    def test_miracle_preach_uses_miniapp_action_and_server_cooldown(self):
         actor = Cultivator.__new__(Cultivator)
         actor.state = {}
         actor.active_atomic_task = None
         actor.save_state = lambda: None
-        sent = []
 
-        async def fake_send(command, **kwargs):
-            sent.append((command, kwargs.get("force_identity_check")))
-            return "【神迹】布道成功，凡人信仰有所增长。"
+        class Transport:
+            def __init__(self):
+                self.actions = []
 
-        actor.send_and_wait_feedback = fake_send
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 0},
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                return {
+                    "actionResult": {"ok": True, "rawMessage": "神迹布道成功，信仰增长。"},
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 10800},
+                        }
+                    },
+                }
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
 
         self.assertTrue(asyncio.run(actor.execute_miracle_preach_once()))
-        self.assertEqual(sent, [(intelligent_cultivator.MIRACLE_PREACH_COMMAND, True)])
+        self.assertEqual(transport.actions, [("主魂", "miracle_sermon")])
         remaining = common_seconds_until(actor.state["next_miracle_preach_time"])
         self.assertGreater(remaining, 2 * 3600 + 50 * 60)
-        self.assertLessEqual(remaining, intelligent_cultivator.MIRACLE_PREACH_CD_SECONDS)
+        self.assertLessEqual(remaining, 10800)
 
-    def test_miracle_preach_real_cooldown_reply_is_matched_and_recorded(self):
+    def test_miracle_preach_respects_miniapp_cooldown_without_action(self):
         actor = Cultivator.__new__(Cultivator)
         actor.state = {}
+        actor.active_atomic_task = None
         actor.save_state = lambda: None
-        response = "凡间方才承受神谕，需再等待 **2小时21分钟37秒**。"
 
-        self.assertTrue(log_utils.feedback_response_matches_command(
-            intelligent_cultivator.MIRACLE_PREACH_COMMAND,
-            response,
-        ))
-        self.assertFalse(actor.record_miracle_preach_response(response))
+        class Transport:
+            def __init__(self):
+                self.actions = []
+
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 8497},
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                raise AssertionError("cooldown must prevent Mini App action")
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
+
+        self.assertFalse(asyncio.run(actor.execute_miracle_preach_once()))
+        self.assertEqual(transport.actions, [])
         remaining = common_seconds_until(actor.state["next_miracle_preach_time"])
         self.assertGreater(remaining, 2 * 3600 + 20 * 60)
-        self.assertLessEqual(remaining, 2 * 3600 + 22 * 60)
+        self.assertLessEqual(remaining, 8497)
 
     def test_main_watchdog_detects_stale_small_world_and_miracle(self):
         actor = Cultivator.__new__(Cultivator)

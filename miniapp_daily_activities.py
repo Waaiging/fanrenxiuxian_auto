@@ -79,21 +79,50 @@ def hunt_loot_contains(run: Any, target: str) -> bool:
     return False
 
 
-def hunt_result_text(payload: Any) -> str:
+def hunt_result_loot(payload: Any) -> dict[str, int]:
     result = payload.get("huntResult") if isinstance(payload, dict) else {}
     result = result if isinstance(result, dict) else {}
     loot = result.get("loot") if isinstance(result.get("loot"), list) else []
-    loot_text = "，".join(
-        f"{item.get('name') or '物品'} x{item.get('quantity') or 1}"
-        for item in loot
-        if isinstance(item, dict)
-    ) or "无额外物品"
-    return (
-        f"洞府寻宝 {result.get('grade') or '结算'}，得分 {int(result.get('score') or 0)}，"
-        f"探明 {int(result.get('revealedCount') or 0)} 格，"
-        f"主宝匣{'已发现' if result.get('foundMain') else '未发现'}，"
-        f"宗门贡献 +{int(result.get('contribution') or 0)}，获得 {loot_text}"
-    )
+    merged: dict[str, int] = {}
+    for item in loot:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "物品").strip() or "物品"
+        try:
+            quantity = max(1, int(item.get("quantity") or 1))
+        except (TypeError, ValueError):
+            quantity = 1
+        merged[name] = merged.get(name, 0) + quantity
+    return merged
+
+
+def normalize_hunt_loot(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for raw_name, raw_quantity in value.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        try:
+            quantity = int(raw_quantity or 0)
+        except (TypeError, ValueError):
+            continue
+        if quantity > 0:
+            normalized[name] = quantity
+    return normalized
+
+
+def merge_hunt_loot(total: Any, payload: Any) -> dict[str, int]:
+    merged = normalize_hunt_loot(total)
+    for name, quantity in hunt_result_loot(payload).items():
+        merged[name] = merged.get(name, 0) + quantity
+    return merged
+
+
+def hunt_loot_text(total: Any) -> str:
+    loot = normalize_hunt_loot(total)
+    return "，".join(f"{name} x{quantity}" for name, quantity in loot.items()) or "无物品"
 
 
 def pagoda_result_text(payload: Any) -> str:
@@ -302,6 +331,47 @@ class MiniAppDailyActivities:
             exc_info=True,
         )
 
+    def _hunt_summary_loot(self, identity: str, today: str) -> dict[str, int]:
+        state = self._state(identity)
+        if state.get("miniapp_hunt_summary_date") != today:
+            state["miniapp_hunt_summary_date"] = today
+            state["miniapp_hunt_summary_loot"] = {}
+            state["miniapp_hunt_summary_completed"] = 0
+            state["miniapp_hunt_summary_logged_date"] = ""
+            state["miniapp_hunt_last_result"] = ""
+            self._save()
+        return normalize_hunt_loot(state.get("miniapp_hunt_summary_loot"))
+
+    def _log_hunt_summary(
+        self,
+        identity: str,
+        today: str,
+        counter: dict[str, int],
+    ) -> str:
+        state = self._state(identity)
+        summary = hunt_loot_text(state.get("miniapp_hunt_summary_loot"))
+        if state.get("miniapp_hunt_summary_logged_date") == today:
+            return summary
+        limit = int(counter.get("limit") or 3)
+        operation = f"洞府寻宝（每日 {limit} 局）"
+        self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
+        self.log.info("IN [Mini App | %s]:\n%s -> %s", identity, operation, summary)
+        self._record(
+            identity,
+            miniapp_hunt_summary_logged_date=today,
+            miniapp_hunt_last_result=summary,
+        )
+        recorder = getattr(self.actor, "record_daily_reward_event", None)
+        if callable(recorder):
+            recorder(
+                identity,
+                ".洞府寻宝",
+                f"三局总获得：{summary}",
+                source="Mini App 洞府寻宝",
+                final=True,
+            )
+        return summary
+
     async def run_pagoda_identity(self, identity: str, today: str | None = None) -> str:
         today = today or datetime.now().strftime("%Y-%m-%d")
         state = self._state(identity)
@@ -435,15 +505,20 @@ class MiniAppDailyActivities:
 
         counter = hunt_counter(snapshot)
         run = hunt_run(snapshot)
+        summary_loot = self._hunt_summary_loot(identity, today)
         completed = 0
         if counter["remaining"] <= 0 and not run:
+            if summary_loot:
+                self._log_hunt_summary(identity, today, counter)
             self._record(
                 identity,
                 miniapp_hunt_last_date=today,
                 miniapp_hunt_last_time=datetime.now().strftime(TIME_FORMAT),
                 miniapp_hunt_used=counter["used"],
                 miniapp_hunt_limit=counter["limit"],
-                miniapp_hunt_last_result="今日寻宝次数已用完",
+                miniapp_hunt_last_result=(
+                    hunt_loot_text(summary_loot) if summary_loot else "今日寻宝次数已用完"
+                ),
                 miniapp_hunt_last_error="",
             )
             return "already"
@@ -461,45 +536,37 @@ class MiniAppDailyActivities:
             run, reason = await self.play_hunt_session(identity, run)
             session_id = str(run.get("sessionId") or "").strip()
             settled = await self.transport.hunt_settle(identity, session_id)
-            result_text = hunt_result_text(settled)
+            summary_loot = merge_hunt_loot(summary_loot, settled)
             settled_counter = hunt_counter(settled)
             if settled_counter["limit"] <= 0:
                 settled_counter = hunt_counter(await self.transport.hunt_snapshot(identity))
             counter = settled_counter
-            result_text = (
-                f"第 {counter['used']} / {counter['limit']} 局：{result_text}"
-                if counter["limit"] > 0
-                else result_text
-            )
             completed += 1
             self._record(
                 identity,
                 miniapp_hunt_last_time=datetime.now().strftime(TIME_FORMAT),
-                miniapp_hunt_last_result=result_text[:1000],
                 miniapp_hunt_last_stop_reason=reason,
                 miniapp_hunt_used=counter["used"],
                 miniapp_hunt_limit=counter["limit"],
                 miniapp_hunt_last_error="",
+                miniapp_hunt_summary_date=today,
+                miniapp_hunt_summary_loot=summary_loot,
+                miniapp_hunt_summary_completed=int(
+                    self._state(identity).get("miniapp_hunt_summary_completed") or 0
+                ) + 1,
             )
-            recorder = getattr(self.actor, "record_daily_reward_event", None)
-            if callable(recorder) and result_text:
-                recorder(
-                    identity,
-                    ".洞府寻宝",
-                    result_text,
-                    source="Mini App 洞府寻宝",
-                    final=True,
-                )
             run = {}
             await asyncio.sleep(1)
 
         if counter["remaining"] <= 0:
+            summary = self._log_hunt_summary(identity, today, counter)
             self._record(
                 identity,
                 miniapp_hunt_last_date=today,
                 miniapp_hunt_last_time=datetime.now().strftime(TIME_FORMAT),
                 miniapp_hunt_used=counter["used"],
                 miniapp_hunt_limit=counter["limit"],
+                miniapp_hunt_last_result=summary,
                 miniapp_hunt_last_error="",
             )
             return "completed"

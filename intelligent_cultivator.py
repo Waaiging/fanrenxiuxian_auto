@@ -89,7 +89,14 @@ def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
 
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 from red_packet_features import install_red_packet_monitor
+from miniapp_beast import MiniAppBeastError
 from miniapp_command_routing import install_miniapp_command_router
+from miniapp_dwelling import (
+    apply_dwelling_snapshot,
+    command_result_ok,
+    command_result_text,
+    small_world_data,
+)
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
@@ -214,7 +221,6 @@ SMALL_WORLD_MANIFEST_COMMAND = ".显灵"
 SMALL_WORLD_CD_SECONDS = 6 * 3600
 MIRACLE_PREACH_COMMAND = ".神迹 布道"
 MIRACLE_PREACH_CD_SECONDS = 3 * 3600
-SMALL_WORLD_PRAYER_KEYWORDS = ("凡人祈愿", "响应祈愿")
 SMALL_WORLD_RETRY_SECONDS = 10 * 60
 SPIRIT_TREE_AVATAR = "缘生子"
 SPIRIT_TREE_IRRIGATION_COMMAND = ".灵树灌溉"
@@ -2135,127 +2141,163 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             sleep_func=scheduler_sleep_seconds,
         )
 
-    def record_small_world_response(self, resp):
-        """Record the 6-hour small-world schedule without treating unknown replies as success."""
-        text = self.response_text(resp).strip()
-        self.state["last_small_world_response"] = text
-        if not text:
-            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Small world: response missing; retry scheduled in 10 minutes.")
-            return False
+    def miniapp_small_world_transport(self):
+        router = getattr(self, "_miniapp_command_router", None)
+        transport = getattr(router, "transport", None)
+        if transport is None:
+            raise MiniAppBeastError("miniapp_route_unavailable")
+        return transport
 
-        cd = self.parse_wait_time(text)
-        if cd > 0 and any(k in text for k in ("冷却", "后再", "请在", "剩余", "尚需", "还需")):
-            self.state["next_small_world_time"] = add_seconds_str(now_str(), cd)
-            self.save_state()
-            log.info(f"Small world: cooldown from response {cd}s, next at {self.state['next_small_world_time']}.")
-            return False
+    @staticmethod
+    def small_world_remaining_seconds(payload, key):
+        world = small_world_data(payload)
+        actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
+        try:
+            return max(0, int(actions.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
 
-        if any(k in text for k in ("境界不足", "无法施展", "尚未开启", "未知指令", "不存在")):
-            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Small world: unavailable response; retry scheduled in 10 minutes.")
-            return False
-
-        if not any(k in text for k in ("小世界", "凡人祈愿", "响应祈愿", "祈愿", "显灵")):
-            self.state["next_small_world_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Small world: unrecognized response; retry scheduled in 10 minutes.")
-            return False
-
+    def record_small_world_miniapp_state(
+        self,
+        payload,
+        *,
+        manifested=False,
+        pending_retry=False,
+        response_text="",
+    ):
+        """Persist Mini App prayer state and use the server-provided cooldown."""
         now = now_str()
+        world = small_world_data(payload)
+        prayer = world.get("prayer") if isinstance(world.get("prayer"), dict) else None
+        text = str(response_text or command_result_text(payload) or "").strip()
+        if not text:
+            text = (
+                f"凡人祈愿待处理：{prayer.get('title') or '未命名祈愿'}"
+                if prayer
+                else "暂无凡人祈愿"
+            )
+        ok = command_result_ok(payload)
         self.state["last_small_world_time"] = now
-        self.state["next_small_world_time"] = add_seconds_str(now, SMALL_WORLD_CD_SECONDS)
+        self.state["last_small_world_response"] = text
+        self.state["miniapp_small_world_last_error"] = "" if ok else "small_world_action_failed"
+        if manifested and ok:
+            self.state["last_manifest_time"] = now
+            self.state["last_manifest_response"] = text
+        remaining = self.small_world_remaining_seconds(payload, "prayerRemainingSeconds")
+        if pending_retry:
+            remaining = SMALL_WORLD_RETRY_SECONDS
+        elif remaining <= 0:
+            remaining = SMALL_WORLD_CD_SECONDS if ok else SMALL_WORLD_RETRY_SECONDS
+        self.state["next_small_world_time"] = add_seconds_str(now, remaining)
         self.save_state()
-        log.info(f"Small world: response recorded, next at {self.state['next_small_world_time']}.")
-        return True
+        return ok
 
-    def record_miracle_preach_response(self, resp):
-        """Record the 3-hour preaching cooldown."""
-        text = self.response_text(resp).strip()
-        self.state["last_miracle_preach_response"] = text
-        if not text:
-            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Miracle preaching: response missing; retry scheduled in 10 minutes.")
-            return False
-
-        cd = self.parse_wait_time(text)
-        if cd > 0 and any(k in text for k in (
-            "冷却", "后再", "请在", "剩余", "尚需", "还需", "需再等待",
-        )):
-            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), cd)
-            self.save_state()
-            log.info(f"Miracle preaching: cooldown from response {cd}s, next at {self.state['next_miracle_preach_time']}.")
-            return False
-
-        if any(k in text for k in ("境界不足", "无法施展", "尚未开启", "未知指令", "不存在")):
-            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Miracle preaching: unavailable response; retry scheduled in 10 minutes.")
-            return False
-
-        if not any(k in text for k in ("神迹", "布道", "香火", "信仰", "愿力", "传道")):
-            self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), SMALL_WORLD_RETRY_SECONDS)
-            self.save_state()
-            log.warning("Miracle preaching: unrecognized response; retry scheduled in 10 minutes.")
-            return False
-
+    def record_miracle_preach_miniapp_state(self, payload):
+        """Persist Mini App preaching state and its exact edict cooldown."""
         now = now_str()
-        self.state["last_miracle_preach_time"] = now
-        self.state["next_miracle_preach_time"] = add_seconds_str(now, MIRACLE_PREACH_CD_SECONDS)
+        text = str(command_result_text(payload) or "").strip()
+        ok = command_result_ok(payload)
+        remaining = self.small_world_remaining_seconds(payload, "edictRemainingSeconds")
+        if remaining <= 0:
+            remaining = MIRACLE_PREACH_CD_SECONDS if ok else SMALL_WORLD_RETRY_SECONDS
+        self.state["last_miracle_preach_response"] = text
+        self.state["next_miracle_preach_time"] = add_seconds_str(now, remaining)
+        self.state["miniapp_miracle_preach_last_error"] = "" if ok else "miracle_sermon_failed"
+        if ok:
+            self.state["last_miracle_preach_time"] = now
         self.save_state()
-        log.info(f"Miracle preaching: response recorded, next at {self.state['next_miracle_preach_time']}.")
-        return True
+        return ok
+
+    def record_small_world_miniapp_error(self, feature, exc):
+        code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+        now = now_str()
+        next_key = "next_small_world_time" if feature == "small_world" else "next_miracle_preach_time"
+        self.state[next_key] = add_seconds_str(now, SMALL_WORLD_RETRY_SECONDS)
+        self.state[f"miniapp_{feature}_last_error"] = code
+        self.state[f"miniapp_{feature}_last_error_time"] = now
+        self.save_state()
+        log.error("Mini App %s failed for main-soul small world: %s", feature, code, exc_info=True)
 
     async def execute_small_world_once(self):
-        """Run .小世界 and its conditional .显灵 follow-up as one atomic main-soul action."""
+        """Read the main soul's Mini App small world and manifest a pending prayer."""
         current_task = asyncio.current_task()
         while self.should_wait_for_atomic_task(SMALL_WORLD_COMMAND):
             await asyncio.sleep(0.5)
         self.active_atomic_task = current_task
         try:
-            resp = await self.send_and_wait_feedback(
-                SMALL_WORLD_COMMAND,
-                timeout=60,
-                max_retries=1,
-                force_identity_check=True,
-            )
-            text = self.response_text(resp)
-            recorded = self.record_small_world_response(resp)
-            if any(keyword in text for keyword in SMALL_WORLD_PRAYER_KEYWORDS):
-                if self.dashboard_command_paused(SMALL_WORLD_MANIFEST_COMMAND, "主魂"):
-                    log.info("Small world: prayer detected, but .显灵 is paused by dashboard.")
-                else:
-                    manifest_resp = await self.send_and_wait_feedback(
-                        SMALL_WORLD_MANIFEST_COMMAND,
-                        timeout=60,
-                        max_retries=1,
-                        force_identity_check=True,
-                    )
-                    self.state["last_manifest_time"] = now_str()
-                    self.state["last_manifest_response"] = self.response_text(manifest_resp).strip()
-                    self.save_state()
-            return recorded
+            transport = self.miniapp_small_world_transport()
+            snapshot = await transport.small_world_snapshot("主魂")
+            apply_dwelling_snapshot(self, "主魂", snapshot)
+            world = small_world_data(snapshot)
+            if not world or world.get("hasWorld") is False:
+                self.record_small_world_miniapp_state(
+                    snapshot,
+                    pending_retry=True,
+                    response_text="主魂尚未开辟可用的小世界",
+                )
+                return False
+            prayer = world.get("prayer") if isinstance(world.get("prayer"), dict) else None
+            actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
+            if not prayer:
+                return self.record_small_world_miniapp_state(snapshot)
+            if self.dashboard_command_paused(SMALL_WORLD_MANIFEST_COMMAND, "主魂"):
+                self.record_small_world_miniapp_state(
+                    snapshot,
+                    pending_retry=True,
+                    response_text="凡人祈愿待处理，显灵已暂停",
+                )
+                return False
+            if not actions.get("canManifest"):
+                self.record_small_world_miniapp_state(
+                    snapshot,
+                    pending_retry=True,
+                    response_text="凡人祈愿待处理，当前条件不足以显灵",
+                )
+                return False
+            result = await transport.small_world_action("主魂", "manifest")
+            apply_dwelling_snapshot(self, "主魂", result)
+            return self.record_small_world_miniapp_state(result, manifested=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.record_small_world_miniapp_error("small_world", exc)
+            return False
         finally:
             if self.active_atomic_task == current_task:
                 self.active_atomic_task = None
 
     async def execute_miracle_preach_once(self):
-        """Run the main-soul preaching command once and record its cooldown."""
+        """Run the main soul's Mini App miracle-sermon action once."""
         current_task = asyncio.current_task()
         while self.should_wait_for_atomic_task(MIRACLE_PREACH_COMMAND):
             await asyncio.sleep(0.5)
         self.active_atomic_task = current_task
         try:
-            resp = await self.send_and_wait_feedback(
-                MIRACLE_PREACH_COMMAND,
-                timeout=60,
-                max_retries=1,
-                force_identity_check=True,
-            )
-            return self.record_miracle_preach_response(resp)
+            transport = self.miniapp_small_world_transport()
+            snapshot = await transport.small_world_snapshot("主魂")
+            apply_dwelling_snapshot(self, "主魂", snapshot)
+            world = small_world_data(snapshot)
+            if not world or world.get("hasWorld") is False:
+                self.record_small_world_miniapp_error(
+                    "miracle_preach",
+                    MiniAppBeastError("small_world_unavailable"),
+                )
+                return False
+            remaining = self.small_world_remaining_seconds(snapshot, "edictRemainingSeconds")
+            if remaining > 0:
+                self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), remaining)
+                self.state["last_miracle_preach_response"] = f"Mini App 神谕冷却剩余 {remaining} 秒"
+                self.state["miniapp_miracle_preach_last_error"] = ""
+                self.save_state()
+                return False
+            result = await transport.small_world_action("主魂", "miracle_sermon")
+            apply_dwelling_snapshot(self, "主魂", result)
+            return self.record_miracle_preach_miniapp_state(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.record_small_world_miniapp_error("miracle_preach", exc)
+            return False
         finally:
             if self.active_atomic_task == current_task:
                 self.active_atomic_task = None
@@ -2263,7 +2305,6 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
     async def run_small_world_loop(self):
         await self.startup_done.wait()
         while self.is_running:
-            await self._wait_for_main_identity()
             next_time = self.state.get("next_small_world_time", "")
             if next_time and is_future(next_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))
@@ -2279,7 +2320,6 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
     async def run_miracle_preach_loop(self):
         await self.startup_done.wait()
         while self.is_running:
-            await self._wait_for_main_identity()
             next_time = self.state.get("next_miracle_preach_time", "")
             if next_time and is_future(next_time):
                 await asyncio.sleep(scheduler_sleep_seconds(seconds_until(next_time)))

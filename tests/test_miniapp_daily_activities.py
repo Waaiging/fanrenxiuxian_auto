@@ -42,8 +42,12 @@ class FakeActor:
 
 
 class FakeLogger:
+    def __init__(self):
+        self.info_messages = []
+
     def info(self, *args, **kwargs):
-        pass
+        message = args[0] if args else ""
+        self.info_messages.append(message % args[1:] if len(args) > 1 else message)
 
     def warning(self, *args, **kwargs):
         pass
@@ -96,6 +100,12 @@ class MiniAppDailyActivityTests(unittest.TestCase):
 
     def test_target_reward_settles_immediately(self):
         actor = FakeActor()
+        actor.state.update({
+            "miniapp_hunt_summary_date": "2026-07-29",
+            "miniapp_hunt_summary_loot": {"灵石": 90},
+            "miniapp_hunt_summary_completed": 2,
+            "miniapp_hunt_summary_logged_date": "",
+        })
 
         class Transport:
             identity_player_ids = {"主魂": 100}
@@ -175,7 +185,8 @@ class MiniAppDailyActivityTests(unittest.TestCase):
                 }
 
         transport = Transport()
-        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+        logger = FakeLogger()
+        runner = MiniAppDailyActivities(actor, transport, "main", logger)
         runner.rng = FirstChoice()
 
         result = asyncio.run(runner.run_hunt_identity("主魂", today="2026-07-29"))
@@ -185,6 +196,28 @@ class MiniAppDailyActivityTests(unittest.TestCase):
         self.assertEqual(transport.settles, ["hunt-1"])
         self.assertEqual(actor.state["miniapp_hunt_last_stop_reason"], "target_reward")
         self.assertEqual(actor.state["miniapp_hunt_last_date"], "2026-07-29")
+        self.assertEqual(actor.state["miniapp_hunt_summary_completed"], 3)
+        self.assertEqual(
+            actor.state["miniapp_hunt_summary_loot"],
+            {"灵石": 90, "阴凝之晶": 1},
+        )
+        self.assertEqual(actor.state["miniapp_hunt_last_result"], "灵石 x90，阴凝之晶 x1")
+        self.assertEqual(len(actor.rewards), 1)
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("OUT [Mini App | 主魂]:\n洞府寻宝（每日 3 局）", combined)
+        self.assertIn(
+            "IN [Mini App | 主魂]:\n洞府寻宝（每日 3 局） -> 灵石 x90，阴凝之晶 x1",
+            combined,
+        )
+        self.assertNotIn("得分", combined)
+        self.assertNotIn("主宝匣", combined)
+
+        self.assertEqual(
+            asyncio.run(runner.run_hunt_identity("主魂", today="2026-07-29")),
+            "done",
+        )
+        self.assertEqual(len(logger.info_messages), 2)
+        self.assertEqual(len(actor.rewards), 1)
 
     def test_pagoda_runs_only_once_per_identity_per_day(self):
         actor = FakeActor(avatars=["素缘子"])

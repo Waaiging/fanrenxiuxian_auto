@@ -51,24 +51,28 @@ EXACT_COMMANDS = {
     ".天阶状态",
     ".观命",
     ".问道",
+    ".小世界",
+    ".显灵",
+    ".神迹 布道",
     ".我的阴罗幡",
     ".每日献祭",
     ".血洗山林",
     ".召唤魔影",
     ".召回魔影",
     ".一键收取精华",
-    ".辨认咒纹",
-    ".借幡镇魂",
-    ".剥离咒源",
 }
 PREFIX_COMMANDS = {
     ".化功为煞",
     ".囚禁魂魄",
     ".安抚幡灵",
-    ".接取解咒委托",
-    ".辨认咒纹",
-    ".借幡镇魂",
-    ".剥离咒源",
+}
+SMALL_WORLD_COMMAND_ACTIONS = {
+    ".显灵": "manifest",
+    ".神迹 布道": "miracle_sermon",
+}
+SMALL_WORLD_ACTION_NAMES = {
+    "manifest": "小世界显灵",
+    "miracle_sermon": "小世界神迹布道",
 }
 
 
@@ -128,6 +132,32 @@ def command_result_text(payload: dict[str, Any]) -> str:
 def command_result_ok(payload: dict[str, Any]) -> bool:
     result = payload.get("actionResult") if isinstance(payload, dict) else None
     return not isinstance(result, dict) or result.get("ok") is not False
+
+
+def small_world_data(payload: Any) -> dict[str, Any]:
+    """Return the Mini App small-world block from a dwelling response."""
+    if not isinstance(payload, dict):
+        return {}
+    account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+    world = account.get("smallWorld") if isinstance(account.get("smallWorld"), dict) else None
+    if world is None:
+        world = payload.get("smallWorld") if isinstance(payload.get("smallWorld"), dict) else {}
+    return world
+
+
+def small_world_status_text(payload: Any) -> str:
+    world = small_world_data(payload)
+    if not world:
+        return "小世界状态不可用"
+    if world.get("hasWorld") is False:
+        opened = world.get("open") if isinstance(world.get("open"), dict) else {}
+        return str(opened.get("reasonText") or "尚未开辟小世界").strip()
+    actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
+    prayer = world.get("prayer") if isinstance(world.get("prayer"), dict) else None
+    if prayer:
+        return f"凡人祈愿待处理：{prayer.get('title') or '未命名祈愿'}"
+    remaining = max(0, int(actions.get("prayerRemainingSeconds") or 0))
+    return f"暂无凡人祈愿，下次约 {remaining} 秒" if remaining else "暂无凡人祈愿"
 
 
 def miniapp_operation_result_text(payload: Any) -> str:
@@ -394,6 +424,30 @@ class MiniAppDwellingTransport:
             identity=identity,
         )
 
+    async def small_world_snapshot(self, identity: str = "主魂") -> dict[str, Any]:
+        """Read small-world state silently for cooldown-aware scheduling."""
+        async with self._lock:
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/details",
+                identity=identity,
+            )
+
+    async def small_world_action(self, identity: str, action: str) -> dict[str, Any]:
+        action = str(action or "").strip()
+        operation = SMALL_WORLD_ACTION_NAMES.get(action)
+        if not operation:
+            raise MiniAppBeastError("small_world_action_not_allowed")
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                operation,
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/small-world",
+                    {"action": action},
+                    identity=identity,
+                ),
+            )
+
     async def command(
         self,
         command: str,
@@ -426,6 +480,12 @@ class MiniAppDwellingTransport:
             elif command == ".查看闭关":
                 path = "/api/miniapp/xianxia-dwelling/deep-seclusion"
                 payload = {"action": "status"}
+            elif command == ".小世界":
+                path = "/api/miniapp/xianxia-dwelling/details"
+                payload = {}
+            elif command in SMALL_WORLD_COMMAND_ACTIONS:
+                path = "/api/miniapp/xianxia-dwelling/small-world"
+                payload = {"action": SMALL_WORLD_COMMAND_ACTIONS[command]}
             else:
                 path = "/api/miniapp/xianxia-dwelling/command-center"
                 payload = {"command": command}
@@ -449,7 +509,8 @@ class MiniAppDwellingTransport:
                             identity=identity,
                         ),
                     )
-            return MiniAppCommandResponse(command_result_text(result), result)
+            text = small_world_status_text(result) if command == ".小世界" else command_result_text(result)
+            return MiniAppCommandResponse(text, result)
 
     async def _external_token_unlocked(
         self,
@@ -651,20 +712,10 @@ class MiniAppDwellingTransport:
             )
 
     async def hunt_start(self, identity: str) -> dict[str, Any]:
-        def summarize(payload: dict[str, Any]) -> str:
-            run = payload.get("huntRun") if isinstance(payload, dict) else {}
-            run = run if isinstance(run, dict) else {}
-            return f"本局开始，神识 {int(run.get('ap') or 0)} / {int(run.get('maxAp') or 0)}"
-
         async with self._lock:
-            return await self._logged_operation(
-                identity,
-                "洞府寻宝入府",
-                lambda: self._request_unlocked(
-                    "/api/miniapp/xianxia-dwelling/hunt",
-                    identity=identity,
-                ),
-                summarize=summarize,
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/hunt",
+                identity=identity,
             )
 
     async def hunt_reveal(
@@ -683,35 +734,11 @@ class MiniAppDwellingTransport:
         if index < 0 or index >= 25:
             raise MiniAppBeastError("hunt_cell_invalid")
 
-        def summarize(payload: dict[str, Any]) -> str:
-            run = payload.get("huntRun") if isinstance(payload, dict) else {}
-            run = run if isinstance(run, dict) else {}
-            cells = run.get("cells") if isinstance(run.get("cells"), list) else []
-            cell = next(
-                (
-                    item
-                    for item in cells
-                    if isinstance(item, dict) and int(item.get("index", -1)) == index
-                ),
-                {},
-            )
-            title = str(cell.get("title") or cell.get("type") or "已探明").strip()
-            loot = cell.get("loot") if isinstance(cell.get("loot"), dict) else {}
-            loot_text = ""
-            if loot:
-                loot_text = f"，获得{loot.get('name') or '物品'} x{loot.get('quantity') or 1}"
-            return f"第 {index + 1} 格：{title}，剩余神识 {int(run.get('ap') or 0)}{loot_text}"
-
         async with self._lock:
-            return await self._logged_operation(
-                identity,
-                f"洞府寻宝探查第 {index + 1} 格",
-                lambda: self._request_unlocked(
-                    "/api/miniapp/xianxia-dwelling/hunt/reveal",
-                    {"sessionId": session_id, "index": index},
-                    identity=identity,
-                ),
-                summarize=summarize,
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/hunt/reveal",
+                {"sessionId": session_id, "index": index},
+                identity=identity,
             )
 
     async def hunt_settle(self, identity: str, session_id: str) -> dict[str, Any]:
@@ -719,31 +746,11 @@ class MiniAppDwellingTransport:
         if not session_id:
             raise MiniAppBeastError("hunt_session_missing")
 
-        def summarize(payload: dict[str, Any]) -> str:
-            result = payload.get("huntResult") if isinstance(payload, dict) else {}
-            result = result if isinstance(result, dict) else {}
-            loot = result.get("loot") if isinstance(result.get("loot"), list) else []
-            loot_text = "，".join(
-                f"{item.get('name') or '物品'} x{item.get('quantity') or 1}"
-                for item in loot
-                if isinstance(item, dict)
-            ) or "无额外物品"
-            main = "已找到主宝匣" if result.get("foundMain") else "未找到主宝匣"
-            return (
-                f"{result.get('grade') or '结算'}，{int(result.get('score') or 0)} 分，"
-                f"{main}；{loot_text}"
-            )
-
         async with self._lock:
-            return await self._logged_operation(
-                identity,
-                "洞府寻宝见好就收",
-                lambda: self._request_unlocked(
-                    "/api/miniapp/xianxia-dwelling/hunt/settle",
-                    {"sessionId": session_id},
-                    identity=identity,
-                ),
-                summarize=summarize,
+            return await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/hunt/settle",
+                {"sessionId": session_id},
+                identity=identity,
             )
 
 
