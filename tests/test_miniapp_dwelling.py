@@ -465,6 +465,49 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("洞府寻宝探查", combined)
         self.assertNotIn("洞府寻宝见好就收", combined)
 
+    def test_external_hash_mismatch_refreshes_init_data_and_entry_token_together(self):
+        logger = FakeLogger()
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                suffix = "new" if payload["initData"] == "signed-new" else "old"
+                return {
+                    "ok": True,
+                    "url": f"/miniapp/xianxia-pagoda?startapp=pagoda_{suffix}",
+                }
+            if path.endswith("/xianxia-pagoda/start"):
+                if payload["initData"] == "signed-old":
+                    raise MiniAppBeastError("hash_mismatch")
+                self.assertEqual(payload["token"], "pagoda_new")
+                return {"ok": True, "state": {"canChallenge": True}}
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        init_data = AsyncMock(side_effect=["signed-old", "signed-new"])
+        with patch("miniapp_dwelling.request_webview_init_data", new=init_data):
+            result = asyncio.run(transport.pagoda_snapshot("素心子"))
+
+        self.assertTrue(result["state"]["canChallenge"])
+        self.assertEqual(init_data.await_count, 2)
+        pagoda_calls = [call for call in calls if call[0].endswith("/xianxia-pagoda/start")]
+        self.assertEqual(
+            [(call[1]["token"], call[1]["initData"]) for call in pagoda_calls],
+            [("pagoda_old", "signed-old"), ("pagoda_new", "signed-new")],
+        )
+        self.assertIn(
+            "Mini App external authorization expired for pagoda; refreshing fixed entry",
+            logger.warning_messages,
+        )
+
     def test_failed_miniapp_operation_is_logged(self):
         logger = FakeLogger()
 

@@ -630,13 +630,24 @@ class MiniAppDwellingTransport:
         except MiniAppBeastError as exc:
             if exc.code not in AUTH_ERROR_CODES | {"entry_token_missing", "invalid_token"}:
                 raise
+            self._log(
+                "warning",
+                "Mini App external authorization expired for %s; refreshing fixed entry",
+                action,
+            )
+            # External entry tokens and Telegram WebApp initData are signed as
+            # one authorization context.  Refreshing only the external token
+            # can keep pairing it with stale initData and repeatedly produce
+            # hash_mismatch (most visible in long-running restricted workers).
+            await self._initialize_unlocked()
             token = await self._external_token_unlocked(
                 identity,
                 action,
                 expected_prefix,
                 force=True,
             )
-            body["token"] = token
+            body = {"token": token, "initData": self.init_data}
+            body.update(payload or {})
             return await _post_json(
                 self.origin,
                 path,
