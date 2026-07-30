@@ -5,7 +5,7 @@
 本脚本是「凡人修仙传」Telegram 游戏的万灵宗角色自动修仙脚本。
 负责自动完成万灵宗特有的灵兽玩法循环：
   1. 灵兽管理 —— 缓存灵兽列表，自动放生/寻觅/更新状态
-  2. 灵兽探渊 —— 六翼优先探索万兽渊（6h CD）
+  2. 灵兽探渊 —— Mini App 按页面冷却选择当前可用的最高战力灵兽（6h CD）
   3. 灵兽偷菜 —— 六翼优先偷取资源（4h CD）
   4. 巡边/放养/互动 —— 其他灵兽巡边，六翼完成探渊/偷菜后优先放养恢复
   5. 深度闭关 —— 自动开闭关、8小时等待、结算重开
@@ -84,6 +84,7 @@ from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from group_visibility_control import run_telegram_write_permission_monitor
 from miniapp_beast_contract import MiniAppBeastContractWorker
+from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_daily_activities import MiniAppDailyActivities
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
@@ -7344,6 +7345,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             if self._miniapp_beast_contract.transport is not None
             else None
         )
+        self._miniapp_beast_abyss = MiniAppBeastAbyssWorker(
+            self,
+            self._miniapp_beast_contract.transport,
+            self.account_key,
+            log,
+        )
         self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
@@ -7457,6 +7464,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self.create_scheduler_task(
                 "beast_contract",
                 lambda: self._miniapp_beast_contract.run(),
+            )
+        if self._miniapp_beast_abyss.enabled:
+            self.create_scheduler_task(
+                "miniapp_beast_abyss",
+                lambda: self._miniapp_beast_abyss.run_loop(),
             )
         if self._miniapp_daily_activities is not None:
             if self._miniapp_daily_activities.pagoda_enabled:

@@ -192,6 +192,79 @@ def miniapp_operation_result_text(payload: Any) -> str:
     return "完成"
 
 
+def _spirit_beast_reward_text(value: Any) -> str:
+    """Normalize the loose reward shapes returned by spirit-beast actions."""
+    parts: list[str] = []
+    if isinstance(value, dict):
+        iterable = value.items()
+        for raw_name, raw_quantity in iterable:
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            if isinstance(raw_quantity, dict):
+                quantity = raw_quantity.get("quantity") or raw_quantity.get("count") or 1
+            else:
+                quantity = raw_quantity
+            try:
+                quantity = int(quantity or 0)
+            except (TypeError, ValueError):
+                quantity = 1
+            parts.append(f"{name} x{max(1, quantity)}")
+    elif isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("itemName") or item.get("label") or "").strip()
+            if not name:
+                continue
+            try:
+                quantity = int(item.get("quantity") or item.get("count") or 1)
+            except (TypeError, ValueError):
+                quantity = 1
+            parts.append(f"{name} x{max(1, quantity)}")
+    return "、".join(parts)
+
+
+def spirit_beast_abyss_result_text(payload: Any) -> str:
+    """Return one concise result for the Wan Beast Valley abyss action."""
+    if not isinstance(payload, dict):
+        return "探渊完成"
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    message = str(
+        payload.get("message")
+        or result.get("message")
+        or result.get("rawMessage")
+        or ""
+    ).strip()
+    if message:
+        return re.sub(r"\s+", " ", message)[:500]
+
+    won = result.get("won")
+    title = str(result.get("title") or "").strip()
+    parts = [title or ("探渊胜利" if won is True else "探渊完成")]
+    beast = result.get("beast") if isinstance(result.get("beast"), dict) else {}
+    wild_beast = result.get("wildBeast") if isinstance(result.get("wildBeast"), dict) else {}
+    beast_name = str(beast.get("name") or "").strip()
+    enemy_name = str(wild_beast.get("name") or "").strip()
+    if beast_name and enemy_name:
+        parts.append(f"{beast_name} 对阵 {enemy_name}")
+    growth = result.get("growth")
+    if isinstance(growth, dict):
+        growth_text = "、".join(
+            f"{key} +{value}"
+            for key, value in growth.items()
+            if value not in (None, "", 0, "0")
+        )
+        if growth_text:
+            parts.append(growth_text)
+    elif growth not in (None, "", 0, "0"):
+        parts.append(f"成长 +{growth}")
+    rewards = _spirit_beast_reward_text(result.get("rewards") or payload.get("rewards"))
+    if rewards:
+        parts.append(f"获得 {rewards}")
+    return "，".join(parts)[:500]
+
+
 def sect_farm_snapshot_status(payload: Any) -> dict[str, Any]:
     """Normalize one sect-farm payload and derive its next useful wake-up."""
     domain = payload.get("domain") if isinstance(payload, dict) else None
@@ -668,24 +741,60 @@ class MiniAppDwellingTransport:
                 post_json=self.post_json,
             )
 
-    async def spirit_beast_snapshot(self, identity: str = "主魂") -> dict[str, Any]:
+    async def spirit_beast_snapshot(
+        self,
+        identity: str = "主魂",
+        log_operation: bool = True,
+    ) -> dict[str, Any]:
         async with self._lock:
-            payload = await self._logged_operation(
+            request = lambda: self._external_request_unlocked(
                 identity,
-                "读取万兽谷灵兽列表",
-                lambda: self._external_request_unlocked(
-                    identity,
-                    "spirit_beast",
-                    "spiritbeast_",
-                    "/api/miniapp/xianxia-spirit-beast/start",
-                ),
-                summarize=lambda result: f"{len(normalize_spirit_beast_roster(result))} 只灵兽",
+                "spirit_beast",
+                "spiritbeast_",
+                "/api/miniapp/xianxia-spirit-beast/start",
             )
+            if log_operation:
+                payload = await self._logged_operation(
+                    identity,
+                    "读取万兽谷灵兽列表",
+                    request,
+                    summarize=lambda result: f"{len(normalize_spirit_beast_roster(result))} 只灵兽",
+                )
+            else:
+                payload = await request()
             return {
                 "beasts": normalize_spirit_beast_roster(payload),
                 "player": payload.get("player") or {},
                 "raw": payload,
             }
+
+    async def spirit_beast_abyss_enter(
+        self,
+        identity: str,
+        beast_id: int,
+        beast_name: str = "",
+    ) -> dict[str, Any]:
+        try:
+            beast_id = int(beast_id)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("spirit_beast_id_invalid") from exc
+        if beast_id <= 0:
+            raise MiniAppBeastError("spirit_beast_id_invalid")
+        detail = str(beast_name or beast_id).strip()
+        operation = f"万兽谷探渊（{detail}）"
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                operation,
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/abyss/enter",
+                    payload={"beastId": beast_id},
+                ),
+                summarize=spirit_beast_abyss_result_text,
+            )
 
     async def spirit_beast_interaction(
         self,

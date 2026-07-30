@@ -939,6 +939,57 @@ def miniapp_beast_contract_command(state):
     )
 
 
+def miniapp_beast_abyss_command(state):
+    """Display the server-authoritative six-hour abyss cooldown."""
+    last_time = str(state.get("beast_abyss_miniapp_last_time") or "").strip()
+    last_attempt = str(state.get("beast_abyss_miniapp_last_attempt_time") or "").strip()
+    next_time = str(state.get("beast_abyss_miniapp_next_time") or "").strip()
+    error = clean_custom_text(state.get("beast_abyss_miniapp_last_error") or "", 100)
+    result = clean_custom_text(state.get("beast_abyss_miniapp_last_result") or "", 120)
+    beast = clean_custom_text(state.get("beast_abyss_miniapp_last_beast") or "", 40)
+    ready = bool(state.get("beast_abyss_miniapp_ready"))
+    target = parse_state_time(next_time)
+    now = datetime.now()
+    next_seconds = max(0, int((target - now).total_seconds())) if target and target > now else 0
+    detail_parts = ["每 6 小时", "以 Mini App 页面冷却为准", "仅主魂"]
+    if beast:
+        detail_parts.append(f"上次：{beast}")
+    if result:
+        detail_parts.append(result)
+    if error:
+        status = "等待重试" if error == "beast_abyss_no_available_beast" else "执行异常"
+        tone = "cooldown" if error == "beast_abyss_no_available_beast" else "error"
+        detail_parts.insert(0, f"Mini App：{error}")
+    elif ready:
+        status = "可探渊"
+        tone = "ready"
+    elif next_seconds > 0:
+        status = "冷却中"
+        tone = "cooldown"
+    elif last_time:
+        status = "等待页面刷新"
+        tone = "cooldown"
+    elif last_attempt:
+        status = "同步中"
+        tone = "cooldown"
+    else:
+        status = "等待首次同步"
+        tone = "unknown"
+    return command_row(
+        "miniapp:spirit-beast-abyss",
+        "万兽谷探渊",
+        status,
+        tone,
+        remaining=format_remaining(next_seconds) if next_seconds else "0秒",
+        at=next_time or last_time or last_attempt,
+        detail=" · ".join(detail_parts),
+        group="灵兽",
+        schedule_type="cooldown",
+        next_seconds=next_seconds,
+        actionable=False,
+    )
+
+
 def miniapp_tianxing_journey_command(state):
     """Display the server-backed twice-daily Tianxing journey automation."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1931,6 +1982,7 @@ def main_soul_panel(account, state):
         rows.extend([
             miniapp_beast_sync_command(state),
             miniapp_beast_contract_command(state),
+            miniapp_beast_abyss_command(state),
             (
                 command_row(
                     ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -1988,6 +2040,7 @@ def main_soul_panel(account, state):
                 actionable=False,
             ))
             rows.append(miniapp_beast_contract_command(state))
+            rows.append(miniapp_beast_abyss_command(state))
             unsupported_detail = "公开群受限；万兽谷 Mini App 未提供这项旧指令接口"
             for command, label in (
                 (".放生 <灵兽>", "放生灵兽"),
@@ -2018,6 +2071,7 @@ def main_soul_panel(account, state):
                     actionable=False,
                 ),
                 miniapp_beast_contract_command(state),
+                miniapp_beast_abyss_command(state),
                 manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
                 manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
                 manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),

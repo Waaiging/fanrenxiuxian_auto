@@ -30,6 +30,7 @@ ROSTER_PAYLOAD = {
         "combatPower": 396,
         "experience": 18,
         "canExpedition": True,
+        "canExploreAbyss": True,
         "isActive": False,
     }],
 }
@@ -43,6 +44,7 @@ class MiniAppBeastTests(unittest.TestCase):
         self.assertEqual(beasts[0]["full_name"], "大圣")
         self.assertEqual(beasts[0]["species"], "3阶金瞳妖猴")
         self.assertEqual(beasts[0]["stamina"], 55)
+        self.assertTrue(beasts[0]["can_explore_abyss"])
 
     def test_invalid_entry_is_rejected(self):
         with self.assertRaises(MiniAppBeastError):

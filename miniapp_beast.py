@@ -103,6 +103,7 @@ def normalize_spirit_beast_roster(payload):
             "exp": experience,
             "is_active": bool(item.get("isActive")),
             "can_expedition": bool(item.get("canExpedition")),
+            "can_explore_abyss": bool(item.get("canExploreAbyss")),
         })
     if not beasts:
         raise MiniAppBeastError("beast_roster_empty")

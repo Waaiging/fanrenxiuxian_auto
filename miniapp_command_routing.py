@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from miniapp_beast import MiniAppBeastError
+from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
@@ -91,6 +92,12 @@ class MiniAppCommandRouter:
             self.log,
         )
         self.tianxing_journey = MiniAppTianxingJourney(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
+        self.beast_abyss = MiniAppBeastAbyssWorker(
             actor,
             self.transport,
             self.account,
@@ -192,6 +199,13 @@ class MiniAppCommandRouter:
                 asyncio.create_task(
                     self.tianxing_journey.run_loop(),
                     name=f"miniapp_{self.account}_journey",
+                )
+            )
+        if self.beast_abyss.enabled:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.beast_abyss.run_loop(),
+                    name=f"miniapp_{self.account}_beast_abyss",
                 )
             )
         self.log.warning(
