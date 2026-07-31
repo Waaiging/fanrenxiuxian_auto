@@ -13138,7 +13138,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_WANYING_GREETING_COMMAND, greeting))
         self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_CO_STUDY_COMMAND, co_study))
 
-    def test_soul_curse_main_extra_tick_only_runs_for_main_account(self):
+    def test_soul_curse_wanying_greeting_runs_for_main_and_sub_publishers(self):
         actor = DummySoulCurse("main")
         profile = actor.soul_curse_publisher_profile()
 
@@ -13149,18 +13149,34 @@ class ParserFixtureTests(unittest.TestCase):
         curse = actor.state["soul_curse"]
         self.assertEqual(curse.get("last_wanying_greeting_date"), datetime.now().strftime("%Y-%m-%d"))
 
+        sub = DummySoulCurse("sub")
+        asyncio.run(sub.soul_curse_main_extra_tick(sub.soul_curse_publisher_profile()))
+        asyncio.run(sub.soul_curse_main_extra_tick(sub.soul_curse_publisher_profile()))
+        self.assertEqual(sub.sent, [SOUL_CURSE_WANYING_GREETING_COMMAND])
+
         xiaohao = DummySoulCurse("xiaohao")
         wait = asyncio.run(xiaohao.soul_curse_main_extra_tick(xiaohao.soul_curse_publisher_profile()))
         self.assertEqual(xiaohao.sent, [])
         self.assertEqual(wait, 600)
 
-    def test_dashboard_shows_main_only_soul_curse_extra_commands(self):
+    def test_dashboard_shows_main_and_sub_soul_curse_chains(self):
         main_panel = next(panel for panel in build_command_panels("main", {}) if panel.get("identity") == "主魂")
+        sub_panels = build_command_panels("sub", {"avatars": {"缘生子": {}}})
+        sub_panel = next(panel for panel in sub_panels if panel.get("identity") == "主魂")
+        sub_yinluo = next(panel for panel in sub_panels if panel.get("identity") == "缘生子")
         xiaohao_panel = next(panel for panel in build_command_panels("xiaohao", {}) if panel.get("identity") == "主魂")
         main_commands = {row.get("command") for row in main_panel.get("commands", [])}
+        sub_commands = {row.get("command") for row in sub_panel.get("commands", [])}
+        sub_yinluo_commands = {row.get("command") for row in sub_yinluo.get("commands", [])}
         xiaohao_commands = {row.get("command") for row in xiaohao_panel.get("commands", [])}
 
         self.assertIn(SOUL_CURSE_WANYING_GREETING_COMMAND, main_commands)
+        self.assertIn(SOUL_CURSE_WANYING_GREETING_COMMAND, sub_commands)
+        self.assertIn(".探望南宫婉", sub_commands)
+        self.assertIn(".推演封魂咒", sub_commands)
+        self.assertIn(".发布解咒委托 1", sub_commands)
+        self.assertIn(".接取解咒委托 <ID>", sub_yinluo_commands)
+        self.assertTrue(any(str(command).startswith(".剥离咒源") for command in sub_yinluo_commands))
         self.assertNotIn(SOUL_CURSE_CO_STUDY_COMMAND, main_commands)
         self.assertNotIn(SOUL_CURSE_WANYING_GREETING_COMMAND, xiaohao_commands)
         self.assertNotIn(SOUL_CURSE_CO_STUDY_COMMAND, xiaohao_commands)

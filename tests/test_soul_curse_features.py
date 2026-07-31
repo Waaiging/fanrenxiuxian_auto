@@ -8,12 +8,12 @@ from unittest.mock import patch
 import dashboard_server
 import soul_curse_features
 from soul_curse_features import (
-    SOUL_CURSE_ASSISTANTS,
     SOUL_CURSE_IDENTIFY_COMMAND,
     SOUL_CURSE_INFER_COMMAND,
     SOUL_CURSE_PROTECT_COMMAND,
     SOUL_CURSE_PUBLISH_COMMAND,
     SOUL_CURSE_PUBLISHERS,
+    SOUL_CURSE_SHARED_ASSISTANTS,
     SOUL_CURSE_STRIP_COMMAND,
     SOUL_CURSE_SUPPRESS_COMMAND,
     SoulCurseMixin,
@@ -177,6 +177,40 @@ class SoulCurseFlowTests(unittest.TestCase):
         self.assertEqual(assist["next_identify_time"], assist["next_strip_time"])
         self.assertEqual(assist["next_suppress_time"], assist["next_strip_time"])
 
+    def test_sub_chain_publishes_and_local_yinluo_completes_commission(self):
+        actor = DummySoulCurseActor(
+            "sub",
+            main_responses={
+                SOUL_CURSE_INFER_COMMAND: ["**【推演封魂咒】** 咒源 +18。"],
+                SOUL_CURSE_PROTECT_COMMAND: ["**【护持神魂】** 魂封 -10，月魄 +1。"],
+                SOUL_CURSE_PUBLISH_COMMAND: ["**【解咒委托已发布】**\n委托 ID：**21**\n报酬：**1** 灵石"],
+            },
+            identity_responses={
+                ("缘生子", ".接取解咒委托 21"): ["**【咒契协定已成】** 阴罗宗弟子已接取 @Gamling33 的解咒委托。"],
+                ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Gamling33"): ["**【阴罗辨咒】** 咒源 +27。"],
+                ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Gamling33"): ["**【借幡镇魂】** 魂封 -11，月魄 +1。"],
+                ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Gamling33"): ["**【剥离咒源成功】** 获得【阴罗残咒】x1。"],
+            },
+        )
+
+        asyncio.run(actor.soul_curse_run_publisher_chain(SOUL_CURSE_PUBLISHERS["sub"]))
+
+        self.assertEqual(actor.main_sent, [
+            SOUL_CURSE_INFER_COMMAND,
+            SOUL_CURSE_PROTECT_COMMAND,
+            SOUL_CURSE_PUBLISH_COMMAND,
+        ])
+        self.assertEqual(actor.identity_sent, [
+            ("缘生子", ".接取解咒委托 21"),
+            ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Gamling33"),
+            ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Gamling33"),
+            ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Gamling33"),
+        ])
+        self.assertEqual(actor.state["soul_curse"]["commission_status"], "completed")
+        local_assist = actor.get_soul_curse_assist_state("缘生子", "sub")
+        self.assertEqual(local_assist["strip_commission_id"], "21")
+        self.assertEqual(local_assist["target_username"], "@Gamling33")
+
     def test_yinluo_action_replenishes_sha_and_retries_same_step(self):
         actor = DummySoulCurseActor(
             "main",
@@ -263,7 +297,7 @@ class SoulCurseFlowTests(unittest.TestCase):
                     }
                 }, f)
             with patch.object(soul_curse_features, "SOUL_CURSE_SHARED_FILE", shared_file):
-                asyncio.run(actor.soul_curse_shared_assist_tick(SOUL_CURSE_ASSISTANTS["sub"]))
+                asyncio.run(actor.soul_curse_shared_assist_tick(SOUL_CURSE_SHARED_ASSISTANTS["sub"][0]))
                 with open(shared_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
@@ -274,7 +308,38 @@ class SoulCurseFlowTests(unittest.TestCase):
             ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @TitanCreeper"),
         ])
         self.assertEqual(data["xiaohao"]["status"], "completed")
-        self.assertEqual(actor.state["avatars"]["缘生子"]["soul_curse_assist"]["strip_commission_id"], "20")
+        shared_assist = actor.get_soul_curse_assist_state("缘生子", "xiaohao")
+        self.assertEqual(shared_assist["strip_commission_id"], "20")
+        self.assertEqual(shared_assist["target_username"], "@TitanCreeper")
+
+    def test_sub_migrates_legacy_xiaohao_assist_without_overwriting_local_chain(self):
+        actor = DummySoulCurseActor("sub")
+        actor.state["avatars"]["缘生子"]["soul_curse_assist"] = {
+            "owner_account": "xiaohao",
+            "target_username": "@TitanCreeper",
+            "commission_id": "424",
+            "strip_commission_id": "424",
+            "status": "completed",
+        }
+
+        local = actor.get_soul_curse_assist_state("缘生子", "sub")
+        shared = actor.get_soul_curse_assist_state("缘生子", "xiaohao")
+
+        self.assertEqual(local["owner_account"], "sub")
+        self.assertEqual(local["commission_id"], "")
+        self.assertEqual(shared["owner_account"], "xiaohao")
+        self.assertEqual(shared["commission_id"], "424")
+        self.assertEqual(shared["strip_commission_id"], "424")
+
+        local["commission_id"] = "425"
+        self.assertEqual(
+            actor.soul_curse_assistant_profile_for_command("缘生子", ".接取解咒委托 425")["owner_account"],
+            "sub",
+        )
+        self.assertEqual(
+            actor.soul_curse_assistant_profile_for_command("缘生子", ".剥离咒源 @TitanCreeper")["owner_account"],
+            "xiaohao",
+        )
 
 
 if __name__ == "__main__":

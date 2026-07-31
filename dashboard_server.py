@@ -86,6 +86,7 @@ from soul_curse_features import (
     SOUL_CURSE_INFER_COMMAND,
     SOUL_CURSE_PROTECT_COMMAND,
     SOUL_CURSE_PUBLISH_COMMAND,
+    SOUL_CURSE_PUBLISHERS,
     SOUL_CURSE_STRIP_COMMAND,
     SOUL_CURSE_SUPPRESS_COMMAND,
     SOUL_CURSE_VISIT_COMMAND,
@@ -1678,7 +1679,8 @@ def soul_curse_publisher_commands(state, account=None):
             group="南宫婉",
         ),
     ]
-    if account == "main":
+    publisher_profile = SOUL_CURSE_PUBLISHERS.get(str(account or ""), {})
+    if publisher_profile.get("wanying_greeting_enabled"):
         wanying_row = daily_done_command(
             curse,
             SOUL_CURSE_WANYING_GREETING_COMMAND,
@@ -2003,6 +2005,7 @@ def main_soul_panel(account, state):
             time_command(state, "next_ask_dao_time", ASK_DAO_COMMAND, "问道", waiting="冷却中", ready="可问道", missing="可问道", group="元婴宗"),
         ])
         rows.extend(meditation_commands(state))
+        rows.extend(soul_curse_publisher_commands(state, account=account))
         rows.extend(concubine_commands(
             state,
             include_divination=True,
