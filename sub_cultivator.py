@@ -3029,6 +3029,9 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 await self.send_keyword_alert(msg, text, title="副号关键词提醒")
             # 保留历史野外历练结果的被动账本同步。
             self.maybe_record_field_training_passive(msg, text)
+            # 黄龙山轮值军报和宗门战事件必须从副号的新消息入口进入公共触发器。
+            # 否则机器人虽已发出军报，寻真子等匹配宗门的身份也不会自动报名。
+            self.maybe_handle_sect_war_message(msg, text, sender)
 
             # 如果这条消息属于自动回复链中的后续消息，交给自动回复模块处理
             if is_auto_reply_followup(self, msg, sender=sender):
