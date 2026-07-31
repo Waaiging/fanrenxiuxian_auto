@@ -156,6 +156,7 @@ PARAM_COMMAND_ROOTS = {
     ".借幡镇魂",
     ".剥离咒源",
     ".侍妾远航",
+    ".支援慕兰",
 }
 _COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
 

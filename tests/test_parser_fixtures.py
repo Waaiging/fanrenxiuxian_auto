@@ -7788,7 +7788,7 @@ class ParserFixtureTests(unittest.TestCase):
             wait = actor._state_impending_command_wait(state, identity="主魂")
 
         self.assertEqual(wait, 0)
-        self.assertEqual(sub_cultivator.MULAN_SUPPORT_COMMAND, ".支援慕兰 奇袭")
+        self.assertEqual(sub_cultivator.MULAN_SUPPORT_COMMAND, ".支援慕兰 护阵")
 
     def test_sub_impending_wait_tracks_ten_oclock_before_mulan_is_due(self):
         actor = SubCultivator.__new__(SubCultivator)

@@ -67,6 +67,7 @@ from command_modules import (
     yuanying_out_plan,
 )
 from command_feedback import is_retired_auto_command
+from automation_settings import mulan_support_command as configured_mulan_support_command
 
 
 # =====================================================================
@@ -99,8 +100,10 @@ HUANGLONG_REPORT_SEARCH_LIMIT = 12
 TRANSIENT_SECT_NAMES = {
     "读取中", "加载中", "同步中", "查询中", "未知", "未知宗门", "暂无数据", "-", "--",
 }
-# .支援慕兰 奇袭 is an independent daily command for each identity.
-MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
+# .支援慕兰 <参数> is an independent daily command for each identity.
+# Keep the exported constant as the default for legacy imports; the runtime
+# helper below reads Dashboard settings on every due check.
+MULAN_SUPPORT_COMMAND = ".支援慕兰 护阵"
 MULAN_SUPPORT_RETRY_SECONDS = 10 * 60
 MULAN_SUPPORT_START_HOUR = 10
 MULAN_SUPPORT_START_MINUTE = 0
@@ -178,10 +181,15 @@ STATE_TIME_COMMAND_MAP = {
 }
 LOW_PRIORITY_DAILY_COMMANDS = {
     ".宗门点卯",
-    MULAN_SUPPORT_COMMAND,
+    ".支援慕兰",
     ".观命",
     ".定命",
 }
+
+
+def current_mulan_support_command():
+    """Return the currently selected Dashboard Mulan-support parameter."""
+    return configured_mulan_support_command()
 LOW_PRIORITY_DAILY_DEFER_SECONDS = 5 * 60
 LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS = 5 * 60
 TIANXING_RIFT_PREFIX_COMMANDS = (".推命 探索", ".改命 探索")
@@ -537,6 +545,9 @@ class CommonCommandMixin:
     def common_command_logger(self):
         """获取子类的日志记录器"""
         return logging.getLogger(self.__class__.__name__)
+
+    def mulan_support_command(self):
+        return current_mulan_support_command()
 
     def common_atomic_task(self, label):
         return _CommonAtomicTask(self, label)
@@ -4217,9 +4228,10 @@ class CommonCommandMixin:
             return False
         return True
 
-    def record_mulan_support_response(self, identity, text, today=None):
-        """Record one identity's .支援慕兰 奇袭 response and retry hint."""
+    def record_mulan_support_response(self, identity, text, today=None, command=""):
+        """Record one identity's configured .支援慕兰 response and retry hint."""
         identity = str(identity or "主魂").strip() or "主魂"
+        command = str(command or self.mulan_support_command()).strip()
         today = today or datetime.now().strftime("%Y-%m-%d")
         now = now_str()
         clean = str(text or "").strip()
@@ -4285,16 +4297,17 @@ class CommonCommandMixin:
         if hasattr(self, "record_daily_reward_event"):
             self.record_daily_reward_event(
                 identity,
-                MULAN_SUPPORT_COMMAND,
+                command,
                 clean,
-                source=MULAN_SUPPORT_COMMAND,
+                source=command,
             )
         log.info(f"[{identity}] Mulan support recorded for {today}.")
         return True
 
     async def maybe_run_mulan_support(self, identity="主魂", today=None, timeout=60):
-        """Send the independent daily .支援慕兰 奇袭 command once per identity."""
+        """Send the configured independent daily .支援慕兰 command once per identity."""
         identity = str(identity or "主魂").strip() or "主魂"
+        command = self.mulan_support_command()
         if seconds_until_mulan_support_start(datetime.now()) > 0:
             return False
         today = today or datetime.now().strftime("%Y-%m-%d")
@@ -4306,14 +4319,14 @@ class CommonCommandMixin:
         if retry_at and is_future(retry_at):
             return False
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(
-            MULAN_SUPPORT_COMMAND,
+            command,
             identity,
         ):
             log.info(f"[{identity}] Mulan support skipped: dashboard command paused.")
             return False
         if identity == "主魂":
             resp = await self.send_and_wait_feedback(
-                MULAN_SUPPORT_COMMAND,
+                command,
                 timeout=timeout,
                 max_retries=0,
                 force_identity_check=True,
@@ -4322,7 +4335,7 @@ class CommonCommandMixin:
         else:
             resp = await self.send_and_wait_feedback_identity(
                 identity,
-                MULAN_SUPPORT_COMMAND,
+                command,
                 timeout=timeout,
                 max_retries=0,
                 force_identity_check=True,
@@ -4332,6 +4345,7 @@ class CommonCommandMixin:
             identity,
             self.timed_command_response_text(resp),
             today=today,
+            command=command,
         )
 
     async def common_avatar_tower_send(

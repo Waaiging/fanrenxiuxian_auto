@@ -36,6 +36,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
+from automation_settings import (
+    MULAN_SUPPORT_MODES,
+    automation_dashboard_payload,
+    mulan_support_command,
+    mulan_support_mode,
+    save_automation_settings,
+)
 from log_utils import command_control_key
 from command_modules import (
     ASK_DAO_COMMAND,
@@ -131,6 +138,7 @@ CLEAR_LOCK = threading.Lock()            # 清屏任务锁
 COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
 RED_PACKET_CONTROL_LOCK = threading.Lock()  # 抢红包设置锁
+AUTOMATION_SETTINGS_LOCK = threading.Lock()  # Boss 身份与慕兰参数设置锁
 STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前端轮询时反复读大日志
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
@@ -213,7 +221,7 @@ ACCOUNT_PROFILE_USERNAMES = {
         "主魂": {"waaiging"},
     },
 }
-MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
+MULAN_SUPPORT_COMMANDS = tuple(f".支援慕兰 {mode}" for mode in MULAN_SUPPORT_MODES)
 
 def account_profile_usernames(account):
     """Return dashboard-safe username mapping for every identity in an account."""
@@ -261,7 +269,7 @@ TWO_PART_COMMANDS = {
     (".抚摸法宝", "玄天斩灵剑"),
     (".推命", "探索"), (".改命", "探索"),
     (".野外历练", "谨慎"), (".野外历练", "深入"),
-}
+} | {(".支援慕兰", mode) for mode in MULAN_SUPPORT_MODES}
 OTHER_LOG_TAG = "其他"                    # 未分类日志标签
 RELATED_LOG_WINDOW_SECONDS = 180          # 关联日志窗口（秒）
 CULTIVATION_DEDUPE_SECONDS = 15           # 修为变更去重窗口
@@ -287,7 +295,7 @@ BOT_REPLY_MARKERS = {
 # 每个账号的日志标签定义（对应不同的游戏指令）
 ACCOUNT_LOG_TAGS = {
     "main": [
-        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
+        ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
         ".探渊", ".一键放养", ".灵兽互动", ".灵兽巡边", ".巡边状态", ".巡边归来",
@@ -305,7 +313,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "sub": [
-        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功", ASK_DAO_COMMAND,
+        ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功", ASK_DAO_COMMAND,
         ".启阵", ".助阵", ".强行出关",
         ".查看闭关", ".闭关修炼", ".深度闭关",
         ".召回侍妾", ".安置侍妾", ".每日问安",
@@ -319,7 +327,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "xiaohao": [
-        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
+        ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
@@ -333,7 +341,7 @@ ACCOUNT_LOG_TAGS = {
     ],
     "waaiging": [
         ".拜入宗门 天星宗",
-        ".宗门点卯", MULAN_SUPPORT_COMMAND, ".宗门传功",
+        ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
         YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
         DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
@@ -826,6 +834,9 @@ def daily_done_command(state, command, label=None, date_key="", done_command="",
 def mulan_support_daily_command(state):
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
+    mode = mulan_support_mode()
+    command = mulan_support_command()
+    label = f"支援慕兰 {mode}"
     target = now.replace(
         hour=MULAN_SUPPORT_START_HOUR,
         minute=MULAN_SUPPORT_START_MINUTE,
@@ -836,8 +847,8 @@ def mulan_support_daily_command(state):
     if str(state.get("last_mulan_support_date") or "") != today and now < target:
         wait_seconds = max(1, int((target - now).total_seconds()))
         return command_row(
-            MULAN_SUPPORT_COMMAND,
-            "支援慕兰 奇袭",
+            command,
+            label,
             "等待 10:00",
             "waiting",
             remaining=format_remaining(wait_seconds),
@@ -849,8 +860,8 @@ def mulan_support_daily_command(state):
         )
     return daily_done_command(
         state,
-        MULAN_SUPPORT_COMMAND,
-        "支援慕兰 奇袭",
+        command,
+        label,
         date_key="last_mulan_support_date",
         detail=detail,
         group="每日",
@@ -4648,6 +4659,49 @@ def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate
 def red_packets(username: str = Depends(authenticate)):
     """Return shared red-packet settings and per-account listener status."""
     return red_packet_dashboard_payload()
+
+
+@app.get("/api/automation-settings")
+def automation_settings_dashboard(username: str = Depends(authenticate)):
+    """Return world-boss identity switches and the Mulan support mode."""
+    return automation_dashboard_payload()
+
+
+@app.post("/api/automation-settings")
+async def automation_settings_control(
+    payload: dict = Body(...),
+    username: str = Depends(authenticate),
+):
+    participants = payload.get("world_boss_participants")
+    mode = payload.get("mulan_support_mode")
+    try:
+        with AUTOMATION_SETTINGS_LOCK:
+            settings = save_automation_settings(
+                world_boss_participants=participants,
+                mulan_support_mode=mode,
+                updated_by=username,
+            )
+    except ValueError as exc:
+        messages = {
+            "world boss participants must be a list": "Boss 参战身份列表格式错误",
+            "invalid world boss participant": "Boss 参战身份无效",
+            "multiple world boss identities per account": "每个账号最多选择一个 Boss 参战身份",
+            "invalid Mulan support mode": "慕兰支援参数必须是斥候、破灯、奇袭或护阵",
+        }
+        return {"success": False, "msg": messages.get(str(exc), "自动化设置无效")}
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    with COMMAND_RECORD_LOCK:
+        COMMAND_RECORD_CACHE.clear()
+    with COMMAND_RECORD_ENDPOINT_LOCK:
+        COMMAND_RECORD_ENDPOINT_CACHE.clear()
+    with DAILY_REWARD_ENDPOINT_LOCK:
+        DAILY_REWARD_ENDPOINT_CACHE.clear()
+    return {
+        "success": True,
+        "settings": settings,
+        "updated_by": username,
+    }
 
 
 @app.post("/api/red-packets")

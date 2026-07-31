@@ -1602,7 +1602,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             support_retry = str(state.get("next_mulan_support_time") or "")
             support_due = (
                 state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
-                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not self.dashboard_command_paused(self.mulan_support_command(), identity)
                 and not (support_retry and is_future(support_retry))
             )
             if support_due:
@@ -1615,7 +1615,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if (
             identity in self.avatars
             and state.get("last_mulan_support_date") != datetime.now().strftime("%Y-%m-%d")
-            and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+            and not self.dashboard_command_paused(self.mulan_support_command(), identity)
             and not (support_retry and is_future(support_retry))
         ):
             min_wait = min(

@@ -981,6 +981,92 @@
             background: var(--card-bg);
             overflow: hidden;
         }
+        .automation-section {
+            border-radius: 8px;
+            background: var(--card-bg);
+            overflow: hidden;
+        }
+        .automation-settings-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 0.9fr);
+            gap: 0.8rem;
+            padding: 0.8rem 0.85rem;
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .automation-card {
+            min-width: 0;
+            border: 1px solid #29323a;
+            border-radius: 7px;
+            background: #11161b;
+            padding: 0.7rem;
+        }
+        .automation-card-title {
+            color: var(--text-primary);
+            font-size: 0.76rem;
+            font-weight: 800;
+        }
+        .automation-card-hint {
+            margin-top: 0.25rem;
+            color: var(--text-secondary);
+            font-size: 0.64rem;
+            line-height: 1.4;
+        }
+        .automation-account-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.55rem;
+            margin-top: 0.65rem;
+        }
+        .automation-account {
+            border: 1px solid #29323a;
+            border-radius: 6px;
+            padding: 0.5rem;
+        }
+        .automation-account-name {
+            color: #bae6fd;
+            font-size: 0.7rem;
+            font-weight: 800;
+        }
+        .automation-identity-options,
+        .automation-mode-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            margin-top: 0.4rem;
+        }
+        .automation-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.28rem;
+            min-height: 1.7rem;
+            padding: 0.15rem 0.4rem;
+            border: 1px solid #303943;
+            border-radius: 5px;
+            color: var(--text-secondary);
+            font-size: 0.65rem;
+            cursor: pointer;
+        }
+        .automation-option:has(input:checked) {
+            border-color: #3b82f6;
+            background: rgba(59,130,246,0.14);
+            color: #bfdbfe;
+        }
+        .automation-option input { accent-color: #60a5fa; }
+        .automation-mode-options .automation-option:has(input:checked) {
+            border-color: #22c55e;
+            background: rgba(34,197,94,0.14);
+            color: #bbf7d0;
+        }
+        .automation-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            flex-wrap: wrap;
+            padding: 0.7rem 0.85rem;
+        }
+        .automation-save { min-width: 5.5rem; }
+        .automation-save:disabled { opacity: 0.55; cursor: wait; }
         .red-packet-controls {
             display: grid;
             grid-template-columns: minmax(8rem, 0.6fr) minmax(8rem, 0.7fr) minmax(8rem, 0.7fr) minmax(17rem, 1.25fr) minmax(18rem, 1.5fr) auto;
@@ -1112,6 +1198,7 @@
             .account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .red-packet-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .red-packet-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .automation-settings-grid { grid-template-columns: 1fr; }
         }
         @media (max-width: 720px) {
             header { min-height: 54px; }
@@ -1130,6 +1217,8 @@
             .red-packet-account-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .red-packet-status-grid { grid-template-columns: 1fr; }
             .red-packet-save { width: 100%; }
+            .automation-account-grid { grid-template-columns: 1fr; }
+            .automation-save { width: 100%; }
         }
     </style>
 </head>
@@ -1157,6 +1246,7 @@
             <button class="workspace-tab is-active" type="button" data-workspace-target="records" aria-selected="true" onclick="setWorkspaceView('records', this)"><i data-lucide="list-checks" aria-hidden="true"></i>指令记录</button>
             <button class="workspace-tab" type="button" data-workspace-target="rewards" aria-selected="false" onclick="setWorkspaceView('rewards', this)"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>周期收益</button>
             <button class="workspace-tab" type="button" data-workspace-target="duels" aria-selected="false" onclick="setWorkspaceView('duels', this)"><i data-lucide="swords" aria-hidden="true"></i>斗法</button>
+            <button class="workspace-tab" type="button" data-workspace-target="automation" aria-selected="false" onclick="setWorkspaceView('automation', this)"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>自动化设置</button>
             <button class="workspace-tab" type="button" data-workspace-target="red-packets" aria-selected="false" onclick="setWorkspaceView('red-packets', this)"><i data-lucide="gift" aria-hidden="true"></i>抢红包</button>
             <button class="workspace-tab" type="button" data-workspace-target="logs" aria-selected="false" onclick="setWorkspaceView('logs', this)"><i data-lucide="scroll-text" aria-hidden="true"></i>运行日志</button>
         </nav>
@@ -1276,6 +1366,32 @@
                 <div class="record-empty">加载中...</div>
             </div>
         </section>
+        <section class="workspace-view automation-section" data-workspace-view="automation">
+            <div class="record-header">
+                <div class="record-title">青元子 Boss 与慕兰支援</div>
+                <div class="record-summary" id="automation-summary">加载中...</div>
+            </div>
+            <div class="automation-settings-grid">
+                <div class="automation-card">
+                    <div class="automation-card-title">青元子世界 Boss 参战身份</div>
+                    <div class="automation-card-hint">每个账号最多选择一个身份；选“关闭”即可跳过该账号。设置保存后下一场 Boss 生效。</div>
+                    <div class="automation-account-grid" id="world-boss-identity-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">慕兰支援参数</div>
+                    <div class="automation-card-hint">每日 10:00 执行，四个参数均可切换。</div>
+                    <div class="automation-mode-options" id="mulan-support-mode-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="automation-actions">
+                <button class="red-packet-save automation-save" id="automation-save" type="button" onclick="saveAutomationSettings()"><i data-lucide="save" aria-hidden="true"></i>保存设置</button>
+                <span class="automation-card-hint" id="automation-updated-hint">保存后脚本即时读取。</span>
+            </div>
+        </section>
         <section class="workspace-view red-packet-section" data-workspace-view="red-packets">
             <div class="record-header">
                 <div class="record-title">红包监听</div>
@@ -1366,6 +1482,7 @@
             commandRecords: 60000,
             dailyRewards: 60000,
             duels: 15000,
+            automation: 15000,
             redPackets: 10000
         };
         const pollBusy = {
@@ -1374,6 +1491,7 @@
             commandRecords: false,
             dailyRewards: false,
             duels: false,
+            automation: false,
             redPackets: false
         };
         let logState = {
@@ -1402,6 +1520,9 @@
         let redPacketDashboardData = {settings: {}, accounts: []};
         let redPacketSettingsDirty = false;
         let redPacketSavePending = false;
+        let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}};
+        let automationSettingsDirty = false;
+        let automationSavePending = false;
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
@@ -1430,6 +1551,7 @@
             if (target === 'logs') updateLogs(true);
             if (target === 'rewards') updateDailyRewardLog(true);
             if (target === 'duels') updateDuelDashboard(true);
+            if (target === 'automation') updateAutomationDashboard(true);
             if (target === 'red-packets') updateRedPacketDashboard(true);
             if (trigger) trigger.blur();
             refreshIcons();
@@ -3600,6 +3722,127 @@
             }
         }
 
+        function markAutomationSettingsDirty() {
+            automationSettingsDirty = true;
+            const summary = document.getElementById('automation-summary');
+            if (summary) summary.innerText = '设置未保存';
+        }
+
+        function renderAutomationDashboard(data) {
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}};
+            const settings = automationDashboardData.settings || {};
+            const worldBoss = automationDashboardData.world_boss || {};
+            const mulan = automationDashboardData.mulan_support || {};
+            const accounts = Array.isArray(worldBoss.accounts) ? worldBoss.accounts : [];
+            const selected = new Set(settings.world_boss?.participants || []);
+            const mode = String(mulan.mode || settings.mulan_support?.mode || '护阵');
+            const summary = document.getElementById('automation-summary');
+            if (summary && !automationSettingsDirty) {
+                summary.innerText = `Boss ${selected.size} 个账号参战 · 慕兰 ${mode}`;
+            }
+
+            if (!automationSettingsDirty) {
+                const identityControls = document.getElementById('world-boss-identity-controls');
+                if (identityControls) {
+                    identityControls.innerHTML = accounts.map(account => {
+                        const accountName = `world-boss-account-${account.key}`;
+                        const hasSelection = (account.identities || []).some(item => selected.has(item.key));
+                        return `
+                            <div class="automation-account">
+                                <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                                <div class="automation-identity-options">
+                                    <label class="automation-option">
+                                        <input type="radio" name="${escapeHtml(accountName)}" value="" ${hasSelection ? '' : 'checked'} onchange="markAutomationSettingsDirty()">
+                                        关闭
+                                    </label>
+                                    ${(account.identities || []).map(item => `
+                                        <label class="automation-option">
+                                            <input type="radio" name="${escapeHtml(accountName)}" value="${escapeHtml(item.key)}" ${selected.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                            ${escapeHtml(item.name)}
+                                        </label>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `;
+                    }).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                const modeControls = document.getElementById('mulan-support-mode-controls');
+                if (modeControls) {
+                    modeControls.innerHTML = (mulan.modes || []).map(item => `
+                        <label class="automation-option">
+                            <input type="radio" name="mulan-support-mode" value="${escapeHtml(item)}" ${item === mode ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                            ${escapeHtml(item)}
+                        </label>
+                    `).join('');
+                }
+            }
+            const hint = document.getElementById('automation-updated-hint');
+            if (hint) {
+                const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
+                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`}`;
+            }
+            const saveButton = document.getElementById('automation-save');
+            if (saveButton) saveButton.disabled = automationSavePending;
+            refreshIcons();
+        }
+
+        async function updateAutomationDashboard(force = false) {
+            if (document.hidden || pollBusy.automation) return;
+            const view = document.querySelector('[data-workspace-view="automation"]');
+            if (!force && view && !view.classList.contains('is-active')) return;
+            pollBusy.automation = true;
+            try {
+                const response = await fetch(apiUrl('/api/automation-settings'), {cache: 'no-store'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+                renderAutomationDashboard(data);
+            } catch (error) {
+                console.error('Automation settings update failed:', error);
+                const summary = document.getElementById('automation-summary');
+                if (summary) summary.innerText = '加载失败';
+            } finally {
+                pollBusy.automation = false;
+            }
+        }
+
+        async function saveAutomationSettings() {
+            if (automationSavePending) return;
+            const participants = Array.from(document.querySelectorAll('#world-boss-identity-controls input[type="radio"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
+            const mode = document.querySelector('#mulan-support-mode-controls input[type="radio"]:checked')?.value || '';
+            if (!mode) {
+                alert('请选择慕兰支援参数。');
+                return;
+            }
+            automationSavePending = true;
+            renderAutomationDashboard(automationDashboardData);
+            try {
+                const response = await fetch(apiUrl('/api/automation-settings'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        world_boss_participants: participants,
+                        mulan_support_mode: mode
+                    })
+                });
+                const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+                if (!response.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${response.status}`);
+                    return;
+                }
+                automationSettingsDirty = false;
+                await updateAutomationDashboard(true);
+            } catch (error) {
+                console.error('Automation settings save failed:', error);
+                alert('自动化设置保存失败。');
+            } finally {
+                automationSavePending = false;
+                const saveButton = document.getElementById('automation-save');
+                if (saveButton) saveButton.disabled = false;
+            }
+        }
+
         function markRedPacketSettingsDirty() {
             redPacketSettingsDirty = true;
             const summary = document.getElementById('red-packet-summary');
@@ -4259,6 +4502,7 @@
         setInterval(updateCommandRecords, POLL_INTERVALS.commandRecords);
         setInterval(updateDailyRewardLog, POLL_INTERVALS.dailyRewards);
         setInterval(updateDuelDashboard, POLL_INTERVALS.duels);
+        setInterval(updateAutomationDashboard, POLL_INTERVALS.automation);
         setInterval(updateRedPacketDashboard, POLL_INTERVALS.redPackets);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
@@ -4273,6 +4517,7 @@
             updateCommandRecords();
             updateDailyRewardLog(true);
             updateDuelDashboard(true);
+            updateAutomationDashboard(true);
             updateRedPacketDashboard(true);
             updateLogs(true);
         });
@@ -4282,6 +4527,7 @@
         updateCommandRecords();
         updateDailyRewardLog();
         updateDuelDashboard();
+        updateAutomationDashboard();
         updateRedPacketDashboard();
         updateLogKindButtons();
         loadLogTags(currentLogAccount);

@@ -11,6 +11,7 @@ from world_boss_features import (
     WORLD_BOSS_STANCE,
     WorldBossMonitor,
     extract_world_boss_entry,
+    select_identity_choice,
     select_main_identity_choice,
 )
 
@@ -45,7 +46,7 @@ class FakeClient:
 
 
 class FakeActor:
-    def __init__(self, *, avatars=None):
+    def __init__(self, *, avatars=None, identity_usernames=None):
         self.client = FakeClient()
         self.config = {}
         self.mc = {}
@@ -53,7 +54,7 @@ class FakeActor:
         self.state_file = "state_fixture.json"
         self.target_chat_id = 2083016447
         self.avatars = list(avatars or [])
-        self.identity_usernames = {"主魂": ["Waaiging"]}
+        self.identity_usernames = identity_usernames or {"主魂": ["Waaiging"]}
         self.my_info = SimpleNamespace(username="Waaiging", first_name="Waaiging")
         self.saved = 0
 
@@ -62,8 +63,9 @@ class FakeActor:
 
 
 class FakeTransport:
-    def __init__(self, player_id=42, error=None):
+    def __init__(self, player_id=42, error=None, player_ids=None):
         self._player_id = player_id
+        self.player_ids = dict(player_ids or {})
         self.error = error
         self.initialized = 0
 
@@ -75,6 +77,8 @@ class FakeTransport:
     def player_id(self, identity):
         if self.error:
             raise self.error
+        if self.player_ids:
+            return self.player_ids[identity]
         if identity != "主魂":
             raise AssertionError(identity)
         return self._player_id
@@ -121,6 +125,23 @@ class WorldBossFeatureTests(unittest.TestCase):
             {"playerId": 8, "source": "avatar", "displayName": "厚土"},
         ]
         self.assertIsNone(select_main_identity_choice(actor, choices))
+
+    def test_selects_requested_avatar_identity(self):
+        actor = FakeActor(
+            avatars=["无咎子", "缘生子"],
+            identity_usernames={
+                "主魂": ["Waaiging"],
+                "无咎子": ["WuxingLinggen"],
+                "缘生子": ["Kulipabp"],
+            },
+        )
+        choices = [
+            {"playerId": 7, "source": "avatar", "sourceLabel": "缘生子", "displayName": "Kulipabp"},
+            {"playerId": 8, "source": "avatar", "sourceLabel": "无咎子", "displayName": "WuxingLinggen"},
+            {"playerId": 42, "source": "personal", "displayName": "Waaiging"},
+        ]
+        self.assertEqual(select_identity_choice(actor, choices, "无咎子"), 8)
+        self.assertEqual(select_identity_choice(actor, choices, "缘生子"), 7)
 
     def test_full_fight_uses_main_player_and_expected_proof(self):
         async def run():
@@ -237,6 +258,50 @@ class WorldBossFeatureTests(unittest.TestCase):
             ):
                 await monitor._participate(entry)
             self.assertEqual(starts, ["", 42])
+
+        asyncio.run(run())
+
+    def test_selected_avatar_uses_its_fixed_player_id(self):
+        async def run():
+            actor = FakeActor(avatars=["无咎子"])
+            monitor = WorldBossMonitor(
+                actor,
+                "main",
+                transport=FakeTransport(player_ids={"主魂": 42, "无咎子": 88}),
+            )
+            entry = extract_world_boss_entry(DummyMessage())
+            payload = {"challenge": {"challengeId": "challenge_fixture"}}
+            monitor._wait_for_challenge = AsyncMock(return_value=("session_fixture", payload))
+            monitor._fight = AsyncMock(return_value={"grade": "甲等"})
+
+            outcome = await monitor._participate(
+                entry,
+                identity="无咎子",
+                init_data="signed_init_data",
+            )
+
+            self.assertEqual(outcome["grade"], "甲等")
+            monitor._wait_for_challenge.assert_awaited_once_with(
+                entry,
+                "signed_init_data",
+                88,
+                identity="无咎子",
+            )
+
+        asyncio.run(run())
+
+    def test_dashboard_disabled_account_does_not_queue_event(self):
+        async def run():
+            actor = FakeActor(avatars=["缘生子"])
+            monitor = WorldBossMonitor(actor, "main")
+            with (
+                patch("world_boss_features.is_game_bot_sender", return_value=True),
+                patch("world_boss_features.world_boss_identities_for_account", return_value=[]),
+            ):
+                queued = await monitor.process_message(DummyMessage())
+            self.assertFalse(queued)
+            self.assertFalse(monitor._tasks)
+            self.assertEqual(actor.state.get("world_boss_events"), None)
 
         asyncio.run(run())
 

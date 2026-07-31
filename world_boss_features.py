@@ -18,6 +18,7 @@ from typing import Any
 
 from telethon import events
 
+from automation_settings import world_boss_identities_for_account
 from log_utils import is_game_bot_sender, resolve_target_chat_id
 from miniapp_beast import (
     MiniAppBeastError,
@@ -164,41 +165,48 @@ def extract_world_boss_entry(
     )
 
 
-def select_main_identity_choice(actor: Any, choices: Any) -> int | None:
-    """Select only an explicitly identifiable personal/main-soul player."""
+def select_identity_choice(actor: Any, choices: Any, identity: str) -> int | None:
+    """Select only the requested, explicitly identifiable Mini App player."""
 
+    identity = str(identity or WORLD_BOSS_IDENTITY).strip() or WORLD_BOSS_IDENTITY
     rows = [item for item in (choices or []) if isinstance(item, dict)]
-    personal = [item for item in rows if str(item.get("source") or "").casefold() == "personal"]
-    if len(personal) == 1:
-        try:
-            return int(personal[0].get("playerId"))
-        except (TypeError, ValueError):
-            return None
+    if identity == WORLD_BOSS_IDENTITY:
+        personal = [item for item in rows if str(item.get("source") or "").casefold() == "personal"]
+        if len(personal) == 1:
+            try:
+                return int(personal[0].get("playerId"))
+            except (TypeError, ValueError):
+                return None
 
-    main_names: set[str] = set()
+    expected_names = {identity.casefold()}
     identity_usernames = getattr(actor, "identity_usernames", {}) or {}
-    configured = identity_usernames.get(WORLD_BOSS_IDENTITY, []) if isinstance(identity_usernames, dict) else []
+    configured = identity_usernames.get(identity, []) if isinstance(identity_usernames, dict) else []
     if isinstance(configured, str):
         configured = [configured]
     for value in configured or []:
         key = str(value or "").strip().lstrip("@").casefold()
         if key:
-            main_names.add(key)
-    me = getattr(actor, "my_info", None)
+            expected_names.add(key)
+    me = getattr(actor, "my_info", None) if identity == WORLD_BOSS_IDENTITY else None
     if me is not None:
         for value in (getattr(me, "username", ""), getattr(me, "first_name", "")):
             key = str(value or "").strip().lstrip("@").casefold()
             if key:
-                main_names.add(key)
+                expected_names.add(key)
 
     matching_ids: set[int] = set()
     for item in rows:
         source_label = str(item.get("sourceLabel") or "").strip()
+        source_label_key = source_label.casefold()
         values = {
             str(item.get(key) or "").strip().lstrip("@").casefold()
-            for key in ("username", "displayName", "daoName")
+            for key in ("username", "displayName", "daoName", "name", "avatarName", "identity")
         }
-        if source_label in {"主魂", "本体", "本人", "个人"} or (main_names & values):
+        label_matches = (
+            identity == WORLD_BOSS_IDENTITY
+            and source_label in {"主魂", "本体", "本人", "个人"}
+        ) or source_label_key == identity.casefold()
+        if label_matches or (expected_names & values):
             try:
                 matching_ids.add(int(item.get("playerId")))
             except (TypeError, ValueError):
@@ -206,12 +214,17 @@ def select_main_identity_choice(actor: Any, choices: Any) -> int | None:
     if len(matching_ids) == 1:
         return next(iter(matching_ids))
 
-    if not (getattr(actor, "avatars", []) or []) and len(rows) == 1:
+    if identity == WORLD_BOSS_IDENTITY and not (getattr(actor, "avatars", []) or []) and len(rows) == 1:
         try:
             return int(rows[0].get("playerId"))
         except (TypeError, ValueError):
             return None
     return None
+
+
+def select_main_identity_choice(actor: Any, choices: Any) -> int | None:
+    """Backward-compatible main-soul selection helper."""
+    return select_identity_choice(actor, choices, WORLD_BOSS_IDENTITY)
 
 
 class _ProcessLease:
@@ -429,6 +442,9 @@ class WorldBossMonitor:
         entry = extract_world_boss_entry(message, sender_username=sender_username)
         if entry is None:
             return False
+        identities = world_boss_identities_for_account(self.account)
+        if not identities:
+            return False
         if self._event_status(entry.fingerprint) in COMPLETED_EVENT_STATUSES:
             return False
         if (
@@ -439,9 +455,9 @@ class WorldBossMonitor:
 
         self._inflight_messages.add(entry.message_id)
         self._inflight_fingerprints.add(entry.fingerprint)
-        self._record(entry, "queued", source=source, error="")
+        self._record(entry, "queued", source=source, identities=identities, error="")
         task = asyncio.create_task(
-            self._run_entry(entry),
+            self._run_entry(entry, identities),
             name=f"world_boss_{self.account}_{entry.message_id}",
         )
         self._tasks.add(task)
@@ -466,7 +482,16 @@ class WorldBossMonitor:
         task.add_done_callback(done)
         return True
 
-    async def _run_entry(self, entry: WorldBossEntry) -> None:
+    async def _run_entry(
+        self,
+        entry: WorldBossEntry,
+        identities: list[str] | None = None,
+    ) -> None:
+        if identities is None:
+            identities = world_boss_identities_for_account(self.account)
+        identities = list(identities)
+        if not identities:
+            return
         async with self._fight_lock:
             lease = self._lease()
             if not lease.acquire():
@@ -478,58 +503,116 @@ class WorldBossMonitor:
                 )
                 return
             try:
-                self._record(entry, "running", started_at=_now_text(), error="")
-                self.log.info("OUT [Mini App | 主魂]:\n青元子世界 Boss 自动参战")
-                outcome = await self._participate(entry)
-                summary = self._outcome_summary(outcome)
                 self._record(
                     entry,
-                    "completed",
-                    completed_at=_now_text(),
+                    "running",
+                    identities=identities,
+                    started_at=_now_text(),
                     error="",
-                    grade=str(outcome.get("grade") or ""),
-                    score=int(outcome.get("score") or 0),
-                    hit_count=int(outcome.get("hit_count") or 0),
-                    perfect_count=int(outcome.get("perfect_count") or 0),
-                    window_count=int(outcome.get("window_count") or 0),
                 )
-                self.log.info("IN [Mini App | 主魂]:\n青元子世界 Boss -> %s", summary)
+                init_data = await request_webview_init_data(
+                    self.client,
+                    entry.bot_username,
+                    entry.token,
+                )
+                results = await asyncio.gather(
+                    *(
+                        self._run_identity(entry, identity, init_data)
+                        for identity in identities
+                    )
+                )
+                successful = [
+                    item for item in results if item.get("status") in {"completed", "already_completed"}
+                ]
+                statuses = {str(item.get("status") or "failed") for item in results}
+                if len(successful) == len(results):
+                    event_status = "completed"
+                elif successful:
+                    event_status = "partial"
+                elif len(statuses) == 1:
+                    event_status = next(iter(statuses))
+                else:
+                    event_status = "failed"
+                errors = [str(item.get("error") or "") for item in results if item.get("error")]
+                self._record(
+                    entry,
+                    event_status,
+                    completed_at=_now_text(),
+                    identities=identities,
+                    identity_results=results,
+                    error=", ".join(dict.fromkeys(errors)),
+                )
             except asyncio.CancelledError:
                 self._record(entry, "cancelled", error="cancelled")
                 raise
             except MiniAppBeastError as exc:
                 code = exc.code
-                status_map = {
-                    "boss_action_limit": "already_completed",
-                    "boss_join_closed": "join_closed",
-                    "boss_not_enough_participants": "not_enough_participants",
-                    "boss_event_closed": "event_closed",
-                    "boss_token_expired": "expired",
-                    "boss_token_missing": "expired",
-                    "boss_token_used": "expired",
-                }
-                status = status_map.get(code, "failed")
-                self._record(entry, status, error=code)
-                if code == "boss_action_limit":
-                    self.log.info(
-                        "IN [Mini App | 主魂]:\n青元子世界 Boss -> 服务器确认本轮已完成"
-                    )
-                elif code == "boss_not_enough_participants":
-                    self.log.info(
-                        "IN [Mini App | 主魂]:\n青元子世界 Boss -> 入场人数不足，本轮未开战"
-                    )
-                else:
-                    self.log.error("Mini App [主魂] 青元子世界 Boss失败：%s", code)
+                self._record(entry, "failed", identities=identities, error=code)
+                self.log.error(
+                    "Mini App [%s] 青元子世界 Boss初始化失败：%s",
+                    ", ".join(identities),
+                    code,
+                )
             except Exception as exc:
                 code = _error_code(exc)
-                self._record(entry, "failed", error=code)
+                self._record(entry, "failed", identities=identities, error=code)
                 self.log.error(
-                    "Mini App [主魂] 青元子世界 Boss失败：%s",
+                    "Mini App [%s] 青元子世界 Boss初始化失败：%s",
+                    ", ".join(identities),
                     code,
                     exc_info=True,
                 )
             finally:
                 lease.release()
+
+    async def _run_identity(
+        self,
+        entry: WorldBossEntry,
+        identity: str,
+        init_data: str,
+    ) -> dict[str, Any]:
+        self.log.info("OUT [Mini App | %s]:\n青元子世界 Boss 自动参战", identity)
+        try:
+            outcome = await self._participate(entry, identity=identity, init_data=init_data)
+            summary = self._outcome_summary(outcome)
+            self.log.info("IN [Mini App | %s]:\n青元子世界 Boss -> %s", identity, summary)
+            return {"identity": identity, "status": "completed", **outcome, "error": ""}
+        except asyncio.CancelledError:
+            raise
+        except MiniAppBeastError as exc:
+            code = exc.code
+            status_map = {
+                "boss_action_limit": "already_completed",
+                "boss_join_closed": "join_closed",
+                "boss_not_enough_participants": "not_enough_participants",
+                "boss_event_closed": "event_closed",
+                "boss_token_expired": "expired",
+                "boss_token_missing": "expired",
+                "boss_token_used": "expired",
+            }
+            status = status_map.get(code, "failed")
+            if code == "boss_action_limit":
+                self.log.info(
+                    "IN [Mini App | %s]:\n青元子世界 Boss -> 服务器确认本轮已完成",
+                    identity,
+                )
+            elif code == "boss_not_enough_participants":
+                self.log.info(
+                    "IN [Mini App | %s]:\n青元子世界 Boss -> 入场人数不足，本轮未开战",
+                    identity,
+                )
+            else:
+                self.log.error("Mini App [%s] 青元子世界 Boss失败：%s", identity, code)
+            return {"identity": identity, "status": status, "error": code}
+        except Exception as exc:
+            code = _error_code(exc)
+            self.log.error(
+                "Mini App [%s] 青元子世界 Boss失败：%s",
+                identity,
+                code,
+                exc_info=True,
+            )
+            return {"identity": identity, "status": "failed", "error": code}
 
     def _discover_transport(self) -> Any:
         if self.transport is not None:
@@ -545,7 +628,7 @@ class WorldBossMonitor:
                 return transport
         return None
 
-    async def _main_player_id(self) -> int | None:
+    async def _identity_player_id(self, identity: str) -> int | None:
         transport = self._discover_transport()
         if transport is None:
             return None
@@ -555,13 +638,18 @@ class WorldBossMonitor:
                 result = initializer()
                 if inspect.isawaitable(result):
                     await result
-            return int(transport.player_id(WORLD_BOSS_IDENTITY))
+            return int(transport.player_id(identity))
         except Exception as exc:
             self.log.warning(
-                "World Boss fixed-entry main identity lookup failed (%s); using event choices",
+                "World Boss fixed-entry identity lookup failed for %s (%s); using event choices",
+                identity,
                 _error_code(exc),
             )
             return None
+
+    async def _main_player_id(self) -> int | None:
+        """Backward-compatible helper used by older tests/callers."""
+        return await self._identity_player_id(WORLD_BOSS_IDENTITY)
 
     async def _request(
         self,
@@ -612,6 +700,7 @@ class WorldBossMonitor:
         entry: WorldBossEntry,
         init_data: str,
         player_id: int | None,
+        identity: str = WORLD_BOSS_IDENTITY,
     ) -> tuple[str, dict[str, Any]]:
         token = entry.token
         deadline = self.monotonic() + WORLD_BOSS_ENTRY_WAIT_SECONDS
@@ -637,9 +726,9 @@ class WorldBossMonitor:
                     if isinstance(item, dict) and str(item.get("playerId") or "").isdigit()
                 }
                 if player_id is None:
-                    player_id = select_main_identity_choice(self.actor, choices)
+                    player_id = select_identity_choice(self.actor, choices, identity)
                 if player_id is None or (available_ids and player_id not in available_ids):
-                    raise MiniAppBeastError("world_boss_main_identity_missing")
+                    raise MiniAppBeastError("world_boss_identity_missing")
                 token = entry.token
                 continue
 
@@ -850,17 +939,24 @@ class WorldBossMonitor:
             "window_count": len(windows),
         }
 
-    async def _participate(self, entry: WorldBossEntry) -> dict[str, Any]:
-        init_data = await request_webview_init_data(
-            self.client,
-            entry.bot_username,
-            entry.token,
-        )
-        player_id = await self._main_player_id()
+    async def _participate(
+        self,
+        entry: WorldBossEntry,
+        identity: str = WORLD_BOSS_IDENTITY,
+        init_data: str = "",
+    ) -> dict[str, Any]:
+        if not init_data:
+            init_data = await request_webview_init_data(
+                self.client,
+                entry.bot_username,
+                entry.token,
+            )
+        player_id = await self._identity_player_id(identity)
         session_token, payload = await self._wait_for_challenge(
             entry,
             init_data,
             player_id,
+            identity=identity,
         )
         return await self._fight(entry, init_data, session_token, payload)
 

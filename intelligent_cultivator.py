@@ -4410,7 +4410,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             support_retry = str(state.get("next_mulan_support_time") or "")
             support_due = (
                 state.get("last_mulan_support_date") != today
-                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not self.dashboard_command_paused(self.mulan_support_command(), identity)
                 and not (support_retry and is_future(support_retry))
             )
             if support_due:
@@ -4420,7 +4420,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             support_retry = str(state.get("next_mulan_support_time") or "")
             if (
                 state.get("last_mulan_support_date") != today
-                and not self.dashboard_command_paused(MULAN_SUPPORT_COMMAND, identity)
+                and not self.dashboard_command_paused(self.mulan_support_command(), identity)
                 and not (support_retry and is_future(support_retry))
             ):
                 support_wait = seconds_until_mulan_support_start(datetime.now())
