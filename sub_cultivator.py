@@ -69,6 +69,7 @@ from datetime import datetime, timedelta  # 时间运算核心
 from telethon import TelegramClient, events  # Telegram MTProto 客户端与事件系统
 from red_packet_features import install_red_packet_monitor
 from miniapp_command_routing import install_miniapp_command_router
+from world_boss_features import install_world_boss_monitor
 
 # ============================================================
 # 项目内部模块导入
@@ -5843,7 +5844,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         log.info(f"Sub-Account Login: {self.my_info.first_name}")
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
         # Mini App 支持的指令固定走 Mini App；仅不支持的指令保留群内发送。
-        await install_miniapp_command_router(self, self.account_key, logger=log)
+        miniapp_router = await install_miniapp_command_router(self, self.account_key, logger=log)
+        await install_world_boss_monitor(
+            self,
+            self.account_key,
+            logger=log,
+            transport=miniapp_router.transport,
+        )
 
         # 注册新消息处理器
         @self.client.on(events.NewMessage(chats=self.target_chat_id))

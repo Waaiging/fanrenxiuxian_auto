@@ -91,6 +91,7 @@ from telethon import TelegramClient, events  # Telegram 客户端框架，消息
 from red_packet_features import install_red_packet_monitor
 from miniapp_beast import MiniAppBeastError
 from miniapp_command_routing import install_miniapp_command_router
+from world_boss_features import install_world_boss_monitor
 from miniapp_dwelling import (
     apply_dwelling_snapshot,
     command_result_ok,
@@ -5630,7 +5631,13 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         )
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
         # Mini App 支持的指令固定走 Mini App；仅不支持的指令保留群内发送。
-        await install_miniapp_command_router(self, self.account_key, logger=log)
+        miniapp_router = await install_miniapp_command_router(self, self.account_key, logger=log)
+        await install_world_boss_monitor(
+            self,
+            self.account_key,
+            logger=log,
+            transport=miniapp_router.transport,
+        )
 
         restricted_specs = self.restricted_account_specs()
         if restricted_specs and os.name != "nt":

@@ -1,0 +1,245 @@
+import asyncio
+import logging
+import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from miniapp_beast import MiniAppBeastError
+from world_boss_features import (
+    WORLD_BOSS_HOLD_MS,
+    WORLD_BOSS_STANCE,
+    WorldBossMonitor,
+    extract_world_boss_entry,
+    select_main_identity_choice,
+)
+
+
+class DummyMessage:
+    def __init__(self, *, message_id=580302, sender_username="hantianzun32_bot", url=None):
+        self.id = message_id
+        self.raw_text = "━━━━━━━━━━━━━━━\n【世界通告｜真仙试锋开启】\nBoss 资料"
+        self.text = self.raw_text
+        self.date = datetime.now(timezone.utc)
+        self._sender = SimpleNamespace(username=sender_username, first_name="韩天尊")
+        url = url or "https://t.me/hantianzun32_bot?startapp=qyz_fixture_token"
+        raw = SimpleNamespace(url=url)
+        self.buttons = [[SimpleNamespace(text="进入真仙战场", url=url, button=raw)]]
+
+    async def get_sender(self):
+        return self._sender
+
+
+class FakeClient:
+    def __init__(self):
+        self.handlers = []
+
+    def add_event_handler(self, callback, event):
+        self.handlers.append((callback, event))
+
+    def remove_event_handler(self, callback):
+        self.handlers = [item for item in self.handlers if item[0] is not callback]
+
+    async def get_messages(self, target, **kwargs):
+        return []
+
+
+class FakeActor:
+    def __init__(self, *, avatars=None):
+        self.client = FakeClient()
+        self.config = {}
+        self.mc = {}
+        self.state = {}
+        self.state_file = "state_fixture.json"
+        self.target_chat_id = 2083016447
+        self.avatars = list(avatars or [])
+        self.identity_usernames = {"主魂": ["Waaiging"]}
+        self.my_info = SimpleNamespace(username="Waaiging", first_name="Waaiging")
+        self.saved = 0
+
+    def save_state(self):
+        self.saved += 1
+
+
+class FakeTransport:
+    def __init__(self, player_id=42, error=None):
+        self._player_id = player_id
+        self.error = error
+        self.initialized = 0
+
+    async def initialize(self):
+        self.initialized += 1
+        if self.error:
+            raise self.error
+
+    def player_id(self, identity):
+        if self.error:
+            raise self.error
+        if identity != "主魂":
+            raise AssertionError(identity)
+        return self._player_id
+
+
+class WorldBossFeatureTests(unittest.TestCase):
+    def test_extracts_only_matching_trusted_entry_shape(self):
+        message = DummyMessage()
+        entry = extract_world_boss_entry(message, sender_username="hantianzun32_bot")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.message_id, 580302)
+        self.assertEqual(entry.bot_username, "hantianzun32_bot")
+        self.assertEqual(entry.origin, "https://asc.aiopenai.app")
+        self.assertNotIn("qyz_fixture_token", repr(entry))
+
+        self.assertIsNone(
+            extract_world_boss_entry(message, sender_username="hantianzun31_bot")
+        )
+        message.buttons[0][0].text = "查看战况"
+        self.assertIsNone(extract_world_boss_entry(message))
+
+    def test_rejects_non_qyz_or_non_telegram_button(self):
+        wrong_token = DummyMessage(
+            url="https://t.me/hantianzun32_bot?startapp=df_fixture_token"
+        )
+        wrong_origin = DummyMessage(
+            url="https://example.com/hantianzun32_bot?startapp=qyz_fixture_token"
+        )
+        self.assertIsNone(extract_world_boss_entry(wrong_token))
+        self.assertIsNone(extract_world_boss_entry(wrong_origin))
+
+    def test_selects_personal_main_identity_instead_of_avatar(self):
+        actor = FakeActor(avatars=["缘生子"])
+        choices = [
+            {"playerId": 7, "source": "avatar", "displayName": "缘生子"},
+            {"playerId": 42, "source": "personal", "displayName": "Waaiging"},
+        ]
+        self.assertEqual(select_main_identity_choice(actor, choices), 42)
+
+    def test_refuses_ambiguous_identity_choices(self):
+        actor = FakeActor(avatars=["缘生子"])
+        choices = [
+            {"playerId": 7, "source": "avatar", "displayName": "缘生子"},
+            {"playerId": 8, "source": "avatar", "displayName": "厚土"},
+        ]
+        self.assertIsNone(select_main_identity_choice(actor, choices))
+
+    def test_full_fight_uses_main_player_and_expected_proof(self):
+        async def run():
+            actor = FakeActor(avatars=["缘生子"])
+            calls = []
+
+            async def post_json(origin, path, payload, timeout):
+                calls.append((path, payload))
+                if path.endswith("/start"):
+                    return {
+                        "sessionToken": "session_fixture",
+                        "boss": {"actionsUsed": 0, "actionsRemaining": 1},
+                        "player": {"maxHp": 188},
+                        "challenge": {
+                            "challengeId": "challenge_fixture",
+                            "windows": [
+                                {"id": "w1", "centerMs": 0, "hitMs": 1, "perfectMs": 1}
+                            ],
+                        },
+                    }
+                if path.endswith("/begin"):
+                    return {"startsInMs": 0}
+                if path.endswith("/hit"):
+                    return {"hit": {"damageYi": 123}}
+                if path.endswith("/finish"):
+                    return {"result": {"grade": "甲等", "score": 100, "player_hp": 188}}
+                raise AssertionError(path)
+
+            monitor = WorldBossMonitor(
+                actor,
+                "main",
+                logger=logging.getLogger("world-boss-test"),
+                transport=FakeTransport(42),
+                post_json=post_json,
+                sleep=AsyncMock(),
+                monotonic=lambda: 100.0,
+                finish_grace_seconds=0,
+            )
+            entry = extract_world_boss_entry(DummyMessage())
+            with patch(
+                "world_boss_features.request_webview_init_data",
+                new=AsyncMock(return_value="signed_init_data"),
+            ):
+                outcome = await monitor._participate(entry)
+
+            self.assertEqual(outcome["grade"], "甲等")
+            self.assertEqual(outcome["hit_count"], 1)
+            self.assertEqual(
+                [path.rsplit("/", 1)[-1] for path, _ in calls],
+                ["start", "begin", "hit", "finish"],
+            )
+            self.assertEqual(calls[0][1]["playerId"], 42)
+            self.assertEqual(calls[2][1]["holdMs"], WORLD_BOSS_HOLD_MS)
+            proof = calls[3][1]["bossProof"]
+            self.assertEqual(proof["mode"], "qyz_focus_burst_v2")
+            self.assertEqual(proof["stance"], WORLD_BOSS_STANCE)
+            self.assertEqual(proof["playerHp"], 188)
+            self.assertEqual(proof["clientStats"]["perfects"], 1)
+            self.assertEqual(
+                proof["actions"],
+                [{"t": 0, "holdMs": WORLD_BOSS_HOLD_MS, "stance": WORLD_BOSS_STANCE}],
+            )
+
+        asyncio.run(run())
+
+    def test_identity_fallback_uses_personal_event_choice(self):
+        async def run():
+            actor = FakeActor(avatars=["缘生子"])
+            starts = []
+
+            async def post_json(origin, path, payload, timeout):
+                if path.endswith("/start"):
+                    starts.append(payload["playerId"])
+                    if len(starts) == 1:
+                        return {
+                            "needsIdentitySelection": True,
+                            "identityChoices": [
+                                {"playerId": 7, "source": "avatar", "displayName": "缘生子"},
+                                {"playerId": 42, "source": "personal", "displayName": "Waaiging"},
+                            ],
+                        }
+                    return {
+                        "sessionToken": "session_fixture",
+                        "boss": {"actionsUsed": 0, "actionsRemaining": 1},
+                        "player": {"maxHp": 100},
+                        "challenge": {
+                            "challengeId": "challenge_fixture",
+                            "windows": [
+                                {"id": "w1", "centerMs": 0, "hitMs": 1, "perfectMs": 1}
+                            ],
+                        },
+                    }
+                if path.endswith("/begin"):
+                    return {"startsInMs": 0}
+                if path.endswith("/hit"):
+                    return {"hit": {"damageYi": 1}}
+                if path.endswith("/finish"):
+                    return {"result": {"grade": "甲等", "score": 100, "player_hp": 100}}
+                raise AssertionError(path)
+
+            monitor = WorldBossMonitor(
+                actor,
+                "sub",
+                transport=FakeTransport(error=MiniAppBeastError("hash_mismatch")),
+                post_json=post_json,
+                sleep=AsyncMock(),
+                monotonic=lambda: 100.0,
+                finish_grace_seconds=0,
+            )
+            entry = extract_world_boss_entry(DummyMessage())
+            with patch(
+                "world_boss_features.request_webview_init_data",
+                new=AsyncMock(return_value="signed_init_data"),
+            ):
+                await monitor._participate(entry)
+            self.assertEqual(starts, ["", 42])
+
+        asyncio.run(run())
+
+
+if __name__ == "__main__":
+    unittest.main()

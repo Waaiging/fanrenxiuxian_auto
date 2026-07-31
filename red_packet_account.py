@@ -9,6 +9,7 @@ import logging
 
 from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
+from world_boss_features import install_world_boss_monitor
 
 
 ACCOUNT_SESSIONS = {
@@ -42,6 +43,7 @@ async def run(account: str) -> None:
     client = actor.client
     monitor = None
     miniapp_worker = None
+    world_boss_monitor = None
     await client.connect()
     try:
         if not await client.is_user_authorized():
@@ -51,6 +53,7 @@ async def run(account: str) -> None:
         if not monitor.topic_id:
             raise RuntimeError(f"red-packet monitor for {account} was not installed")
         miniapp_worker = RestrictedMiniAppWorker(actor, account, logger=logger)
+        actor._restricted_miniapp_worker = miniapp_worker
         try:
             await miniapp_worker.start()
         except Exception as exc:
@@ -64,9 +67,17 @@ async def run(account: str) -> None:
                 account,
                 exc_info=True,
             )
+        world_boss_monitor = await install_world_boss_monitor(
+            actor,
+            account,
+            logger=logger,
+            transport=miniapp_worker.transport,
+        )
         logger.warning("[%s] Restricted account entered Mini App standby mode", account)
         await client.run_until_disconnected()
     finally:
+        if world_boss_monitor is not None:
+            await world_boss_monitor.stop()
         if miniapp_worker is not None:
             await miniapp_worker.stop()
         if monitor is not None:

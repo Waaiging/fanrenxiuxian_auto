@@ -86,6 +86,7 @@ from group_visibility_control import run_telegram_write_permission_monitor
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_daily_activities import MiniAppDailyActivities
+from world_boss_features import install_world_boss_monitor
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
@@ -7356,6 +7357,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.my_info = await self.client.get_me()
         log.info(f"XiaoHao Login: {self.my_info.first_name}")
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
+        await install_world_boss_monitor(
+            self,
+            self.account_key,
+            logger=log,
+            transport=self._miniapp_beast_contract.transport,
+        )
         @self.client.on(events.NewMessage(chats=self.target_chat_id))
         async def h(e): await self.handle_game_response(e)
         @self.client.on(events.MessageEdited(chats=self.target_chat_id))

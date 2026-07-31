@@ -35,6 +35,7 @@ star_gazing_events.jsonl
 star_gazing_events.lock
 duel_state.json
 duel_state.lock
+.world_boss_*.lock
 
 # Local backups, snapshots, and temporary scripts
 *.bak
