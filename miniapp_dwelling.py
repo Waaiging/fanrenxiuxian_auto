@@ -35,6 +35,17 @@ AUTH_ERROR_CODES = {
 
 DESTINY_CHOICES = {"紫微", "天府", "太阴", "贪狼"}
 DESTINY_ACTIONS = {"闭关", "炼制", "探索", "斗法"}
+TRANSIENT_PROFILE_TEXTS = {
+    "读取中",
+    "加载中",
+    "同步中",
+    "查询中",
+    "未知",
+    "未知宗门",
+    "暂无数据",
+    "-",
+    "--",
+}
 EXACT_COMMANDS = {
     ".查看闭关",
     ".闭关修炼",
@@ -989,6 +1000,15 @@ def _snapshot_text(*values: Any) -> str:
     return ""
 
 
+def _snapshot_authoritative_text(*values: Any) -> str:
+    """Return profile text only when it is an authoritative value, not a UI placeholder."""
+    text = _snapshot_text(*values)
+    normalized = text.rstrip(".。…").strip()
+    if normalized in TRANSIENT_PROFILE_TEXTS:
+        return ""
+    return text
+
+
 def _snapshot_int(value: Any, *, minimum: int | None = None) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -1052,7 +1072,10 @@ def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) 
     if dao_name:
         container["miniapp_dao_name"] = dao_name
 
-    sect_name = _snapshot_text(profile.get("sectName"), account.get("sectName"))
+    # The overview endpoint can briefly expose UI placeholders such as
+    # "读取中" while an identity profile is still loading. Never let those
+    # transient values overwrite a previously confirmed sect mapping.
+    sect_name = _snapshot_authoritative_text(profile.get("sectName"), account.get("sectName"))
     spirit_root_value = profile.get("spiritRoot")
     spirit_root = _snapshot_text(
         _snapshot_mapping(spirit_root_value).get("name"),

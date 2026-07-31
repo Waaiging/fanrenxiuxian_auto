@@ -94,6 +94,11 @@ SECT_WAR_JOIN_CD_SECONDS = 2 * 3600            # 参战冷却 2 小时
 SECT_WAR_RETRY_SECONDS = 10 * 60               # 宗门战重试间隔 10 分钟
 HUANGLONG_REPORT_TITLE = "黄龙山轮值军报"
 HUANGLONG_SIGNUP_COMMAND = ".报名黄龙山"
+HUANGLONG_REPORT_SEARCH_RETRY_SECONDS = 2 * 60
+HUANGLONG_REPORT_SEARCH_LIMIT = 12
+TRANSIENT_SECT_NAMES = {
+    "读取中", "加载中", "同步中", "查询中", "未知", "未知宗门", "暂无数据", "-", "--",
+}
 # .支援慕兰 奇袭 is an independent daily command for each identity.
 MULAN_SUPPORT_COMMAND = ".支援慕兰 奇袭"
 MULAN_SUPPORT_RETRY_SECONDS = 10 * 60
@@ -251,6 +256,13 @@ def common_command_default_state():
         "huanglong_signup_status": "",
         "huanglong_signup_response": "",
         "huanglong_signup_records": {},
+        "huanglong_rotation_report_date": "",
+        "huanglong_rotation_report_sect": "",
+        "huanglong_rotation_report_msg_id": "",
+        "huanglong_rotation_report_time": "",
+        "huanglong_rotation_report_source": "",
+        "huanglong_rotation_report_status": "",
+        "next_huanglong_report_search_time": "",
         "custom_command_runs": {},
         "identity_pauses": {},
         "star_gazing_assigned_manifest_time": "",
@@ -5647,10 +5659,11 @@ class CommonCommandMixin:
             mapping = self.state.get("identity_sect_names", {})
         if isinstance(mapping, dict):
             sect = str(mapping.get(identity, "") or "").strip()
-            if sect:
+            if sect and sect not in TRANSIENT_SECT_NAMES:
                 return sect
         if identity == "主魂":
-            return self.account_sect_name()
+            sect = self.account_sect_name()
+            return "" if sect in TRANSIENT_SECT_NAMES else sect
         return ""
 
     def identity_sect_map(self):
@@ -5668,6 +5681,144 @@ class CommonCommandMixin:
         if not sect:
             return []
         return [identity for identity, identity_sect in self.identity_sect_map().items() if identity_sect == sect]
+
+    def huanglong_identity_sect_map_complete(self):
+        """Return whether every configured identity currently has a usable sect mapping."""
+        identities = ["主魂", *list(getattr(self, "avatars", []) or [])]
+        return all(self.identity_sect_name(identity) for identity in identities)
+
+    def huanglong_rotation_report_complete_for_date(self, date_text):
+        if self.state.get("huanglong_rotation_report_date") != date_text:
+            return False
+        return self.state.get("huanglong_rotation_report_status") in {"matched", "no_matching_identity"}
+
+    def record_huanglong_rotation_report(self, date_text, sect, msg_id, source, status, now_dt=None):
+        """Persist the daily rotation report even when this account has no matching identity."""
+        now_dt = now_dt or datetime.now()
+        values = {
+            "huanglong_rotation_report_date": date_text,
+            "huanglong_rotation_report_sect": sect,
+            "huanglong_rotation_report_msg_id": str(msg_id or ""),
+            "huanglong_rotation_report_time": dt_to_str(now_dt),
+            "huanglong_rotation_report_source": str(source or "message"),
+            "huanglong_rotation_report_status": status,
+            "next_huanglong_report_search_time": (
+                ""
+                if status in {"matched", "no_matching_identity"}
+                else dt_to_str(now_dt + timedelta(seconds=HUANGLONG_REPORT_SEARCH_RETRY_SECONDS))
+            ),
+        }
+        if any(self.state.get(key) != value for key, value in values.items()):
+            self.state.update(values)
+            self.save_state()
+
+    def huanglong_message_local_date(self, msg):
+        msg_dt = getattr(msg, "date", None)
+        if not msg_dt:
+            return ""
+        try:
+            if getattr(msg_dt, "tzinfo", None) is not None:
+                msg_dt = datetime.fromtimestamp(msg_dt.timestamp())
+            return msg_dt.strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+
+    async def backfill_recent_huanglong_report(self, now_dt=None, reason="sect war loop"):
+        """Search today's report during the signup window when a NewMessage update was missed."""
+        now_dt = now_dt or datetime.now()
+        in_window, _ = self.huanglong_signup_window_status(now_dt)
+        if not in_window:
+            return False
+
+        self.ensure_common_command_state()
+        today = now_dt.strftime("%Y-%m-%d")
+        if self.huanglong_rotation_report_complete_for_date(today):
+            return True
+
+        next_search = str(self.state.get("next_huanglong_report_search_time") or "")
+        if next_search:
+            try:
+                if datetime.strptime(next_search, TIME_FORMAT) > now_dt:
+                    return False
+            except Exception:
+                pass
+
+        client = getattr(self, "client", None)
+        chat_id = getattr(self, "target_chat_id", None)
+        if client is None or chat_id is None or not hasattr(client, "get_messages"):
+            return False
+
+        self.state["next_huanglong_report_search_time"] = dt_to_str(
+            now_dt + timedelta(seconds=HUANGLONG_REPORT_SEARCH_RETRY_SECONDS)
+        )
+        self.save_state()
+        log = self.common_command_logger()
+        try:
+            messages = await client.get_messages(
+                chat_id,
+                limit=HUANGLONG_REPORT_SEARCH_LIMIT,
+                search=HUANGLONG_REPORT_TITLE,
+            )
+        except Exception as exc:
+            log.warning(f"Huanglong report backfill failed ({reason}): {exc}")
+            return False
+
+        if messages is None:
+            messages = []
+        elif not isinstance(messages, (list, tuple)):
+            try:
+                messages = list(messages)
+            except TypeError:
+                messages = [messages]
+
+        for msg in messages:
+            text = getattr(msg, "text", None) or getattr(msg, "message", None) or ""
+            if not self.parse_huanglong_rotation_sect(text):
+                continue
+            message_date = self.huanglong_message_local_date(msg)
+            if message_date and message_date != today:
+                continue
+            sender = None
+            get_sender = getattr(msg, "get_sender", None)
+            if callable(get_sender):
+                try:
+                    sender = await get_sender()
+                except Exception:
+                    sender = None
+            if sender is not None and not is_game_bot_sender(self, sender):
+                continue
+            log.info(
+                "Huanglong rotation report recovered from recent messages "
+                f"for {today} ({reason}, msg={getattr(msg, 'id', '')})."
+            )
+            return self.maybe_handle_huanglong_report_message(
+                msg,
+                text,
+                sender,
+                now_dt=now_dt,
+                source=f"backfill:{reason}",
+            )
+        return False
+
+    def huanglong_report_loop_wait_seconds(self, now_dt=None):
+        """Sleep toward 12:00 precisely, then honor the short in-window retry schedule."""
+        now_dt = now_dt or datetime.now()
+        today = now_dt.strftime("%Y-%m-%d")
+        start = now_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+        end = now_dt.replace(hour=14, minute=0, second=0, microsecond=0)
+        if now_dt < start:
+            return max(5, min(300, int((start - now_dt).total_seconds()) + 5))
+        if now_dt < end and not self.huanglong_rotation_report_complete_for_date(today):
+            next_search = str(self.state.get("next_huanglong_report_search_time") or "")
+            if next_search:
+                try:
+                    wait = int((datetime.strptime(next_search, TIME_FORMAT) - now_dt).total_seconds())
+                    if wait > 0:
+                        return max(5, min(HUANGLONG_REPORT_SEARCH_RETRY_SECONDS, wait))
+                except Exception:
+                    pass
+            return 5
+        return 300
 
     def clean_common_text(self, text):
         """去除 markdown 加粗标记和反引号"""
@@ -5729,6 +5880,57 @@ class CommonCommandMixin:
         return status in {
             "pending", "sent", "no_response", "responded", "window_closed", "paused", "send_error",
         }
+
+    def is_huanglong_signup_success_response(self, text):
+        clean = self.clean_common_text(text)
+        return bool(
+            "黄龙" in clean
+            and any(marker in clean for marker in (
+                "黄龙征调报名成功",
+                "身份加入今日",
+                "已加入今日",
+                "已报名",
+                "已经报名",
+            ))
+        )
+
+    def observed_huanglong_signup_from_ledger(self, date_text, identity):
+        """Recover a confirmed manual signup so report backfill never sends it twice."""
+        account = actor_account_key(self)
+        if not account or not os.path.exists(MESSAGE_EVENTS_DB_FILE):
+            return None
+        conn = None
+        try:
+            conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=3)
+            rows = conn.execute(
+                """
+                SELECT ledger.response_msg_id, events.text
+                FROM command_ledger AS ledger
+                LEFT JOIN message_events AS events
+                  ON events.account = ledger.account
+                 AND events.msg_id = ledger.response_msg_id
+                WHERE ledger.account = ?
+                  AND ledger.identity = ?
+                  AND ledger.command = ?
+                  AND ledger.status = 'matched'
+                  AND substr(ledger.sent_at, 1, 10) = ?
+                ORDER BY ledger.sent_at DESC, events.id DESC
+                LIMIT 50
+                """,
+                (account, identity, HUANGLONG_SIGNUP_COMMAND, date_text),
+            ).fetchall()
+        except (OSError, sqlite3.Error):
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+        for response_msg_id, response_text in rows:
+            if self.is_huanglong_signup_success_response(response_text):
+                return {
+                    "response_msg_id": response_msg_id,
+                    "response": self.clean_common_text(response_text),
+                }
+        return None
 
     def record_huanglong_signup_status(self, date_text, sect, identity, msg_id, status, response=""):
         identity = str(identity or "主魂").strip() or "主魂"
@@ -5831,7 +6033,15 @@ class CommonCommandMixin:
                 sent = True
         return sent
 
-    def maybe_handle_huanglong_report_message(self, msg, text, sender=None):
+    def maybe_handle_huanglong_report_message(
+        self,
+        msg,
+        text,
+        sender=None,
+        *,
+        now_dt=None,
+        source="new message",
+    ):
         """被动检测黄龙山轮值军报，本宗门账号在报名窗口内只报名一次。"""
         if sender is not None and not is_game_bot_sender(self, sender):
             return False
@@ -5842,13 +6052,29 @@ class CommonCommandMixin:
         self.ensure_common_command_state()
         log = self.common_command_logger()
         msg_id = getattr(msg, "id", "") if msg is not None else ""
-        today = datetime.now().strftime("%Y-%m-%d")
+        now_dt = now_dt or datetime.now()
+        today = now_dt.strftime("%Y-%m-%d")
         identities = self.huanglong_identities_for_sect(sect)
+        report_status = (
+            "matched"
+            if identities
+            else "no_matching_identity"
+            if self.huanglong_identity_sect_map_complete()
+            else "mapping_incomplete"
+        )
+        self.record_huanglong_rotation_report(
+            today,
+            sect,
+            msg_id,
+            source,
+            report_status,
+            now_dt=now_dt,
+        )
         if not identities:
             log.info(f"Huanglong rotation report for {sect} ignored: no matching identity in {self.identity_sect_map()}.")
             return True
 
-        in_window, window_status = self.huanglong_signup_window_status()
+        in_window, window_status = self.huanglong_signup_window_status(now_dt)
         if not in_window:
             if window_status == "window_closed":
                 for identity in identities:
@@ -5864,6 +6090,21 @@ class CommonCommandMixin:
         pending_identities = []
         for identity in identities:
             if self.huanglong_signup_record_matches(today, sect, identity):
+                continue
+            observed = self.observed_huanglong_signup_from_ledger(today, identity)
+            if observed:
+                self.record_huanglong_signup_status(
+                    today,
+                    sect,
+                    identity,
+                    msg_id,
+                    "responded",
+                    observed["response"],
+                )
+                log.info(
+                    f"Huanglong signup already confirmed for {identity}/{sect} in command ledger; "
+                    "state recovered without sending again."
+                )
                 continue
             self.record_huanglong_signup_status(today, sect, identity, msg_id, "pending", "")
             pending_identities.append(identity)
@@ -6178,11 +6419,22 @@ class CommonCommandMixin:
         """宗门战主循环：检测宗门战有效期并在可参战时自动参战"""
         self.ensure_common_command_state()
         await self.startup_done.wait()
-        await asyncio.sleep(random.randint(30, 90))
+        initial_wait = random.randint(30, 90)
+        in_signup_window, _ = self.huanglong_signup_window_status()
+        if in_signup_window:
+            initial_wait = random.randint(3, 10)
+        else:
+            initial_wait = min(initial_wait, self.huanglong_report_loop_wait_seconds())
+        await asyncio.sleep(initial_wait)
 
         while self.is_running:
             # 只检查本地冷却时不切身份；真正发送主魂命令时由 send_and_wait_feedback 对齐。
             self.ensure_common_command_state()
+            # NewMessage updates can occasionally be missed during reconnects.
+            # During the 12:00-14:00 signup window, recover today's report once
+            # from Telegram search; restricted accounts do the same if their
+            # full process starts later in the window.
+            await self.backfill_recent_huanglong_report(reason="sect war loop")
             if await self.sleep_if_identity_paused("主魂", "Sect war loop"):
                 continue
             next_join = self.state.get("next_sect_war_join_time", "")
@@ -6206,4 +6458,4 @@ class CommonCommandMixin:
                 await asyncio.sleep(5)
                 continue
 
-            await asyncio.sleep(300)
+            await asyncio.sleep(self.huanglong_report_loop_wait_seconds())

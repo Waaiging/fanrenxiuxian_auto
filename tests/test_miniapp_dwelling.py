@@ -621,6 +621,40 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(actor.state["spirit_root"], "异灵根(雷)")
         self.assertEqual(actor.state["level"], "化神初期")
 
+    def test_transient_sect_placeholder_does_not_overwrite_confirmed_mapping(self):
+        class Actor:
+            def __init__(self):
+                self.state = {
+                    "identity_sect_names": {"寻真子": "落云宗"},
+                    "avatars": {
+                        "寻真子": {
+                            "miniapp_sect_name": "落云宗",
+                            "sect_name": "落云宗",
+                        }
+                    },
+                }
+                self.identity_sect_names = {"寻真子": "落云宗"}
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+        actor = Actor()
+        payload = {
+            "snapshot": {"level": "overview"},
+            "account": {
+                "playerId": -203,
+                "daoName": "寻真子",
+                "cultivationLevel": "元婴初期",
+                "profile": {"sectName": "读取中"},
+            },
+        }
+
+        self.assertTrue(apply_dwelling_snapshot(actor, "寻真子", payload))
+        self.assertEqual(actor.identity_sect_names["寻真子"], "落云宗")
+        self.assertEqual(actor.state["identity_sect_names"]["寻真子"], "落云宗")
+        self.assertEqual(actor.state["avatars"]["寻真子"]["miniapp_sect_name"], "落云宗")
+        self.assertEqual(actor.state["avatars"]["寻真子"]["sect_name"], "落云宗")
+
     def test_hybrid_router_syncs_home_profiles_for_every_identity(self):
         class Actor:
             def __init__(self):

@@ -7,7 +7,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import concubine_features
 import common_command_features
@@ -2019,6 +2019,178 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual(actor.parse_huanglong_rotation_sect(text), "凌霄宫")
         self.assertEqual(actor.parse_huanglong_rotation_sect("今日轮值宗门为【凌霄宫】。"), "")
+
+    def test_huanglong_report_records_no_match_for_complete_identity_map(self):
+        actor = DummyCommon()
+        actor.sect_name = "万灵宗"
+        actor.avatars = ["素心子"]
+        actor.identity_sect_names = {"主魂": "万灵宗", "素心子": "星宫"}
+        report = """
+【黄龙山轮值军报】
+今日黄龙山前线轮值宗门为【落云宗】。
+轮值宗门弟子可在 14:00 前使用 .报名黄龙山 报名。
+"""
+
+        handled = actor.maybe_handle_huanglong_report_message(
+            SimpleNamespace(id=3001),
+            report,
+            now_dt=datetime(2026, 7, 31, 12, 30),
+            source="fixture",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(actor.state["huanglong_rotation_report_date"], "2026-07-31")
+        self.assertEqual(actor.state["huanglong_rotation_report_sect"], "落云宗")
+        self.assertEqual(actor.state["huanglong_rotation_report_status"], "no_matching_identity")
+        self.assertTrue(actor.huanglong_rotation_report_complete_for_date("2026-07-31"))
+
+    def test_huanglong_identity_map_ignores_transient_sect_placeholder(self):
+        actor = DummyCommon()
+        actor.sect_name = "元婴宗"
+        actor.avatars = ["厚土", "寻真子"]
+        actor.identity_sect_names = {
+            "主魂": "元婴宗",
+            "厚土": "星宫",
+            "寻真子": "读取中",
+        }
+
+        self.assertEqual(
+            actor.identity_sect_map(),
+            {"主魂": "元婴宗", "厚土": "星宫"},
+        )
+        self.assertFalse(actor.huanglong_identity_sect_map_complete())
+        self.assertEqual(actor.huanglong_identities_for_sect("落云宗"), [])
+
+    def test_huanglong_backfill_search_routes_recent_report(self):
+        actor = DummyCommon()
+        actor.sect_name = "万灵宗"
+        actor.avatars = []
+        report = """
+【黄龙山轮值军报】
+今日黄龙山前线轮值宗门为【落云宗】。
+轮值宗门弟子可在 14:00 前使用 .报名黄龙山 报名。
+"""
+        message = SimpleNamespace(
+            id=578380,
+            text=report,
+            date=datetime(2026, 7, 31, 12, 0, 1),
+        )
+        actor.client = SimpleNamespace(get_messages=AsyncMock(return_value=[message]))
+        actor.target_chat_id = -1002083016447
+        actor.maybe_handle_huanglong_report_message = Mock(return_value=True)
+        now_dt = datetime(2026, 7, 31, 12, 5)
+
+        self.assertTrue(asyncio.run(actor.backfill_recent_huanglong_report(
+            now_dt=now_dt,
+            reason="fixture",
+        )))
+
+        actor.client.get_messages.assert_awaited_once_with(
+            actor.target_chat_id,
+            limit=common_command_features.HUANGLONG_REPORT_SEARCH_LIMIT,
+            search=common_command_features.HUANGLONG_REPORT_TITLE,
+        )
+        actor.maybe_handle_huanglong_report_message.assert_called_once_with(
+            message,
+            report,
+            None,
+            now_dt=now_dt,
+            source="backfill:fixture",
+        )
+
+    def test_huanglong_loop_wait_targets_noon_and_stops_after_report(self):
+        actor = DummyCommon()
+
+        self.assertEqual(
+            actor.huanglong_report_loop_wait_seconds(datetime(2026, 7, 31, 11, 59, 58)),
+            7,
+        )
+        self.assertEqual(
+            actor.huanglong_report_loop_wait_seconds(datetime(2026, 7, 31, 12, 5)),
+            5,
+        )
+
+        actor.state.update({
+            "huanglong_rotation_report_date": "2026-07-31",
+            "huanglong_rotation_report_status": "no_matching_identity",
+        })
+        self.assertEqual(
+            actor.huanglong_report_loop_wait_seconds(datetime(2026, 7, 31, 12, 6)),
+            300,
+        )
+
+    def test_huanglong_backfill_recovers_manual_signup_without_resending(self):
+        actor = DummyCommon()
+        actor.account_key = "sub"
+        actor.sect_name = "元婴宗"
+        actor.avatars = ["寻真子"]
+        actor.identity_sect_names = {"主魂": "元婴宗", "寻真子": "落云宗"}
+        report = """
+【黄龙山轮值军报】
+今日黄龙山前线轮值宗门为【落云宗】。
+轮值宗门弟子可在 14:00 前使用 .报名黄龙山 报名。
+"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "message_events.sqlite3")
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE command_ledger (
+                        account TEXT,
+                        identity TEXT,
+                        command TEXT,
+                        status TEXT,
+                        response_msg_id INTEGER,
+                        sent_at TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE message_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account TEXT,
+                        msg_id INTEGER,
+                        text TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO command_ledger (
+                        account, identity, command, status, response_msg_id, sent_at
+                    ) VALUES ('sub', '寻真子', '.报名黄龙山', 'matched', 578391, '2026-07-31 12:01:22')
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO message_events (account, msg_id, text)
+                    VALUES (
+                        'sub',
+                        578391,
+                        '【黄龙征调报名成功】你已加入今日【落云宗】的黄龙山援军名单。'
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with patch.object(common_command_features, "MESSAGE_EVENTS_DB_FILE", db_path):
+                handled = actor.maybe_handle_huanglong_report_message(
+                    SimpleNamespace(id=578380),
+                    report,
+                    now_dt=datetime(2026, 7, 31, 12, 30),
+                    source="backfill:fixture",
+                )
+
+        self.assertTrue(handled)
+        record = actor.state["huanglong_signup_records"]["2026-07-31|寻真子|落云宗"]
+        self.assertEqual(record["status"], "responded")
+        self.assertIn("报名成功", record["response"])
+        self.assertFalse(hasattr(actor, "_huanglong_signup_task"))
 
     def test_huanglong_signup_sends_once_for_matching_sect_in_window(self):
         actor = DummyCommon()
