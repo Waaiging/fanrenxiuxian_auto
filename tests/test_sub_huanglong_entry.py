@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -17,6 +18,14 @@ class _Event:
 
 
 class SubHuanglongEntryTests(unittest.TestCase):
+    def test_sub_start_registers_common_sect_war_scheduler(self):
+        source = inspect.getsource(SubCultivator.start)
+
+        self.assertIn(
+            'self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())',
+            source,
+        )
+
     def test_sub_identity_sect_mapping_includes_luoyun_xunzhenzi(self):
         with patch.object(
             sub_cultivator,

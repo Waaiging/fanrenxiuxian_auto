@@ -6082,6 +6082,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
 
         # 启动所有后台循环
         self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
+        self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())      # 全天观星监听
         if self.main_star_palace_enabled:
             self.create_scheduler_task("star_attraction", lambda: self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
