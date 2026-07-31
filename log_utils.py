@@ -650,6 +650,8 @@ def command_response_family(command):
         return "small_world"
     if cmd == ".显灵":
         return "manifest"
+    if cmd == ".安抚信徒":
+        return "miracle"
     if cmd.startswith(".神迹"):
         return "miracle"
     if cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰") or cmd.startswith(".掌天瓶"):

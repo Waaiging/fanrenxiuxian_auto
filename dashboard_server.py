@@ -991,6 +991,49 @@ def miniapp_beast_abyss_command(state):
     )
 
 
+def small_world_calamity_command(state):
+    """Display the event-driven main-soul calamity watcher."""
+    pending = bool(state.get("small_world_calamity_pending"))
+    next_time = str(state.get("next_small_world_calamity_time") or "").strip()
+    target = parse_state_time(next_time)
+    next_seconds = max(0, int((target - datetime.now()).total_seconds())) if target and target > datetime.now() else 0
+    hazard = clean_custom_text(state.get("small_world_calamity_last_type") or "", 50)
+    try:
+        loss = max(0, int(state.get("small_world_calamity_last_incense_loss") or 0))
+    except (TypeError, ValueError):
+        loss = 0
+    error = clean_custom_text(state.get("small_world_calamity_last_error") or "", 100)
+    handled_at = str(state.get("small_world_calamity_last_handled_time") or "").strip()
+    detail_parts = ["监听机器人关键字【小世界·天降浩劫】", "仅匹配主号 @Weeguu"]
+    if hazard:
+        detail_parts.append(f"最近：{hazard}")
+    if loss:
+        detail_parts.append(f"香火损失 {loss}")
+    if handled_at:
+        detail_parts.append(f"上次处理 {handled_at}")
+    if error:
+        detail_parts.append(f"Mini App：{error}")
+    if pending:
+        status = "等待神谕冷却" if next_seconds else "待安抚"
+        tone = "error" if error else ("cooldown" if next_seconds else "ready")
+    else:
+        status = "监听中"
+        tone = "watch"
+    return command_row(
+        ".安抚信徒",
+        "天降浩劫安抚",
+        status,
+        tone,
+        remaining=format_remaining(next_seconds) if next_seconds else "",
+        at=next_time or handled_at,
+        detail=" · ".join(detail_parts),
+        group="化神",
+        schedule_type="event",
+        next_seconds=next_seconds if pending else None,
+        actionable=False,
+    )
+
+
 def miniapp_tianxing_journey_command(state):
     """Display the server-backed twice-daily Tianxing journey automation."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1973,6 +2016,7 @@ def main_soul_panel(account, state):
             time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
             time_command(state, "next_small_world_time", ".小世界", "小世界", waiting="6小时冷却", group="化神"),
             manual_command(".显灵", "显灵", "凡人祈愿时自动响应", "化神"),
+            small_world_calamity_command(state),
             time_command(state, "next_miracle_preach_time", ".神迹 布道", "神迹 布道", waiting="3小时冷却", group="化神"),
         ])
         rows.extend(meditation_commands(state))

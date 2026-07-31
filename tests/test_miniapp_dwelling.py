@@ -104,6 +104,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".问道",
             ".小世界",
             ".显灵",
+            ".安抚信徒",
             ".神迹 布道",
             ".我的阴罗幡",
             ".每日献祭",
@@ -135,6 +136,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".问道",
             ".小世界",
             ".显灵",
+            ".安抚信徒",
             ".神迹 布道",
             ".我的阴罗幡",
             ".每日献祭",
@@ -238,6 +240,8 @@ class MiniAppDwellingTests(unittest.TestCase):
             puzzle = asyncio.run(transport.command(".拼图", identity="素心子"))
             status = asyncio.run(transport.command(".查看闭关", identity="主魂"))
             manifest = asyncio.run(transport.command(".显灵", identity="主魂"))
+            soothe = asyncio.run(transport.command(".安抚信徒", identity="主魂"))
+            collected = asyncio.run(transport.small_world_action("主魂", "collect"))
 
         self.assertEqual(transport.player_id("主魂"), 100)
         self.assertEqual(transport.player_id("素心子"), -200)
@@ -245,6 +249,8 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(puzzle.text, "reply:.拼图")
         self.assertEqual(status.text, "reply:status")
         self.assertEqual(manifest.text, "reply:manifest")
+        self.assertEqual(soothe.text, "reply:soothe")
+        self.assertEqual(collected["actionResult"]["rawMessage"], "reply:collect")
         self.assertEqual(calls[1][0], "/api/miniapp/xianxia-dwelling/command-center")
         self.assertEqual(calls[1][1]["playerId"], -200)
         self.assertEqual(calls[2][0], "/api/miniapp/xianxia-dwelling/command-center")
@@ -252,6 +258,10 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
         self.assertEqual(calls[4][0], "/api/miniapp/xianxia-dwelling/small-world")
         self.assertEqual(calls[4][1]["action"], "manifest")
+        self.assertEqual(calls[5][0], "/api/miniapp/xianxia-dwelling/small-world")
+        self.assertEqual(calls[5][1]["action"], "soothe")
+        self.assertEqual(calls[6][0], "/api/miniapp/xianxia-dwelling/small-world")
+        self.assertEqual(calls[6][1]["action"], "collect")
 
     def test_completed_status_is_settled_for_maintenance_loop(self):
         calls = []

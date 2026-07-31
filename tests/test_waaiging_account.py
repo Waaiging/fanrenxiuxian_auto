@@ -47,6 +47,8 @@ class WaaigingAccountTests(unittest.TestCase):
             actor.state = {
                 "avatars": {"无咎子": {}},
                 "next_small_world_time": "2026-07-22 03:00:00",
+                "next_small_world_calamity_time": "2026-07-22 03:05:00",
+                "small_world_calamity_pending": True,
                 "next_miracle_preach_time": "2026-07-22 03:10:00",
             }
             actor.xiaohao_visibility_control_enabled = True
@@ -63,6 +65,8 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertTrue(saved)
         self.assertNotIn("avatars", saved[-1])
         self.assertEqual(saved[-1]["next_small_world_time"], "")
+        self.assertEqual(saved[-1]["next_small_world_calamity_time"], "")
+        self.assertFalse(saved[-1]["small_world_calamity_pending"])
         self.assertEqual(saved[-1]["next_miracle_preach_time"], "")
 
     def test_small_world_scheduler_tasks_are_not_registered_for_waaiging(self):
@@ -83,7 +87,7 @@ class WaaigingAccountTests(unittest.TestCase):
 
         actor.start_small_world_scheduler_tasks()
 
-        self.assertEqual(registered, ["small_world", "miracle_preach"])
+        self.assertEqual(registered, ["small_world", "small_world_calamity", "miracle_preach"])
 
     def test_restricted_account_specs_support_both_accounts(self):
         actor = intelligent_cultivator.Cultivator.__new__(intelligent_cultivator.Cultivator)

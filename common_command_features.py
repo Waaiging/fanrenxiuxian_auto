@@ -107,6 +107,7 @@ TIME_CRITICAL_COMMAND_PREFIXES = (
     ".观命",
     ".定命",
     ".助阵",
+    ".安抚信徒",
 )
 STALE_STAR_TIME_CRITICAL_KEYS = {
     "next_star_gazing_time",
@@ -156,6 +157,7 @@ STATE_TIME_COMMAND_MAP = {
     "next_force_exit_time": ".强行出关",
     "next_nurture_spirit_time": ".温养器灵 青竹蜂云剑（神雷版）",
     "next_small_world_time": ".小世界",
+    "next_small_world_calamity_time": ".安抚信徒",
     "next_miracle_preach_time": ".神迹 布道",
     "next_star_gazing_time": ".观星",
     "pending_star_gazing_target_time": ".观星",

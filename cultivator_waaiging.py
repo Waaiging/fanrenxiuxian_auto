@@ -82,11 +82,15 @@ class WaaigingCultivator(core.Cultivator):
             "next_treasure_touch_time",
             "next_nurture_spirit_time",
             "next_small_world_time",
+            "next_small_world_calamity_time",
             "next_miracle_preach_time",
         ):
             if self.state.get(key):
                 self.state[key] = ""
                 disabled_state_changed = True
+        if self.state.get("small_world_calamity_pending"):
+            self.state["small_world_calamity_pending"] = False
+            disabled_state_changed = True
         if disabled_state_changed or avatars_removed:
             self.save_state()
 
@@ -123,7 +127,11 @@ class WaaigingCultivator(core.Cultivator):
         if not self.enable_nurture_spirit:
             disabled_keys.add("next_nurture_spirit_time")
         if not self.enable_small_world:
-            disabled_keys.update(("next_small_world_time", "next_miracle_preach_time"))
+            disabled_keys.update((
+                "next_small_world_time",
+                "next_small_world_calamity_time",
+                "next_miracle_preach_time",
+            ))
         return [item for item in stale if item[0] not in disabled_keys]
 
     async def _send_tianxing_prefixes(self, commands, action):

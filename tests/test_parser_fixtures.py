@@ -13296,6 +13296,211 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertGreater(remaining, 29 * 60)
         self.assertLessEqual(remaining, 1800)
 
+    def test_small_world_calamity_notice_queues_main_only_and_deduplicates(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.enable_small_world = True
+        actor.state = {}
+        actor.identity_usernames = {"主魂": ["Weeguu"]}
+        actor.expected_username = "Weeguu"
+        actor.my_info = None
+        actor.small_world_calamity_event = asyncio.Event()
+        actor.save_state = lambda: None
+        text = (
+            "⚡【小世界·天降浩劫】⚡\n"
+            "道友 @Weeguu 的小世界遭遇【邪神蛊惑】！\n"
+            "❌ 修重代价：库存香火损失 6,626 点\n"
+            "请速速查看 .小世界 并安抚信徒！"
+        )
+        msg = SimpleNamespace(id=901)
+
+        parsed = intelligent_cultivator.parse_small_world_calamity_event(text)
+        self.assertEqual(parsed["hazard"], "邪神蛊惑")
+        self.assertEqual(parsed["incense_loss"], 6626)
+        self.assertTrue(log_utils.feedback_response_matches_command(
+            ".安抚信徒", "安抚信徒成功，信仰与稳定回升。"
+        ))
+        self.assertTrue(actor.maybe_queue_small_world_calamity(msg, text))
+        self.assertTrue(actor.state["small_world_calamity_pending"])
+        self.assertEqual(actor.state["small_world_calamity_last_type"], "邪神蛊惑")
+        self.assertTrue(actor.small_world_calamity_event.is_set())
+        self.assertFalse(actor.maybe_queue_small_world_calamity(msg, text, source="edited message"))
+
+        other = text.replace("@Weeguu", "@Gamling33")
+        self.assertFalse(actor.maybe_queue_small_world_calamity(SimpleNamespace(id=902), other))
+
+    def test_small_world_calamity_uses_miniapp_soothe_and_shares_edict_cooldown(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "small_world_calamity_pending": True,
+            "next_small_world_calamity_time": "",
+        }
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        class Transport:
+            def __init__(self):
+                self.actions = []
+
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 0},
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                return {
+                    "actionResult": {"ok": True, "rawMessage": "安抚信徒成功，信仰与稳定回升。"},
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 10800},
+                        }
+                    },
+                }
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
+
+        self.assertTrue(asyncio.run(actor.execute_small_world_calamity_once()))
+        self.assertEqual(transport.actions, [("主魂", "soothe")])
+        self.assertFalse(actor.state["small_world_calamity_pending"])
+        self.assertEqual(actor.state["small_world_calamity_last_status"], "handled")
+        self.assertTrue(actor.state["small_world_calamity_last_handled_time"])
+        remaining = common_seconds_until(actor.state["next_miracle_preach_time"])
+        self.assertGreater(remaining, 2 * 3600 + 50 * 60)
+        self.assertLessEqual(remaining, 10800)
+
+    def test_small_world_calamity_waits_for_server_edict_cooldown(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "small_world_calamity_pending": True,
+            "next_small_world_calamity_time": "",
+        }
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        class Transport:
+            def __init__(self):
+                self.actions = []
+
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "actions": {"edictRemainingSeconds": 1800},
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                raise AssertionError("edict cooldown must prevent soothe")
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
+
+        self.assertFalse(asyncio.run(actor.execute_small_world_calamity_once()))
+        self.assertEqual(transport.actions, [])
+        self.assertTrue(actor.state["small_world_calamity_pending"])
+        self.assertEqual(actor.state["small_world_calamity_last_status"], "edict_cooldown")
+        remaining = common_seconds_until(actor.state["next_small_world_calamity_time"])
+        self.assertGreater(remaining, 29 * 60)
+        self.assertLessEqual(remaining, 1800)
+        self.assertEqual(
+            actor.state["next_small_world_calamity_time"],
+            actor.state["next_miracle_preach_time"],
+        )
+
+    def test_small_world_calamity_collects_incense_before_soothing_when_needed(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "small_world_calamity_pending": True,
+            "next_small_world_calamity_time": "",
+        }
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor.dashboard_command_paused = lambda command, identity="": False
+
+        class Transport:
+            def __init__(self):
+                self.actions = []
+
+            async def small_world_snapshot(self, identity):
+                return {
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "summary": {"incensePoints": 100},
+                            "actions": {
+                                "edictRemainingSeconds": 0,
+                                "sootheCost": 600,
+                                "canCollect": True,
+                            },
+                        }
+                    }
+                }
+
+            async def small_world_action(self, identity, action):
+                self.actions.append((identity, action))
+                if action == "collect":
+                    return {
+                        "actionResult": {"ok": True, "rawMessage": "收割香火 800 点。"},
+                        "account": {
+                            "smallWorld": {
+                                "hasWorld": True,
+                                "summary": {"incensePoints": 900},
+                                "actions": {"edictRemainingSeconds": 0, "sootheCost": 600},
+                            }
+                        },
+                    }
+                return {
+                    "actionResult": {"ok": True, "rawMessage": "安抚信徒成功。"},
+                    "account": {
+                        "smallWorld": {
+                            "hasWorld": True,
+                            "summary": {"incensePoints": 300},
+                            "actions": {"edictRemainingSeconds": 10800},
+                        }
+                    },
+                }
+
+        transport = Transport()
+        actor._miniapp_command_router = SimpleNamespace(transport=transport)
+
+        self.assertTrue(asyncio.run(actor.execute_small_world_calamity_once()))
+        self.assertEqual(transport.actions, [("主魂", "collect"), ("主魂", "soothe")])
+        self.assertFalse(actor.state["small_world_calamity_pending"])
+
+    def test_small_world_calamity_defers_regular_miracle_preaching(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {
+            "small_world_calamity_pending": True,
+            "next_small_world_calamity_time": "",
+        }
+        actor.active_atomic_task = None
+        actor.save_state = lambda: None
+        actor._miniapp_command_router = SimpleNamespace(
+            transport=SimpleNamespace(
+                small_world_snapshot=lambda identity: (_ for _ in ()).throw(
+                    AssertionError("calamity priority must prevent a sermon snapshot")
+                )
+            )
+        )
+
+        self.assertFalse(asyncio.run(actor.execute_miracle_preach_once()))
+        self.assertLessEqual(
+            common_seconds_until(actor.state["next_miracle_preach_time"]),
+            intelligent_cultivator.SMALL_WORLD_CALAMITY_RETRY_SECONDS,
+        )
+
     def test_miracle_preach_uses_miniapp_action_and_server_cooldown(self):
         actor = Cultivator.__new__(Cultivator)
         actor.state = {}
@@ -13398,6 +13603,7 @@ class ParserFixtureTests(unittest.TestCase):
         target_commands = {
             intelligent_cultivator.SMALL_WORLD_COMMAND,
             intelligent_cultivator.SMALL_WORLD_MANIFEST_COMMAND,
+            intelligent_cultivator.SMALL_WORLD_SOOTHE_COMMAND,
             intelligent_cultivator.MIRACLE_PREACH_COMMAND,
         }
         for account in ("main", "sub", "xiaohao"):

@@ -54,6 +54,7 @@ EXACT_COMMANDS = {
     ".问道",
     ".小世界",
     ".显灵",
+    ".安抚信徒",
     ".神迹 布道",
     ".我的阴罗幡",
     ".每日献祭",
@@ -69,10 +70,13 @@ PREFIX_COMMANDS = {
 }
 SMALL_WORLD_COMMAND_ACTIONS = {
     ".显灵": "manifest",
+    ".安抚信徒": "soothe",
     ".神迹 布道": "miracle_sermon",
 }
 SMALL_WORLD_ACTION_NAMES = {
+    "collect": "小世界收割香火",
     "manifest": "小世界显灵",
+    "soothe": "小世界安抚信徒",
     "miracle_sermon": "小世界神迹布道",
 }
 

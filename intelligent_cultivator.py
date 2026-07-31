@@ -223,10 +223,13 @@ WUJIU_TREASURE_TOUCH_COMMAND = ".抚摸法宝 风雷翅"
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600        # 抚摸法宝冷却：2 小时
 SMALL_WORLD_COMMAND = ".小世界"
 SMALL_WORLD_MANIFEST_COMMAND = ".显灵"
+SMALL_WORLD_SOOTHE_COMMAND = ".安抚信徒"
+SMALL_WORLD_CALAMITY_KEYWORD = "【小世界·天降浩劫】"
 SMALL_WORLD_CD_SECONDS = 6 * 3600
 MIRACLE_PREACH_COMMAND = ".神迹 布道"
 MIRACLE_PREACH_CD_SECONDS = 3 * 3600
 SMALL_WORLD_RETRY_SECONDS = 10 * 60
+SMALL_WORLD_CALAMITY_RETRY_SECONDS = 5 * 60
 SPIRIT_TREE_AVATAR = "缘生子"
 SPIRIT_TREE_IRRIGATION_COMMAND = ".灵树灌溉"
 SPIRIT_TREE_STATUS_COMMAND = ".灵树状态"
@@ -241,6 +244,24 @@ SPIRIT_TREE_MATURE_KEYWORDS = ("灵果已完全成熟", "采摘期开启", "成�
 SPIRIT_TREE_GUARD_CD_SECONDS = 5 * 3600
 SPIRIT_TREE_GUARD_SUCCESS_RETRY_SECONDS = 5 * 60
 SPIRIT_TREE_GUARD_ERROR_BLOCK_SECONDS = 60 * 60
+
+
+def parse_small_world_calamity_event(text):
+    """Parse one bot calamity notice without accepting ordinary small-world text."""
+    clean = str(text or "").replace("**", "").replace("`", "")
+    if SMALL_WORLD_CALAMITY_KEYWORD not in clean:
+        return {}
+    hazard_match = re.search(r"小世界遭遇\s*【([^】]+)】", clean)
+    loss_match = re.search(r"(?:库存)?香火损失\s*([\d,]+)\s*点", clean)
+    try:
+        incense_loss = int((loss_match.group(1) if loss_match else "0").replace(",", ""))
+    except (TypeError, ValueError):
+        incense_loss = 0
+    return {
+        "hazard": str(hazard_match.group(1) if hazard_match else "未知浩劫").strip(),
+        "incense_loss": max(0, incense_loss),
+        "text": re.sub(r"\s+", " ", clean).strip()[:700],
+    }
 
 
 def spirit_tree_default_state():
@@ -647,6 +668,9 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         self.formation_assist_in_progress = False  # 实时助阵并发保护
         self._spirit_tree_harvest_tasks = {}       # 身份级灵树成熟后的一次性采摘任务
         self._spirit_tree_guard_tasks = {}         # 身份级古剑门来袭后的一次性守山任务
+        self.small_world_calamity_event = asyncio.Event()
+        if self.state.get("small_world_calamity_pending"):
+            self.small_world_calamity_event.set()
 
     # ------------------------------------------------------------------
     # 状态持久化
@@ -694,6 +718,17 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             "last_small_world_response": "",
             "last_manifest_time": "",
             "last_manifest_response": "",
+            "small_world_calamity_pending": False,
+            "small_world_calamity_last_event_id": "",
+            "small_world_calamity_last_event_time": "",
+            "small_world_calamity_last_event_text": "",
+            "small_world_calamity_last_type": "",
+            "small_world_calamity_last_incense_loss": 0,
+            "small_world_calamity_last_handled_time": "",
+            "small_world_calamity_last_response": "",
+            "small_world_calamity_last_status": "",
+            "small_world_calamity_last_error": "",
+            "next_small_world_calamity_time": "",
             "last_miracle_preach_time": "",
             "next_miracle_preach_time": "",
             "last_miracle_preach_response": "",
@@ -1234,6 +1269,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             # 记录游戏机器人活动（用于判断机器人是否在线）
             if is_game_bot_sender(self, sender_cache):
                 record_game_bot_activity(self, sender_cache, log, msg=msg, text=text)
+                self.maybe_queue_small_world_calamity(msg, text, source="new message")
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
                 # 被动身份自愈 + 手动指令状态同步
                 self.update_identity_passively(msg)
@@ -2162,6 +2198,216 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         except (TypeError, ValueError):
             return 0
 
+    def small_world_calamity_targets_main(self, msg, text):
+        aliases = {
+            str(value or "").strip().lstrip("@").casefold()
+            for value in (getattr(self, "identity_usernames", {}) or {}).get("主魂", [])
+            if str(value or "").strip()
+        }
+        expected = str(getattr(self, "expected_username", "") or "").strip().lstrip("@").casefold()
+        if expected:
+            aliases.add(expected)
+        me = getattr(self, "my_info", None)
+        username = str(getattr(me, "username", "") or "").strip().lstrip("@").casefold()
+        if username:
+            aliases.add(username)
+        mentioned = {
+            value.casefold()
+            for value in re.findall(r"@([a-zA-Z0-9_]+)", str(text or ""))
+        }
+        if mentioned:
+            return bool(aliases.intersection(mentioned))
+        return text_targets_current_account(self, msg, text)
+
+    def maybe_queue_small_world_calamity(self, msg, text, source="new message"):
+        parsed = parse_small_world_calamity_event(text)
+        if not parsed or not self.enable_small_world:
+            return False
+        if not self.small_world_calamity_targets_main(msg, text):
+            return False
+
+        message_id = str(getattr(msg, "id", "") or "").strip()
+        event_key = (
+            f"msg:{message_id}"
+            if message_id
+            else f"text:{parsed['hazard']}:{parsed['incense_loss']}:{parsed['text']}"
+        )
+        if str(self.state.get("small_world_calamity_last_event_id") or "") == event_key:
+            return False
+
+        now = now_str()
+        self.state["small_world_calamity_pending"] = True
+        self.state["small_world_calamity_last_event_id"] = event_key
+        self.state["small_world_calamity_last_event_time"] = now
+        self.state["small_world_calamity_last_event_text"] = parsed["text"]
+        self.state["small_world_calamity_last_type"] = parsed["hazard"]
+        self.state["small_world_calamity_last_incense_loss"] = parsed["incense_loss"]
+        self.state["small_world_calamity_last_status"] = "queued"
+        self.state["small_world_calamity_last_error"] = ""
+        self.state["next_small_world_calamity_time"] = now
+        self.save_state()
+
+        signal = getattr(self, "small_world_calamity_event", None)
+        if signal is None:
+            signal = asyncio.Event()
+            self.small_world_calamity_event = signal
+        signal.set()
+        log.warning(
+            "Small-world calamity queued for main soul from %s: %s, incense loss %s, msg=%s.",
+            source,
+            parsed["hazard"],
+            parsed["incense_loss"],
+            message_id or "unknown",
+        )
+        return True
+
+    def defer_small_world_calamity(self, seconds, status, response="", error=""):
+        try:
+            seconds = max(30, int(seconds))
+        except (TypeError, ValueError):
+            seconds = SMALL_WORLD_CALAMITY_RETRY_SECONDS
+        now = now_str()
+        retry_at = add_seconds_str(now, seconds)
+        self.state["small_world_calamity_pending"] = True
+        self.state["small_world_calamity_last_status"] = str(status or "retry")
+        self.state["small_world_calamity_last_response"] = str(response or "")[:700]
+        self.state["small_world_calamity_last_error"] = str(error or "")[:200]
+        self.state["next_small_world_calamity_time"] = retry_at
+        if status == "edict_cooldown":
+            self.state["next_miracle_preach_time"] = retry_at
+        self.save_state()
+        return seconds
+
+    @staticmethod
+    def small_world_soothe_completed(payload):
+        if command_result_ok(payload):
+            return True
+        result = payload.get("actionResult") if isinstance(payload, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        code = str(result.get("error") or "").strip().casefold()
+        text = str(command_result_text(payload) or "").strip()
+        if code in {"nothing_to_soothe", "no_calamity", "already_soothed", "already_stable"}:
+            return True
+        return any(marker in text for marker in (
+            "无需安抚", "不必安抚", "无需再安抚", "信徒已安定", "信众已安定", "浩劫已平息",
+        ))
+
+    def record_small_world_calamity_error(self, exc):
+        code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+        self.defer_small_world_calamity(
+            SMALL_WORLD_CALAMITY_RETRY_SECONDS,
+            "error",
+            response=str(exc),
+            error=code,
+        )
+        log.error("Mini App small-world calamity soothe failed: %s", code, exc_info=True)
+
+    def defer_miracle_preach_for_small_world_calamity(self):
+        if not self.state.get("small_world_calamity_pending"):
+            return False
+        next_time = str(self.state.get("next_small_world_calamity_time") or "").strip()
+        wait = seconds_until(next_time) if next_time and is_future(next_time) else SMALL_WORLD_CALAMITY_RETRY_SECONDS
+        self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), max(30, int(wait or 0)))
+        self.save_state()
+        log.info("Miracle preaching deferred while a small-world calamity awaits soothing.")
+        return True
+
+    async def execute_small_world_calamity_once(self):
+        """Use the Mini App soothe action for one queued main-soul calamity."""
+        if not self.state.get("small_world_calamity_pending"):
+            return True
+        current_task = asyncio.current_task()
+        while self.should_wait_for_atomic_task(SMALL_WORLD_SOOTHE_COMMAND):
+            await asyncio.sleep(0.5)
+        self.active_atomic_task = current_task
+        try:
+            transport = self.miniapp_small_world_transport()
+            snapshot = await transport.small_world_snapshot("主魂")
+            apply_dwelling_snapshot(self, "主魂", snapshot)
+            world = small_world_data(snapshot)
+            if not world or world.get("hasWorld") is False:
+                raise MiniAppBeastError("small_world_unavailable")
+
+            remaining = self.small_world_remaining_seconds(snapshot, "edictRemainingSeconds")
+            if remaining > 0:
+                self.defer_small_world_calamity(
+                    remaining,
+                    "edict_cooldown",
+                    response=f"安抚信徒需等待神谕冷却 {remaining} 秒",
+                )
+                log.info("Small-world calamity soothe waiting for edict cooldown: %ss.", remaining)
+                return False
+
+            if self.dashboard_command_paused(SMALL_WORLD_SOOTHE_COMMAND, "主魂"):
+                self.defer_small_world_calamity(300, "paused", response="安抚信徒已暂停")
+                return False
+
+            actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
+            summary = world.get("summary") if isinstance(world.get("summary"), dict) else {}
+            try:
+                soothe_cost = max(0, int(float(str(actions.get("sootheCost") or 0).replace(",", ""))))
+            except (TypeError, ValueError):
+                soothe_cost = 0
+            try:
+                incense_points = max(0, int(float(str(summary.get("incensePoints") or 0).replace(",", ""))))
+            except (TypeError, ValueError):
+                incense_points = 0
+            if soothe_cost > incense_points and actions.get("canCollect"):
+                collected = await transport.small_world_action("主魂", "collect")
+                apply_dwelling_snapshot(self, "主魂", collected)
+                world = small_world_data(collected)
+                summary = world.get("summary") if isinstance(world.get("summary"), dict) else {}
+                try:
+                    incense_points = max(0, int(float(str(summary.get("incensePoints") or 0).replace(",", ""))))
+                except (TypeError, ValueError):
+                    incense_points = 0
+            if soothe_cost > 0 and incense_points < soothe_cost:
+                response = f"安抚信徒需要 {soothe_cost} 香火，当前仅 {incense_points}"
+                self.defer_small_world_calamity(
+                    SMALL_WORLD_CALAMITY_RETRY_SECONDS,
+                    "insufficient_incense",
+                    response=response,
+                    error="insufficient_incense",
+                )
+                log.error("Small-world calamity soothe deferred: %s", response)
+                return False
+
+            result = await transport.small_world_action("主魂", "soothe")
+            apply_dwelling_snapshot(self, "主魂", result)
+            response = str(command_result_text(result) or "安抚信徒操作完成").strip()
+            remaining = self.small_world_remaining_seconds(result, "edictRemainingSeconds")
+            if self.small_world_soothe_completed(result):
+                now = now_str()
+                self.state["small_world_calamity_pending"] = False
+                self.state["small_world_calamity_last_handled_time"] = now
+                self.state["small_world_calamity_last_response"] = response[:700]
+                self.state["small_world_calamity_last_status"] = "handled"
+                self.state["small_world_calamity_last_error"] = ""
+                self.state["next_small_world_calamity_time"] = ""
+                self.state["last_small_world_time"] = now
+                self.state["last_small_world_response"] = response[:700]
+                if remaining > 0:
+                    self.state["next_miracle_preach_time"] = add_seconds_str(now, remaining)
+                self.save_state()
+                log.info("Small-world calamity handled for main soul via Mini App: %s", response[:300])
+                return True
+
+            result_data = result.get("actionResult") if isinstance(result, dict) else {}
+            result_data = result_data if isinstance(result_data, dict) else {}
+            error = str(result_data.get("error") or "small_world_soothe_failed")
+            retry = remaining or SMALL_WORLD_CALAMITY_RETRY_SECONDS
+            self.defer_small_world_calamity(retry, "action_failed", response=response, error=error)
+            log.error("Small-world calamity soothe was not completed: %s", response[:300])
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.record_small_world_calamity_error(exc)
+            return False
+        finally:
+            if self.active_atomic_task == current_task:
+                self.active_atomic_task = None
+
     def record_small_world_miniapp_state(
         self,
         payload,
@@ -2273,6 +2519,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
 
     async def execute_miracle_preach_once(self):
         """Run the main soul's Mini App miracle-sermon action once."""
+        if self.defer_miracle_preach_for_small_world_calamity():
+            return False
         current_task = asyncio.current_task()
         while self.should_wait_for_atomic_task(MIRACLE_PREACH_COMMAND):
             await asyncio.sleep(0.5)
@@ -2295,6 +2543,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 self.state["miniapp_miracle_preach_last_error"] = ""
                 self.save_state()
                 return False
+            if self.defer_miracle_preach_for_small_world_calamity():
+                return False
             result = await transport.small_world_action("主魂", "miracle_sermon")
             apply_dwelling_snapshot(self, "主魂", result)
             return self.record_miracle_preach_miniapp_state(result)
@@ -2306,6 +2556,39 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         finally:
             if self.active_atomic_task == current_task:
                 self.active_atomic_task = None
+
+    async def run_small_world_calamity_loop(self):
+        """Sleep until a bot calamity event arrives, then soothe through Mini App."""
+        await self.startup_done.wait()
+        signal = getattr(self, "small_world_calamity_event", None)
+        if signal is None:
+            signal = asyncio.Event()
+            self.small_world_calamity_event = signal
+        while self.is_running:
+            if not self.state.get("small_world_calamity_pending"):
+                signal.clear()
+                if self.state.get("small_world_calamity_pending"):
+                    continue
+                await signal.wait()
+                continue
+
+            await self.pause_event.wait()
+            next_time = str(self.state.get("next_small_world_calamity_time") or "").strip()
+            if next_time and is_future(next_time):
+                wait = max(1, seconds_until(next_time))
+                signal.clear()
+                if (
+                    not self.state.get("small_world_calamity_pending")
+                    or str(self.state.get("next_small_world_calamity_time") or "").strip() != next_time
+                ):
+                    continue
+                try:
+                    await asyncio.wait_for(signal.wait(), timeout=wait)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            await self.execute_small_world_calamity_once()
 
     async def run_small_world_loop(self):
         await self.startup_done.wait()
@@ -2342,6 +2625,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             log.info("Small-world / miracle-preaching loops disabled for current account.")
             return
         self.create_scheduler_task("small_world", lambda: self.run_small_world_loop())
+        self.create_scheduler_task("small_world_calamity", lambda: self.run_small_world_calamity_loop())
         self.create_scheduler_task("miracle_preach", lambda: self.run_miracle_preach_loop())
 
     # ------------------------------------------------------------------
@@ -2513,6 +2797,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             ("next_rift_search_time", ".探寻裂缝", "主魂"),
             ("next_treasure_touch_time", TREASURE_TOUCH_COMMAND, "主魂"),
             ("next_small_world_time", SMALL_WORLD_COMMAND, "主魂"),
+            ("next_small_world_calamity_time", SMALL_WORLD_SOOTHE_COMMAND, "主魂"),
             ("next_miracle_preach_time", MIRACLE_PREACH_COMMAND, "主魂"),
         ]
         stale = []
@@ -5397,6 +5682,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
                     record_game_bot_activity(self, sender, log, msg=msg, text=text)
+                    self.maybe_queue_small_world_calamity(msg, text, source="edited message")
                     record_star_gazing_event(self.account_key, msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
