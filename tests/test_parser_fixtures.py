@@ -13138,7 +13138,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_WANYING_GREETING_COMMAND, greeting))
         self.assertTrue(log_utils.feedback_response_matches_command(SOUL_CURSE_CO_STUDY_COMMAND, co_study))
 
-    def test_soul_curse_wanying_greeting_runs_for_main_and_sub_publishers(self):
+    def test_soul_curse_wanying_greeting_runs_only_for_main_publisher(self):
         actor = DummySoulCurse("main")
         profile = actor.soul_curse_publisher_profile()
 
@@ -13150,9 +13150,24 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(curse.get("last_wanying_greeting_date"), datetime.now().strftime("%Y-%m-%d"))
 
         sub = DummySoulCurse("sub")
-        asyncio.run(sub.soul_curse_main_extra_tick(sub.soul_curse_publisher_profile()))
-        asyncio.run(sub.soul_curse_main_extra_tick(sub.soul_curse_publisher_profile()))
-        self.assertEqual(sub.sent, [SOUL_CURSE_WANYING_GREETING_COMMAND])
+        sub.state["soul_curse"] = {
+            "last_wanying_greeting_date": "2026-07-30",
+            "next_wanying_greeting_time": "2026-07-31 12:15:06",
+            "last_wanying_greeting_time": "2026-07-30 09:08:00",
+            "last_status": "wanying_greeting_unknown",
+            "last_detail": "婉影问安无回执",
+            "next_action_at": "2026-07-31 12:15:06",
+        }
+        wait = asyncio.run(sub.soul_curse_main_extra_tick(sub.soul_curse_publisher_profile()))
+        self.assertEqual(sub.sent, [])
+        self.assertEqual(wait, 600)
+        sub_curse = sub.state["soul_curse"]
+        self.assertEqual(sub_curse.get("last_wanying_greeting_date"), "")
+        self.assertEqual(sub_curse.get("next_wanying_greeting_time"), "")
+        self.assertEqual(sub_curse.get("last_wanying_greeting_time"), "")
+        self.assertEqual(sub_curse.get("last_status"), "")
+        self.assertEqual(sub_curse.get("last_detail"), "")
+        self.assertEqual(sub_curse.get("next_action_at"), "")
 
         xiaohao = DummySoulCurse("xiaohao")
         wait = asyncio.run(xiaohao.soul_curse_main_extra_tick(xiaohao.soul_curse_publisher_profile()))
@@ -13171,7 +13186,7 @@ class ParserFixtureTests(unittest.TestCase):
         xiaohao_commands = {row.get("command") for row in xiaohao_panel.get("commands", [])}
 
         self.assertIn(SOUL_CURSE_WANYING_GREETING_COMMAND, main_commands)
-        self.assertIn(SOUL_CURSE_WANYING_GREETING_COMMAND, sub_commands)
+        self.assertNotIn(SOUL_CURSE_WANYING_GREETING_COMMAND, sub_commands)
         self.assertIn(".探望南宫婉", sub_commands)
         self.assertIn(".推演封魂咒", sub_commands)
         self.assertIn(".发布解咒委托 1", sub_commands)

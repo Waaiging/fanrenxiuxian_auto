@@ -52,8 +52,6 @@ SOUL_CURSE_PUBLISHERS = {
         "assistant_account": "sub",
         "assistant_identity": YINLUO_IDENTITY,
         "visit_minute": 3,
-        "wanying_greeting_enabled": True,
-        "wanying_minute": 8,
         "shared": False,
     },
     "xiaohao": {
@@ -911,6 +909,23 @@ class SoulCurseMixin:
 
     async def soul_curse_maybe_wanying_greeting(self, profile):
         if not self.soul_curse_main_extra_enabled(profile, "wanying_greeting_enabled"):
+            state = self.get_soul_curse_state()
+            changed = False
+            for key in (
+                "last_wanying_greeting_date",
+                "next_wanying_greeting_time",
+                "last_wanying_greeting_time",
+            ):
+                if state.get(key):
+                    state[key] = ""
+                    changed = True
+            if str(state.get("last_status") or "").startswith("wanying_greeting_"):
+                state["last_status"] = ""
+                state["last_detail"] = ""
+                state["next_action_at"] = ""
+                changed = True
+            if changed:
+                self.save_state()
             return 600
         state = self.get_soul_curse_state()
         if state.get("last_wanying_greeting_date") == _today():
