@@ -1,8 +1,9 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import MiniAppDwellingTransport
 from miniapp_fishing import (
     MiniAppFishingAutomation,
@@ -228,6 +229,36 @@ class MiniAppFishingTests(unittest.TestCase):
         finish = next(call for call in calls if call[0].endswith("/finish"))
         self.assertEqual(finish[1]["token"], "fish_next")
         self.assertEqual(finish[1]["fishingProof"]["challengeId"], "challenge-1")
+
+    def test_daily_limit_is_recorded_without_error_traceback(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.is_running = True
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(actor, SimpleNamespace(), "main", logger)
+        worker.settings = lambda: {"enabled": True}
+        worker.run_cycle = AsyncMock(
+            side_effect=MiniAppBeastError("fishing_daily_limit_reached")
+        )
+
+        async def stop_after_one_cycle(_seconds):
+            actor.is_running = False
+
+        with patch("miniapp_fishing.asyncio.sleep", new=AsyncMock(side_effect=stop_after_one_cycle)):
+            asyncio.run(worker.run_loop())
+
+        logger.info.assert_called_with(
+            "Mini App fishing daily limit reached; waiting for reset."
+        )
+        logger.error.assert_not_called()
+        self.assertEqual(actor.state["miniapp_fishing_status"], "daily_done")
 
 
 if __name__ == "__main__":

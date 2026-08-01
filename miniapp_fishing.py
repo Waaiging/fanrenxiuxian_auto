@@ -612,5 +612,12 @@ class MiniAppFishingAutomation:
                         datetime.now() + timedelta(seconds=wait)
                     ).strftime(TIME_FORMAT),
                 )
-                self.log.error("Mini App fishing loop failed: %s", code, exc_info=True)
+                if status == "daily_done":
+                    self.log.info("Mini App fishing daily limit reached; waiting for reset.")
+                elif status == "no_rod":
+                    self.log.warning("Mini App fishing paused: no fishing rod is available.")
+                elif status == "auth_refresh":
+                    self.log.info("Mini App fishing authorization refreshed; retrying shortly.")
+                else:
+                    self.log.error("Mini App fishing loop failed: %s", code, exc_info=True)
             await asyncio.sleep(max(1, min(int(wait), 300)))
