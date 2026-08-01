@@ -39,6 +39,7 @@ from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_STAR
 from automation_settings import (
     MULAN_SUPPORT_MODES,
     automation_dashboard_payload,
+    miniapp_fishing_settings,
     mulan_support_command,
     mulan_support_mode,
     save_automation_settings,
@@ -59,6 +60,7 @@ from duel_features import (
     configure_duel_multi_plan,
     duel_dashboard_payload,
     set_duel_control,
+    set_duel_intervals,
     set_duel_multi_control,
     set_duel_participant_control,
     set_titan_beast_mode,
@@ -67,6 +69,14 @@ from duel_features import (
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
+from reward_parsing import (
+    compact_reward_summary,
+    daily_reward_items_for_command,
+    is_mulan_settlement_text,
+    normalize_reward_items,
+    reward_command_root,
+    trust_empty_reward_reparse,
+)
 from fishing_features import (
     FISHING_AUTO_ACCOUNT_IDENTITIES,
     FISHING_AUTOMATION_ENABLED,
@@ -159,6 +169,9 @@ RESOURCE_STATS_BUILD_LOCK = threading.Lock()
 CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
+BEAST_BORDER_PATROL_CONTROL_KEY = ".灵兽巡边 *"
+BEAST_BORDER_PATROL_MODES = ("斥候", "护粮", "袭营")
+BEAST_BORDER_PATROL_DEFAULT_MODE = "袭营"
 MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
 DEPLOY_VERSION_FILE = "deploy_version.json"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
@@ -594,21 +607,32 @@ def append_custom_commands(account, panel, custom_commands, root_state=None):
     return panel
 
 
-def command_control_disabled(controls, account, identity, control_key, default_disabled=False):
+def command_control_entry(controls, account, identity, control_key):
     account_controls = controls.get(account, {}) if isinstance(controls, dict) else {}
     if not isinstance(account_controls, dict):
-        return bool(default_disabled)
+        return None
     for ident in (identity or "主魂", "*"):
         ident_controls = account_controls.get(ident, {})
         if not isinstance(ident_controls, dict):
             continue
         if control_key not in ident_controls:
             continue
-        entry = ident_controls.get(control_key)
-        if isinstance(entry, dict):
-            return bool(entry.get("disabled"))
+        return ident_controls.get(control_key)
+    return None
+
+
+def command_control_disabled(controls, account, identity, control_key, default_disabled=False):
+    entry = command_control_entry(controls, account, identity, control_key)
+    if isinstance(entry, dict):
+        return bool(entry.get("disabled"))
+    if entry is not None:
         return bool(entry)
     return bool(default_disabled)
+
+
+def normalize_beast_border_patrol_mode(mode):
+    mode = str(mode or "").strip()
+    return mode if mode in BEAST_BORDER_PATROL_MODES else BEAST_BORDER_PATROL_DEFAULT_MODE
 
 
 def fishing_auto_control_entry(account):
@@ -630,6 +654,7 @@ def apply_command_controls(account, panel):
     for row in commands:
         control_key = command_control_key(row.get("command", ""))
         row["control_key"] = control_key
+        entry = command_control_entry(controls, account, identity, control_key)
         row["control_disabled"] = command_control_disabled(
             controls,
             account,
@@ -642,6 +667,16 @@ def apply_command_controls(account, panel):
             row["tone"] = "paused"
             detail = row.get("detail", "")
             row["detail"] = f"dashboard 临时暂停{f' · {detail}' if detail else ''}"
+        if control_key == BEAST_BORDER_PATROL_CONTROL_KEY and row.get("actionable", True):
+            mode = normalize_beast_border_patrol_mode(
+                entry.get("patrol_mode") if isinstance(entry, dict) else ""
+            )
+            row["patrol_mode_options"] = list(BEAST_BORDER_PATROL_MODES)
+            row["patrol_mode_value"] = mode
+            row["command"] = f".灵兽巡边 <灵兽> {mode}"
+            detail = row.get("detail", "")
+            patrol_detail = f"灵兽按体力自动选择 · 路线：{mode}"
+            row["detail"] = f"{patrol_detail}{f' · {detail}' if detail else ''}"
     return panel
 
 
@@ -1086,6 +1121,65 @@ def miniapp_tianxing_journey_command(state):
         detail=" · ".join(detail_parts),
         group="游历",
         schedule_type="daily",
+        next_seconds=next_seconds,
+        actionable=False,
+    )
+
+
+def miniapp_fishing_command(state):
+    """Display the main-soul Mini App fishing loop and its latest score."""
+    settings = miniapp_fishing_settings()
+    enabled = bool(settings.get("enabled"))
+    status_key = str(state.get("miniapp_fishing_status") or "waiting")
+    error = clean_custom_text(state.get("miniapp_fishing_last_error") or "", 100)
+    result = clean_custom_text(state.get("miniapp_fishing_last_result") or "", 180)
+    next_time = str(state.get("miniapp_fishing_next_run_time") or "").strip()
+    target = parse_state_time(next_time)
+    next_seconds = (
+        max(0, int((target - datetime.now()).total_seconds()))
+        if target and target > datetime.now()
+        else 0
+    )
+    pond = clean_custom_text(state.get("miniapp_fishing_pond") or settings.get("pond") or "", 40)
+    bait = clean_custom_text(state.get("miniapp_fishing_bait") or settings.get("bait") or "", 40)
+    chum = clean_custom_text(state.get("miniapp_fishing_chum") or "不打窝", 40)
+    grade = clean_custom_text(state.get("miniapp_fishing_last_grade") or "", 20)
+    score = int(state.get("miniapp_fishing_last_score") or 0)
+    detail_parts = ["仅主号主魂", pond, bait, chum]
+    if grade or score:
+        detail_parts.append(f"上次 {grade or '-'} {score}分")
+    if result:
+        detail_parts.append(result)
+    if not enabled:
+        status = "已暂停"
+        tone = "paused"
+    elif error:
+        status = "等待重试"
+        tone = "error"
+        detail_parts.insert(0, f"Mini App：{error}")
+    else:
+        status_map = {
+            "waiting": ("等鱼讯", "cooldown"),
+            "reeling": ("自动收线", "active"),
+            "caught": ("提竿成功", "active"),
+            "empty": ("本竿空竿", "cooldown"),
+            "settling": ("鱼获结算中", "cooldown"),
+            "daily_done": ("今日竿数已尽", "done"),
+            "no_rod": ("无鱼竿", "error"),
+            "auth_refresh": ("刷新入口", "cooldown"),
+            "paused": ("已暂停", "paused"),
+        }
+        status, tone = status_map.get(status_key, ("等待执行", "ready"))
+    return command_row(
+        "miniapp:fishing",
+        "灵溪自动垂钓",
+        status,
+        tone,
+        remaining=format_remaining(next_seconds) if next_seconds else "0秒",
+        at=next_time or str(state.get("miniapp_fishing_last_round_time") or ""),
+        detail=" · ".join(part for part in detail_parts if part),
+        group="游历",
+        schedule_type="cooldown",
         next_seconds=next_seconds,
         actionable=False,
     )
@@ -2040,6 +2134,7 @@ def main_soul_panel(account, state):
             miniapp_beast_sync_command(state),
             miniapp_beast_contract_command(state),
             miniapp_beast_abyss_command(state),
+            miniapp_fishing_command(state),
             (
                 command_row(
                     ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
@@ -2923,44 +3018,7 @@ def ensure_daily_reward_events_schema(conn):
 
 
 def compact_reward_summary_from_json(rewards):
-    if not isinstance(rewards, dict) or not rewards:
-        return ""
-    priority = {
-        "修为": 0, "天机": 1, "天机值": 1, "宗门贡献": 2, "贡献": 2,
-        "灵石": 3, "神识": 4, "气血": 5, "煞气": 6, "道韵": 7,
-        "感悟": 8, "经验": 9, "星辰精华": 10, "精华": 11,
-    }
-    plus_names = set(priority)
-
-    def display_name(name):
-        if name == "宗门贡献":
-            return "贡献"
-        if name == "天机值":
-            return "天机"
-        return str(name or "")
-
-    def sort_key(item):
-        name, _value = item
-        shown = display_name(name)
-        return (priority.get(shown, 100), shown)
-
-    parts = []
-    for name, value in sorted(rewards.items(), key=sort_key):
-        try:
-            amount = int(value or 0)
-        except Exception:
-            continue
-        if not amount:
-            continue
-        shown = display_name(name)
-        number = f"{amount:,}"
-        if amount < 0:
-            parts.append(f"{shown}{number}")
-        elif shown in plus_names:
-            parts.append(f"{shown}+{number}")
-        else:
-            parts.append(f"{shown}x{number}")
-    return "｜".join(parts)
+    return compact_reward_summary(rewards)
 
 
 def build_daily_reward_log(date="", account="", identity="", command="", limit=300):
@@ -3077,12 +3135,22 @@ def build_daily_reward_log(date="", account="", identity="", command="", limit=3
     outcomes = {}
     result_rows = []
     for item in rows:
+        command_text = str(item["command"] or "")
+        command_root = reward_command_root(command_text)
+        raw_text = str(item["clean"] or item["excerpt"] or "")
         try:
-            rewards = json.loads(item["rewards_json"] or "{}")
-            if not isinstance(rewards, dict):
-                rewards = {}
+            stored_rewards = json.loads(item["rewards_json"] or "{}")
+            if not isinstance(stored_rewards, dict):
+                stored_rewards = {}
         except Exception:
-            rewards = {}
+            stored_rewards = {}
+        if command_root == ".支援慕兰" and raw_text and not is_mulan_settlement_text(raw_text):
+            # Historical rows sometimes persisted the short departure acknowledgement
+            # ("正赶往天南边境") as if it were a reward settlement.
+            continue
+        reparsed_rewards = daily_reward_items_for_command(command_text, raw_text) if raw_text else {}
+        trust_empty_reparse = trust_empty_reward_reparse(command_text, raw_text)
+        rewards = reparsed_rewards if reparsed_rewards or trust_empty_reparse else normalize_reward_items(stored_rewards)
         for name, value in rewards.items():
             try:
                 summary_rewards[name] = int(summary_rewards.get(name, 0) or 0) + int(value or 0)
@@ -3099,7 +3167,7 @@ def build_daily_reward_log(date="", account="", identity="", command="", limit=3
             "time": item["event_time"],
             "identity": item["identity"] or "主魂",
             "username": command_record_username(item["account"], item["identity"] or "主魂"),
-            "command": item["command"],
+            "command": command_text,
             "source": item["source"] or "",
             "outcome": outcome,
             "final": bool(item["final"]),
@@ -4663,7 +4731,7 @@ def red_packets(username: str = Depends(authenticate)):
 
 @app.get("/api/automation-settings")
 def automation_settings_dashboard(username: str = Depends(authenticate)):
-    """Return world-boss identity switches and the Mulan support mode."""
+    """Return shared Boss, Mulan, and Mini App fishing settings."""
     return automation_dashboard_payload()
 
 
@@ -4674,11 +4742,17 @@ async def automation_settings_control(
 ):
     participants = payload.get("world_boss_participants")
     mode = payload.get("mulan_support_mode")
+    fishing = payload.get("miniapp_fishing")
+    fishing = fishing if isinstance(fishing, dict) else {}
     try:
         with AUTOMATION_SETTINGS_LOCK:
             settings = save_automation_settings(
                 world_boss_participants=participants,
                 mulan_support_mode=mode,
+                miniapp_fishing_enabled=fishing.get("enabled"),
+                miniapp_fishing_pond=fishing.get("pond"),
+                miniapp_fishing_bait=fishing.get("bait"),
+                miniapp_fishing_chum=fishing.get("chum"),
                 updated_by=username,
             )
     except ValueError as exc:
@@ -4687,6 +4761,9 @@ async def automation_settings_control(
             "invalid world boss participant": "Boss 参战身份无效",
             "multiple world boss identities per account": "每个账号最多选择一个 Boss 参战身份",
             "invalid Mulan support mode": "慕兰支援参数必须是斥候、破灯、奇袭或护阵",
+            "invalid Mini App fishing pond": "灵溪垂钓地点无效",
+            "invalid Mini App fishing bait": "灵溪垂钓鱼饵无效",
+            "invalid Mini App fishing chum": "灵溪垂钓窝料无效",
         }
         return {"success": False, "msg": messages.get(str(exc), "自动化设置无效")}
     with STATUS_LOCK:
@@ -4789,6 +4866,29 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
             bool(data.get("queues", {}).get(queue_key, {}).get("enabled"))
             if queue_key else None
         ),
+        "updated_by": username,
+    }
+
+
+@app.post("/api/duels/settings")
+async def duel_settings_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Update the global queue cadence and same-target duel interval."""
+    try:
+        data = set_duel_intervals(
+            payload.get("interval_seconds"),
+            payload.get("target_interval_seconds"),
+        )
+    except ValueError:
+        return {
+            "success": False,
+            "msg": "斗法间隔必须是 1 秒到 7 天之间的有效数字",
+        }
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "interval_seconds": int(data.get("interval_seconds") or 0),
+        "target_interval_seconds": int(data.get("target_interval_seconds") or 0),
         "updated_by": username,
     }
 
@@ -4951,29 +5051,28 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
             }
         account_controls = data.setdefault(account, {})
         identity_controls = account_controls.setdefault(identity, {})
-        if disabled:
-            identity_controls[control_key] = {
-                "disabled": True,
+        old_entry = identity_controls.get(control_key, {})
+        stored_entry = dict(old_entry) if isinstance(old_entry, dict) else {}
+        persist_entry = control_key == BEAST_BORDER_PATROL_CONTROL_KEY
+        if disabled or default_paused or persist_entry:
+            stored_entry.update({
+                "disabled": disabled,
                 "command": command,
                 "label": label,
                 "updated_at": datetime.now().strftime(TIME_FORMAT),
                 "updated_by": username,
-            }
+            })
+            if persist_entry:
+                stored_entry["patrol_mode"] = normalize_beast_border_patrol_mode(
+                    payload.get("patrol_mode") or stored_entry.get("patrol_mode")
+                )
+            identity_controls[control_key] = stored_entry
         else:
-            if default_paused:
-                identity_controls[control_key] = {
-                    "disabled": False,
-                    "command": command,
-                    "label": label,
-                    "updated_at": datetime.now().strftime(TIME_FORMAT),
-                    "updated_by": username,
-                }
-            else:
-                identity_controls.pop(control_key, None)
-                if not identity_controls:
-                    account_controls.pop(identity, None)
-                if not account_controls:
-                    data.pop(account, None)
+            identity_controls.pop(control_key, None)
+            if not identity_controls:
+                account_controls.pop(identity, None)
+            if not account_controls:
+                data.pop(account, None)
         save_command_controls(data)
     with STATUS_LOCK:
         STATUS_CACHE.clear()
@@ -4984,6 +5083,51 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "control_key": control_key,
         "disabled": disabled,
     }
+
+
+@app.post("/api/beast-border-patrol-mode")
+async def set_beast_border_patrol_mode(
+    payload: dict = Body(...),
+    username: str = Depends(authenticate),
+):
+    """Set the patrol route while keeping stamina-based beast selection automatic."""
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "主魂").strip() or "主魂"
+    mode = str(payload.get("mode") or "").strip()
+    if account not in {"main", "xiaohao"}:
+        return {"success": False, "msg": "该账号没有自动灵兽巡边"}
+    if identity != "主魂":
+        return {"success": False, "msg": "灵兽巡边仅由主魂执行"}
+    if mode not in BEAST_BORDER_PATROL_MODES:
+        return {"success": False, "msg": "巡边路线必须是斥候、护粮或袭营"}
+
+    with COMMAND_CONTROL_LOCK:
+        data = load_command_controls()
+        identity_controls = data.setdefault(account, {}).setdefault(identity, {})
+        old_entry = identity_controls.get(BEAST_BORDER_PATROL_CONTROL_KEY, {})
+        entry = dict(old_entry) if isinstance(old_entry, dict) else {
+            "disabled": bool(old_entry),
+        }
+        entry.update({
+            "command": f".灵兽巡边 <灵兽> {mode}",
+            "label": "灵兽巡边",
+            "patrol_mode": mode,
+            "updated_at": datetime.now().strftime(TIME_FORMAT),
+            "updated_by": username,
+        })
+        entry.setdefault("disabled", False)
+        identity_controls[BEAST_BORDER_PATROL_CONTROL_KEY] = entry
+        save_command_controls(data)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "account": account,
+        "identity": identity,
+        "mode": mode,
+        "updated_by": username,
+    }
+
 
 @app.post("/api/fishing-auto-bait")
 async def set_fishing_auto_bait(payload: dict = Body(...), username: str = Depends(authenticate)):

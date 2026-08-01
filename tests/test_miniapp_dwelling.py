@@ -416,7 +416,12 @@ class MiniAppDwellingTests(unittest.TestCase):
                 return {
                     "ok": True,
                     "state": {"canChallenge": False},
-                    "replay": {"clearedCount": 20, "endFloor": 20, "failedFloor": 21},
+                    "replay": {
+                        "clearedCount": 20,
+                        "endFloor": 20,
+                        "failedFloor": 21,
+                        "report": "总收获:\n修为增加了 1200 点\n获得塔印 40 点。",
+                    },
                 }
             if path.endswith("/xianxia-dwelling/details"):
                 return {
@@ -483,6 +488,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(reveal[1]["index"], 6)
         combined = "\n".join(logger.info_messages)
         self.assertIn("OUT [Mini App | 素心子]:\n琉璃问心塔一念登塔", combined)
+        self.assertIn("奖励：修为+1,200｜塔印+40", combined)
         self.assertNotIn("洞府寻宝入府", combined)
         self.assertNotIn("洞府寻宝探查", combined)
         self.assertNotIn("洞府寻宝见好就收", combined)
@@ -800,7 +806,8 @@ class MiniAppDwellingTests(unittest.TestCase):
                 pass
 
         actor = Actor()
-        router = MiniAppCommandRouter(actor, "main")
+        logger = FakeLogger()
+        router = MiniAppCommandRouter(actor, "main", logger=logger)
         router.transport.identity_player_ids = {"主魂": 100, "素缘子": -200}
         router.transport.sect_farm_snapshot = AsyncMock(return_value={
             "domain": {
@@ -813,7 +820,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             }
         })
 
-        async def action(identity, action, plot_key="", star_name=""):
+        async def action(identity, action, plot_key="", star_name="", log_operation=True):
             if action == "soothe":
                 plots = [
                     {"key": "1", "status": "可收集"},
@@ -833,7 +840,8 @@ class MiniAppDwellingTests(unittest.TestCase):
                     {"key": "2", "name": "天雷星", "remainingSeconds": 3598},
                     {"key": "3", "name": "天雷星", "remainingSeconds": 3600},
                 ]
-                message = f"已在星位 {plot_key} 牵引{star_name}"
+                cost = 100 if plot_key == "2" else 200
+                message = f"已在星位 {plot_key} 牵引{star_name}，消耗修为 {cost}"
             return {
                 "ok": True,
                 "actionResult": {"ok": True, "rawMessage": message},
@@ -857,7 +865,14 @@ class MiniAppDwellingTests(unittest.TestCase):
         pull_calls = router.transport.sect_farm_action.await_args_list[-2:]
         self.assertEqual([call.kwargs["plot_key"] for call in pull_calls], ["2", "3"])
         self.assertTrue(all(call.kwargs["star_name"] == "天雷星" for call in pull_calls))
+        self.assertTrue(all(call.kwargs["log_operation"] is False for call in pull_calls))
         self.assertEqual(actor.rewards[0][0:2], ("素缘子", ".收集精华"))
+        combined = "\n".join(logger.info_messages)
+        self.assertEqual(combined.count("OUT [Mini App | 素缘子]:\n宗门灵圃牵引星辰"), 1)
+        self.assertEqual(combined.count("IN [Mini App | 素缘子]:\n宗门灵圃牵引星辰"), 1)
+        self.assertIn("宗门灵圃牵引星辰（2个星位）", combined)
+        self.assertIn("星位 2、3 已牵引天雷星，共 2 个引星盘", combined)
+        self.assertIn("消耗修为 300", combined)
 
     def test_router_star_farm_skips_collect_when_soothed_stars_are_still_maturing(self):
         actor = SimpleNamespace(

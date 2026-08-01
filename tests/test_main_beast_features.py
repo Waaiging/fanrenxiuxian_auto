@@ -7,6 +7,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import intelligent_cultivator
+import dashboard_server
 from dashboard_server import build_command_panels
 from main_beast_features import (
     ABYSS_CD_SECONDS,
@@ -89,6 +90,23 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertNotIn("大圣", [item["full_name"] for item in candidates])
         self.assertEqual(candidates[0]["full_name"], "灵狐")
 
+    def test_patrol_uses_dashboard_route_and_keeps_automatic_beast_selection(self):
+        self.actor.dashboard_command_option = lambda *args, **kwargs: "斥候"
+        self.actor.update_main_beast_cache = AsyncMock(return_value=True)
+        self.actor.normalize_main_beast_for_action = AsyncMock(return_value=True)
+        sent = []
+
+        async def send(command, **kwargs):
+            sent.append(command)
+            return "灵兽【灵狐】领命前往边境巡行，执行【斥候】。"
+
+        self.actor.send_and_wait_feedback = send
+
+        self.assertTrue(asyncio.run(self.actor.execute_main_beast_patrol()))
+        self.assertEqual(sent, [".灵兽巡边 灵狐 斥候"])
+        self.assertEqual(self.actor.state["beast_border_patrol_name"], "灵狐")
+        self.assertEqual(self.actor.state["beast_border_patrol_mode"], "斥候")
+
     def test_manual_responses_record_real_cooldowns(self):
         self.assertTrue(self.actor.record_manual_beast_command_response(
             ".寻觅灵兽",
@@ -137,7 +155,10 @@ class MainBeastFeatureTests(unittest.TestCase):
 
     def test_dashboard_main_panel_is_wanling_and_has_requested_entries(self):
         state = {**main_beast_default_state(), "done": [], "avatars": {}}
-        panel = build_command_panels("main", state)[0]
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            dashboard_server, "CONFIG_DIR", tmpdir
+        ):
+            panel = build_command_panels("main", state)[0]
         commands = {item["command"] for item in panel["commands"]}
         self.assertTrue({
             ".寻觅灵兽",
@@ -152,6 +173,9 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertNotIn(".我的灵兽", commands)
         miniapp = next(item for item in panel["commands"] if item["command"] == "miniapp:spirit-beast")
         self.assertEqual(miniapp["dashboard_action"], "miniapp-beast-refresh")
+        patrol = next(item for item in panel["commands"] if item.get("control_key") == ".灵兽巡边 *")
+        self.assertEqual(patrol["patrol_mode_options"], ["斥候", "护粮", "袭营"])
+        self.assertEqual(patrol["patrol_mode_value"], "袭营")
 
     def test_miniapp_sync_replaces_deprecated_roster_command(self):
         self.actor.config = {

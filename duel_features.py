@@ -27,6 +27,8 @@ DUEL_DB_FILE = os.path.join(CONFIG_DIR, "message_events.sqlite3")
 XIAOHAO_STATE_FILE = os.path.join(CONFIG_DIR, "state_xiaohao.json")
 DUEL_INTERVAL_SECONDS = 6 * 60
 DUEL_TARGET_INTERVAL_SECONDS = 11 * 60
+DUEL_INTERVAL_MIN_SECONDS = 1
+DUEL_INTERVAL_MAX_SECONDS = 7 * 24 * 3600
 DUEL_DAILY_LIMIT = 10
 DUEL_LEASE_SECONDS = 4 * 60
 DUEL_RESULT_WAIT_SECONDS = 90
@@ -38,7 +40,7 @@ DUEL_ROLLING_TARGET_COOLDOWN_SECONDS = 24 * 3600
 DUEL_MULTI_MAX_TARGETS = 20
 DUEL_MULTI_MAX_COUNT = 999
 DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
-DUEL_STATE_VERSION = 3
+DUEL_STATE_VERSION = 4
 DUEL_ROTATION_QUEUE_KEY = "rotation"
 DUEL_ROTATION_DEFAULT_TARGET = "Waaiging"
 DUEL_LEGACY_QUEUE_TARGETS = {
@@ -108,6 +110,18 @@ def duel_time(value=None):
 
 def duel_date(value=None):
     return (value or duel_now()).strftime("%Y-%m-%d")
+
+
+def duel_duration_label(seconds):
+    seconds = max(0, int(seconds or 0))
+    if seconds and seconds % 3600 == 0:
+        return f"{seconds // 3600} 小时"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes and not remainder:
+        return f"{minutes} 分钟"
+    if minutes:
+        return f"{minutes}分{remainder}秒"
+    return f"{seconds} 秒"
 
 
 def parse_duel_time(value):
@@ -271,6 +285,8 @@ def duel_default_state():
         "enabled": True,
         "date": duel_date(),
         "updated_at": duel_time(),
+        "interval_seconds": DUEL_INTERVAL_SECONDS,
+        "target_interval_seconds": DUEL_TARGET_INTERVAL_SECONDS,
         "target_next_at": {},
         "queues": {key: _new_queue_state(key) for key in DUEL_QUEUES},
         "multi": _new_multi_state(),
@@ -403,6 +419,17 @@ def _ensure_duel_state_shape(data, reset_daily=True):
     data = _migrate_legacy_duel_queues(data)
     data["version"] = DUEL_STATE_VERSION
     data.setdefault("enabled", True)
+    for field, default in (
+        ("interval_seconds", DUEL_INTERVAL_SECONDS),
+        ("target_interval_seconds", DUEL_TARGET_INTERVAL_SECONDS),
+    ):
+        try:
+            seconds = int(round(float(data.get(field, default))))
+        except (TypeError, ValueError):
+            seconds = default
+        if seconds < DUEL_INTERVAL_MIN_SECONDS or seconds > DUEL_INTERVAL_MAX_SECONDS:
+            seconds = default
+        data[field] = seconds
     target_next_at = data.setdefault("target_next_at", {})
     if not isinstance(target_next_at, dict):
         target_next_at = {}
@@ -583,6 +610,43 @@ def load_duel_state(write_back=False):
         if write_back or not os.path.exists(DUEL_STATE_FILE):
             data["updated_at"] = duel_time()
             _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def duel_interval_seconds(data):
+    try:
+        return int(data.get("interval_seconds", DUEL_INTERVAL_SECONDS))
+    except (AttributeError, TypeError, ValueError):
+        return DUEL_INTERVAL_SECONDS
+
+
+def duel_target_interval_seconds(data):
+    try:
+        return int(data.get("target_interval_seconds", DUEL_TARGET_INTERVAL_SECONDS))
+    except (AttributeError, TypeError, ValueError):
+        return DUEL_TARGET_INTERVAL_SECONDS
+
+
+def _validated_duel_interval_seconds(value):
+    try:
+        seconds = int(round(float(value)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid duel interval") from exc
+    if seconds < DUEL_INTERVAL_MIN_SECONDS or seconds > DUEL_INTERVAL_MAX_SECONDS:
+        raise ValueError("invalid duel interval")
+    return seconds
+
+
+def set_duel_intervals(interval_seconds, target_interval_seconds):
+    """Persist the queue cadence and per-target cooldown used by all duel plans."""
+    interval_seconds = _validated_duel_interval_seconds(interval_seconds)
+    target_interval_seconds = _validated_duel_interval_seconds(target_interval_seconds)
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        data["interval_seconds"] = interval_seconds
+        data["target_interval_seconds"] = target_interval_seconds
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
         return data
 
 
@@ -969,6 +1033,8 @@ def release_duel_target_preparation(claim, detail=""):
 
 def _reserve_multi_duel_locked(data, account, now):
     multi = data["multi"]
+    interval_seconds = duel_interval_seconds(data)
+    target_interval_seconds = duel_target_interval_seconds(data)
     dirty = False
     if (
         not multi.get("enabled")
@@ -1019,7 +1085,9 @@ def _reserve_multi_duel_locked(data, account, now):
         if blocked_targets:
             blocked_until, target_username = min(blocked_targets, key=lambda item: item[0])
             multi["next_at"] = duel_time(blocked_until)
-            multi["last_result"] = f"等待 @{target_username} 满足 11 分钟间隔"
+            multi["last_result"] = (
+                f"等待 @{target_username} 满足 {duel_duration_label(target_interval_seconds)}间隔"
+            )
             return None, True
         return None, dirty
 
@@ -1082,10 +1150,10 @@ def _reserve_multi_duel_locked(data, account, now):
 
     run_id = uuid.uuid4().hex
     multi["cursor"] = (selected_index + 1) % len(targets)
-    multi["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
+    multi["next_at"] = duel_time(now + timedelta(seconds=interval_seconds))
     multi["last_attempt_at"] = duel_time(now)
     data.setdefault("target_next_at", {})[target_username.lower()] = duel_time(
-        now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
+        now + timedelta(seconds=target_interval_seconds)
     )
     preparation_run_id = ""
     reply_to_msg_id = None
@@ -1308,6 +1376,8 @@ def reserve_duel_for_account(account):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        interval_seconds = duel_interval_seconds(data)
+        target_interval_seconds = duel_target_interval_seconds(data)
         if not data.get("enabled"):
             return None
         multi_reservation, dirty = _reserve_multi_duel_locked(data, account, now)
@@ -1502,10 +1572,10 @@ def reserve_duel_for_account(account):
 
             run_id = uuid.uuid4().hex
             queue["cursor"] = (selected_index + 1) % len(participants)
-            queue["next_at"] = duel_time(now + timedelta(seconds=DUEL_INTERVAL_SECONDS))
+            queue["next_at"] = duel_time(now + timedelta(seconds=interval_seconds))
             queue["last_attempt_at"] = duel_time(now)
             data.setdefault("target_next_at", {})[target_username.lower()] = duel_time(
-                now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
+                now + timedelta(seconds=target_interval_seconds)
             )
             queue["in_flight"] = {
                 "run_id": run_id,
@@ -1555,6 +1625,8 @@ def finish_duel_reservation(reservation, result):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        interval_seconds = duel_interval_seconds(data)
+        target_interval_seconds = duel_target_interval_seconds(data)
         if reservation.get("queue_key") == "multi":
             multi = data["multi"]
             in_flight = multi.get("in_flight") or {}
@@ -1609,7 +1681,7 @@ def finish_duel_reservation(reservation, result):
                 multi["next_at"] = _next_day_time(now)
             else:
                 multi["next_at"] = duel_time(
-                    now + timedelta(seconds=DUEL_INTERVAL_SECONDS)
+                    now + timedelta(seconds=interval_seconds)
                 )
 
             target_key = normalize_duel_target(
@@ -1619,12 +1691,12 @@ def finish_duel_reservation(reservation, result):
             if status == "cooldown":
                 target_ready = now + timedelta(
                     seconds=max(
-                        DUEL_TARGET_INTERVAL_SECONDS,
+                        target_interval_seconds,
                         int(result.get("wait_seconds") or 0),
                     )
                 )
             else:
-                target_ready = now + timedelta(seconds=DUEL_TARGET_INTERVAL_SECONDS)
+                target_ready = now + timedelta(seconds=target_interval_seconds)
             reserved_ready = parse_duel_time(target_next_at.get(target_key))
             target_next_at[target_key] = duel_time(
                 max(target_ready, reserved_ready) if reserved_ready else target_ready
@@ -1663,7 +1735,7 @@ def finish_duel_reservation(reservation, result):
         target_preparation = queue.get("target_preparation") or {}
         if target_preparation.get("run_id") == reservation.get("preparation_run_id"):
             queue["target_preparation"] = {}
-        retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else DUEL_INTERVAL_SECONDS
+        retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else interval_seconds
         if status == "cooldown":
             retry_seconds = max(retry_seconds, int(result.get("wait_seconds") or 0))
         completed_next_at = now + timedelta(seconds=retry_seconds)
@@ -1679,7 +1751,7 @@ def finish_duel_reservation(reservation, result):
         target_next_at = data.setdefault("target_next_at", {})
         reserved_target_next_at = parse_duel_time(target_next_at.get(target_key))
         target_completed_at = now + timedelta(
-            seconds=max(DUEL_TARGET_INTERVAL_SECONDS, retry_seconds)
+            seconds=max(target_interval_seconds, retry_seconds)
         )
         target_next_at[target_key] = (
             duel_time(max(target_completed_at, reserved_target_next_at))
@@ -2118,8 +2190,10 @@ def duel_dashboard_payload(date="", limit=200):
     return {
         "enabled": bool(data.get("enabled")),
         "date": query_date,
-        "interval_seconds": DUEL_INTERVAL_SECONDS,
-        "target_interval_seconds": DUEL_TARGET_INTERVAL_SECONDS,
+        "interval_seconds": duel_interval_seconds(data),
+        "target_interval_seconds": duel_target_interval_seconds(data),
+        "interval_min_seconds": DUEL_INTERVAL_MIN_SECONDS,
+        "interval_max_seconds": DUEL_INTERVAL_MAX_SECONDS,
         "daily_limit": DUEL_DAILY_LIMIT,
         "target_options": target_options,
         "identity_options": identity_options,

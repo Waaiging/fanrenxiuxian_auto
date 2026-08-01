@@ -19,6 +19,7 @@ from miniapp_beast import (
     normalize_spirit_beast_roster,
     request_webview_init_data,
 )
+from reward_parsing import compact_reward_summary, daily_reward_items_for_command
 
 
 AUTH_ERROR_CODES = {
@@ -280,6 +281,25 @@ def spirit_beast_abyss_result_text(payload: Any) -> str:
     return "，".join(parts)[:500]
 
 
+def pagoda_challenge_result_text(payload: Any) -> str:
+    """Return floor progress plus the actual pagoda reward/penalty summary."""
+    replay = payload.get("replay") if isinstance(payload, dict) else {}
+    replay = replay if isinstance(replay, dict) else {}
+    cleared = int(replay.get("clearedCount") or 0)
+    end_floor = int(replay.get("endFloor") or 0)
+    failed_floor = int(replay.get("failedFloor") or 0)
+    summary = f"通过 {cleared} 层，抵达第 {end_floor} 层"
+    if failed_floor > 0:
+        summary += f"，止步第 {failed_floor} 层"
+    report = str(replay.get("report") or "").strip()
+    reward_summary = compact_reward_summary(
+        daily_reward_items_for_command(".闯塔", report)
+    )
+    if reward_summary:
+        summary += f"；奖励：{reward_summary}"
+    return summary[:500]
+
+
 def sect_farm_snapshot_status(payload: Any) -> dict[str, Any]:
     """Normalize one sect-farm payload and derive its next useful wake-up."""
     domain = payload.get("domain") if isinstance(payload, dict) else None
@@ -322,6 +342,31 @@ def sect_farm_snapshot_status(payload: Any) -> dict[str, Any]:
         "empty_keys": empty,
         "next_wait_seconds": next_wait_seconds,
     }
+
+
+def sect_farm_pull_batch_operation(plot_keys: Any) -> str:
+    keys = [str(key).strip() for key in (plot_keys or []) if str(key).strip()]
+    return f"宗门灵圃牵引星辰（{len(keys)}个星位）"
+
+
+def sect_farm_pull_batch_result_text(
+    plot_keys: Any,
+    star_name: str,
+    result_texts: Any = None,
+) -> str:
+    keys = [str(key).strip() for key in (plot_keys or []) if str(key).strip()]
+    target = str(star_name or "星辰").strip() or "星辰"
+    summary = f"星位 {'、'.join(keys)} 已牵引{target}，共 {len(keys)} 个引星盘"
+    cultivation_cost = 0
+    for text in result_texts or []:
+        for amount in re.findall(r"消耗修为\s*([\d,]+)", str(text or "").replace("**", "")):
+            try:
+                cultivation_cost += int(amount.replace(",", ""))
+            except ValueError:
+                continue
+    if cultivation_cost:
+        summary += f"，消耗修为 {cultivation_cost:,}"
+    return summary
 
 
 class MiniAppDwellingTransport:
@@ -857,6 +902,7 @@ class MiniAppDwellingTransport:
         action: str,
         plot_key: str = "",
         star_name: str = "",
+        log_operation: bool = True,
     ) -> dict[str, Any]:
         if action not in {"collect", "soothe", "pull"}:
             raise MiniAppBeastError("sect_farm_action_not_allowed")
@@ -869,16 +915,196 @@ class MiniAppDwellingTransport:
         detail = str(plot_key or star_name or "").strip()
         operation = f"宗门灵圃{action_name}{f'（{detail}）' if detail else ''}"
         async with self._lock:
+            request = lambda: self._external_request_unlocked(
+                identity,
+                "sect_farm",
+                "farm_",
+                "/api/miniapp/xianxia-sect-farm/action",
+                payload=body,
+            )
+            if log_operation:
+                return await self._logged_operation(
+                    identity,
+                    operation,
+                    request,
+                )
+            return await request()
+
+    async def _fishing_request_unlocked(
+        self,
+        identity: str,
+        token: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        if not self.init_data or not self.start_payload:
+            await self._initialize_unlocked()
+        body = {"token": str(token or "").strip(), "initData": self.init_data}
+        if not body["token"]:
+            raise MiniAppBeastError("fishing_token_missing")
+        body.update(payload or {})
+        try:
+            return await _post_json(
+                self.origin,
+                path,
+                body,
+                int(timeout or self.timeout),
+                post_json=self.post_json,
+            )
+        except MiniAppBeastError as exc:
+            if exc.code not in AUTH_ERROR_CODES:
+                raise
+            # A fishing token is signed together with the current initData.
+            # Refresh both on the next cycle instead of pairing an old cast
+            # token with newly signed Telegram data.
+            await self._initialize_unlocked()
+            self._external_tokens.pop((self.player_id(identity), "fishing"), None)
+            raise MiniAppBeastError("fishing_auth_refreshed") from exc
+
+    async def fishing_entry(self, identity: str = "主魂") -> tuple[str, dict[str, Any]]:
+        """Create or resume the identity's fishing lobby/cast."""
+        async with self._lock:
+            token = await self._external_token_unlocked(
+                identity,
+                "fishing",
+                "fish_",
+                force=True,
+            )
+            payload = await self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/start",
+            )
+            return str(payload.get("token") or token), payload
+
+    async def fishing_start(
+        self,
+        identity: str,
+        token: str,
+    ) -> tuple[str, dict[str, Any]]:
+        async with self._lock:
+            payload = await self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/start",
+            )
+            return str(payload.get("token") or token), payload
+
+    async def fishing_shop(self, identity: str, token: str) -> dict[str, Any]:
+        async with self._lock:
+            return await self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/shop",
+            )
+
+    async def fishing_buy_bait(
+        self,
+        identity: str,
+        token: str,
+        bait_key: str,
+        quantity: int,
+    ) -> dict[str, Any]:
+        bait_key = str(bait_key or "").strip()
+        quantity = int(quantity or 0)
+        if not bait_key or quantity < 1 or quantity > 99:
+            raise MiniAppBeastError("fishing_quantity_invalid")
+        async with self._lock:
             return await self._logged_operation(
                 identity,
-                operation,
-                lambda: self._external_request_unlocked(
+                f"灵溪垂钓购买鱼饵（{bait_key} x{quantity}）",
+                lambda: self._fishing_request_unlocked(
                     identity,
-                    "sect_farm",
-                    "farm_",
-                    "/api/miniapp/xianxia-sect-farm/action",
-                    payload=body,
+                    token,
+                    "/api/miniapp/xianxia-fishing/buy-bait",
+                    {"baitKey": bait_key, "quantity": quantity},
                 ),
+            )
+
+    async def fishing_apply_chum(
+        self,
+        identity: str,
+        token: str,
+        chum_key: str,
+    ) -> dict[str, Any]:
+        chum_key = str(chum_key or "").strip()
+        if not chum_key:
+            raise MiniAppBeastError("fishing_chum_invalid")
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                f"灵溪垂钓打窝（{chum_key}）",
+                lambda: self._fishing_request_unlocked(
+                    identity,
+                    token,
+                    "/api/miniapp/xianxia-fishing/chum",
+                    {"chumKey": chum_key},
+                ),
+            )
+
+    async def fishing_next_cast(
+        self,
+        identity: str,
+        token: str,
+        pond_key: str,
+        bait_item_id: str,
+        log_operation: bool = True,
+    ) -> tuple[str, dict[str, Any]]:
+        pond_key = str(pond_key or "").strip()
+        bait_item_id = str(bait_item_id or "").strip()
+        if not pond_key:
+            raise MiniAppBeastError("fishing_pond_invalid")
+        if not bait_item_id:
+            raise MiniAppBeastError("fishing_bait_invalid")
+        async with self._lock:
+            request = lambda: self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/next",
+                {"pondKey": pond_key, "baitItemId": bait_item_id},
+            )
+            payload = (
+                await self._logged_operation(
+                    identity,
+                    f"灵溪垂钓开竿（{pond_key} · {bait_item_id}）",
+                    request,
+                )
+                if log_operation
+                else await request()
+            )
+            return str(payload.get("token") or token), payload
+
+    async def fishing_finish(
+        self,
+        identity: str,
+        token: str,
+        proof: dict[str, Any],
+        log_operation: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(proof, dict) or not proof.get("challengeId"):
+            raise MiniAppBeastError("fishing_proof_invalid")
+        async with self._lock:
+            request = lambda: self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/finish",
+                {"fishingProof": proof},
+            )
+            if log_operation:
+                return await self._logged_operation(
+                    identity,
+                    "灵溪垂钓自动收线",
+                    request,
+                )
+            return await request()
+
+    async def fishing_result(self, identity: str, token: str) -> dict[str, Any]:
+        async with self._lock:
+            return await self._fishing_request_unlocked(
+                identity,
+                token,
+                "/api/miniapp/xianxia-fishing/result",
             )
 
     async def pagoda_snapshot(self, identity: str) -> dict[str, Any]:
@@ -894,17 +1120,6 @@ class MiniAppDwellingTransport:
     async def pagoda_challenge(self, identity: str) -> dict[str, Any]:
         """Run the identity's single scheduled daily pagoda challenge."""
 
-        def summarize(payload: dict[str, Any]) -> str:
-            replay = payload.get("replay") if isinstance(payload, dict) else {}
-            replay = replay if isinstance(replay, dict) else {}
-            cleared = int(replay.get("clearedCount") or 0)
-            end_floor = int(replay.get("endFloor") or 0)
-            failed_floor = int(replay.get("failedFloor") or 0)
-            summary = f"通过 {cleared} 层，抵达第 {end_floor} 层"
-            if failed_floor > 0:
-                summary += f"，止步第 {failed_floor} 层"
-            return summary
-
         async with self._lock:
             return await self._logged_operation(
                 identity,
@@ -916,7 +1131,7 @@ class MiniAppDwellingTransport:
                     "/api/miniapp/xianxia-pagoda/challenge",
                     timeout=max(60, self.timeout),
                 ),
-                summarize=summarize,
+                summarize=pagoda_challenge_result_text,
             )
 
     async def hunt_snapshot(self, identity: str) -> dict[str, Any]:

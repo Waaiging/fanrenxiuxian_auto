@@ -30,6 +30,8 @@ ABYSS_CD_SECONDS = 6 * 3600
 PASTURE_CD_SECONDS = 4 * 3600 + 60
 INTERACTION_CD_SECONDS = 90 * 60
 BORDER_PATROL_CD_SECONDS = 75 * 60
+BEAST_BORDER_PATROL_MODES = ("斥候", "护粮", "袭营")
+BEAST_BORDER_PATROL_DEFAULT_MODE = "袭营"
 ACTION_RETRY_SECONDS = 10 * 60
 ABYSS_MIN_STAMINA = 30
 BORDER_PATROL_MIN_STAMINA = 24
@@ -87,7 +89,7 @@ def main_beast_default_state():
         "last_beast_border_patrol_time": "",
         "next_beast_border_patrol_time": "",
         "beast_border_patrol_name": "",
-        "beast_border_patrol_mode": "袭营",
+        "beast_border_patrol_mode": BEAST_BORDER_PATROL_DEFAULT_MODE,
         "best_beast_name": "",
         "best_beast_power": 0,
         "best_beast_status": "",
@@ -522,6 +524,17 @@ class MainBeastMixin:
         checker = getattr(self, "dashboard_command_paused", None)
         return bool(checker and checker(command, "主魂"))
 
+    def main_beast_patrol_mode(self):
+        reader = getattr(self, "dashboard_command_option", None)
+        mode = reader(
+            ".灵兽巡边 <灵兽> 袭营",
+            "patrol_mode",
+            BEAST_BORDER_PATROL_DEFAULT_MODE,
+            "主魂",
+        ) if callable(reader) else BEAST_BORDER_PATROL_DEFAULT_MODE
+        mode = str(mode or "").strip()
+        return mode if mode in BEAST_BORDER_PATROL_MODES else BEAST_BORDER_PATROL_DEFAULT_MODE
+
     def record_main_hunt_response(self, text):
         clean = str(text or "").replace("**", "")
         if not clean:
@@ -814,6 +827,8 @@ class MainBeastMixin:
         return False
 
     async def execute_main_beast_patrol(self):
+        mode = self.main_beast_patrol_mode()
+        self.state["beast_border_patrol_mode"] = mode
         active_name = str(self.state.get("beast_border_patrol_name") or "")
         if active_name:
             response = await self.send_and_wait_feedback(".巡边归来", timeout=60, max_retries=0)
@@ -832,7 +847,9 @@ class MainBeastMixin:
             attempted.add(name)
             if not await self.normalize_main_beast_for_action(candidate, "patrol"):
                 continue
-            response = await self.send_and_wait_feedback(f".灵兽巡边 {name} 袭营", timeout=60, max_retries=0)
+            response = await self.send_and_wait_feedback(
+                f".灵兽巡边 {name} {mode}", timeout=60, max_retries=0
+            )
             if self.record_main_patrol_response(name, self.main_beast_response_text(response)):
                 return True
 
@@ -910,7 +927,10 @@ class MainBeastMixin:
                     continue
                 async with self.beast_lock:
                     due_patrol = self.main_beast_due("next_beast_border_patrol_time", "last_beast_border_patrol_time", BORDER_PATROL_CD_SECONDS)
-                    if due_patrol and not self.main_beast_action_paused(".灵兽巡边 <灵兽> 袭营"):
+                    patrol_mode = self.main_beast_patrol_mode()
+                    if due_patrol and not self.main_beast_action_paused(
+                        f".灵兽巡边 <灵兽> {patrol_mode}"
+                    ):
                         await self.execute_main_beast_patrol()
                         await asyncio.sleep(2)
                 future_times = []

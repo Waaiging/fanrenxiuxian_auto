@@ -34,6 +34,8 @@ from miniapp_dwelling import (
     miniapp_operation_result_text,
     normalize_miniapp_command,
     sect_farm_action_result_ok,
+    sect_farm_pull_batch_operation,
+    sect_farm_pull_batch_result_text,
     sect_farm_snapshot_status,
 )
 
@@ -512,13 +514,15 @@ class RestrictedMiniAppWorker:
         self,
         action: str,
         plot_key: str = "",
+        log_operation: bool = True,
     ) -> tuple[dict[str, Any], tuple[int, int, list[str], int]]:
-        payload = await self.transport.sect_farm_action(
-            STAR_IDENTITY,
-            action,
-            plot_key=plot_key,
-            star_name=STAR_TARGET if action == "pull" else "",
-        )
+        action_kwargs = {
+            "plot_key": plot_key,
+            "star_name": STAR_TARGET if action == "pull" else "",
+        }
+        if not log_operation:
+            action_kwargs["log_operation"] = False
+        payload = await self.transport.sect_farm_action(STAR_IDENTITY, action, **action_kwargs)
         if not sect_farm_action_result_ok(payload, action):
             raise MiniAppBeastError(f"star_farm_{action}_failed")
         state = identity_state(self.actor, STAR_IDENTITY)
@@ -541,12 +545,27 @@ class RestrictedMiniAppWorker:
                     _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
                     if ready > 0:
                         _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
-                for plot_key in empty:
-                    _, (ready, troubled, _, next_wait) = await self._star_action(
-                        "pull",
-                        plot_key=plot_key,
+                pull_keys = list(empty)
+                if pull_keys:
+                    operation = sect_farm_pull_batch_operation(pull_keys)
+                    self.log.info("OUT [Mini App | %s]:\n%s", STAR_IDENTITY, operation)
+                    pull_results = []
+                    for plot_key in pull_keys:
+                        pull_payload, (ready, troubled, _, next_wait) = await self._star_action(
+                            "pull",
+                            plot_key=plot_key,
+                            log_operation=False,
+                        )
+                        pull_results.append(
+                            command_result_text(pull_payload) or miniapp_operation_result_text(pull_payload)
+                        )
+                        await asyncio.sleep(1)
+                    self.log.info(
+                        "IN [Mini App | %s]:\n%s -> %s",
+                        STAR_IDENTITY,
+                        operation,
+                        sect_farm_pull_batch_result_text(pull_keys, STAR_TARGET, pull_results),
                     )
-                    await asyncio.sleep(1)
                 wait = (
                     next_wait + STAR_FARM_WAKE_GRACE_SECONDS
                     if next_wait > 0

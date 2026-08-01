@@ -2629,6 +2629,35 @@ def command_control_entry_disabled(entry):
     return bool(entry)
 
 
+def dashboard_command_control_entry(actor, command, identity=None):
+    """Return the first matching dashboard control entry for one command."""
+    account = actor_account_key(actor)
+    if not account:
+        return None
+    controls = load_command_controls().get(account, {})
+    if not isinstance(controls, dict):
+        return None
+    identities = [str(identity or getattr(actor, "current_identity", "主魂") or "主魂"), "*"]
+    keys = command_control_candidate_keys(command)
+    for ident in identities:
+        ident_controls = controls.get(ident, {})
+        if not isinstance(ident_controls, dict):
+            continue
+        for key in keys:
+            if key in ident_controls:
+                return ident_controls.get(key)
+    return None
+
+
+def dashboard_command_control_value(actor, command, field, default=None, identity=None):
+    """Read a non-toggle option stored alongside a dashboard command control."""
+    entry = dashboard_command_control_entry(actor, command, identity=identity)
+    if not isinstance(entry, dict):
+        return default
+    value = entry.get(field, default)
+    return default if value is None else value
+
+
 def dashboard_command_disabled(actor, command, identity=None):
     """判断 dashboard 是否临时暂停了该账号/身份/指令。"""
     account = actor_account_key(actor)

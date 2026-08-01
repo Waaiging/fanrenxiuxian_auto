@@ -33,6 +33,7 @@ from log_utils import (
     MESSAGE_EVENTS_DB_FILE,
     actor_account_key,
     avatar_marker_identity_from_text,
+    dashboard_command_control_value,
     dashboard_command_disabled,
     identity_from_single_username_mention,
     identity_plain_usernames,
@@ -68,6 +69,17 @@ from command_modules import (
 )
 from command_feedback import is_retired_auto_command
 from automation_settings import mulan_support_command as configured_mulan_support_command
+from reward_parsing import (
+    clean_reward_text as shared_clean_reward_text,
+    context_reward_items as shared_context_reward_items,
+    daily_reward_items_for_command as shared_daily_reward_items_for_command,
+    field_training_settlement_text as shared_field_training_settlement_text,
+    is_mulan_settlement_text,
+    parse_reward_items as shared_parse_reward_items,
+    reward_text_for_command as shared_reward_text_for_command,
+    rift_settlement_text as shared_rift_settlement_text,
+    trust_empty_reward_reparse,
+)
 
 
 # =====================================================================
@@ -654,7 +666,7 @@ class CommonCommandMixin:
         return bool(config.get("daily_reward_summary_push", False))
 
     def clean_reward_text(self, text):
-        return re.sub(r"[ \t]+", " ", str(text or "").replace("**", "").replace("`", "")).strip()
+        return shared_clean_reward_text(text)
 
     def daily_reward_edited_settlement_commands(self):
         return {
@@ -665,177 +677,49 @@ class CommonCommandMixin:
             ".元婴闭关",
             ".元婴出窍",
             ".问道",
+            ".支援慕兰",
+            ".闯塔",
         }
 
     def daily_reward_parse_text_for_command(self, command, text):
         """Return the text segment that should be counted for daily rewards."""
-        clean = self.clean_reward_text(text)
-        root = str(command or "").split()[0] if command else ""
-        if root == ".野外历练":
-            return self.daily_reward_field_training_settlement_text(clean)
-        if root == ".探寻裂缝":
-            return self.daily_reward_rift_settlement_text(clean)
-        return clean
+        return shared_reward_text_for_command(command, text)
 
     def daily_reward_field_training_settlement_text(self, text):
-        clean = self.clean_reward_text(text)
-        if not clean:
-            return ""
-
-        title = ""
-        title_match = re.search(r"【野外历练[^】]{0,30}】", clean)
-        if title_match:
-            title = title_match.group(0)
-
-        candidate_starts = []
-        for pattern in (
-            r"@[A-Za-z0-9_]{2,}\s*(?:遭遇|在|采得|发现|误入|寻得|负伤|一时|本已|选择)",
-            r"@\S{2,40}\s*遭遇",
-            r"战力对比\s*[:：]",
-            r"一番斗法后",
-            r"本已要负伤折返",
-        ):
-            match = re.search(pattern, clean)
-            if match and (not title_match or match.start() > title_match.end()):
-                candidate_starts.append(match.start())
-
-        if not candidate_starts:
-            return clean
-
-        start = min(candidate_starts)
-        tail = clean[start:].strip()
-        if not tail:
-            return clean
-        if title and title not in tail[:80]:
-            return f"{title} {tail}".strip()
-        return tail
+        return shared_field_training_settlement_text(text)
 
     def daily_reward_rift_settlement_text(self, text):
-        clean = self.clean_reward_text(text)
-        if not clean:
-            return ""
-
-        candidate_starts = []
-        for pattern in (
-            r"你的元婴满载而归",
-            r"一番斗法后",
-            r"获得修为\s*[+＋-]?\d",
-            r"【遭遇风暴】",
-            r"【不敌败退】",
-            r"【大凶·虚空噬体】",
-            r"【元婴遁逃·虚弱】",
-            r"身受重创",
-            r"遭受重创",
-            r"虚弱期",
-            r"肉身破碎",
-            r"肉身化为",
-            r"修为倒退",
-        ):
-            match = re.search(pattern, clean)
-            if match:
-                candidate_starts.append(match.start())
-
-        if not candidate_starts:
-            return clean
-        return clean[min(candidate_starts):].strip()
+        return shared_rift_settlement_text(text)
 
     def parse_reward_items_from_text(self, text):
         """Best-effort parser for command rewards used by the daily summary."""
-        clean = self.clean_reward_text(text)
-        if not clean:
-            return {}
-        rewards = {}
-        bracket_reward_stop_names = {
-            "深度闭关总结", "元婴闭关结算", "元婴归窍总结", "元神归窍总结", "元婴成长",
-            "探寻成功", "不敌败退", "遭遇风暴", "激战得胜", "大凶·虚空噬体", "元婴遁逃·虚弱",
-            "凌霄云阶", "天门洞开", "周天巡天", "天门余韵", "罡风淬体",
-            "天人感应", "推命命中", "改命待发", "天星偏转", "改命回天",
-            "战斗加成", "凌霄神通",
-        }
-
-        def add(name, amount):
-            name = str(name or "").strip(" ：:，,。.;；-+")
-            if not name:
-                return
-            if name in {"x", "X", "本次", "额外", "收益", "奖励", "获得", "收获", "共计"}:
-                return
-            if name in bracket_reward_stop_names:
-                return
-            if any(ch in name for ch in "【】[]"):
-                return
-            try:
-                value = int(str(amount).replace(",", ""))
-            except Exception:
-                return
-            if value == 0:
-                return
-            rewards[name] = int(rewards.get(name, 0)) + value
-
-        for name, amount in re.findall(r"【([^】]{1,30})】\s*[xX*＊]\s*([+-]?\d[\d,]*)", clean):
-            add(name, amount)
-
-        for match in re.finditer(r"【([^】]{1,30})】(?!\s*[xX*＊]\s*[+-]?\d)", clean):
-            name = match.group(1).strip()
-            if not name or name in bracket_reward_stop_names or name.startswith("野外历练"):
-                continue
-            before = clean[max(0, match.start() - 16):match.start()]
-            after = clean[match.end():min(len(clean), match.end() + 24)]
-            if "灵兽" in before and re.match(r"\s*(?:成功|击败|出战|休息|已)", after):
-                continue
-            if re.match(r"\s*(?:因与|，?斗法|照命|成功击败|已助阵|正在|尚需)", after):
-                continue
-            context_before = clean[max(0, match.start() - 44):match.start()]
-            context_after = clean[match.end():min(len(clean), match.end() + 20)]
-            before_reward = any(marker in context_before for marker in (
-                "为你带来了", "带来了", "带回了", "获得了", "获得", "得到", "收获",
-                "发现", "意外之喜", "奖励", "战利品", "至宝", "额外收获",
-            ))
-            after_reward = any(marker in context_after for marker in ("x", "X", "＊", "*"))
-            if before_reward or after_reward:
-                add(name, 1)
-
-        for name, amount in re.findall(
-            r"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·（）()]{0,20})\s*[xX*＊]\s*([+-]?\d[\d,]*)",
-            clean,
-        ):
-            add(name, amount)
-
-        for name, amount in re.findall(
-            r"(修为|灵石|宗门贡献|贡献|神识|气血|煞气|道韵|感悟|经验|星辰精华|精华)\s*(?:额外)?\s*(?:增加了?|提升了?|获得了?|得到了?|为|:|：)?\s*\+?\s*([+-]?\d[\d,]*)",
-            clean,
-        ):
-            add(name, amount)
-
-        for name, amount in re.findall(
-            r"(修为|灵石|宗门贡献|贡献|神识|气血|煞气|道韵|感悟|经验|星辰精华|精华)\s*(?:减少|降低|扣除|扣了?|损失|折损|倒退了?|消耗)\s*\+?\s*([+-]?\d[\d,]*)",
-            clean,
-        ):
-            try:
-                value = -abs(int(str(amount).replace(",", "")))
-            except Exception:
-                continue
-            add(name, value)
-
-        negative_before_amount = ("减少", "降低", "扣除", "扣了", "损失", "折损", "倒退", "消耗")
-        for match in re.finditer(
-            r"([+-]?\d[\d,]*)\s*(点|枚|份|缕|颗|个)?\s*(修为|灵石|宗门贡献|贡献|神识|气血|煞气|道韵|感悟|经验|星辰精华|精华)",
-            clean,
-        ):
-            prefix = clean[max(0, match.start() - 12):match.start()]
-            if any(word in prefix for word in negative_before_amount):
-                continue
-            amount, _unit, name = match.groups()
-            add(name, amount)
-
-        for amount in re.findall(r"修为最终(?:增加|变化)了?\s*\+?\s*([+-]?\d[\d,]*)\s*点", clean):
-            add("修为", amount)
-
-        return rewards
+        return shared_parse_reward_items(text)
 
     def daily_reward_outcome_from_text(self, command, text, rewards=None):
         root = str(command or "").split()[0] if command else ""
+        full_clean = self.clean_reward_text(text)
         clean = self.daily_reward_parse_text_for_command(root or command, text)
         rewards = rewards if isinstance(rewards, dict) else {}
+        if root == ".支援慕兰":
+            if not is_mulan_settlement_text(full_clean):
+                return ""
+            if "险还" in full_clean:
+                return "脱险"
+            if any(marker in full_clean for marker in ("惨败", "败退", "任务失败")):
+                return "失败"
+            return "成功" if rewards or "边境军功" in full_clean else ""
+        if root in {".探渊", ".灵兽探渊"}:
+            if any(marker in full_clean for marker in ("不敌", "重伤退回", "败退", "失败")):
+                return "失败"
+            if rewards or any(marker in full_clean for marker in ("击败", "战利品归来", "探渊胜利")):
+                return "成功"
+            return ""
+        if root == ".闯塔":
+            if any(marker in full_clean for marker in ("无法闯塔", "挑战失败", "修为不足")):
+                return "失败"
+            if rewards or any(marker in full_clean for marker in ("试炼古塔 - 战报", "总收获", "本次共闯过")):
+                return "成功"
+            return ""
         if root == ".问道":
             if any(k in clean for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
                 return "失败"
@@ -886,11 +770,19 @@ class CommonCommandMixin:
             ))
         if root in {".探渊", ".灵兽探渊"}:
             return any(k in clean for k in ("探渊", "万兽渊", "获得", "收获", "带回", "战利品", "奖励"))
+        if root == ".支援慕兰":
+            return is_mulan_settlement_text(clean)
+        if root == ".闯塔":
+            if any(k in clean for k in ("冷却", "今日已闯", "修为不足", "无法闯塔")):
+                return False
+            return any(k in clean for k in ("试炼古塔 - 战报", "总收获", "本次共闯过")) or bool(
+                self.daily_reward_items_for_command(command, clean)
+            )
         if root == ".问道":
             if any(k in clean for k in ("冷却", "后再", "尚需", "剩余", "请在")):
                 return False
             return self.is_ask_dao_response(clean)
-        return bool(self.parse_reward_items_from_text(clean))
+        return bool(self.daily_reward_items_for_command(command, clean))
 
     def daily_reward_sorted_reward_items(self, rewards, priority=False):
         if not rewards:
@@ -904,15 +796,17 @@ class CommonCommandMixin:
             "天机值": 1,
             "宗门贡献": 2,
             "贡献": 2,
-            "灵石": 3,
-            "神识": 4,
-            "气血": 5,
-            "煞气": 6,
-            "道韵": 7,
-            "感悟": 8,
-            "经验": 9,
-            "星辰精华": 10,
-            "精华": 11,
+            "边境军功": 3,
+            "塔印": 4,
+            "灵石": 5,
+            "神识": 6,
+            "气血": 7,
+            "煞气": 8,
+            "道韵": 9,
+            "感悟": 10,
+            "经验": 11,
+            "星辰精华": 12,
+            "精华": 13,
         }
 
         def sort_key(name):
@@ -981,38 +875,11 @@ class CommonCommandMixin:
 
     def daily_reward_context_reward_items(self, command, text):
         """Parse useful destiny-side gains that should be shown in compact daily details."""
-        clean = self.clean_reward_text(text)
-        if not clean:
-            return {}
-        rewards = {}
+        return shared_context_reward_items(command, text)
 
-        def add(name, amount):
-            try:
-                value = int(str(amount).replace(",", ""))
-            except Exception:
-                return
-            if value:
-                rewards[name] = int(rewards.get(name, 0) or 0) + value
-
-        command_root = str(command or "").split()[0] if command else ""
-        if command_root == ".问道":
-            if "大道感悟" in clean or "获得感悟" in clean:
-                add("感悟", 1)
-            elif "道韵" in clean and not re.search(r"道韵\s*\+?\s*\d", clean):
-                add("道韵", 1)
-
-        context_lines = []
-        for line in re.split(r"[\n\r]+", clean):
-            if any(marker in line for marker in ("推命命中", "司命演算", "天机值")):
-                context_lines.append(line)
-        context = "\n".join(context_lines)
-        if not context:
-            return rewards
-        for amount in re.findall(r"天机值\s*\+?\s*([+-]?\d[\d,]*)", context):
-            add("天机", amount)
-        for _name, amount in re.findall(r"(宗门贡献|贡献)\s*\+?\s*([+-]?\d[\d,]*)", context):
-            add("贡献", amount)
-        return rewards
+    def daily_reward_items_for_command(self, command, text):
+        """Parse one command settlement using command-aware reward boundaries."""
+        return shared_daily_reward_items_for_command(command, text)
 
     def daily_reward_command_short_label(self, command):
         root = str(command or "").split()[0] if command else ""
@@ -1026,6 +893,7 @@ class CommonCommandMixin:
             ".登天阶": "登阶",
             ".收集精华": "精华",
             ".问道": "问道",
+            ".支援慕兰": "慕兰",
             ".闯塔": "问心塔",
             ".洞府寻宝": "寻宝",
         }.get(root, root.lstrip(".") or "未知")
@@ -1033,7 +901,7 @@ class CommonCommandMixin:
     def daily_reward_command_counts_compact_text(self, command_counts):
         if not command_counts:
             return ""
-        ordered = ["历练", "裂缝", "出窍", "闭关", "探渊", "问道", "登阶", "问心塔", "寻宝", "精华"]
+        ordered = ["历练", "裂缝", "出窍", "闭关", "探渊", "问道", "慕兰", "登阶", "问心塔", "寻宝", "精华"]
         normalized = {}
         for command, count in command_counts.items():
             label = self.daily_reward_command_short_label(command)
@@ -1065,7 +933,7 @@ class CommonCommandMixin:
         if not display or amount == 0:
             return ""
         plus_names = {
-            "修为", "天机", "贡献", "神识", "气血", "煞气",
+            "修为", "天机", "贡献", "边境军功", "塔印", "神识", "气血", "煞气",
             "道韵", "感悟", "经验", "星辰精华", "精华",
         }
         if amount < 0:
@@ -1187,12 +1055,7 @@ class CommonCommandMixin:
             events = []
             self.state["daily_reward_events"] = events
 
-        reward_clean = self.daily_reward_parse_text_for_command(root or command, clean)
-        rewards = self.parse_reward_items_from_text(reward_clean)
-        self.daily_reward_merge_rewards(
-            rewards,
-            self.daily_reward_context_reward_items(root or command, clean),
-        )
+        rewards = self.daily_reward_items_for_command(root or command, clean)
         final = bool(final or self.daily_reward_is_final_settlement_text(root or command, clean))
         outcome = outcome or self.daily_reward_outcome_from_text(root or command, clean, rewards)
         if not final and not rewards:
@@ -1284,6 +1147,10 @@ class CommonCommandMixin:
             return ".探渊"
         if any(k in clean for k in ("问道", "悟道", "论道", "道韵", "大道感悟")):
             return ".问道"
+        if any(k in clean for k in ("慕兰烽烟", "边境军功", "连续支援")):
+            return ".支援慕兰"
+        if any(k in clean for k in ("琉璃问心塔", "试炼古塔 - 战报", "闯塔历程", "本次共闯过")):
+            return ".闯塔"
         return ""
 
     def daily_reward_identity_from_message(self, msg, text):
@@ -1419,6 +1286,10 @@ class CommonCommandMixin:
             if command_root == ".深度闭关":
                 continue
             raw_text = event.get("clean") or event.get("excerpt") or ""
+            if command_root == ".支援慕兰" and raw_text and not is_mulan_settlement_text(raw_text):
+                # Older records captured the short "正赶往天南边境" acknowledgement
+                # as a fake reward. Only the edited battle settlement is revenue.
+                continue
             if not event.get("final") and not event.get("rewards"):
                 continue
             stored_rewards = event.get("rewards") if isinstance(event.get("rewards"), dict) else {}
@@ -1433,23 +1304,16 @@ class CommonCommandMixin:
                 "events": [],
             })
             bucket["count"] += 1
-            rewards = {}
-            if raw_text:
-                reward_text = self.daily_reward_parse_text_for_command(command, raw_text)
-                rewards = self.parse_reward_items_from_text(reward_text)
+            rewards = self.daily_reward_items_for_command(command, raw_text) if raw_text else {}
             if command_root == ".野外历练" and rewards:
                 rewards.pop("宗门贡献", None)
-            if not rewards and isinstance(event.get("rewards"), dict):
+                rewards.pop("贡献", None)
+            trust_empty_reparse = trust_empty_reward_reparse(command, raw_text)
+            if not rewards and not trust_empty_reparse and isinstance(event.get("rewards"), dict):
                 rewards = dict(event.get("rewards") or {})
                 if command_root == ".野外历练":
                     rewards.pop("宗门贡献", None)
-            if markdown:
-                if command_root == ".野外历练":
-                    rewards.pop("宗门贡献", None)
                     rewards.pop("贡献", None)
-                for name, value in self.daily_reward_context_reward_items(command, raw_text).items():
-                    if int(rewards.get(name, 0) or 0) == 0:
-                        rewards[name] = int(value or 0)
             outcome = self.daily_reward_outcome_from_text(command, raw_text, rewards) if raw_text else ""
             outcome = outcome or event.get("outcome") or ""
             if outcome:
@@ -2541,6 +2405,15 @@ class CommonCommandMixin:
 
     def dashboard_command_paused(self, command, identity=""):
         return dashboard_command_disabled(self, command, identity or "主魂")[0]
+
+    def dashboard_command_option(self, command, field, default=None, identity=""):
+        return dashboard_command_control_value(
+            self,
+            command,
+            field,
+            default=default,
+            identity=identity or "主魂",
+        )
 
     def dashboard_command_control_mtime(self):
         """Return command_controls.json mtime; 0 means missing/unreadable."""
@@ -4294,12 +4167,16 @@ class CommonCommandMixin:
             "last_mulan_support_error": "",
         })
         persist(updates)
-        if hasattr(self, "record_daily_reward_event"):
+        if (
+            hasattr(self, "record_daily_reward_event")
+            and self.daily_reward_is_final_settlement_text(command, clean)
+        ):
             self.record_daily_reward_event(
                 identity,
                 command,
                 clean,
                 source=command,
+                final=True,
             )
         log.info(f"[{identity}] Mulan support recorded for {today}.")
         return True
@@ -4411,6 +4288,14 @@ class CommonCommandMixin:
                 log.warning(f"Avatar [{avatar}] tower: 修为不足 after force exit, will retry later.")
                 return False
 
+        self.record_daily_reward_event(
+            avatar,
+            ".闯塔",
+            resp_text,
+            source=".闯塔",
+            msg=resp,
+            final=True,
+        )
         self.set_avatar_state(avatar, "last_tower_date", today)
         log.info(f"Avatar [{avatar}] tower completed for {today}.")
         return True

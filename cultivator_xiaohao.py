@@ -3263,6 +3263,16 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         mode = str(mode or "").strip()
         return mode if mode in BEAST_BORDER_PATROL_MODES else BEAST_BORDER_PATROL_DEFAULT_MODE
 
+    def configured_beast_border_patrol_mode(self):
+        reader = getattr(self, "dashboard_command_option", None)
+        mode = reader(
+            ".灵兽巡边 <灵兽> 袭营",
+            "patrol_mode",
+            BEAST_BORDER_PATROL_DEFAULT_MODE,
+            "主魂",
+        ) if callable(reader) else BEAST_BORDER_PATROL_DEFAULT_MODE
+        return self.normalize_beast_border_patrol_mode(mode)
+
     def parse_beast_border_patrol_command(self, command):
         parts = str(command or "").strip().split()
         if len(parts) < 2:
@@ -6988,8 +6998,9 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                     need_patrol = not is_future(add_seconds_str(last_patrol, BEAST_BORDER_PATROL_CD_SECONDS))
                 if need_patrol:
                     async with AtomicTaskContext(self, "BeastBorderPatrol"):
-                        log.info(f"Beast border patrol due: sending default mode {BEAST_BORDER_PATROL_DEFAULT_MODE}.")
-                        await self.run_beast_border_patrol(BEAST_BORDER_PATROL_DEFAULT_MODE)
+                        patrol_mode = self.configured_beast_border_patrol_mode()
+                        log.info(f"Beast border patrol due: sending configured mode {patrol_mode}.")
+                        await self.run_beast_border_patrol(patrol_mode)
                         self.save_state()
                     sleep_for = 30
                 elif next_patrol and is_future(next_patrol):

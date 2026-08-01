@@ -994,6 +994,69 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(abyss_rewards, {"经验": 291, "三级妖丹": 1, "蛮荒兽血": 2})
         self.assertNotIn("六翼", abyss_rewards)
 
+    def test_daily_reward_tower_uses_total_section_and_key_conversion_only(self):
+        actor = DummyAvatarCommon()
+        text = (
+            "【试炼古塔 - 战报】\n"
+            "闯塔历程（摘要）:\n"
+            "- 1F【破】碾压｜炼气一层｜试炼层｜塔钥\n"
+            "总收获:\n"
+            "本次共闯过 21 层。\n"
+            " - 修为 损失了 5576 点\n"
+            " - 宗门贡献增加了 12 点\n"
+            " - 获得了【灵石】x552\n"
+            " - 获得了【三级妖丹】x3\n"
+            " - 获得塔印 56 点（累计 2102）\n"
+            "本次塔相轨迹: 试炼层x7 / 宝库层x5\n"
+            "本次构筑: 攻势x1 / 收益x1\n"
+            "遭遇词缀: 噬灵x2\n"
+            "未消耗塔钥 x1 已被塔灵回收，折算为修为180、贡献12。"
+        )
+
+        rewards = actor.daily_reward_items_for_command(".闯塔", text)
+
+        self.assertEqual(rewards, {
+            "修为": -5396,
+            "宗门贡献": 24,
+            "塔印": 56,
+            "灵石": 552,
+            "三级妖丹": 3,
+        })
+        for false_reward in ("试炼层", "宝库层", "攻势", "收益", "噬灵", "未消耗塔钥"):
+            self.assertNotIn(false_reward, rewards)
+
+    def test_daily_reward_mulan_skips_departure_and_parses_edited_settlement(self):
+        actor = DummyAvatarCommon()
+        departure = "【慕兰烽烟】\n@Crayonxxin 领了【夜袭法士营】之令，正赶往天南边境..."
+        settlement = (
+            "【慕兰烽烟 · 破慕兰圣灯】小胜\n"
+            "获得修为 +504\n"
+            "获得灵石 +158\n"
+            "获得材料 阴魂丝 x1\n"
+            "边境军功 +4，累计 15\n"
+            "连续支援 3 天"
+        )
+
+        self.assertFalse(actor.daily_reward_is_final_settlement_text(".支援慕兰", departure))
+        self.assertEqual(actor.daily_reward_items_for_command(".支援慕兰", departure), {})
+        self.assertTrue(actor.daily_reward_is_final_settlement_text(".支援慕兰", settlement))
+        self.assertEqual(actor.daily_reward_items_for_command(".支援慕兰", settlement), {
+            "修为": 504,
+            "边境军功": 4,
+            "灵石": 158,
+            "阴魂丝": 1,
+        })
+
+    def test_daily_reward_question_title_is_not_a_reward(self):
+        actor = DummyAvatarCommon()
+        rewards = actor.daily_reward_items_for_command(
+            ".问道",
+            "【问道得宝】\n你获得大道感悟。",
+        )
+
+        self.assertEqual(rewards, {"感悟": 1})
+        self.assertNotIn("问道得宝", rewards)
+
     def test_daily_reward_summary_plain_text_for_xiaohao(self):
         actor = DummyAvatarCommon()
         actor.account_key = "xiaohao"
@@ -4528,6 +4591,49 @@ class ParserFixtureTests(unittest.TestCase):
             default_disabled=True,
         ))
 
+    def test_dashboard_patrol_mode_changes_route_without_exposing_beast_name(self):
+        state = {"done": [], "avatars": {}}
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            dashboard_server, "CONFIG_DIR", tmpdir
+        ):
+            result = asyncio.run(dashboard_server.set_beast_border_patrol_mode(
+                {"account": "main", "identity": "主魂", "mode": "护粮"},
+                username="fixture",
+            ))
+            self.assertTrue(result["success"])
+            panel = build_command_panels("main", state)[0]
+            row = next(
+                item for item in panel["commands"]
+                if item.get("control_key") == ".灵兽巡边 *"
+            )
+
+            self.assertEqual(row["command"], ".灵兽巡边 <灵兽> 护粮")
+            self.assertEqual(row["patrol_mode_value"], "护粮")
+            self.assertEqual(row["patrol_mode_options"], ["斥候", "护粮", "袭营"])
+            self.assertIn("灵兽按体力自动选择", row["detail"])
+
+            asyncio.run(dashboard_server.set_command_control({
+                "account": "main",
+                "identity": "主魂",
+                "control_key": ".灵兽巡边 *",
+                "command": row["command"],
+                "label": "灵兽巡边",
+                "disabled": True,
+            }, username="fixture"))
+            asyncio.run(dashboard_server.set_command_control({
+                "account": "main",
+                "identity": "主魂",
+                "control_key": ".灵兽巡边 *",
+                "command": row["command"],
+                "label": "灵兽巡边",
+                "disabled": False,
+            }, username="fixture"))
+            controls = dashboard_server.load_command_controls()
+
+        entry = controls["main"]["主魂"][".灵兽巡边 *"]
+        self.assertFalse(entry["disabled"])
+        self.assertEqual(entry["patrol_mode"], "护粮")
+
     def test_dashboard_hides_fishing_command_rows(self):
         today = datetime.now().strftime("%Y-%m-%d")
         state = {
@@ -7346,6 +7452,72 @@ class ParserFixtureTests(unittest.TestCase):
             dashboard_server.CONFIG_DIR = old_config_dir
             dashboard_server.DAILY_REWARD_ENDPOINT_CACHE.clear()
 
+    def test_dashboard_daily_reward_log_reparses_legacy_misclassified_rewards(self):
+        old_config_dir = dashboard_server.CONFIG_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                dashboard_server.CONFIG_DIR = tmp
+                db_path = os.path.join(tmp, dashboard_server.MESSAGE_EVENTS_DB_FILE)
+                conn = sqlite3.connect(db_path)
+                try:
+                    dashboard_server.ensure_daily_reward_events_schema(conn)
+                    rows = [
+                        (
+                            "tower", ".闯塔",
+                            {"试炼层": 7, "攻势": 1, "未消耗塔钥": 1},
+                            "总收获:\n修为增加了 1000 点\n获得塔印 40 点\n"
+                            "本次塔相轨迹: 试炼层x7\n本次构筑: 攻势x1\n"
+                            "未消耗塔钥 x1 已被塔灵回收，折算为修为180、贡献12。",
+                        ),
+                        (
+                            "abyss", ".探渊",
+                            {"深渊魔蛛": 1, "三级妖丹": 1},
+                            "你的灵兽【六翼】成功击败了对手【深渊魔蛛】！"
+                            "它带回了战利品：【三级妖丹】x1。",
+                        ),
+                        (
+                            "ask", ".问道",
+                            {"问道得宝": 1, "感悟": 1},
+                            "【问道得宝】\n你获得大道感悟。",
+                        ),
+                        (
+                            "mulan-departure", ".支援慕兰",
+                            {"慕兰烽烟": 1},
+                            "【慕兰烽烟】\n@Crayonxxin 领命，正赶往天南边境...",
+                        ),
+                    ]
+                    for key, command, rewards, clean in rows:
+                        conn.execute(
+                            """
+                            INSERT INTO daily_reward_events (
+                                account, event_key, event_date, event_time, identity, command,
+                                source, outcome, final, rewards_json, reward_summary, excerpt,
+                                clean, text_hash, created_at, updated_at
+                            ) VALUES ('main', ?, '2026-07-31', '12:00:00', '主魂', ?,
+                                      ?, '成功', 1, ?, '', ?, ?, ?,
+                                      '2026-07-31 12:00:00', '2026-07-31 12:00:00')
+                            """,
+                            (key, command, command, json.dumps(rewards, ensure_ascii=False), clean, clean, key),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                payload = dashboard_server.build_daily_reward_log(date="2026-07-31")
+
+                by_command = {row["command"]: row for row in payload["rows"]}
+                self.assertNotIn(".支援慕兰", by_command)
+                self.assertEqual(by_command[".闯塔"]["rewards"], {
+                    "修为": 1180,
+                    "宗门贡献": 12,
+                    "塔印": 40,
+                })
+                self.assertEqual(by_command[".探渊"]["rewards"], {"三级妖丹": 1})
+                self.assertEqual(by_command[".问道"]["rewards"], {"感悟": 1})
+        finally:
+            dashboard_server.CONFIG_DIR = old_config_dir
+            dashboard_server.DAILY_REWARD_ENDPOINT_CACHE.clear()
+
     def test_cultivation_profile_from_spirit_root_reply(self):
         text = """
 **@Lvdoumiao**** 的天命玉牒**
@@ -8085,6 +8257,31 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beast_border_patrol_mode"], "袭营")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
         self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 70 * 60)
+
+    def test_border_patrol_uses_dashboard_route_with_stamina_selected_beast(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beasts_cache": [
+                {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 95},
+                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 80},
+            ],
+        }
+        actor.save_state = lambda: None
+        actor.dashboard_command_option = lambda *args, **kwargs: "护粮"
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return "灵兽【青蛟】领命前往边境巡行，执行【护粮】。"
+
+        actor.send_and_wait_feedback = fake_send
+        mode = actor.configured_beast_border_patrol_mode()
+
+        self.assertEqual(mode, "护粮")
+        self.assertTrue(asyncio.run(actor.run_beast_border_patrol(mode)))
+        self.assertEqual(sent, [".灵兽巡边 青蛟 护粮"])
+        self.assertEqual(actor.state["beast_border_patrol_name"], "青蛟")
+        self.assertEqual(actor.state["beast_border_patrol_mode"], "护粮")
 
     def test_border_patrol_success_with_duration_marks_beast_busy(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)

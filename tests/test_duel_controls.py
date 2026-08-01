@@ -175,6 +175,32 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(row["target_username"], "DashboardTarget")
         self.assertIn("Waaiging", payload["target_options"])
 
+    def test_custom_intervals_persist_and_drive_new_reservations(self):
+        state = duel_features.set_duel_intervals(45, 95)
+
+        self.assertEqual(state["interval_seconds"], 45)
+        self.assertEqual(state["target_interval_seconds"], 95)
+        payload = duel_features.duel_dashboard_payload()
+        self.assertEqual(payload["interval_seconds"], 45)
+        self.assertEqual(payload["target_interval_seconds"], 95)
+
+        reservation = duel_features.reserve_duel_for_account("main")
+        scheduled = duel_features.load_duel_state()
+        reserved_at = duel_features.parse_duel_time(reservation["reserved_at"])
+        next_at = duel_features.parse_duel_time(
+            scheduled["queues"][ROTATION]["next_at"]
+        )
+        target_at = duel_features.parse_duel_time(
+            scheduled["target_next_at"][reservation["target_username"].lower()]
+        )
+
+        self.assertGreaterEqual((next_at - reserved_at).total_seconds(), 45)
+        self.assertGreaterEqual((target_at - reserved_at).total_seconds(), 95)
+
+    def test_invalid_custom_interval_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid duel interval"):
+            duel_features.set_duel_intervals(0, 60)
+
     def test_dashboard_payload_returns_titan_beast_mode(self):
         duel_features.set_titan_beast_mode("出战")
 

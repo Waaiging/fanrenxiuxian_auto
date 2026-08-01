@@ -26,6 +26,10 @@ class AutomationSettingsTests(unittest.TestCase):
             [f"{account}|主魂" for account in settings.ACCOUNT_IDENTITIES],
         )
         self.assertEqual(value["mulan_support"]["mode"], "护阵")
+        self.assertTrue(value["miniapp_fishing"]["enabled"])
+        self.assertEqual(value["miniapp_fishing"]["pond"], "qingxi")
+        self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
+        self.assertEqual(value["miniapp_fishing"]["chum"], "none")
 
     def test_save_accepts_one_identity_per_account_and_can_disable_account(self):
         value = settings.save_automation_settings(
@@ -37,7 +41,29 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(settings.world_boss_identities_for_account("main", value), ["无咎子"])
         self.assertEqual(settings.world_boss_identities_for_account("xiaohao", value), [])
         self.assertEqual(settings.mulan_support_command(value), ".支援慕兰 破灯")
+        self.assertTrue(settings.miniapp_fishing_settings(value)["enabled"])
         self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["updated_by"], "tester")
+
+    def test_save_updates_miniapp_fishing_choices(self):
+        value = settings.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            miniapp_fishing_enabled=False,
+            miniapp_fishing_pond="hantan",
+            miniapp_fishing_bait="spirit_worm",
+            miniapp_fishing_chum="grass",
+        )
+        self.assertEqual(
+            value["miniapp_fishing"],
+            {
+                "enabled": False,
+                "account": "main",
+                "identity": "主魂",
+                "pond": "hantan",
+                "bait": "spirit_worm",
+                "chum": "grass",
+            },
+        )
 
     def test_common_command_reads_dashboard_mode_without_restart(self):
         settings.save_automation_settings(
@@ -71,6 +97,9 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(len(payload["world_boss"]["accounts"]), len(settings.ACCOUNT_IDENTITIES))
         waaiging = next(item for item in payload["world_boss"]["accounts"] if item["key"] == "waaiging")
         self.assertTrue(waaiging["identities"][0]["selected"])
+        self.assertEqual(payload["miniapp_fishing"]["identity"], "主魂")
+        self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
+        self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
 
 
 if __name__ == "__main__":

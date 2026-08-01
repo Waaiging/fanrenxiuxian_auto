@@ -27,9 +27,12 @@ from miniapp_dwelling import (
     miniapp_operation_result_text,
     normalize_miniapp_command,
     sect_farm_action_result_ok,
+    sect_farm_pull_batch_operation,
+    sect_farm_pull_batch_result_text,
     sect_farm_snapshot_status,
 )
 from miniapp_daily_activities import MiniAppDailyActivities
+from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_journey import MiniAppTianxingJourney
 
 
@@ -92,6 +95,12 @@ class MiniAppCommandRouter:
             self.log,
         )
         self.tianxing_journey = MiniAppTianxingJourney(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
+        self.fishing = MiniAppFishingAutomation(
             actor,
             self.transport,
             self.account,
@@ -208,6 +217,13 @@ class MiniAppCommandRouter:
                     name=f"miniapp_{self.account}_beast_abyss",
                 )
             )
+        if self.fishing.supported:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.fishing.run_loop(),
+                    name=f"miniapp_{self.account}_fishing",
+                )
+            )
         self.log.warning(
             "[%s] Mini App command routing active for identities %s; unsupported commands stay in the group",
             self.account,
@@ -321,13 +337,15 @@ class MiniAppCommandRouter:
         identity: str,
         action: str,
         plot_key: str = "",
+        log_operation: bool = True,
     ) -> tuple[dict[str, Any], tuple[int, int, list[str], int]]:
-        payload = await self.transport.sect_farm_action(
-            identity,
-            action,
-            plot_key=plot_key,
-            star_name=self.star_farm_target if action == "pull" else "",
-        )
+        action_kwargs = {
+            "plot_key": plot_key,
+            "star_name": self.star_farm_target if action == "pull" else "",
+        }
+        if not log_operation:
+            action_kwargs["log_operation"] = False
+        payload = await self.transport.sect_farm_action(identity, action, **action_kwargs)
         if not sect_farm_action_result_ok(payload, action):
             raise MiniAppBeastError(f"star_farm_{action}_failed")
         now = _now_text()
@@ -377,13 +395,32 @@ class MiniAppCommandRouter:
                     identity,
                     "collect",
                 )
-        for plot_key in empty:
-            _, (ready, troubled, _, next_wait) = await self._star_farm_action(
+        pull_keys = list(empty)
+        if pull_keys:
+            operation = sect_farm_pull_batch_operation(pull_keys)
+            self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
+            pull_results = []
+            for plot_key in pull_keys:
+                pull_payload, (ready, troubled, _, next_wait) = await self._star_farm_action(
+                    identity,
+                    "pull",
+                    plot_key=plot_key,
+                    log_operation=False,
+                )
+                pull_results.append(
+                    command_result_text(pull_payload) or miniapp_operation_result_text(pull_payload)
+                )
+                await asyncio.sleep(1)
+            self.log.info(
+                "IN [Mini App | %s]:\n%s -> %s",
                 identity,
-                "pull",
-                plot_key=plot_key,
+                operation,
+                sect_farm_pull_batch_result_text(
+                    pull_keys,
+                    self.star_farm_target,
+                    pull_results,
+                ),
             )
-            await asyncio.sleep(1)
         if next_wait > 0:
             return next_wait + STAR_FARM_WAKE_GRACE_SECONDS
         return self.star_farm_retry_seconds
