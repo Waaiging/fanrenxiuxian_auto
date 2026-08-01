@@ -32,6 +32,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["pond"], "qingxi")
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
+        self.assertEqual(value["miniapp_fishing"]["start_time"], "")
 
     def test_save_accepts_one_identity_per_account_and_can_disable_account(self):
         value = settings.save_automation_settings(
@@ -56,6 +57,7 @@ class AutomationSettingsTests(unittest.TestCase):
             miniapp_fishing_chum="grass",
             miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土"],
             miniapp_fishing_rod_owner="sub|主魂",
+            miniapp_fishing_start_time="06:30",
         )
         self.assertEqual(
             value["miniapp_fishing"],
@@ -66,6 +68,7 @@ class AutomationSettingsTests(unittest.TestCase):
                 "pond": "hantan",
                 "bait": "spirit_worm",
                 "chum": "grass",
+                "start_time": "06:30",
             },
         )
 
@@ -101,6 +104,12 @@ class AutomationSettingsTests(unittest.TestCase):
                 mulan_support_mode="护阵",
                 miniapp_fishing_rod_owner="sub|不存在",
             )
+        with self.assertRaisesRegex(ValueError, "invalid Mini App fishing start time"):
+            settings.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                miniapp_fishing_start_time="25:00",
+            )
 
     def test_dashboard_payload_exposes_all_accounts_and_modes(self):
         settings.save_automation_settings(
@@ -115,6 +124,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertTrue(waaiging["identities"][0]["selected"])
         self.assertEqual(payload["miniapp_fishing"]["participants"], ["main|主魂"])
         self.assertEqual(payload["miniapp_fishing"]["rod_owner"], "auto")
+        self.assertEqual(payload["miniapp_fishing"]["start_time"], "")
         self.assertEqual(len(payload["miniapp_fishing"]["accounts"]), 2)
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)

@@ -1425,6 +1425,10 @@
                         打窝
                         <select id="miniapp-fishing-chum" class="record-select" onchange="markAutomationSettingsDirty()"></select>
                     </label>
+                    <label class="record-field">
+                        每日开始时间（留空立即开始）
+                        <input id="miniapp-fishing-start-time" class="record-input" type="time" onchange="markAutomationSettingsDirty()">
+                    </label>
                     <div class="automation-card-hint" id="miniapp-fishing-runtime">等待运行状态...</div>
                 </div>
             </div>
@@ -3890,6 +3894,7 @@
             const fishingPond = String(fishing.pond || fishingSettings.pond || 'qingxi');
             const fishingBait = String(fishing.bait || fishingSettings.bait || 'demon_blood');
             const fishingChum = String(fishing.chum || fishingSettings.chum || 'none');
+            const fishingStartTime = String(fishing.start_time ?? fishingSettings.start_time ?? '');
             const fishingAccounts = Array.isArray(fishing.accounts) ? fishing.accounts : [];
             const fishingRuntime = fishing.runtime || {};
             const fishingOptionName = (options, key) => (
@@ -3975,6 +3980,8 @@
                 renderFishingSelect('miniapp-fishing-pond', fishing.ponds, fishingPond);
                 renderFishingSelect('miniapp-fishing-bait', fishing.baits, fishingBait);
                 renderFishingSelect('miniapp-fishing-chum', fishing.chums, fishingChum);
+                const fishingStartTimeControl = document.getElementById('miniapp-fishing-start-time');
+                if (fishingStartTimeControl) fishingStartTimeControl.value = fishingStartTime;
             }
             const fishingRuntimeControl = document.getElementById('miniapp-fishing-runtime');
             if (fishingRuntimeControl) {
@@ -3992,7 +3999,7 @@
             if (hint) {
                 const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
                 const fishingText = `${fishingOptionName(fishing.ponds, fishingPond)} / ${fishingOptionName(fishing.baits, fishingBait)} / ${fishingOptionName(fishing.chums, fishingChum)}`;
-                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 垂钓 ${fishingText} · ${fishingParticipants.size} 个身份`;
+                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 垂钓 ${fishingText} · ${fishingParticipants.size} 个身份 · ${fishingStartTime ? `${fishingStartTime} 开始` : '立即开始'}`;
             }
             const saveButton = document.getElementById('automation-save');
             if (saveButton) saveButton.disabled = automationSavePending;
@@ -4032,6 +4039,7 @@
             const fishingPond = document.getElementById('miniapp-fishing-pond')?.value || '';
             const fishingBait = document.getElementById('miniapp-fishing-bait')?.value || '';
             const fishingChum = document.getElementById('miniapp-fishing-chum')?.value || '';
+            const fishingStartTime = document.getElementById('miniapp-fishing-start-time')?.value || '';
             if (!mode) {
                 alert('请选择慕兰支援参数。');
                 return;
@@ -4059,7 +4067,8 @@
                             rod_owner: fishingRodOwner,
                             pond: fishingPond,
                             bait: fishingBait,
-                            chum: fishingChum
+                            chum: fishingChum,
+                            start_time: fishingStartTime
                         }
                     })
                 });

@@ -67,6 +67,24 @@ def _today_text() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def fishing_start_wait(value: Any, now: datetime | None = None) -> tuple[int, str]:
+    """Return seconds and timestamp until today's configured fishing start."""
+    text = str(value or "").strip()
+    if not text:
+        return 0, ""
+    current = now or datetime.now()
+    try:
+        target = datetime.strptime(
+            f"{current.strftime('%Y-%m-%d')} {text}",
+            "%Y-%m-%d %H:%M",
+        )
+    except ValueError:
+        return 0, ""
+    if target <= current:
+        return 0, target.strftime(TIME_FORMAT)
+    return max(1, math.ceil((target - current).total_seconds())), target.strftime(TIME_FORMAT)
+
+
 def fishing_participant_parts(value: Any) -> tuple[str, str]:
     text = str(value or "").strip()
     if "|" not in text:
@@ -425,6 +443,79 @@ def fishing_result_summary(finish_payload: Any, catch_payload: Any) -> str:
     return "，".join(part for part in parts if part)
 
 
+def fishing_rounds_summary(records: Any) -> str:
+    """Build one readable log entry from all buffered rounds for an identity."""
+    rounds = _items(records)
+    if not rounds:
+        return ""
+
+    configurations = []
+    for item in rounds:
+        config = (
+            str(item.get("pond") or "灵溪"),
+            str(item.get("bait") or "鱼饵"),
+            str(item.get("chum") or "不打窝"),
+        )
+        if config not in configurations:
+            configurations.append(config)
+
+    if len(configurations) == 1:
+        pond, bait, chum = configurations[0]
+        title = f"灵溪垂钓汇总（{pond} · {bait} · {chum}，共 {len(rounds)} 竿）"
+    else:
+        title = f"灵溪垂钓汇总（共 {len(rounds)} 竿）"
+
+    purchase_totals: dict[str, int] = {}
+    loot_totals: dict[str, int] = {}
+    caught_count = 0
+    total_weight = 0.0
+    total_exp = 0
+    lines = []
+
+    for index, item in enumerate(rounds, 1):
+        for purchase in _items(item.get("purchases")):
+            name = str(purchase.get("name") or "鱼饵")
+            purchase_totals[name] = purchase_totals.get(name, 0) + max(
+                1, _integer(purchase.get("quantity"), 1)
+            )
+        for loot in _items(item.get("bonus_loot")):
+            name = str(loot.get("name") or "物品")
+            loot_totals[name] = loot_totals.get(name, 0) + max(
+                1, _integer(loot.get("qty"), 1)
+            )
+
+        caught = bool(item.get("caught"))
+        caught_count += int(caught)
+        total_weight += _number(item.get("weight"), 0)
+        total_exp += _integer(item.get("exp_gain"), 0)
+        detail = str(item.get("summary") or "本竿结果未记录").strip()
+        if len(configurations) > 1:
+            detail = (
+                f"[{str(item.get('pond') or '灵溪')} · "
+                f"{str(item.get('bait') or '鱼饵')} · "
+                f"{str(item.get('chum') or '不打窝')}] {detail}"
+            )
+        lines.append(f"{index}. {detail}")
+
+    if purchase_totals:
+        title += "｜自动购饵 " + "、".join(
+            f"{name}x{quantity}" for name, quantity in purchase_totals.items()
+        )
+
+    total_parts = [f"成功 {caught_count}/{len(rounds)} 竿"]
+    if total_weight > 0:
+        total_parts.append(f"总重 {total_weight:.2f}斤")
+    if total_exp:
+        total_parts.append(f"钓术经验 +{total_exp}")
+    if loot_totals:
+        total_parts.append(
+            "伴生机缘 "
+            + "、".join(f"{name}x{quantity}" for name, quantity in loot_totals.items())
+        )
+    lines.append("合计：" + "，".join(total_parts))
+    return "\n".join([title, *lines])
+
+
 class MiniAppFishingAutomation:
     """Coordinate server-verified fishing and one shared rod across accounts."""
 
@@ -466,6 +557,85 @@ class MiniAppFishingAutomation:
         state["miniapp_fishing_identity"] = str(identity or self._current_identity or "主魂")
         state["miniapp_fishing_updated_at"] = _now_text()
         self._save()
+
+    def _append_round_summary(
+        self,
+        identity: str,
+        *,
+        record_id: str,
+        pond: str,
+        bait: str,
+        chum: str,
+        purchases: list[dict[str, Any]],
+        summary: str,
+        caught: bool,
+        weight: float,
+        exp_gain: int,
+        bonus_loot: list[dict[str, Any]],
+    ) -> None:
+        state = self._state(identity)
+        today = _today_text()
+        same_day = str(state.get("miniapp_fishing_summary_date") or "") == today
+        records = [
+            dict(item)
+            for item in _items(state.get("miniapp_fishing_round_records"))
+        ] if same_day else []
+        emitted_count = (
+            max(0, _integer(state.get("miniapp_fishing_summary_emitted_count"), 0))
+            if same_day
+            else 0
+        )
+        normalized_id = str(record_id or "").strip()
+        if normalized_id and any(str(item.get("id") or "") == normalized_id for item in records):
+            return
+        records.append(
+            {
+                "id": normalized_id or f"{_now_text()}-{len(records) + 1}",
+                "completed_at": _now_text(),
+                "pond": str(pond or "灵溪"),
+                "bait": str(bait or "鱼饵"),
+                "chum": str(chum or "不打窝"),
+                "purchases": [dict(item) for item in _items(purchases)],
+                "summary": str(summary or "本竿结果未记录")[:1200],
+                "caught": bool(caught),
+                "weight": max(0.0, _number(weight, 0)),
+                "exp_gain": max(0, _integer(exp_gain, 0)),
+                "bonus_loot": [dict(item) for item in _items(bonus_loot)],
+            }
+        )
+        records = records[-50:]
+        self._record(
+            identity,
+            miniapp_fishing_summary_date=today,
+            miniapp_fishing_round_records=records,
+            miniapp_fishing_round_count_today=len(records),
+            miniapp_fishing_summary_emitted_count=min(emitted_count, len(records)),
+        )
+
+    def _emit_daily_summary(self, identity: str) -> bool:
+        state = self._state(identity)
+        if str(state.get("miniapp_fishing_summary_date") or "") != _today_text():
+            return False
+        records = [dict(item) for item in _items(state.get("miniapp_fishing_round_records"))]
+        emitted_count = max(
+            0,
+            min(
+                len(records),
+                _integer(state.get("miniapp_fishing_summary_emitted_count"), 0),
+            ),
+        )
+        pending = records[emitted_count:]
+        summary_text = fishing_rounds_summary(pending)
+        if not summary_text:
+            return False
+        self.log.info("IN [Mini App | %s]:\n%s", identity, summary_text)
+        self._record(
+            identity,
+            miniapp_fishing_summary_emitted_count=len(records),
+            miniapp_fishing_last_daily_summary=summary_text[:5000],
+            miniapp_fishing_last_daily_summary_time=_now_text(),
+        )
+        return True
 
     def _record_shop(self, identity: str, shop: dict[str, Any]) -> None:
         self._record(
@@ -715,20 +885,20 @@ class MiniAppFishingAutomation:
         pending_purchases = _items(
             self._state(identity).get("miniapp_fishing_pending_purchases")
         )
-        purchase_text = "、".join(
-            f"{str(item.get('name') or '鱼饵')}x{max(1, _integer(item.get('quantity'), 1))}"
-            for item in pending_purchases
-        )
         chum = str(self._state(identity).get("miniapp_fishing_chum") or "不打窝")
         if ready:
-            round_title = f"灵溪垂钓汇总（{pond} · {bait} · {chum}）"
-            if purchase_text:
-                round_title += f"｜自动购饵 {purchase_text}"
-            self.log.info(
-                "IN [Mini App | %s]:\n%s -> %s",
+            self._append_round_summary(
                 identity,
-                round_title,
-                summary,
+                record_id=str(challenge.get("challengeId") or ""),
+                pond=pond,
+                bait=bait,
+                chum=chum,
+                purchases=pending_purchases,
+                summary=summary,
+                caught=caught,
+                weight=_number(fish.get("weight"), 0),
+                exp_gain=_integer(catch_result.get("expGain"), 0),
+                bonus_loot=_items(catch_result.get("bonusLoot")),
             )
         self._record(
             identity,
@@ -810,11 +980,36 @@ class MiniAppFishingAutomation:
             catch_payload = await self.transport.fishing_result(identity, token)
             summary = fishing_result_summary({}, catch_payload)
             ready = bool(_mapping(catch_payload.get("result")).get("ready"))
+            catch_result = _mapping(catch_payload.get("result"))
+            fish = _mapping(catch_result.get("fish"))
+            pending_purchases = _items(
+                self._state(identity).get("miniapp_fishing_pending_purchases")
+            )
+            if ready:
+                self._append_round_summary(
+                    identity,
+                    record_id=str(
+                        session.get("id")
+                        or session.get("sessionId")
+                        or session.get("castId")
+                        or ""
+                    ),
+                    pond=str(self._state(identity).get("miniapp_fishing_pond") or "灵溪"),
+                    bait=str(self._state(identity).get("miniapp_fishing_bait") or "鱼饵"),
+                    chum=str(self._state(identity).get("miniapp_fishing_chum") or "不打窝"),
+                    purchases=pending_purchases,
+                    summary=summary,
+                    caught=bool(catch_result.get("caught")),
+                    weight=_number(fish.get("weight"), 0),
+                    exp_gain=_integer(catch_result.get("expGain"), 0),
+                    bonus_loot=_items(catch_result.get("bonusLoot")),
+                )
             self._record(
                 identity,
                 miniapp_fishing_status="settled",
                 miniapp_fishing_last_result=summary,
                 miniapp_fishing_last_error="",
+                miniapp_fishing_pending_purchases=([] if ready else pending_purchases),
                 miniapp_fishing_next_run_time=(
                     datetime.now() + timedelta(seconds=3)
                 ).strftime(TIME_FORMAT),
@@ -1362,7 +1557,23 @@ class MiniAppFishingAutomation:
                     pause = getattr(self.actor, "pause_event", None)
                     if pause is not None:
                         await pause.wait()
-                    wait = await self._drive_once(settings)
+                    start_wait, start_at = fishing_start_wait(settings.get("start_time"))
+                    if start_wait > 0:
+                        identity = str(self._current_identity or "主魂")
+                        self._record(
+                            identity,
+                            miniapp_fishing_status="waiting_start",
+                            miniapp_fishing_last_error="",
+                            miniapp_fishing_next_run_time=start_at,
+                        )
+                        self._set_global_status(
+                            settings,
+                            "waiting_start",
+                            f"等待 {str(settings.get('start_time') or '')} 开始自动垂钓",
+                        )
+                        wait = min(start_wait, 300)
+                    else:
+                        wait = await self._drive_once(settings)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1372,9 +1583,11 @@ class MiniAppFishingAutomation:
                     self._state(identity).get("miniapp_fishing_status") or ""
                 )
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+                summary_emitted = False
                 if code == "fishing_daily_limit_reached":
                     status = "daily_done"
                     wait = 5
+                    summary_emitted = self._emit_daily_summary(identity)
                     self._mark_daily_done(settings, participant_key)
                 elif code == "fishing_rod_missing":
                     status = "no_rod"
@@ -1412,7 +1625,7 @@ class MiniAppFishingAutomation:
                         datetime.now() + timedelta(seconds=wait)
                     ).strftime(TIME_FORMAT),
                 )
-                if status == "daily_done" and previous_status != status:
+                if status == "daily_done" and previous_status != status and not summary_emitted:
                     self.log.info(
                         "Mini App fishing daily limit reached for %s; advancing participant.",
                         identity,

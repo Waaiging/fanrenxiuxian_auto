@@ -1164,6 +1164,8 @@ def miniapp_fishing_command(state):
     runtime_detail = clean_custom_text(runtime.get("detail") or "", 180)
     transfer = runtime.get("transfer") if isinstance(runtime.get("transfer"), dict) else {}
     detail_parts = [f"参与 {len(participants)} 个身份", pond, bait, chum, "自动购饵每次 10 份"]
+    start_time = clean_custom_text(settings.get("start_time") or "", 10)
+    detail_parts.append(f"开始 {start_time}" if start_time else "立即开始")
     if current_label:
         detail_parts.append(f"下一位 {current_label}")
     if holder_label:
@@ -1193,6 +1195,7 @@ def miniapp_fishing_command(state):
         "active_round": ("完成当前鱼讯", "active"),
         "transferring": ("自动转竿", "active"),
         "waiting_transfer": ("等待换竿", "cooldown"),
+        "waiting_start": ("等待开钓", "cooldown"),
         "verifying_transfer": ("验竿中", "cooldown"),
         "transfer_failed": ("转竿已停止", "error"),
         "identity_paused": ("身份暂停", "paused"),
@@ -4812,6 +4815,7 @@ async def automation_settings_control(
                 miniapp_fishing_chum=fishing.get("chum"),
                 miniapp_fishing_participants=fishing.get("participants"),
                 miniapp_fishing_rod_owner=fishing.get("rod_owner"),
+                miniapp_fishing_start_time=fishing.get("start_time"),
                 updated_by=username,
             )
     except ValueError as exc:
@@ -4827,6 +4831,7 @@ async def automation_settings_control(
             "invalid Mini App fishing participant": "灵溪垂钓参与身份无效",
             "Mini App fishing participants required": "启用灵溪垂钓时至少选择一个身份",
             "invalid Mini App fishing rod owner": "手动指定的钓竿持有者无效",
+            "invalid Mini App fishing start time": "灵溪垂钓开始时间必须是 HH:MM",
         }
         return {"success": False, "msg": messages.get(str(exc), "自动化设置无效")}
     with STATUS_LOCK:

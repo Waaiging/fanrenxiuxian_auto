@@ -53,6 +53,7 @@ DEFAULT_MINIAPP_FISHING_CHUM = "none"
 MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub")
 DEFAULT_MINIAPP_FISHING_PARTICIPANTS = ("main|主魂",)
 DEFAULT_MINIAPP_FISHING_ROD_OWNER = "auto"
+DEFAULT_MINIAPP_FISHING_START_TIME = ""
 DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
     (account, "主魂") for account in ACCOUNT_IDENTITIES
 )
@@ -80,9 +81,20 @@ def _normalize_participant(value: Any) -> tuple[str, str] | None:
     return account, identity
 
 
+def _normalize_clock_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.strptime(text, "%H:%M")
+    except ValueError:
+        return ""
+    return text if parsed.strftime("%H:%M") == text else ""
+
+
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -97,6 +109,7 @@ def default_automation_settings() -> dict[str, Any]:
             "pond": DEFAULT_MINIAPP_FISHING_POND,
             "bait": DEFAULT_MINIAPP_FISHING_BAIT,
             "chum": DEFAULT_MINIAPP_FISHING_CHUM,
+            "start_time": DEFAULT_MINIAPP_FISHING_START_TIME,
         },
         "updated_at": "",
         "updated_by": "",
@@ -164,12 +177,14 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
         pond = str(fishing.get("pond") or "").strip()
         bait = str(fishing.get("bait") or "").strip()
         chum = str(fishing.get("chum") or "").strip()
+        start_time = _normalize_clock_time(fishing.get("start_time"))
         if pond in {item[0] for item in MINIAPP_FISHING_PONDS}:
             result["miniapp_fishing"]["pond"] = pond
         if bait in {item[0] for item in MINIAPP_FISHING_BAITS}:
             result["miniapp_fishing"]["bait"] = bait
         if chum in {item[0] for item in MINIAPP_FISHING_CHUMS}:
             result["miniapp_fishing"]["chum"] = chum
+        result["miniapp_fishing"]["start_time"] = start_time
 
     result["updated_at"] = str(source.get("updated_at") or "")
     result["updated_by"] = str(source.get("updated_by") or "")
@@ -194,6 +209,7 @@ def save_automation_settings(
     miniapp_fishing_chum: Any = None,
     miniapp_fishing_participants: Any = None,
     miniapp_fishing_rod_owner: Any = None,
+    miniapp_fishing_start_time: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     if not isinstance(world_boss_participants, list):
@@ -234,6 +250,14 @@ def save_automation_settings(
         if miniapp_fishing_chum is None
         else miniapp_fishing_chum
     ).strip()
+    raw_fishing_start_time = (
+        current_fishing.get("start_time", DEFAULT_MINIAPP_FISHING_START_TIME)
+        if miniapp_fishing_start_time is None
+        else miniapp_fishing_start_time
+    )
+    fishing_start_time = _normalize_clock_time(raw_fishing_start_time)
+    if str(raw_fishing_start_time or "").strip() and not fishing_start_time:
+        raise ValueError("invalid Mini App fishing start time")
     raw_fishing_participants = (
         current_fishing.get("participants")
         if miniapp_fishing_participants is None
@@ -280,6 +304,7 @@ def save_automation_settings(
                 "pond": fishing_pond,
                 "bait": fishing_bait,
                 "chum": fishing_chum,
+                "start_time": fishing_start_time,
             },
             "updated_at": datetime.now().strftime(TIME_FORMAT),
             "updated_by": str(updated_by or "dashboard")[:80],
