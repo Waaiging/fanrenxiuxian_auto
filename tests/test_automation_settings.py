@@ -27,6 +27,8 @@ class AutomationSettingsTests(unittest.TestCase):
         )
         self.assertEqual(value["mulan_support"]["mode"], "护阵")
         self.assertTrue(value["miniapp_fishing"]["enabled"])
+        self.assertEqual(value["miniapp_fishing"]["participants"], ["main|主魂"])
+        self.assertEqual(value["miniapp_fishing"]["rod_owner"], "auto")
         self.assertEqual(value["miniapp_fishing"]["pond"], "qingxi")
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
@@ -52,13 +54,15 @@ class AutomationSettingsTests(unittest.TestCase):
             miniapp_fishing_pond="hantan",
             miniapp_fishing_bait="spirit_worm",
             miniapp_fishing_chum="grass",
+            miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土"],
+            miniapp_fishing_rod_owner="sub|主魂",
         )
         self.assertEqual(
             value["miniapp_fishing"],
             {
                 "enabled": False,
-                "account": "main",
-                "identity": "主魂",
+                "participants": ["main|无咎子", "sub|主魂", "sub|厚土"],
+                "rod_owner": "sub|主魂",
                 "pond": "hantan",
                 "bait": "spirit_worm",
                 "chum": "grass",
@@ -85,6 +89,18 @@ class AutomationSettingsTests(unittest.TestCase):
                 world_boss_participants=["main|主魂", "main|缘生子"],
                 mulan_support_mode="护阵",
             )
+        with self.assertRaisesRegex(ValueError, "invalid Mini App fishing participant"):
+            settings.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                miniapp_fishing_participants=["xiaohao|主魂"],
+            )
+        with self.assertRaisesRegex(ValueError, "invalid Mini App fishing rod owner"):
+            settings.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                miniapp_fishing_rod_owner="sub|不存在",
+            )
 
     def test_dashboard_payload_exposes_all_accounts_and_modes(self):
         settings.save_automation_settings(
@@ -97,7 +113,9 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(len(payload["world_boss"]["accounts"]), len(settings.ACCOUNT_IDENTITIES))
         waaiging = next(item for item in payload["world_boss"]["accounts"] if item["key"] == "waaiging")
         self.assertTrue(waaiging["identities"][0]["selected"])
-        self.assertEqual(payload["miniapp_fishing"]["identity"], "主魂")
+        self.assertEqual(payload["miniapp_fishing"]["participants"], ["main|主魂"])
+        self.assertEqual(payload["miniapp_fishing"]["rod_owner"], "auto")
+        self.assertEqual(len(payload["miniapp_fishing"]["accounts"]), 2)
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
 

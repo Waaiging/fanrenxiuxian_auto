@@ -3197,6 +3197,10 @@ class ParserFixtureTests(unittest.TestCase):
             parse_trade_purchase_response("购买失败！你还缺少：【青竹钓竿】x1。")["status"],
             "missing_required_rod",
         )
+        self.assertEqual(
+            parse_trade_purchase_response("购买失败！你还缺少：【银竹钓竿】x1。")["status"],
+            "missing_required_rod",
+        )
         self.assertEqual(parse_rod_gift_response("赠送成功！你将【青竹钓竿】x1赠予了对方。")["status"], "success")
 
     def test_fishing_control_text_is_bare_and_limited(self):

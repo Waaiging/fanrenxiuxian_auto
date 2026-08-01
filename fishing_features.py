@@ -802,7 +802,11 @@ def parse_trade_purchase_response(text):
         return result
     if any(k in clean for k in ["挂单不存在", "已被购买", "购买失败", "交易失败", "资源不足", "灵石不足"]):
         result["matched"] = True
-        result["status"] = "missing_required_rod" if FISHING_ROD_ITEM in clean and "缺少" in clean else "failed"
+        result["status"] = (
+            "missing_required_rod"
+            if "缺少" in clean and (FISHING_ROD_ITEM in clean or "钓竿" in clean)
+            else "failed"
+        )
     return result
 
 

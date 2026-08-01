@@ -72,6 +72,7 @@ from duel_features import (
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
+from miniapp_fishing import miniapp_fishing_global_snapshot
 from reward_parsing import (
     compact_reward_summary,
     daily_reward_items_for_command,
@@ -1130,10 +1131,14 @@ def miniapp_tianxing_journey_command(state):
 
 
 def miniapp_fishing_command(state):
-    """Display the main-soul Mini App fishing loop and its latest score."""
+    """Display the shared multi-identity Mini App fishing loop."""
     settings = miniapp_fishing_settings()
     enabled = bool(settings.get("enabled"))
-    status_key = str(state.get("miniapp_fishing_status") or "waiting")
+    try:
+        runtime = miniapp_fishing_global_snapshot(settings)
+    except Exception:
+        runtime = {}
+    status_key = str(runtime.get("status") or state.get("miniapp_fishing_status") or "waiting")
     error = clean_custom_text(state.get("miniapp_fishing_last_error") or "", 100)
     result = clean_custom_text(state.get("miniapp_fishing_last_result") or "", 180)
     next_time = str(state.get("miniapp_fishing_next_run_time") or "").strip()
@@ -1153,7 +1158,20 @@ def miniapp_fishing_command(state):
     last_bait = clean_custom_text(state.get("miniapp_fishing_bait") or "", 40)
     grade = clean_custom_text(state.get("miniapp_fishing_last_grade") or "", 20)
     score = int(state.get("miniapp_fishing_last_score") or 0)
-    detail_parts = ["仅主号主魂", pond, bait, chum]
+    participants = runtime.get("participant_labels") or []
+    current_label = clean_custom_text(runtime.get("current_label") or "", 60)
+    holder_label = clean_custom_text(runtime.get("rod_holder_label") or "", 60)
+    runtime_detail = clean_custom_text(runtime.get("detail") or "", 180)
+    transfer = runtime.get("transfer") if isinstance(runtime.get("transfer"), dict) else {}
+    detail_parts = [f"参与 {len(participants)} 个身份", pond, bait, chum, "自动购饵每次 10 份"]
+    if current_label:
+        detail_parts.append(f"下一位 {current_label}")
+    if holder_label:
+        detail_parts.append(f"持竿 {holder_label}")
+    if transfer.get("listing_id"):
+        detail_parts.append(f"挂单 {transfer.get('listing_id')}")
+    if runtime_detail:
+        detail_parts.append(runtime_detail)
     if last_bait and last_bait != bait:
         detail_parts.append(f"上竿 {last_bait}")
     if grade or score:
@@ -1169,12 +1187,23 @@ def miniapp_fishing_command(state):
         "daily_done": ("今日竿数已尽", "done"),
         "no_rod": ("无鱼竿", "error"),
         "auth_refresh": ("刷新入口", "cooldown"),
+        "scanning": ("扫描鱼竿", "cooldown"),
+        "ready": ("准备下一竿", "ready"),
+        "fishing": ("自动垂钓", "active"),
+        "active_round": ("完成当前鱼讯", "active"),
+        "transferring": ("自动转竿", "active"),
+        "waiting_transfer": ("等待换竿", "cooldown"),
+        "verifying_transfer": ("验竿中", "cooldown"),
+        "transfer_failed": ("转竿已停止", "error"),
+        "identity_paused": ("身份暂停", "paused"),
+        "no_participants": ("未选身份", "paused"),
+        "unavailable": ("状态不可用", "error"),
         "paused": ("已暂停", "paused"),
     }
     if not enabled:
         status = "已暂停"
         tone = "paused"
-    elif status_key in {"daily_done", "no_rod", "auth_refresh"}:
+    elif status_key in status_map:
         status, tone = status_map[status_key]
     elif error:
         status = "等待重试"
@@ -4744,7 +4773,23 @@ def red_packets(username: str = Depends(authenticate)):
 @app.get("/api/automation-settings")
 def automation_settings_dashboard(username: str = Depends(authenticate)):
     """Return shared Boss, Mulan, and Mini App fishing settings."""
-    return automation_dashboard_payload()
+    payload = automation_dashboard_payload()
+    fishing = payload.get("miniapp_fishing") if isinstance(payload.get("miniapp_fishing"), dict) else {}
+    try:
+        fishing["runtime"] = miniapp_fishing_global_snapshot(
+            (payload.get("settings") or {}).get("miniapp_fishing") or {}
+        )
+    except Exception:
+        fishing["runtime"] = {
+            "status": "unavailable",
+            "detail": "共享垂钓状态暂时不可用",
+            "participant_labels": [],
+            "current_label": "",
+            "rod_holder_label": "",
+            "transfer": {},
+        }
+    payload["miniapp_fishing"] = fishing
+    return payload
 
 
 @app.post("/api/automation-settings")
@@ -4765,6 +4810,8 @@ async def automation_settings_control(
                 miniapp_fishing_pond=fishing.get("pond"),
                 miniapp_fishing_bait=fishing.get("bait"),
                 miniapp_fishing_chum=fishing.get("chum"),
+                miniapp_fishing_participants=fishing.get("participants"),
+                miniapp_fishing_rod_owner=fishing.get("rod_owner"),
                 updated_by=username,
             )
     except ValueError as exc:
@@ -4776,6 +4823,10 @@ async def automation_settings_control(
             "invalid Mini App fishing pond": "灵溪垂钓地点无效",
             "invalid Mini App fishing bait": "灵溪垂钓鱼饵无效",
             "invalid Mini App fishing chum": "灵溪垂钓窝料无效",
+            "Mini App fishing participants must be a list": "灵溪垂钓参与身份列表格式错误",
+            "invalid Mini App fishing participant": "灵溪垂钓参与身份无效",
+            "Mini App fishing participants required": "启用灵溪垂钓时至少选择一个身份",
+            "invalid Mini App fishing rod owner": "手动指定的钓竿持有者无效",
         }
         return {"success": False, "msg": messages.get(str(exc), "自动化设置无效")}
     with STATUS_LOCK:

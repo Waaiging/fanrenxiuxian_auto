@@ -50,6 +50,9 @@ DEFAULT_MINIAPP_FISHING_ENABLED = True
 DEFAULT_MINIAPP_FISHING_POND = "qingxi"
 DEFAULT_MINIAPP_FISHING_BAIT = "demon_blood"
 DEFAULT_MINIAPP_FISHING_CHUM = "none"
+MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub")
+DEFAULT_MINIAPP_FISHING_PARTICIPANTS = ("main|主魂",)
+DEFAULT_MINIAPP_FISHING_ROD_OWNER = "auto"
 DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
     (account, "主魂") for account in ACCOUNT_IDENTITIES
 )
@@ -79,7 +82,7 @@ def _normalize_participant(value: Any) -> tuple[str, str] | None:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -89,8 +92,8 @@ def default_automation_settings() -> dict[str, Any]:
         "mulan_support": {"mode": DEFAULT_MULAN_SUPPORT_MODE},
         "miniapp_fishing": {
             "enabled": DEFAULT_MINIAPP_FISHING_ENABLED,
-            "account": "main",
-            "identity": "主魂",
+            "participants": list(DEFAULT_MINIAPP_FISHING_PARTICIPANTS),
+            "rod_owner": DEFAULT_MINIAPP_FISHING_ROD_OWNER,
             "pond": DEFAULT_MINIAPP_FISHING_POND,
             "bait": DEFAULT_MINIAPP_FISHING_BAIT,
             "chum": DEFAULT_MINIAPP_FISHING_CHUM,
@@ -131,6 +134,33 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
         result["miniapp_fishing"]["enabled"] = bool(
             fishing.get("enabled", DEFAULT_MINIAPP_FISHING_ENABLED)
         )
+        if isinstance(fishing.get("participants"), list):
+            participants = []
+            for item in fishing["participants"]:
+                normalized = _normalize_participant(item)
+                if normalized is None or normalized[0] not in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
+                    continue
+                key = automation_participant_key(*normalized)
+                if key not in participants:
+                    participants.append(key)
+            result["miniapp_fishing"]["participants"] = participants
+        else:
+            legacy = _normalize_participant(
+                {
+                    "account": fishing.get("account", "main"),
+                    "identity": fishing.get("identity", "主魂"),
+                }
+            )
+            if legacy is not None and legacy[0] in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
+                result["miniapp_fishing"]["participants"] = [
+                    automation_participant_key(*legacy)
+                ]
+        rod_owner = str(fishing.get("rod_owner") or DEFAULT_MINIAPP_FISHING_ROD_OWNER).strip()
+        normalized_owner = _normalize_participant(rod_owner)
+        if rod_owner == "auto":
+            result["miniapp_fishing"]["rod_owner"] = "auto"
+        elif normalized_owner is not None and normalized_owner[0] in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
+            result["miniapp_fishing"]["rod_owner"] = automation_participant_key(*normalized_owner)
         pond = str(fishing.get("pond") or "").strip()
         bait = str(fishing.get("bait") or "").strip()
         chum = str(fishing.get("chum") or "").strip()
@@ -162,6 +192,8 @@ def save_automation_settings(
     miniapp_fishing_pond: Any = None,
     miniapp_fishing_bait: Any = None,
     miniapp_fishing_chum: Any = None,
+    miniapp_fishing_participants: Any = None,
+    miniapp_fishing_rod_owner: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     if not isinstance(world_boss_participants, list):
@@ -202,6 +234,34 @@ def save_automation_settings(
         if miniapp_fishing_chum is None
         else miniapp_fishing_chum
     ).strip()
+    raw_fishing_participants = (
+        current_fishing.get("participants")
+        if miniapp_fishing_participants is None
+        else miniapp_fishing_participants
+    )
+    if not isinstance(raw_fishing_participants, list):
+        raise ValueError("Mini App fishing participants must be a list")
+    fishing_participants = []
+    for item in raw_fishing_participants:
+        normalized = _normalize_participant(item)
+        if normalized is None or normalized[0] not in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
+            raise ValueError("invalid Mini App fishing participant")
+        key = automation_participant_key(*normalized)
+        if key not in fishing_participants:
+            fishing_participants.append(key)
+    if fishing_enabled and not fishing_participants:
+        raise ValueError("Mini App fishing participants required")
+    fishing_rod_owner = str(
+        current_fishing.get("rod_owner", DEFAULT_MINIAPP_FISHING_ROD_OWNER)
+        if miniapp_fishing_rod_owner is None
+        else miniapp_fishing_rod_owner
+    ).strip()
+    normalized_owner = _normalize_participant(fishing_rod_owner)
+    if fishing_rod_owner != "auto" and (
+        normalized_owner is None
+        or normalized_owner[0] not in MINIAPP_FISHING_SUPPORTED_ACCOUNTS
+    ):
+        raise ValueError("invalid Mini App fishing rod owner")
     if fishing_pond not in {item[0] for item in MINIAPP_FISHING_PONDS}:
         raise ValueError("invalid Mini App fishing pond")
     if fishing_bait not in {item[0] for item in MINIAPP_FISHING_BAITS}:
@@ -215,6 +275,8 @@ def save_automation_settings(
             "mulan_support": {"mode": mode},
             "miniapp_fishing": {
                 "enabled": fishing_enabled,
+                "participants": fishing_participants,
+                "rod_owner": fishing_rod_owner,
                 "pond": fishing_pond,
                 "bait": fishing_bait,
                 "chum": fishing_chum,
@@ -293,6 +355,20 @@ def automation_dashboard_payload() -> dict[str, Any]:
         },
         "miniapp_fishing": {
             **miniapp_fishing_settings(settings),
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                        }
+                        for identity in ACCOUNT_IDENTITIES[account]
+                    ],
+                }
+                for account in MINIAPP_FISHING_SUPPORTED_ACCOUNTS
+            ],
             "ponds": [
                 {"key": key, "name": name}
                 for key, name in MINIAPP_FISHING_PONDS

@@ -1398,13 +1398,21 @@
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">灵溪自动垂钓</div>
-                    <div class="automation-card-hint">当前仅主号主魂持有鱼竿。缺少所选鱼饵时自动购买；窝料不足时也会先补齐其鱼饵成本。</div>
+                    <div class="automation-card-hint">所选身份按每竿轮转。系统自动识别当前持竿者，通过“上架凝血草换银竹钓竿 → 持竿者购买挂单”完成转移，并在 Mini App 验竿后继续。自动购饵固定每次 10 份。</div>
                     <div class="automation-mode-options">
                         <label class="automation-option">
                             <input id="miniapp-fishing-enabled" type="checkbox" onchange="markAutomationSettingsDirty()">
                             启用自动垂钓
                         </label>
                     </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="miniapp-fishing-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <label class="record-field">
+                        当前钓竿持有者
+                        <select id="miniapp-fishing-rod-owner" class="record-select" onchange="markAutomationSettingsDirty()"></select>
+                    </label>
                     <label class="record-field">
                         钓鱼地点
                         <select id="miniapp-fishing-pond" class="record-select" onchange="markAutomationSettingsDirty()"></select>
@@ -1417,6 +1425,7 @@
                         打窝
                         <select id="miniapp-fishing-chum" class="record-select" onchange="markAutomationSettingsDirty()"></select>
                     </label>
+                    <div class="automation-card-hint" id="miniapp-fishing-runtime">等待运行状态...</div>
                 </div>
             </div>
             <div class="automation-actions">
@@ -3876,15 +3885,19 @@
             const selected = new Set(settings.world_boss?.participants || []);
             const mode = String(mulan.mode || settings.mulan_support?.mode || '护阵');
             const fishingEnabled = Boolean(fishing.enabled ?? fishingSettings.enabled ?? true);
+            const fishingParticipants = new Set(fishing.participants || fishingSettings.participants || []);
+            const fishingRodOwner = String(fishing.rod_owner || fishingSettings.rod_owner || 'auto');
             const fishingPond = String(fishing.pond || fishingSettings.pond || 'qingxi');
             const fishingBait = String(fishing.bait || fishingSettings.bait || 'demon_blood');
             const fishingChum = String(fishing.chum || fishingSettings.chum || 'none');
+            const fishingAccounts = Array.isArray(fishing.accounts) ? fishing.accounts : [];
+            const fishingRuntime = fishing.runtime || {};
             const fishingOptionName = (options, key) => (
                 (Array.isArray(options) ? options : []).find(item => String(item.key || '') === String(key || ''))?.name || key
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 垂钓 ${fishingEnabled ? '启用' : '暂停'}`;
+                summary.innerText = `Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -3923,6 +3936,34 @@
                 }
                 const fishingEnabledControl = document.getElementById('miniapp-fishing-enabled');
                 if (fishingEnabledControl) fishingEnabledControl.checked = fishingEnabled;
+                const fishingParticipantControls = document.getElementById('miniapp-fishing-participant-controls');
+                if (fishingParticipantControls) {
+                    fishingParticipantControls.innerHTML = fishingAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${fishingParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                const fishingRodOwnerControl = document.getElementById('miniapp-fishing-rod-owner');
+                if (fishingRodOwnerControl) {
+                    const ownerOptions = fishingAccounts.flatMap(account => (account.identities || []).map(item => ({
+                        key: item.key,
+                        name: `${account.name || account.key}｜${item.name || item.key}`
+                    })));
+                    fishingRodOwnerControl.innerHTML = [
+                        '<option value="auto">自动识别</option>',
+                        ...ownerOptions.map(item => `<option value="${escapeHtml(item.key || '')}">${escapeHtml(item.name || item.key || '')}</option>`)
+                    ].join('');
+                    fishingRodOwnerControl.value = fishingRodOwner;
+                }
                 const renderFishingSelect = (id, options, value) => {
                     const select = document.getElementById(id);
                     if (!select) return;
@@ -3935,11 +3976,23 @@
                 renderFishingSelect('miniapp-fishing-bait', fishing.baits, fishingBait);
                 renderFishingSelect('miniapp-fishing-chum', fishing.chums, fishingChum);
             }
+            const fishingRuntimeControl = document.getElementById('miniapp-fishing-runtime');
+            if (fishingRuntimeControl) {
+                const runtimeParts = [
+                    `状态：${fishingRuntime.detail || fishingRuntime.status || '等待启动'}`,
+                    `当前持竿：${fishingRuntime.rod_holder_label || '尚未识别'}`,
+                    `下一位：${fishingRuntime.current_label || '待定'}`
+                ];
+                if (fishingRuntime.transfer_from_label || fishingRuntime.transfer_to_label) {
+                    runtimeParts.push(`转移：${fishingRuntime.transfer_from_label || '?'} → ${fishingRuntime.transfer_to_label || '?'}${fishingRuntime.transfer?.listing_id ? `（挂单 ${fishingRuntime.transfer.listing_id}）` : ''}`);
+                }
+                fishingRuntimeControl.innerText = runtimeParts.join(' · ');
+            }
             const hint = document.getElementById('automation-updated-hint');
             if (hint) {
                 const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
                 const fishingText = `${fishingOptionName(fishing.ponds, fishingPond)} / ${fishingOptionName(fishing.baits, fishingBait)} / ${fishingOptionName(fishing.chums, fishingChum)}`;
-                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 垂钓 ${fishingText}`;
+                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 垂钓 ${fishingText} · ${fishingParticipants.size} 个身份`;
             }
             const saveButton = document.getElementById('automation-save');
             if (saveButton) saveButton.disabled = automationSavePending;
@@ -3972,6 +4025,10 @@
                 .filter(Boolean);
             const mode = document.querySelector('#mulan-support-mode-controls input[type="radio"]:checked')?.value || '';
             const fishingEnabled = Boolean(document.getElementById('miniapp-fishing-enabled')?.checked);
+            const fishingParticipants = Array.from(document.querySelectorAll('#miniapp-fishing-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
+            const fishingRodOwner = document.getElementById('miniapp-fishing-rod-owner')?.value || 'auto';
             const fishingPond = document.getElementById('miniapp-fishing-pond')?.value || '';
             const fishingBait = document.getElementById('miniapp-fishing-bait')?.value || '';
             const fishingChum = document.getElementById('miniapp-fishing-chum')?.value || '';
@@ -3981,6 +4038,10 @@
             }
             if (!fishingPond || !fishingBait || !fishingChum) {
                 alert('请选择完整的灵溪垂钓设置。');
+                return;
+            }
+            if (fishingEnabled && !fishingParticipants.length) {
+                alert('启用灵溪垂钓时至少选择一个参与身份。');
                 return;
             }
             automationSavePending = true;
@@ -3994,6 +4055,8 @@
                         mulan_support_mode: mode,
                         miniapp_fishing: {
                             enabled: fishingEnabled,
+                            participants: fishingParticipants,
+                            rod_owner: fishingRodOwner,
                             pond: fishingPond,
                             bait: fishingBait,
                             chum: fishingChum
