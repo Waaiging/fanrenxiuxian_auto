@@ -776,7 +776,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["transfer"]["status"], "listed")
         self.assertEqual(runtime["transfer"]["listing_id"], "24474")
 
-    def test_completed_round_advances_to_next_selected_identity(self):
+    def test_completed_round_keeps_current_identity_until_daily_limit(self):
         worker = MiniAppFishingAutomation(
             SimpleNamespace(config={}, state={}, save_state=lambda: None),
             SimpleNamespace(),
@@ -798,8 +798,14 @@ class MiniAppFishingTests(unittest.TestCase):
 
         runtime = worker._complete_round(settings, "main|主魂")
 
-        self.assertEqual(runtime["current_key"], "sub|主魂")
+        self.assertEqual(runtime["current_key"], "main|主魂")
         self.assertEqual(runtime["last_round"]["participant"], "main|主魂")
+        self.assertEqual(runtime["status"], "fishing")
+        self.assertIn("继续垂钓", runtime["detail"])
+
+        runtime = worker._mark_daily_done(settings, "main|主魂")
+        self.assertEqual(runtime["current_key"], "sub|主魂")
+        self.assertIn("今日竿数已尽", runtime["detail"])
 
 
 if __name__ == "__main__":

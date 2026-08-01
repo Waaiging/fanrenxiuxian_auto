@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import http.client
 import inspect
+import json
 import logging
 import os
 import re
@@ -40,6 +42,12 @@ WORLD_BOSS_FINISH_GRACE_SECONDS = 2.2
 WORLD_BOSS_HISTORY_LIMIT = 20
 WORLD_BOSS_SCAN_LIMIT = 30
 WORLD_BOSS_TIMEOUT_SECONDS = 20
+WORLD_BOSS_ACCOUNT_OFFSET_SLOTS = {
+    "main": -3,
+    "sub": -1,
+    "xiaohao": 1,
+    "waaiging": 3,
+}
 
 AUTH_TOKEN_ERRORS = {
     "boss_token_missing",
@@ -66,6 +74,110 @@ COMPLETED_EVENT_STATUSES = {
     "event_closed",
     "expired",
 }
+
+
+class _PersistentWorldBossJsonClient:
+    """One keep-alive HTTP connection matching the browser's fetch behavior.
+
+    The realtime hit window is only a few hundred milliseconds wide. Opening a new
+    TLS connection for every hit regularly takes more than one second on the VPS,
+    so all requests for one account/event are serialized over one warm connection.
+    """
+
+    def __init__(self, origin: str) -> None:
+        parsed = urllib.parse.urlsplit(str(origin or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise MiniAppBeastError("invalid_entry_url")
+        self.origin = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, "", "", "")
+        )
+        self.scheme = parsed.scheme
+        self.hostname = parsed.hostname
+        self.port = parsed.port
+        self.connection: http.client.HTTPConnection | None = None
+        self.lock = asyncio.Lock()
+
+    def close(self) -> None:
+        connection, self.connection = self.connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def _new_connection(self, timeout: int) -> http.client.HTTPConnection:
+        connection_type = (
+            http.client.HTTPSConnection
+            if self.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        return connection_type(
+            self.hostname,
+            port=self.port,
+            timeout=max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS)),
+        )
+
+    def _post_sync(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        timeout: int,
+    ) -> dict[str, Any]:
+        target = urllib.parse.urlsplit(
+            urllib.parse.urljoin(self.origin.rstrip("/") + "/", str(path).lstrip("/"))
+        )
+        request_path = target.path or "/"
+        if target.query:
+            request_path += "?" + target.query
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Origin": self.origin,
+            "Referer": self.origin.rstrip("/") + "/miniapp/xianxia-world-boss",
+            "User-Agent": "Mozilla/5.0 Telegram-Android/11.0",
+            "Connection": "keep-alive",
+        }
+
+        for connection_attempt in range(2):
+            if self.connection is None:
+                self.connection = self._new_connection(timeout)
+            else:
+                self.connection.timeout = max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
+            try:
+                self.connection.request("POST", request_path, body=body, headers=headers)
+                response = self.connection.getresponse()
+                status = int(response.status or 0)
+                response_body = response.read().decode("utf-8", errors="replace")
+                if response.will_close:
+                    self.close()
+                break
+            except (OSError, http.client.HTTPException) as exc:
+                self.close()
+                if connection_attempt == 0:
+                    continue
+                raise MiniAppBeastError(type(exc).__name__.lower()) from exc
+        else:
+            raise MiniAppBeastError("request_failed")
+
+        try:
+            data = json.loads(response_body)
+        except Exception as exc:
+            raise MiniAppBeastError("invalid_json", status) from exc
+        if not isinstance(data, dict):
+            raise MiniAppBeastError("invalid_response", status)
+        if status >= 400 or data.get("ok") is False:
+            raise MiniAppBeastError(data.get("error") or f"http_{status}", status)
+        return data
+
+    async def post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        timeout: int,
+    ) -> dict[str, Any]:
+        async with self.lock:
+            return await asyncio.to_thread(self._post_sync, path, payload, timeout)
 
 
 def _now_text() -> str:
@@ -296,6 +408,7 @@ class WorldBossMonitor:
         self._inflight_messages: set[int] = set()
         self._inflight_fingerprints: set[str] = set()
         self._fight_lock = asyncio.Lock()
+        self._json_clients: dict[str, _PersistentWorldBossJsonClient] = {}
 
     def _save(self) -> None:
         saver = getattr(self.actor, "save_state", None)
@@ -407,6 +520,9 @@ class WorldBossMonitor:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        for client in self._json_clients.values():
+            client.close()
+        self._json_clients.clear()
         remover = getattr(self.client, "remove_event_handler", None)
         if callable(remover):
             if self._new_handler is not None:
@@ -662,11 +778,19 @@ class WorldBossMonitor:
     ) -> dict[str, Any]:
         for attempt in range(max(0, retries) + 1):
             try:
+                request_timeout = int(timeout or self.timeout)
+                if self.post_json is None:
+                    normalized_origin = miniapp_origin(origin)
+                    client = self._json_clients.get(normalized_origin)
+                    if client is None:
+                        client = _PersistentWorldBossJsonClient(normalized_origin)
+                        self._json_clients[normalized_origin] = client
+                    return await client.post(path, payload, request_timeout)
                 return await _post_json(
                     origin,
                     path,
                     payload,
-                    int(timeout or self.timeout),
+                    request_timeout,
                     post_json=self.post_json,
                 )
             except MiniAppBeastError as exc:
@@ -792,6 +916,13 @@ class WorldBossMonitor:
             raise MiniAppBeastError("boss_windows_invalid")
         return normalized
 
+    def _hit_offset_ms(self, window: dict[str, Any]) -> int:
+        """Spread accounts inside the perfect window instead of bursting one VPS IP."""
+        slot = int(WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0))
+        perfect_ms = max(1, int(window.get("perfectMs") or 1))
+        step = min(40, max(0, (perfect_ms - 10) // 3))
+        return slot * step
+
     async def _hit_window(
         self,
         entry: WorldBossEntry,
@@ -801,15 +932,29 @@ class WorldBossMonitor:
         battle_start: float,
         window: dict[str, Any],
     ) -> dict[str, Any]:
-        target = battle_start + window["centerMs"] / 1000.0
+        target_ms = max(0, int(window["centerMs"]) + self._hit_offset_ms(window))
+        target = battle_start + target_ms / 1000.0
         wait = target - self.monotonic()
         if wait > 0:
             await self.sleep(wait)
+        elapsed_ms = max(0, int((self.monotonic() - battle_start) * 1000))
+        delta_ms = abs(elapsed_ms - int(window["centerMs"]))
         action = {
-            "t": window["centerMs"],
+            "t": elapsed_ms,
             "holdMs": WORLD_BOSS_HOLD_MS,
             "stance": WORLD_BOSS_STANCE,
         }
+        matched = delta_ms <= int(window["hitMs"])
+        perfect = matched and delta_ms <= int(window["perfectMs"])
+        if not matched:
+            return {
+                "action": action,
+                "ok": False,
+                "matched": False,
+                "perfect": False,
+                "damage": 0.0,
+                "error": "local_window_missed",
+            }
         try:
             payload = await self._request(
                 entry.origin,
@@ -819,7 +964,7 @@ class WorldBossMonitor:
                     "initData": init_data,
                     "challengeId": challenge_id,
                     "windowId": window["id"],
-                    "elapsedMs": window["centerMs"],
+                    "elapsedMs": elapsed_ms,
                     "holdMs": WORLD_BOSS_HOLD_MS,
                 },
                 retries=2,
@@ -829,12 +974,21 @@ class WorldBossMonitor:
             return {
                 "action": action,
                 "ok": True,
+                "matched": matched,
+                "perfect": perfect,
                 "damage": float(hit.get("damageYi") or 0),
             }
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return {"action": action, "ok": False, "damage": 0.0, "error": _error_code(exc)}
+            return {
+                "action": action,
+                "ok": False,
+                "matched": matched,
+                "perfect": perfect,
+                "damage": 0.0,
+                "error": _error_code(exc),
+            }
 
     async def _fight(
         self,
@@ -890,6 +1044,14 @@ class WorldBossMonitor:
         actions.sort(key=lambda item: item["t"])
         successful_hits = sum(1 for item in hit_results if item["ok"])
         failed_hits = len(hit_results) - successful_hits
+        matched_hits = sum(1 for item in hit_results if item.get("matched"))
+        perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
+        hit_error_counts: dict[str, int] = {}
+        for item in hit_results:
+            if item.get("ok"):
+                continue
+            code = str(item.get("error") or "unknown")
+            hit_error_counts[code] = hit_error_counts.get(code, 0) + 1
         realtime_damage = any(float(item.get("damage") or 0) > 0 for item in hit_results)
         player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
         player_hp = max(1, int(player.get("maxHp") or 100))
@@ -908,13 +1070,13 @@ class WorldBossMonitor:
             "dead": False,
             "actions": actions,
             "clientStats": {
-                "dodges": len(actions),
+                "dodges": matched_hits,
                 "grazes": 0,
                 "damage": 0,
-                "hits": len(actions),
-                "perfects": len(actions),
-                "combo": len(actions),
-                "bestCombo": len(actions),
+                "hits": matched_hits,
+                "perfects": perfect_hits,
+                "combo": matched_hits,
+                "bestCombo": matched_hits,
             },
             "realtimeDamageApplied": realtime_damage,
         }
@@ -934,8 +1096,9 @@ class WorldBossMonitor:
             "score": int(result.get("score") or 0),
             "player_hp": int(result.get("player_hp") if result.get("player_hp") is not None else player_hp),
             "hit_count": successful_hits,
-            "perfect_count": len(actions),
+            "perfect_count": perfect_hits,
             "failed_hit_count": failed_hits,
+            "hit_error_counts": hit_error_counts,
             "window_count": len(windows),
         }
 
@@ -972,6 +1135,15 @@ class WorldBossMonitor:
         summary = f"{grade} {score}分；命中 {hits}/{total}，完美 {perfects}，余血 {hp}"
         if failed:
             summary += f"；{failed} 次实时回传失败"
+            error_counts = outcome.get("hit_error_counts")
+            if isinstance(error_counts, dict) and error_counts:
+                details = ", ".join(
+                    f"{code}x{int(count)}"
+                    for code, count in sorted(error_counts.items())
+                    if int(count or 0) > 0
+                )
+                if details:
+                    summary += f"（{details}）"
         return summary
 
 

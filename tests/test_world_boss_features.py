@@ -207,6 +207,67 @@ class WorldBossFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_realtime_hit_uses_actual_elapsed_time_and_account_stagger(self):
+        async def run():
+            clock = [100.0]
+            calls = []
+
+            async def sleep(seconds):
+                clock[0] += seconds
+
+            async def post_json(origin, path, payload, timeout):
+                calls.append((path, dict(payload)))
+                return {"hit": {"damageYi": 9}}
+
+            monitor = WorldBossMonitor(
+                FakeActor(),
+                "main",
+                post_json=post_json,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+            )
+            result = await monitor._hit_window(
+                extract_world_boss_entry(DummyMessage()),
+                "signed_init_data",
+                "session_fixture",
+                "challenge_fixture",
+                100.0,
+                {
+                    "id": "w1",
+                    "centerMs": 1000,
+                    "hitMs": 460,
+                    "perfectMs": 150,
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["perfect"])
+            elapsed = calls[0][1]["elapsedMs"]
+            self.assertGreaterEqual(elapsed, 875)
+            self.assertLessEqual(elapsed, 885)
+            self.assertEqual(result["action"]["t"], elapsed)
+
+        asyncio.run(run())
+
+    def test_default_requests_reuse_one_persistent_client_per_origin(self):
+        async def run():
+            fake_client = SimpleNamespace(
+                post=AsyncMock(return_value={"ok": True}),
+                close=lambda: None,
+            )
+            monitor = WorldBossMonitor(FakeActor(), "main")
+            with patch(
+                "world_boss_features._PersistentWorldBossJsonClient",
+                return_value=fake_client,
+            ) as client_type:
+                await monitor._request("https://asc.aiopenai.app", "/one", {})
+                await monitor._request("https://asc.aiopenai.app", "/two", {})
+
+            client_type.assert_called_once_with("https://asc.aiopenai.app")
+            self.assertEqual(fake_client.post.await_count, 2)
+
+        asyncio.run(run())
+
     def test_identity_fallback_uses_personal_event_choice(self):
         async def run():
             actor = FakeActor(avatars=["缘生子"])

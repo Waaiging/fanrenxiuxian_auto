@@ -1182,15 +1182,14 @@ class MiniAppFishingAutomation:
                 "completed_at": _now_text(),
             }
             if participant_key in participants:
-                data["current_key"] = _next_participant(
-                    participants,
-                    participant_key,
-                    _mapping(data.get("completed_today")),
-                )
-            data["status"] = "ready"
+                # Keep the rod on this identity until the Mini App confirms its daily
+                # cast limit. Rotating after every single catch creates dozens of
+                # unnecessary market transfers and prevents one complete daily summary.
+                data["current_key"] = participant_key
+            data["status"] = "fishing"
             data["detail"] = (
                 f"{fishing_participant_label(participant_key)} 本竿完成；"
-                f"下一位 {fishing_participant_label(data.get('current_key')) or '待定'}"
+                "继续垂钓至今日竿数耗尽"
             )
 
         return _update_global_state(update, settings=settings)
