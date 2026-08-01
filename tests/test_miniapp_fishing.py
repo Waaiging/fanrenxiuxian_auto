@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import dashboard_server
 from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import MiniAppDwellingTransport
 from miniapp_fishing import (
@@ -259,6 +260,33 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         logger.error.assert_not_called()
         self.assertEqual(actor.state["miniapp_fishing_status"], "daily_done")
+
+    def test_dashboard_daily_limit_uses_configured_bait_and_done_status(self):
+        state = {
+            "miniapp_fishing_status": "daily_done",
+            "miniapp_fishing_last_error": "fishing_daily_limit_reached",
+            "miniapp_fishing_pond": "青溪浅滩",
+            "miniapp_fishing_bait": "凡饵",
+            "miniapp_fishing_chum": "不打窝",
+            "miniapp_fishing_last_grade": "甲等",
+            "miniapp_fishing_last_score": 100,
+        }
+        with patch(
+            "dashboard_server.miniapp_fishing_settings",
+            return_value={
+                "enabled": True,
+                "pond": "qingxi",
+                "bait": "demon_blood",
+                "chum": "none",
+            },
+        ):
+            row = dashboard_server.miniapp_fishing_command(state)
+
+        self.assertEqual(row["status"], "今日竿数已尽")
+        self.assertEqual(row["tone"], "done")
+        self.assertIn("妖血饵", row["detail"])
+        self.assertIn("上竿 凡饵", row["detail"])
+        self.assertNotIn("fishing_daily_limit_reached", row["detail"])
 
 
 if __name__ == "__main__":

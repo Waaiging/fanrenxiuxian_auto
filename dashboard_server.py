@@ -37,6 +37,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
 from automation_settings import (
+    MINIAPP_FISHING_BAITS,
+    MINIAPP_FISHING_CHUMS,
+    MINIAPP_FISHING_PONDS,
     MULAN_SUPPORT_MODES,
     automation_dashboard_payload,
     miniapp_fishing_settings,
@@ -1140,35 +1143,44 @@ def miniapp_fishing_command(state):
         if target and target > datetime.now()
         else 0
     )
-    pond = clean_custom_text(state.get("miniapp_fishing_pond") or settings.get("pond") or "", 40)
-    bait = clean_custom_text(state.get("miniapp_fishing_bait") or settings.get("bait") or "", 40)
-    chum = clean_custom_text(state.get("miniapp_fishing_chum") or "不打窝", 40)
+    def option_name(options, key):
+        wanted = str(key or "").strip()
+        return dict(options).get(wanted, wanted)
+
+    pond = option_name(MINIAPP_FISHING_PONDS, settings.get("pond"))
+    bait = option_name(MINIAPP_FISHING_BAITS, settings.get("bait"))
+    chum = option_name(MINIAPP_FISHING_CHUMS, settings.get("chum"))
+    last_bait = clean_custom_text(state.get("miniapp_fishing_bait") or "", 40)
     grade = clean_custom_text(state.get("miniapp_fishing_last_grade") or "", 20)
     score = int(state.get("miniapp_fishing_last_score") or 0)
     detail_parts = ["仅主号主魂", pond, bait, chum]
+    if last_bait and last_bait != bait:
+        detail_parts.append(f"上竿 {last_bait}")
     if grade or score:
         detail_parts.append(f"上次 {grade or '-'} {score}分")
     if result:
         detail_parts.append(result)
+    status_map = {
+        "waiting": ("等鱼讯", "cooldown"),
+        "reeling": ("自动收线", "active"),
+        "caught": ("提竿成功", "active"),
+        "empty": ("本竿空竿", "cooldown"),
+        "settling": ("鱼获结算中", "cooldown"),
+        "daily_done": ("今日竿数已尽", "done"),
+        "no_rod": ("无鱼竿", "error"),
+        "auth_refresh": ("刷新入口", "cooldown"),
+        "paused": ("已暂停", "paused"),
+    }
     if not enabled:
         status = "已暂停"
         tone = "paused"
+    elif status_key in {"daily_done", "no_rod", "auth_refresh"}:
+        status, tone = status_map[status_key]
     elif error:
         status = "等待重试"
         tone = "error"
         detail_parts.insert(0, f"Mini App：{error}")
     else:
-        status_map = {
-            "waiting": ("等鱼讯", "cooldown"),
-            "reeling": ("自动收线", "active"),
-            "caught": ("提竿成功", "active"),
-            "empty": ("本竿空竿", "cooldown"),
-            "settling": ("鱼获结算中", "cooldown"),
-            "daily_done": ("今日竿数已尽", "done"),
-            "no_rod": ("无鱼竿", "error"),
-            "auth_refresh": ("刷新入口", "cooldown"),
-            "paused": ("已暂停", "paused"),
-        }
         status, tone = status_map.get(status_key, ("等待执行", "ready"))
     return command_row(
         "miniapp:fishing",
