@@ -177,6 +177,7 @@ class DuelControlTests(unittest.TestCase):
 
     def test_custom_intervals_persist_and_drive_new_reservations(self):
         state = duel_features.set_duel_intervals(45, 95)
+        duel_features.set_duel_participant_control(True, "main|主魂", "ExternalIntervalTarget")
 
         self.assertEqual(state["interval_seconds"], 45)
         self.assertEqual(state["target_interval_seconds"], 95)
@@ -236,14 +237,14 @@ class DuelControlTests(unittest.TestCase):
             "main",
             "无咎子",
             [
-                {"username": "TitanCreeper", "count": 2},
-                {"username": "Gamling33", "count": 1},
+                {"username": "ExternalAlpha", "count": 2},
+                {"username": "ExternalBeta", "count": 1},
             ],
             enabled=True,
         )
 
         first = duel_features.reserve_duel_for_account("main")
-        self.assertEqual((first["queue_key"], first["target_username"]), ("multi", "TitanCreeper"))
+        self.assertEqual((first["queue_key"], first["target_username"]), ("multi", "ExternalAlpha"))
         duel_features.finish_duel_reservation(first, {
             "status": "settled", "outcome": "胜利", "remaining": 9,
         })
@@ -252,17 +253,17 @@ class DuelControlTests(unittest.TestCase):
         state["multi"]["next_at"] = ""
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         second = duel_features.reserve_duel_for_account("main")
-        self.assertEqual(second["target_username"], "Gamling33")
+        self.assertEqual(second["target_username"], "ExternalBeta")
         duel_features.finish_duel_reservation(second, {
             "status": "settled", "outcome": "失败", "remaining": 8,
         })
 
         state = duel_features.load_duel_state()
         state["multi"]["next_at"] = ""
-        state["target_next_at"].pop("titancreeper", None)
+        state["target_next_at"].pop("externalalpha", None)
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
         third = duel_features.reserve_duel_for_account("main")
-        self.assertEqual(third["target_username"], "TitanCreeper")
+        self.assertEqual(third["target_username"], "ExternalAlpha")
         duel_features.finish_duel_reservation(third, {
             "status": "settled", "outcome": "胜利", "remaining": 7,
         })
@@ -413,6 +414,55 @@ class DuelControlTests(unittest.TestCase):
             {},
         )
 
+    def test_main_soul_target_is_aligned_and_held_before_rotation_reservation(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "sub|主魂", key)
+        duel_features.set_duel_participant_control(True, "sub|主魂", "Weeguu")
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("sub"))
+        preparation = duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"]
+        self.assertEqual(
+            (
+                preparation["owner"],
+                preparation["target_identity"],
+                preparation["target_username"],
+                preparation["status"],
+            ),
+            ("main", "主魂", "Weeguu", "pending"),
+        )
+
+        claim = duel_features.claim_duel_target_preparation("main")
+        self.assertIsNotNone(claim)
+        self.assertTrue(
+            duel_features.finish_duel_target_preparation(
+                claim,
+                True,
+                "主号主魂已重新确认并锁定",
+                reply_to_msg_id=8301,
+            )
+        )
+
+        reservation = duel_features.reserve_duel_for_account("sub")
+        self.assertEqual(reservation["participant_key"], "sub|主魂")
+        self.assertEqual(reservation["target_account"], "main")
+        self.assertEqual(reservation["target_identity"], "主魂")
+        self.assertEqual(reservation["command"], ".斗法 @Weeguu")
+        self.assertIsNone(reservation["reply_to_msg_id"])
+        self.assertTrue(reservation["preparation_run_id"])
+        self.assertEqual(
+            duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"]["status"],
+            "holding",
+        )
+
+        duel_features.finish_duel_reservation(reservation, {
+            "status": "settled", "outcome": "胜利", "remaining": 9,
+        })
+        self.assertEqual(
+            duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"],
+            {},
+        )
+
     def test_stale_ready_preparation_without_reply_anchor_is_recreated(self):
         duel_features.configure_duel_multi_plan(
             "main",
@@ -459,6 +509,38 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(reply_to_msg_id, 8123)
         self.assertEqual(actor.calls, [(
             "寻真子",
+            ".斗法",
+            30,
+            {"force_fresh": True, "return_switch_message_id": True},
+        )])
+
+    def test_target_preparation_switches_and_confirms_requested_main_soul(self):
+        class Actor(duel_features.DuelMixin):
+            account_key = "main"
+            avatars = ["缘生子"]
+
+            def __init__(self):
+                self.current_identity = "缘生子"
+                self.calls = []
+
+            async def prepare_identity_for_time_critical_command(self, identity, command="", timeout=0, **kwargs):
+                self.calls.append((identity, command, timeout, kwargs))
+                self.current_identity = identity
+                return True, 8401
+
+        actor = Actor()
+        success, detail, switch_message_id = asyncio.run(actor.prepare_duel_target_identity({
+            "owner": "main",
+            "target_identity": "主魂",
+            "target_username": "Weeguu",
+        }))
+
+        self.assertTrue(success, detail)
+        self.assertIn("按用户名斗法", detail)
+        self.assertEqual(actor.current_identity, "主魂")
+        self.assertEqual(switch_message_id, 8401)
+        self.assertEqual(actor.calls, [(
+            "主魂",
             ".斗法",
             30,
             {"force_fresh": True, "return_switch_message_id": True},

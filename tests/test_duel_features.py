@@ -39,6 +39,14 @@ class DuelFeatureTests(unittest.TestCase):
                 "beasts_cache": [{"full_name": "六翼", "status": "出战中"}],
             }, handle, ensure_ascii=False)
 
+    def use_external_rotation_targets(self):
+        """Keep reservation-focused tests independent from target identity preparation."""
+        state = duel_features.load_duel_state(write_back=True)
+        rotation = state["queues"][ROTATION]
+        for index, participant in enumerate(rotation["participants"].values()):
+            participant["target_username"] = f"ExternalTarget{index + 1}"
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
     def tearDown(self):
         for item in reversed(self.patchers):
             item.stop()
@@ -60,6 +68,7 @@ class DuelFeatureTests(unittest.TestCase):
         ])
 
     def test_single_rotation_advances_across_all_identities(self):
+        self.use_external_rotation_targets()
         first = duel_features.reserve_duel_for_account("main")
         self.assertEqual(first["queue_key"], ROTATION)
         self.assertEqual(first["identity"], "主魂")
@@ -80,6 +89,7 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertGreaterEqual((next_at - started).total_seconds(), 359)
 
     def test_lease_prevents_duplicate_reservation(self):
+        self.use_external_rotation_targets()
         first = duel_features.reserve_duel_for_account("main")
         self.assertIsNotNone(first)
         self.assertIsNone(duel_features.reserve_duel_for_account("xiaohao"))
@@ -148,6 +158,7 @@ class DuelFeatureTests(unittest.TestCase):
         )
 
     def test_busy_target_does_not_consume_attempt_and_retries_soon(self):
+        self.use_external_rotation_targets()
         reservation = duel_features.reserve_duel_for_account("main")
         result = duel_features.parse_duel_result(
             "天机繁忙！对方正在进行另一场因果纠缠，请稍候再试。",
@@ -184,6 +195,7 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertEqual(result["status"], "settled")
         self.assertEqual(result["outcome"], "逃脱")
 
+        self.use_external_rotation_targets()
         reservation = duel_features.reserve_duel_for_account("main")
         duel_features.finish_duel_reservation(reservation, result)
         participant = duel_features.load_duel_state()["queues"][ROTATION]["participants"][
@@ -198,7 +210,7 @@ class DuelFeatureTests(unittest.TestCase):
         for key, participant in rotation["participants"].items():
             participant["enabled"] = key in {"main|主魂", "main|无咎子"}
             if participant["enabled"]:
-                participant["target_username"] = "Waaiging"
+                participant["target_username"] = "ExternalShared"
         duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
 
         first = duel_features.reserve_duel_for_account("main")
@@ -213,13 +225,14 @@ class DuelFeatureTests(unittest.TestCase):
 
         self.assertIsNone(duel_features.reserve_duel_for_account("main"))
         blocked = duel_features.load_duel_state()["queues"][ROTATION]
-        self.assertIn("@Waaiging", blocked["last_result"])
+        self.assertIn("@ExternalShared", blocked["last_result"])
         self.assertGreater(
             duel_features.parse_duel_time(blocked["next_at"]),
             datetime.now(),
         )
 
     def test_finish_reanchors_interval_after_a_delayed_execution(self):
+        self.use_external_rotation_targets()
         reservation = duel_features.reserve_duel_for_account("main")
         state = duel_features.load_duel_state()
         state["queues"][ROTATION]["next_at"] = "2000-01-01 00:00:00"
@@ -463,6 +476,10 @@ class DuelFeatureTests(unittest.TestCase):
         rotation = state["queues"][ROTATION]
         for key, participant in rotation["participants"].items():
             participant["enabled"] = key in {"xiaohao|素心子", "main|主魂"}
+            if participant["enabled"]:
+                participant["target_username"] = (
+                    "ExternalXiaohaoTarget" if key == "xiaohao|素心子" else "ExternalMainTarget"
+                )
         xiaohao_index = next(
             index
             for index, item in enumerate(duel_features.DUEL_QUEUES[ROTATION]["participants"])

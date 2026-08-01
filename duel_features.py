@@ -881,10 +881,11 @@ def _multi_target_by_id(multi, target_id):
 
 
 def _duel_target_activation(target_username):
-    target = duel_identity_for_username(target_username)
-    if not target or target.get("identity") == "主魂":
-        return None
-    return target
+    # Every known target identity must be aligned and held before the duel, not
+    # only avatars.  ``.斗法 @main_username`` resolves to whatever identity that
+    # Telegram account currently controls, so a fishing/other temporary switch
+    # can otherwise redirect a planned main-soul duel to an avatar.
+    return duel_identity_for_username(target_username)
 
 
 def _duel_target_preparation_contexts(data):
@@ -961,7 +962,7 @@ def finish_duel_target_preparation(claim, success, detail="", reply_to_msg_id=No
         reply_to_msg_id = 0
     if success and reply_to_msg_id <= 0:
         success = False
-        detail = detail or "目标分身切换消息缺失"
+        detail = detail or "目标身份切换消息缺失"
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
         queue_key, container, field, preparation = _duel_target_preparation_context(data, claim)
@@ -1165,6 +1166,11 @@ def _reserve_multi_duel_locked(data, account, now):
         )
         preparation_run_id = str(preparation.get("run_id") or "")
         reply_to_msg_id = int(preparation.get("reply_to_msg_id") or 0) or None
+        if activation.get("identity") == "主魂":
+            # Main souls continue to use the explicit username command.  The
+            # fresh switch message is still required as proof/alignment and its
+            # owner keeps the identity under the atomic preparation hold.
+            reply_to_msg_id = None
     multi["in_flight"] = {
         "run_id": run_id,
         "owner": account,
@@ -1190,7 +1196,11 @@ def _reserve_multi_duel_locked(data, account, now):
         "target_identity": (activation or {}).get("identity", ""),
         "preparation_run_id": preparation_run_id,
         "reply_to_msg_id": reply_to_msg_id,
-        "command": ".斗法" if activation else f".斗法 @{target_username}",
+        "command": (
+            ".斗法"
+            if activation and activation.get("identity") != "主魂"
+            else f".斗法 @{target_username}"
+        ),
         "reserved_at": duel_time(now),
     }, True
 
@@ -1494,6 +1504,30 @@ def reserve_duel_for_account(account):
             pstate = queue["participants"][key]
             preparation_run_id = ""
             reply_to_msg_id = None
+
+            # TitanCreeper also needs its beast preparation.  Do this before
+            # creating the main-soul identity hold; otherwise the target
+            # scheduler would sit inside that hold and could not run the beast
+            # preparation until the lease expired.
+            if target_username.lower() == "titancreeper":
+                titan_status = titan_target_status(queue.get("beast_mode"))
+                if titan_status["ready"]:
+                    titan_status = None
+            else:
+                titan_status = None
+            if titan_status is not None:
+                desired_label = TITAN_BEAST_MODE_LABELS[queue.get("beast_mode", TITAN_BEAST_MODE_DEFAULT)]
+                waiting_result = (
+                    f"等待小号群组发送权限恢复后切换六翼{desired_label}"
+                    if titan_status.get("preparation_blocked")
+                    else f"等待小号主魂与六翼{desired_label}"
+                )
+                if queue.get("last_result") != waiting_result:
+                    queue["last_result"] = waiting_result
+                    queue["next_at"] = duel_time(now + timedelta(seconds=60))
+                    dirty = True
+                continue
+
             if selected_activation:
                 target_preparation = queue.get("target_preparation") or {}
                 matching_preparation = (
@@ -1547,28 +1581,11 @@ def reserve_duel_for_account(account):
                     return None
                 preparation_run_id = str(target_preparation.get("run_id") or "")
                 reply_to_msg_id = int(target_preparation.get("reply_to_msg_id") or 0) or None
+                if selected_activation.get("identity") == "主魂":
+                    reply_to_msg_id = None
             elif target_preparation:
                 queue["target_preparation"] = {}
                 dirty = True
-
-            if target_username.lower() == "titancreeper":
-                titan_status = titan_target_status(queue.get("beast_mode"))
-                if titan_status["ready"]:
-                    titan_status = None
-            else:
-                titan_status = None
-            if titan_status is not None:
-                desired_label = TITAN_BEAST_MODE_LABELS[queue.get("beast_mode", TITAN_BEAST_MODE_DEFAULT)]
-                waiting_result = (
-                    f"等待小号群组发送权限恢复后切换六翼{desired_label}"
-                    if titan_status.get("preparation_blocked")
-                    else f"等待小号主魂与六翼{desired_label}"
-                )
-                if queue.get("last_result") != waiting_result:
-                    queue["last_result"] = waiting_result
-                    queue["next_at"] = duel_time(now + timedelta(seconds=60))
-                    dirty = True
-                continue
 
             run_id = uuid.uuid4().hex
             queue["cursor"] = (selected_index + 1) % len(participants)
@@ -1610,7 +1627,11 @@ def reserve_duel_for_account(account):
                 "target_identity": (selected_activation or {}).get("identity", ""),
                 "preparation_run_id": preparation_run_id,
                 "reply_to_msg_id": reply_to_msg_id,
-                "command": ".斗法" if selected_activation else f".斗法 @{target_username}",
+                "command": (
+                    ".斗法"
+                    if selected_activation and selected_activation.get("identity") != "主魂"
+                    else f".斗法 @{target_username}"
+                ),
                 "reserved_at": duel_time(now),
             }
         if dirty:
@@ -2218,11 +2239,12 @@ class DuelMixin:
             return False, "目标身份准备账号不匹配", None
         identity = str(claim.get("target_identity") or "").strip()
         username = str(claim.get("target_username") or "").strip()
-        if not identity or identity == "主魂" or identity not in getattr(self, "avatars", []):
-            return False, "目标不是可切换分身", None
+        known_identities = {"主魂", *getattr(self, "avatars", [])}
+        if not identity or identity not in known_identities:
+            return False, "目标不是可切换身份", None
         prepare = getattr(self, "prepare_identity_for_time_critical_command", None)
         if not callable(prepare):
-            return False, "账号缺少分身预切换能力", None
+            return False, "账号缺少身份预切换能力", None
         prepared = await prepare(
             identity,
             command=".斗法",
@@ -2245,7 +2267,11 @@ class DuelMixin:
             return False, f"{identity} 的 .切换 消息 ID 未取得", None
         return (
             True,
-            f"@{username} · 已发送 .切换 {identity}，等待发起者引用该消息斗法",
+            (
+                f"@{username} · 已切换并锁定 {identity}，等待发起者按用户名斗法"
+                if identity == "主魂"
+                else f"@{username} · 已发送 .切换 {identity}，等待发起者引用该消息斗法"
+            ),
             reply_to_msg_id,
         )
 
