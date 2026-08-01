@@ -109,7 +109,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertIn("银须灵鲢", summary)
         self.assertIn("灵石x8", summary)
 
-    def test_lobby_buys_missing_selected_bait_before_casting(self):
+    def test_lobby_buys_ten_selected_baits_before_casting(self):
         class Actor:
             def __init__(self):
                 self.state = {}
@@ -134,7 +134,7 @@ class MiniAppFishingTests(unittest.TestCase):
                 )
             ),
             fishing_shop=AsyncMock(return_value=shop_payload(bait_count=0)),
-            fishing_buy_bait=AsyncMock(return_value=shop_payload(bait_count=1)),
+            fishing_buy_bait=AsyncMock(return_value=shop_payload(bait_count=10)),
             fishing_next_cast=AsyncMock(return_value=("fish_cast", {"token": "fish_cast"})),
             fishing_start=AsyncMock(
                 return_value=(
@@ -166,7 +166,7 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(wait, 31)
         transport.fishing_buy_bait.assert_awaited_once_with(
-            "主魂", "fish_lobby", "demon_blood", 1, log_operation=False
+            "主魂", "fish_lobby", "demon_blood", 10, log_operation=False
         )
         transport.fishing_next_cast.assert_awaited_once_with(
             "主魂",

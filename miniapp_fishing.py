@@ -17,6 +17,7 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_RETRY_SECONDS = 60
 DEFAULT_DISABLED_SECONDS = 30
 DEFAULT_RESULT_ATTEMPTS = 18
+BAIT_PURCHASE_QUANTITY = 10
 IDENTITY = "主魂"
 
 
@@ -214,10 +215,6 @@ class MiniAppFishingAutomation:
             15,
             _integer(settings.get("fishing_retry_seconds"), DEFAULT_RETRY_SECONDS),
         )
-        self.purchase_quantity = max(
-            1,
-            min(99, _integer(settings.get("fishing_bait_purchase_quantity"), 1)),
-        )
 
     @property
     def supported(self) -> bool:
@@ -292,7 +289,7 @@ class MiniAppFishingAutomation:
         missing = max(0, int(minimum) - _integer(bait.get("count"), 0))
         if missing <= 0:
             return shop, bait
-        quantity = max(missing, self.purchase_quantity)
+        quantity = BAIT_PURCHASE_QUANTITY
         bought = await self.transport.fishing_buy_bait(
             IDENTITY,
             token,
