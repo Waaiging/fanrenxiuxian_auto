@@ -742,7 +742,7 @@ class MiniAppFishingAutomation:
         if not chum:
             raise MiniAppBeastError("fishing_chum_invalid")
         if _integer(chum.get("remainingToday"), 0) <= 0:
-            raise MiniAppBeastError("fishing_chum_daily_limit")
+            return self._use_no_chum_after_daily_limit(identity, shop, chum)
         for cost in _items(chum.get("cost")):
             required = _integer(cost.get("qty"), 0)
             owned = _integer(cost.get("owned"), 0)
@@ -765,12 +765,17 @@ class MiniAppFishingAutomation:
         chum = fishing_option(refreshed.get("chums"), chum_key)
         if not chum.get("affordable"):
             raise MiniAppBeastError("fishing_chum_unaffordable")
-        applied = await self.transport.fishing_apply_chum(
-            identity,
-            token,
-            chum_key,
-            log_operation=False,
-        )
+        try:
+            applied = await self.transport.fishing_apply_chum(
+                identity,
+                token,
+                chum_key,
+                log_operation=False,
+            )
+        except MiniAppBeastError as exc:
+            if exc.code == "fishing_chum_daily_limit":
+                return self._use_no_chum_after_daily_limit(identity, refreshed, chum)
+            raise
         updated = fishing_shop(applied) or refreshed
         self._record_shop(identity, updated)
         self._record(
@@ -779,6 +784,42 @@ class MiniAppFishingAutomation:
             miniapp_fishing_last_chum=str(chum.get("name") or chum_key),
         )
         return updated
+
+    def _use_no_chum_after_daily_limit(
+        self,
+        identity: str,
+        shop: dict[str, Any],
+        chum: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Treat an exhausted configured chum as a normal same-day fallback."""
+        today = _today_text()
+        chum_key = str(chum.get("key") or "")
+        chum_name = str(chum.get("name") or chum_key or "所选鱼窝")
+        state = self._state(identity)
+        already_recorded = (
+            str(state.get("miniapp_fishing_chum_fallback_date") or "") == today
+            and str(state.get("miniapp_fishing_chum_fallback_key") or "") == chum_key
+        )
+        self._record(
+            identity,
+            miniapp_fishing_chum_fallback_date=today,
+            miniapp_fishing_chum_fallback_key=chum_key,
+            miniapp_fishing_chum_fallback_name=chum_name,
+            miniapp_fishing_chum_fallback_reason="daily_limit",
+            miniapp_fishing_chum_fallback_detail=(
+                f"{chum_name}今日打窝次数已尽；本日后续继续不打窝"
+            ),
+        )
+        if not already_recorded:
+            logger = getattr(self.log, "info", None)
+            if callable(logger):
+                logger(
+                    "Mini App fishing chum daily limit reached for %s (%s); "
+                    "continuing without chum.",
+                    identity,
+                    chum_name,
+                )
+        return shop
 
     @staticmethod
     def _wait_for_bite(session: dict[str, Any]) -> int:

@@ -21,7 +21,7 @@ from miniapp_fishing import (
 ENTRY = "https://t.me/fanrenxiuxian_bot?startapp=dwelling_fixture"
 
 
-def shop_payload(*, bait_count=0, active_chum=None):
+def shop_payload(*, bait_count=0, active_chum=None, chum_remaining_today=1):
     return {
         "shop": {
             "castActive": False,
@@ -51,8 +51,8 @@ def shop_payload(*, bait_count=0, active_chum=None):
                     "name": "妖腥窝",
                     "uses": 6,
                     "dailyLimit": 1,
-                    "usedToday": 0,
-                    "remainingToday": 1,
+                    "usedToday": 1 - min(1, chum_remaining_today),
+                    "remainingToday": chum_remaining_today,
                     "affordable": bait_count >= 2,
                     "cost": [{"name": "妖血饵", "qty": 2, "owned": bait_count}],
                 }
@@ -246,6 +246,87 @@ class MiniAppFishingTests(unittest.TestCase):
             "qingxi",
             "item_fishing_bait_demon_blood",
             log_operation=False,
+        )
+
+    def test_exhausted_configured_chum_continues_without_chum(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        transport = SimpleNamespace(fishing_apply_chum=AsyncMock())
+        worker = MiniAppFishingAutomation(Actor(), transport, "sub", logger)
+        shop = miniapp_fishing.fishing_shop(
+            shop_payload(bait_count=10, chum_remaining_today=0)
+        )
+
+        result = asyncio.run(worker._ensure_chum("主魂", "fish_token", shop, "demon"))
+        second = asyncio.run(worker._ensure_chum("主魂", "fish_token", shop, "demon"))
+
+        self.assertIs(result, shop)
+        self.assertIs(second, shop)
+        transport.fishing_apply_chum.assert_not_awaited()
+        self.assertEqual(
+            worker.actor.state["miniapp_fishing_chum_fallback_reason"],
+            "daily_limit",
+        )
+        self.assertIn(
+            "继续不打窝",
+            worker.actor.state["miniapp_fishing_chum_fallback_detail"],
+        )
+        logger.info.assert_called_once()
+
+    def test_existing_active_chum_is_used_even_when_reapply_limit_is_zero(self):
+        actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
+        transport = SimpleNamespace(fishing_apply_chum=AsyncMock())
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "sub",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        shop = miniapp_fishing.fishing_shop(
+            shop_payload(
+                bait_count=10,
+                active_chum={"key": "demon", "name": "妖腥窝", "remaining": 1},
+                chum_remaining_today=0,
+            )
+        )
+
+        result = asyncio.run(worker._ensure_chum("主魂", "fish_token", shop, "demon"))
+
+        self.assertIs(result, shop)
+        transport.fishing_apply_chum.assert_not_awaited()
+        self.assertNotIn("miniapp_fishing_chum_fallback_reason", actor.state)
+
+    def test_server_side_chum_limit_race_also_falls_back_without_error(self):
+        actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
+        refreshed_payload = shop_payload(bait_count=10, chum_remaining_today=1)
+        transport = SimpleNamespace(
+            fishing_shop=AsyncMock(return_value=refreshed_payload),
+            fishing_apply_chum=AsyncMock(
+                side_effect=MiniAppBeastError("fishing_chum_daily_limit")
+            ),
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "sub",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        shop = miniapp_fishing.fishing_shop(refreshed_payload)
+
+        result = asyncio.run(worker._ensure_chum("主魂", "fish_token", shop, "demon"))
+
+        self.assertEqual(result["activeChum"], None)
+        transport.fishing_apply_chum.assert_awaited_once()
+        self.assertEqual(
+            actor.state["miniapp_fishing_chum_fallback_reason"],
+            "daily_limit",
         )
 
     def test_transport_uses_fishing_external_token_and_scoped_endpoints(self):
