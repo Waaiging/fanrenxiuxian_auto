@@ -1005,43 +1005,51 @@ class MiniAppDwellingTransport:
         token: str,
         bait_key: str,
         quantity: int,
+        log_operation: bool = True,
     ) -> dict[str, Any]:
         bait_key = str(bait_key or "").strip()
         quantity = int(quantity or 0)
         if not bait_key or quantity < 1 or quantity > 99:
             raise MiniAppBeastError("fishing_quantity_invalid")
         async with self._lock:
-            return await self._logged_operation(
+            request = lambda: self._fishing_request_unlocked(
                 identity,
-                f"灵溪垂钓购买鱼饵（{bait_key} x{quantity}）",
-                lambda: self._fishing_request_unlocked(
-                    identity,
-                    token,
-                    "/api/miniapp/xianxia-fishing/buy-bait",
-                    {"baitKey": bait_key, "quantity": quantity},
-                ),
+                token,
+                "/api/miniapp/xianxia-fishing/buy-bait",
+                {"baitKey": bait_key, "quantity": quantity},
             )
+            if log_operation:
+                return await self._logged_operation(
+                    identity,
+                    f"灵溪垂钓购买鱼饵（{bait_key} x{quantity}）",
+                    request,
+                )
+            return await request()
 
     async def fishing_apply_chum(
         self,
         identity: str,
         token: str,
         chum_key: str,
+        log_operation: bool = True,
     ) -> dict[str, Any]:
         chum_key = str(chum_key or "").strip()
         if not chum_key:
             raise MiniAppBeastError("fishing_chum_invalid")
         async with self._lock:
-            return await self._logged_operation(
+            request = lambda: self._fishing_request_unlocked(
                 identity,
-                f"灵溪垂钓打窝（{chum_key}）",
-                lambda: self._fishing_request_unlocked(
-                    identity,
-                    token,
-                    "/api/miniapp/xianxia-fishing/chum",
-                    {"chumKey": chum_key},
-                ),
+                token,
+                "/api/miniapp/xianxia-fishing/chum",
+                {"chumKey": chum_key},
             )
+            if log_operation:
+                return await self._logged_operation(
+                    identity,
+                    f"灵溪垂钓打窝（{chum_key}）",
+                    request,
+                )
+            return await request()
 
     async def fishing_next_cast(
         self,

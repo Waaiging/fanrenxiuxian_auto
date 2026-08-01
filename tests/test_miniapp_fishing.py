@@ -166,7 +166,7 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(wait, 31)
         transport.fishing_buy_bait.assert_awaited_once_with(
-            "主魂", "fish_lobby", "demon_blood", 1
+            "主魂", "fish_lobby", "demon_blood", 1, log_operation=False
         )
         transport.fishing_next_cast.assert_awaited_once_with(
             "主魂",
@@ -230,6 +230,76 @@ class MiniAppFishingTests(unittest.TestCase):
         finish = next(call for call in calls if call[0].endswith("/finish"))
         self.assertEqual(finish[1]["token"], "fish_next")
         self.assertEqual(finish[1]["fishingProof"]["challengeId"], "challenge-1")
+
+    def test_completed_round_emits_one_aggregated_log(self):
+        class Actor:
+            def __init__(self):
+                self.state = {
+                    "miniapp_fishing_chum": "不打窝",
+                    "miniapp_fishing_pending_purchases": [
+                        {"name": "妖血饵", "quantity": 1}
+                    ],
+                }
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        challenge = {
+            "challengeId": "summary-fixture",
+            "fishSeed": "summary-fixture",
+            "fishPower": 1.7,
+            "targetLow": 41,
+            "targetHigh": 68,
+            "minDurationMs": 5200,
+            "maxDurationMs": 70000,
+        }
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(return_value=(
+                "fish_cast",
+                {
+                    "session": {
+                        "phase": "bite",
+                        "pond": {"name": "青溪浅滩"},
+                        "bait": {"name": "妖血饵"},
+                    },
+                    "challenge": challenge,
+                },
+            )),
+            fishing_shop=AsyncMock(return_value=shop_payload(bait_count=1)),
+            fishing_finish=AsyncMock(return_value={
+                "result": {
+                    "grade": "甲等",
+                    "score": 100,
+                    "quality_bonus": 0.32,
+                    "details": {"stability": 1},
+                }
+            }),
+            fishing_result=AsyncMock(return_value={
+                "result": {
+                    "ready": True,
+                    "caught": True,
+                    "fish": {"name": "银须灵鲢", "weight": 1.23},
+                    "rarityLabel": "灵鱼",
+                    "expGain": 4,
+                    "bonusLoot": [],
+                }
+            }),
+        )
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(Actor(), transport, "main", logger)
+
+        with patch("miniapp_fishing.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(worker.run_cycle({"enabled": True}))
+
+        self.assertEqual(logger.info.call_count, 1)
+        combined = " ".join(str(part) for part in logger.info.call_args.args)
+        self.assertIn("灵溪垂钓汇总", combined)
+        self.assertIn("自动购饵 妖血饵x1", combined)
+        self.assertIn("甲等 100分", combined)
+        self.assertNotIn("灵溪垂钓开竿", combined)
+        self.assertNotIn("灵溪垂钓自动收线", combined)
+        self.assertEqual(worker.actor.state["miniapp_fishing_pending_purchases"], [])
 
     def test_daily_limit_is_recorded_without_error_traceback(self):
         class Actor:

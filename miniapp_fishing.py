@@ -298,17 +298,30 @@ class MiniAppFishingAutomation:
             token,
             str(bait.get("key") or bait_key),
             quantity,
+            log_operation=False,
         )
         updated_shop = fishing_shop(bought) or shop
         self._record_shop(updated_shop)
         updated_bait = fishing_option(updated_shop.get("baits"), bait_key)
         if _integer(updated_bait.get("count"), 0) < minimum:
             raise MiniAppBeastError("fishing_bait_missing")
+        bait_name = str(updated_bait.get("name") or bait.get("name") or bait_key)
+        pending_purchases = [
+            dict(item)
+            for item in _items(self._state().get("miniapp_fishing_pending_purchases"))
+        ]
+        existing = next(
+            (item for item in pending_purchases if str(item.get("name") or "") == bait_name),
+            None,
+        )
+        if existing is None:
+            pending_purchases.append({"name": bait_name, "quantity": quantity})
+        else:
+            existing["quantity"] = _integer(existing.get("quantity"), 0) + quantity
         self._record(
             miniapp_fishing_last_purchase_time=_now_text(),
-            miniapp_fishing_last_purchase=(
-                f"{str(updated_bait.get('name') or bait.get('name') or bait_key)} x{quantity}"
-            ),
+            miniapp_fishing_last_purchase=f"{bait_name} x{quantity}",
+            miniapp_fishing_pending_purchases=pending_purchases,
         )
         return updated_shop, updated_bait
 
@@ -347,7 +360,12 @@ class MiniAppFishingAutomation:
         chum = fishing_option(refreshed.get("chums"), chum_key)
         if not chum.get("affordable"):
             raise MiniAppBeastError("fishing_chum_unaffordable")
-        applied = await self.transport.fishing_apply_chum(IDENTITY, token, chum_key)
+        applied = await self.transport.fishing_apply_chum(
+            IDENTITY,
+            token,
+            chum_key,
+            log_operation=False,
+        )
         updated = fishing_shop(applied) or refreshed
         self._record_shop(updated)
         self._record(
@@ -380,6 +398,7 @@ class MiniAppFishingAutomation:
             raise MiniAppBeastError("fishing_pond_invalid")
         if not pond.get("unlocked"):
             raise MiniAppBeastError("fishing_pond_locked")
+        self._record(miniapp_fishing_pending_purchases=[])
         shop = await self._ensure_chum(token, shop, chum_key)
         shop, bait = await self._ensure_bait(token, shop, bait_key)
         token, _ = await self.transport.fishing_next_cast(
@@ -393,13 +412,6 @@ class MiniAppFishingAutomation:
         session = _mapping(start.get("session"))
         wait = self._wait_for_bite(session)
         active_chum = _mapping(shop.get("activeChum"))
-        self.log.info(
-            "OUT [Mini App | %s]:\n灵溪垂钓开竿（%s · %s · %s）",
-            IDENTITY,
-            str(pond.get("name") or pond_key),
-            str(bait.get("name") or bait_key),
-            str(active_chum.get("name") or "不打窝"),
-        )
         self._record(
             miniapp_fishing_status="waiting",
             miniapp_fishing_last_error="",
@@ -425,13 +437,6 @@ class MiniAppFishingAutomation:
         proof = built["proof"]
         pond = str(_mapping(session.get("pond")).get("name") or "灵溪")
         bait = str(_mapping(session.get("bait")).get("name") or "鱼饵")
-        self.log.info(
-            "OUT [Mini App | %s]:\n灵溪垂钓自动收线（%s · %s，预测 %s 分）",
-            IDENTITY,
-            pond,
-            bait,
-            built["predicted_score"],
-        )
         self._record(
             miniapp_fishing_status="reeling",
             miniapp_fishing_predicted_score=built["predicted_score"],
@@ -461,19 +466,30 @@ class MiniAppFishingAutomation:
             if _mapping(catch_payload.get("result")).get("ready"):
                 break
         summary = fishing_result_summary(finish, catch_payload)
-        self.log.info(
-            "IN [Mini App | %s]:\n灵溪垂钓自动收线（%s · %s） -> %s",
-            IDENTITY,
-            pond,
-            bait,
-            summary,
-        )
         score_result = _mapping(finish.get("result"))
         details = _mapping(score_result.get("details"))
         catch_result = _mapping(catch_payload.get("result"))
         fish = _mapping(catch_result.get("fish"))
         ready = bool(catch_result.get("ready"))
         caught = bool(catch_result.get("caught"))
+        pending_purchases = _items(
+            self._state().get("miniapp_fishing_pending_purchases")
+        )
+        purchase_text = "、".join(
+            f"{str(item.get('name') or '鱼饵')}x{max(1, _integer(item.get('quantity'), 1))}"
+            for item in pending_purchases
+        )
+        chum = str(self._state().get("miniapp_fishing_chum") or "不打窝")
+        if ready:
+            round_title = f"灵溪垂钓汇总（{pond} · {bait} · {chum}）"
+            if purchase_text:
+                round_title += f"｜自动购饵 {purchase_text}"
+            self.log.info(
+                "IN [Mini App | %s]:\n%s -> %s",
+                IDENTITY,
+                round_title,
+                summary,
+            )
         self._record(
             miniapp_fishing_status=("caught" if caught else "empty" if ready else "settling"),
             miniapp_fishing_last_error="",
@@ -491,6 +507,7 @@ class MiniAppFishingAutomation:
             miniapp_fishing_last_weight=_number(fish.get("weight"), 0),
             miniapp_fishing_last_exp_gain=_integer(catch_result.get("expGain"), 0),
             miniapp_fishing_last_bonus_loot=_items(catch_result.get("bonusLoot")),
+            miniapp_fishing_pending_purchases=([] if ready else pending_purchases),
             miniapp_fishing_next_run_time=(
                 datetime.now() + timedelta(seconds=3 if ready else 30)
             ).strftime(TIME_FORMAT),
@@ -591,6 +608,9 @@ class MiniAppFishingAutomation:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                previous_status = str(
+                    self._state().get("miniapp_fishing_status") or ""
+                )
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 if code == "fishing_daily_limit_reached":
                     status = "daily_done"
@@ -612,12 +632,12 @@ class MiniAppFishingAutomation:
                         datetime.now() + timedelta(seconds=wait)
                     ).strftime(TIME_FORMAT),
                 )
-                if status == "daily_done":
+                if status == "daily_done" and previous_status != status:
                     self.log.info("Mini App fishing daily limit reached; waiting for reset.")
-                elif status == "no_rod":
+                elif status == "no_rod" and previous_status != status:
                     self.log.warning("Mini App fishing paused: no fishing rod is available.")
-                elif status == "auth_refresh":
+                elif status == "auth_refresh" and previous_status != status:
                     self.log.info("Mini App fishing authorization refreshed; retrying shortly.")
-                else:
+                elif status == "error":
                     self.log.error("Mini App fishing loop failed: %s", code, exc_info=True)
             await asyncio.sleep(max(1, min(int(wait), 300)))
