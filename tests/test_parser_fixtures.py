@@ -13364,16 +13364,22 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertFalse(log_utils.command_send_precheck(actor, command))
                 self.assertFalse(log_utils.command_send_allowed(actor, command))
 
-    def test_dashboard_xiaohao_removes_retired_hunt_command(self):
+    def test_dashboard_xiaohao_labels_hunt_as_miniapp_scheduler(self):
         panels = build_command_panels("xiaohao", {
             "beast_hunt_stopped": True,
             "beast_hunt_stopped_reason": "第十只灵兽种类是风雀：风希",
+            "restricted_miniapp_active": True,
             "avatars": {},
         })
         main_panel = next(panel for panel in panels if panel.get("identity") == "主魂")
-        commands = {row.get("command") for row in main_panel.get("commands", [])}
+        hunt_rows = [
+            row for row in main_panel.get("commands", [])
+            if row.get("command") == ".寻觅灵兽"
+        ]
 
-        self.assertNotIn(".寻觅灵兽", commands)
+        self.assertEqual(len(hunt_rows), 1)
+        self.assertEqual(hunt_rows[0].get("execution_channel"), "miniapp")
+        self.assertIn("不发送群指令", hunt_rows[0].get("execution_channel_detail", ""))
 
     def test_dashboard_removes_retired_avatar_field_training_commands(self):
         panels = build_command_panels("main", {"avatars": {"无咎子": {}, "缘生子": {}, "素缘子": {}}})
