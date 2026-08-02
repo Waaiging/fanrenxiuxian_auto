@@ -22,6 +22,7 @@ from concubine_features import (
 from miniapp_beast import MiniAppBeastError
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_contract import MiniAppBeastContractWorker
+from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_daily_activities import MiniAppDailyActivities
 from miniapp_journey import MiniAppTianxingJourney
 from miniapp_dwelling import (
@@ -129,6 +130,12 @@ class RestrictedMiniAppWorker:
             self.account,
             self.log,
         )
+        self.beast_seek = MiniAppBeastSeekWorker(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
         self._tasks: list[asyncio.Task[Any]] = []
         self._last_auth_refresh = datetime.min
 
@@ -210,6 +217,8 @@ class RestrictedMiniAppWorker:
             self._spawn("journey", self.tianxing_journey.run_loop())
         if self.beast_abyss.enabled:
             self._spawn("beast_abyss", self.beast_abyss.run_loop())
+        if self.beast_seek.enabled:
+            self._spawn("beast_seek", self.beast_seek.run_loop())
 
         if self.account == "xiaohao":
             for avatar in getattr(self.actor, "avatars", []) or []:

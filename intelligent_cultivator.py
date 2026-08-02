@@ -5515,7 +5515,6 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     "main_beast_contract",
                     lambda: self._miniapp_beast_contract.run(),
                 )
-            self.create_scheduler_task("main_beast_hunt", lambda: self.run_main_beast_hunt_timer())
             self.create_scheduler_task("main_beast_action", lambda: self.run_main_beast_action_timer())
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))

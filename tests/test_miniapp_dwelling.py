@@ -133,6 +133,7 @@ class MiniAppDwellingTests(unittest.TestCase):
 
     def test_dashboard_labels_supported_and_group_only_yinluo_commands(self):
         miniapp_commands = (
+            ".寻觅灵兽",
             ".问道",
             ".小世界",
             ".显灵",
@@ -396,6 +397,72 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("万兽谷灵兽安抚（ID 7）", combined)
         self.assertNotIn("读取宗门灵圃", combined)
         self.assertIn("IN [Mini App | 素心子]:\n宗门灵圃安抚星辰 -> 安抚完成", combined)
+
+    def test_spirit_beast_seek_and_release_use_exact_new_beast_id(self):
+        logger = FakeLogger()
+        calls = []
+
+        def beast(beast_id, name, beast_type):
+            return {
+                "id": beast_id,
+                "name": name,
+                "beastType": beast_type,
+                "tier": 1,
+                "stamina": 100,
+                "combatPower": 100,
+                "status": "休息中",
+            }
+
+        existing = beast(7, "六翼", "六翼霜蚣")
+        newly_found = beast(99, "新来的风雀", "风雀")
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-spirit-beast?startapp=spiritbeast_fixture",
+                }
+            if path.endswith("/xianxia-spirit-beast/action"):
+                if payload["action"] == "seek":
+                    return {
+                        "ok": True,
+                        "message": "新来的风雀循着兽迹进入了灵兽袋。",
+                        "beasts": [existing, newly_found],
+                    }
+                self.assertEqual(payload["action"], "release")
+                self.assertEqual(payload["beastId"], 99)
+                self.assertTrue(payload["confirm"])
+                return {
+                    "ok": True,
+                    "message": "已解除与【新来的风雀】的灵契。",
+                    "beasts": [existing],
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(),
+            ENTRY,
+            logger=logger,
+            post_json=post_json,
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            sought = asyncio.run(transport.spirit_beast_seek("主魂"))
+            released = asyncio.run(
+                transport.spirit_beast_release("主魂", 99, "新来的风雀")
+            )
+
+        self.assertEqual({item["id"] for item in sought["beasts"]}, {7, 99})
+        self.assertEqual({item["id"] for item in released["beasts"]}, {7})
+        action_calls = [body for path, body in calls if path.endswith("/action")]
+        self.assertEqual(action_calls[0]["action"], "seek")
+        self.assertEqual(action_calls[1]["action"], "release")
+        self.assertEqual(action_calls[1]["beastId"], 99)
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("OUT [Mini App | 主魂]:\n万兽谷寻觅灵兽", combined)
+        self.assertIn("万兽谷放生新寻灵兽（新来的风雀）", combined)
 
     def test_pagoda_logs_action_while_hunt_steps_stay_silent(self):
         logger = FakeLogger()

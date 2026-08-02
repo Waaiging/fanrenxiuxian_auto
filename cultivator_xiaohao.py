@@ -85,6 +85,7 @@ from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_ev
 from group_visibility_control import run_telegram_write_permission_monitor
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
+from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_daily_activities import MiniAppDailyActivities
 from world_boss_features import install_world_boss_monitor
 from log_utils import (
@@ -7363,6 +7364,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self.account_key,
             log,
         )
+        self._miniapp_beast_seek = MiniAppBeastSeekWorker(
+            self,
+            self._miniapp_beast_contract.transport,
+            self.account_key,
+            log,
+        )
         self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
@@ -7487,6 +7494,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self.create_scheduler_task(
                 "miniapp_beast_abyss",
                 lambda: self._miniapp_beast_abyss.run_loop(),
+            )
+        if self._miniapp_beast_seek.enabled:
+            self.create_scheduler_task(
+                "miniapp_beast_seek",
+                lambda: self._miniapp_beast_seek.run_loop(),
             )
         if self._miniapp_daily_activities is not None:
             if self._miniapp_daily_activities.pagoda_enabled:

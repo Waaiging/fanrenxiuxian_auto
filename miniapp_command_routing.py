@@ -18,6 +18,7 @@ from typing import Any
 
 from miniapp_beast import MiniAppBeastError
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
+from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_dwelling import (
     MiniAppDwellingTransport,
     apply_dwelling_snapshot,
@@ -107,6 +108,12 @@ class MiniAppCommandRouter:
             self.log,
         )
         self.beast_abyss = MiniAppBeastAbyssWorker(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
+        self.beast_seek = MiniAppBeastSeekWorker(
             actor,
             self.transport,
             self.account,
@@ -215,6 +222,13 @@ class MiniAppCommandRouter:
                 asyncio.create_task(
                     self.beast_abyss.run_loop(),
                     name=f"miniapp_{self.account}_beast_abyss",
+                )
+            )
+        if self.beast_seek.enabled:
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.beast_seek.run_loop(),
+                    name=f"miniapp_{self.account}_beast_seek",
                 )
             )
         if self.fishing.supported:

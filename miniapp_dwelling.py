@@ -281,6 +281,26 @@ def spirit_beast_abyss_result_text(payload: Any) -> str:
     return "，".join(parts)[:500]
 
 
+def spirit_beast_seek_result_text(payload: Any) -> str:
+    """Return the server message for one Mini App beast-seeking action."""
+    text = miniapp_operation_result_text(payload)
+    if text and text != "完成":
+        return text
+    try:
+        count = len(normalize_spirit_beast_roster(payload))
+    except MiniAppBeastError:
+        count = 0
+    return f"寻觅结束，灵兽袋现有 {count} 只灵兽" if count else "寻觅结束"
+
+
+def spirit_beast_release_result_text(payload: Any) -> str:
+    """Return the server message for releasing one explicitly selected beast."""
+    text = miniapp_operation_result_text(payload)
+    if text and text != "完成":
+        return text
+    return "新寻得的非目标灵兽已放生"
+
+
 def pagoda_challenge_result_text(payload: Any) -> str:
     """Return floor progress plus the actual pagoda reward/penalty summary."""
     replay = payload.get("replay") if isinstance(payload, dict) else {}
@@ -825,6 +845,66 @@ class MiniAppDwellingTransport:
             return {
                 "beasts": normalize_spirit_beast_roster(payload),
                 "player": payload.get("player") or {},
+                "raw": payload,
+            }
+
+    async def spirit_beast_seek(self, identity: str = "主魂") -> dict[str, Any]:
+        """Seek one new beast through the Wan Beast Valley Mini App."""
+        async with self._lock:
+            payload = await self._logged_operation(
+                identity,
+                "万兽谷寻觅灵兽",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/action",
+                    payload={"action": "seek"},
+                ),
+                summarize=spirit_beast_seek_result_text,
+            )
+            return {
+                "beasts": normalize_spirit_beast_roster(payload),
+                "player": payload.get("player") or {},
+                "message": miniapp_operation_result_text(payload),
+                "raw": payload,
+            }
+
+    async def spirit_beast_release(
+        self,
+        identity: str,
+        beast_id: int,
+        beast_name: str = "",
+    ) -> dict[str, Any]:
+        """Release exactly one beast selected by its immutable Mini App id."""
+        try:
+            beast_id = int(beast_id)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("spirit_beast_id_invalid") from exc
+        if beast_id <= 0:
+            raise MiniAppBeastError("spirit_beast_id_invalid")
+        detail = str(beast_name or beast_id).strip()
+        async with self._lock:
+            payload = await self._logged_operation(
+                identity,
+                f"万兽谷放生新寻灵兽（{detail}）",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/action",
+                    payload={
+                        "action": "release",
+                        "beastId": beast_id,
+                        "confirm": True,
+                    },
+                ),
+                summarize=spirit_beast_release_result_text,
+            )
+            return {
+                "beasts": normalize_spirit_beast_roster(payload),
+                "player": payload.get("player") or {},
+                "message": miniapp_operation_result_text(payload),
                 "raw": payload,
             }
 

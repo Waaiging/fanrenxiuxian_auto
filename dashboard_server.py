@@ -693,11 +693,16 @@ def apply_command_execution_channels(panel, root_state=None):
     for row in panel.get("commands") or []:
         command = normalize_miniapp_command(row.get("command", ""))
         miniapp_only = command.startswith("miniapp:")
-        miniapp_capable = miniapp_command_allowed(command)
+        miniapp_scheduler = command == ".寻觅灵兽"
+        miniapp_capable = miniapp_command_allowed(command) or miniapp_scheduler
         if miniapp_only or miniapp_capable:
             row["execution_channel"] = "miniapp"
             if miniapp_only:
                 row["execution_channel_detail"] = "仅通过 Mini App 执行"
+            elif miniapp_scheduler:
+                row["execution_channel_detail"] = (
+                    "由 Mini App 定时任务执行，不发送群指令，也不回退群内"
+                )
             elif restricted_active:
                 row["execution_channel_detail"] = "当前受限模式，仅通过 Mini App 执行"
             elif route_active:

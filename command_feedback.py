@@ -47,6 +47,7 @@ NO_RESPONSE_TIMEOUT_SECONDS = 60
 NO_RESPONSE_RETRY_COUNT = 1
 RETIRED_AUTO_COMMAND_PREFIXES = (
     ".闯塔",
+    ".寻觅灵兽",
     ".借天门势",
     ".灵树灌溉",
     ".灵树状态",
@@ -82,7 +83,6 @@ RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY = {
         ".改换星移",
     ),
     ("xiaohao", "主魂"): (
-        ".寻觅灵兽",
         ".灵兽偷菜",
         ".探渊",
         ".灵兽探渊",
