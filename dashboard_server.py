@@ -2243,7 +2243,16 @@ def main_soul_panel(account, state):
             ))
             rows.append(miniapp_beast_contract_command(state))
             rows.append(miniapp_beast_abyss_command(state))
-            unsupported_detail = "公开群受限；万兽谷 Mini App 未提供这项旧指令接口"
+            rows.append(
+                time_command(
+                    state,
+                    "next_hunt_time",
+                    ".寻觅灵兽",
+                    "寻觅灵兽",
+                    group="灵兽",
+                )
+            )
+            unsupported_detail = "公开群受限；该手动旧指令不属于 Mini App 自动寻觅流程"
             for command, label in (
                 (".放生 <灵兽>", "放生灵兽"),
                 (".灵兽休息 <灵兽>", "灵兽休息"),
@@ -2274,6 +2283,7 @@ def main_soul_panel(account, state):
                 ),
                 miniapp_beast_contract_command(state),
                 miniapp_beast_abyss_command(state),
+                time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽"),
                 manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
                 manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
                 manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),

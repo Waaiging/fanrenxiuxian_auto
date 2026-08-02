@@ -3,6 +3,7 @@ import copy
 import unittest
 from datetime import datetime
 
+from dashboard_server import build_command_panels
 from miniapp_beast_seek import MiniAppBeastSeekWorker
 
 
@@ -315,6 +316,25 @@ class MiniAppBeastSeekTests(unittest.TestCase):
         )
 
         self.assertFalse(worker.enabled)
+
+    def test_xiaohao_dashboard_shows_seek_as_miniapp_scheduler(self):
+        state = {
+            "restricted_miniapp_active": True,
+            "next_hunt_time": "2099-01-01 00:00:00",
+            "avatars": {},
+        }
+
+        panel = next(
+            item
+            for item in build_command_panels("xiaohao", state)
+            if item.get("identity") == "主魂"
+        )
+        row = next(
+            item for item in panel["commands"] if item.get("command") == ".寻觅灵兽"
+        )
+
+        self.assertEqual(row["execution_channel"], "miniapp")
+        self.assertIn("定时任务", row["execution_channel_detail"])
 
 
 if __name__ == "__main__":
