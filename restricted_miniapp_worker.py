@@ -35,6 +35,9 @@ from miniapp_dwelling import (
     miniapp_operation_result_text,
     normalize_miniapp_command,
     sect_farm_action_result_ok,
+    sect_farm_collect_batch_operation,
+    sect_farm_collect_batch_result_text,
+    sect_farm_collection_due,
     sect_farm_pull_batch_operation,
     sect_farm_pull_batch_result_text,
     sect_farm_snapshot_status,
@@ -540,6 +543,31 @@ class RestrictedMiniAppWorker:
         state["star_miniapp_last_result"] = (
             command_result_text(payload) or miniapp_operation_result_text(payload)
         )
+        action_time = now_str()
+        if action == "soothe":
+            state["last_calm_time"] = action_time
+            state["last_star_appease_time"] = action_time
+        elif action == "collect":
+            state["last_collection_time"] = action_time
+            state["last_star_collect_time"] = action_time
+            recorder = getattr(self.actor, "record_daily_reward_event", None)
+            if callable(recorder) and state["star_miniapp_last_result"]:
+                try:
+                    recorder(
+                        STAR_IDENTITY,
+                        ".收集精华",
+                        state["star_miniapp_last_result"],
+                        source="Mini App 收集精华",
+                    )
+                except Exception:
+                    self.log.warning(
+                        "Mini App star essence reward recording failed for %s",
+                        STAR_IDENTITY,
+                        exc_info=True,
+                    )
+        elif action == "pull":
+            state["star_attraction_start_time"] = action_time
+            state["last_star_attraction_time"] = action_time
         return payload, self._record_star_snapshot(payload)
 
     async def run_star_farm_loop(self) -> None:
@@ -549,12 +577,41 @@ class RestrictedMiniAppWorker:
             try:
                 payload = await self.transport.sect_farm_snapshot(STAR_IDENTITY)
                 ready, troubled, empty, next_wait = self._record_star_snapshot(payload)
-                collection_due = ready > 0 or (troubled > 0 and next_wait <= 0)
+                collection_due = sect_farm_collection_due(ready, troubled, next_wait)
                 if collection_due:
                     _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
-                    if ready > 0:
-                        _, (ready, troubled, empty, next_wait) = await self._star_action("collect")
-                pull_keys = list(empty)
+                    if ready > 0 and sect_farm_collection_due(ready, troubled, next_wait):
+                        requested_count = ready
+                        empty_before = set(empty)
+                        operation = sect_farm_collect_batch_operation(requested_count)
+                        self.log.info("OUT [Mini App | %s]:\n%s", STAR_IDENTITY, operation)
+                        collect_payload, (ready, troubled, empty, next_wait) = await self._star_action(
+                            "collect",
+                            log_operation=False,
+                        )
+                        empty_after = set(empty)
+                        confirmed_count = len(empty_after - empty_before)
+                        state = identity_state(self.actor, STAR_IDENTITY)
+                        state["star_miniapp_last_collect_requested_count"] = requested_count
+                        state["star_miniapp_last_collect_confirmed_count"] = confirmed_count
+                        state["star_miniapp_last_collect_empty_count"] = len(empty_after)
+                        self._save()
+                        self.log.info(
+                            "IN [Mini App | %s]:\n%s -> %s",
+                            STAR_IDENTITY,
+                            operation,
+                            sect_farm_collect_batch_result_text(
+                                requested_count,
+                                confirmed_count,
+                                len(empty_after),
+                                command_result_text(collect_payload)
+                                or miniapp_operation_result_text(collect_payload),
+                            ),
+                        )
+                # Do not immediately refill partial empty slots while the
+                # rest of the Tianlei batch is still maturing.  Waiting lets
+                # the next collection empty and refill all eight together.
+                pull_keys = list(empty) if next_wait <= 0 else []
                 if pull_keys:
                     operation = sect_farm_pull_batch_operation(pull_keys)
                     self.log.info("OUT [Mini App | %s]:\n%s", STAR_IDENTITY, operation)

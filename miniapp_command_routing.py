@@ -28,6 +28,9 @@ from miniapp_dwelling import (
     miniapp_operation_result_text,
     normalize_miniapp_command,
     sect_farm_action_result_ok,
+    sect_farm_collect_batch_operation,
+    sect_farm_collect_batch_result_text,
+    sect_farm_collection_due,
     sect_farm_pull_batch_operation,
     sect_farm_pull_batch_result_text,
     sect_farm_snapshot_status,
@@ -396,7 +399,7 @@ class MiniAppCommandRouter:
         """Run one due batch and return seconds until the next collection."""
         payload = await self.transport.sect_farm_snapshot(identity)
         ready, troubled, empty, next_wait = self._record_star_snapshot(identity, payload)
-        collection_due = ready > 0 or (troubled > 0 and next_wait <= 0)
+        collection_due = sect_farm_collection_due(ready, troubled, next_wait)
         if collection_due:
             # One maintenance action immediately before the batch collection;
             # no fixed-interval soothing or polling while stars are maturing.
@@ -404,12 +407,41 @@ class MiniAppCommandRouter:
                 identity,
                 "soothe",
             )
-            if ready > 0:
-                _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
+            if ready > 0 and sect_farm_collection_due(ready, troubled, next_wait):
+                requested_count = ready
+                empty_before = set(empty)
+                operation = sect_farm_collect_batch_operation(requested_count)
+                self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
+                collect_payload, (ready, troubled, empty, next_wait) = await self._star_farm_action(
                     identity,
                     "collect",
+                    log_operation=False,
                 )
-        pull_keys = list(empty)
+                empty_after = set(empty)
+                confirmed_count = len(empty_after - empty_before)
+                state = identity_state(self.actor, identity)
+                state.update({
+                    "star_miniapp_last_collect_requested_count": requested_count,
+                    "star_miniapp_last_collect_confirmed_count": confirmed_count,
+                    "star_miniapp_last_collect_empty_count": len(empty_after),
+                })
+                self._save_star_state()
+                self.log.info(
+                    "IN [Mini App | %s]:\n%s -> %s",
+                    identity,
+                    operation,
+                    sect_farm_collect_batch_result_text(
+                        requested_count,
+                        confirmed_count,
+                        len(empty_after),
+                        command_result_text(collect_payload)
+                        or miniapp_operation_result_text(collect_payload),
+                    ),
+                )
+        # Keep already-empty plots idle while any sibling plot in the same
+        # Tianlei batch is still maturing.  Once the remainder is collected,
+        # all empty plots are pulled together and their timers realign.
+        pull_keys = list(empty) if next_wait <= 0 else []
         if pull_keys:
             operation = sect_farm_pull_batch_operation(pull_keys)
             self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)

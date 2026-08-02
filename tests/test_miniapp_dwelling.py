@@ -10,6 +10,7 @@ from miniapp_dwelling import (
     apply_dwelling_snapshot,
     miniapp_command_allowed,
     sect_farm_action_result_ok,
+    sect_farm_collection_due,
     sect_farm_snapshot_status,
 )
 from miniapp_command_routing import MiniAppCommandRouter
@@ -89,6 +90,12 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertFalse(sect_farm_action_result_ok({
             "actionResult": {"ok": False, "error": "permission_denied"},
         }, "collect"))
+
+    def test_star_farm_collection_waits_for_the_whole_batch(self):
+        self.assertFalse(sect_farm_collection_due(3, 0, 18))
+        self.assertFalse(sect_farm_collection_due(0, 2, 18))
+        self.assertTrue(sect_farm_collection_due(8, 0, 0))
+        self.assertTrue(sect_farm_collection_due(0, 8, 0))
 
     def test_command_whitelist_rejects_group_only_actions(self):
         for command in (
@@ -897,7 +904,7 @@ class MiniAppDwellingTests(unittest.TestCase):
                 message = "安抚完成"
             elif action == "collect":
                 plots = [
-                    {"key": "1", "status": "正常"},
+                    {"key": "1", "empty": True},
                     {"key": "2", "empty": True},
                     {"key": "3", "empty": True},
                 ]
@@ -927,19 +934,57 @@ class MiniAppDwellingTests(unittest.TestCase):
                 ("collect",),
                 ("pull",),
                 ("pull",),
+                ("pull",),
             ],
         )
-        pull_calls = router.transport.sect_farm_action.await_args_list[-2:]
-        self.assertEqual([call.kwargs["plot_key"] for call in pull_calls], ["2", "3"])
+        pull_calls = router.transport.sect_farm_action.await_args_list[-3:]
+        self.assertEqual([call.kwargs["plot_key"] for call in pull_calls], ["1", "2", "3"])
         self.assertTrue(all(call.kwargs["star_name"] == "天雷星" for call in pull_calls))
         self.assertTrue(all(call.kwargs["log_operation"] is False for call in pull_calls))
         self.assertEqual(actor.rewards[0][0:2], ("素缘子", ".收集精华"))
         combined = "\n".join(logger.info_messages)
         self.assertEqual(combined.count("OUT [Mini App | 素缘子]:\n宗门灵圃牵引星辰"), 1)
         self.assertEqual(combined.count("IN [Mini App | 素缘子]:\n宗门灵圃牵引星辰"), 1)
-        self.assertIn("宗门灵圃牵引星辰（2个星位）", combined)
-        self.assertIn("星位 2、3 已牵引天雷星，共 2 个引星盘", combined)
-        self.assertIn("消耗修为 300", combined)
+        self.assertIn("宗门灵圃牵引星辰（3个星位）", combined)
+        self.assertIn("星位 1、2、3 已牵引天雷星，共 3 个引星盘", combined)
+        self.assertIn("消耗修为 500", combined)
+        self.assertIn("宗门灵圃收集精华（批量2个星位）", combined)
+        self.assertIn("请求一次性收集 2 个引星盘", combined)
+        self.assertIn("确认本次清空 2 个", combined)
+        self.assertIn("收集后空盘 3 个", combined)
+
+    def test_router_star_farm_waits_when_some_tianlei_plots_are_still_maturing(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={"avatars": {"素缘子": {}}},
+            avatars=["素缘子"],
+            identity_sect_names={"素缘子": "星宫"},
+            save_state=lambda: None,
+        )
+        actor.get_avatar_state = lambda identity: actor.state["avatars"][identity]
+        router = MiniAppCommandRouter(actor, "main")
+        router.transport.sect_farm_snapshot = AsyncMock(return_value={
+            "domain": {
+                "mode": "stars",
+                "plots": [
+                    {"key": "1", "name": "天雷星", "status": "可收集"},
+                    {"key": "2", "name": "天雷星", "status": "可收集"},
+                    {"key": "3", "name": "天雷星", "status": "可收集"},
+                    {"key": "4", "name": "天雷星", "status": "凝聚中", "remainingSeconds": 12},
+                    {"key": "5", "name": "天雷星", "status": "凝聚中", "remainingSeconds": 18},
+                    {"key": "6", "empty": True},
+                    {"key": "7", "empty": True},
+                    {"key": "8", "empty": True},
+                ],
+            }
+        })
+        router.transport.sect_farm_action = AsyncMock()
+
+        wait = asyncio.run(router.run_star_farm_cycle("素缘子"))
+
+        self.assertEqual(wait, 23)
+        router.transport.sect_farm_action.assert_not_awaited()
 
     def test_router_star_farm_skips_collect_when_soothed_stars_are_still_maturing(self):
         actor = SimpleNamespace(
@@ -1181,6 +1226,36 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(status[0], 1)
         self.assertEqual(actor.state["avatars"]["素心子"]["star_miniapp_last_error"], "")
+
+    def test_restricted_star_collect_records_time_and_reward(self):
+        rewards = []
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}, "restricted_miniapp": {}},
+            state={"avatars": {"素心子": {}}},
+            save_state=lambda: None,
+            record_daily_reward_event=lambda identity, command, text, source="": rewards.append(
+                (identity, command, text, source)
+            ),
+        )
+        actor.get_avatar_state = lambda identity: actor.state["avatars"][identity]
+        worker = RestrictedMiniAppWorker(actor, "xiaohao")
+        worker.transport.sect_farm_action = AsyncMock(return_value={
+            "ok": True,
+            "actionResult": {"ok": True, "message": "收集完成：天雷竹 x8"},
+            "domain": {
+                "mode": "stars",
+                "plots": [{"key": str(index), "empty": True} for index in range(1, 9)],
+            },
+        })
+
+        asyncio.run(worker._star_action("collect", log_operation=False))
+
+        state = actor.state["avatars"]["素心子"]
+        self.assertTrue(state["last_collection_time"])
+        self.assertTrue(state["last_star_collect_time"])
+        self.assertEqual(rewards[0][0:2], ("素心子", ".收集精华"))
+        self.assertEqual(rewards[0][3], "Mini App 收集精华")
 
     def test_unknown_identity_is_rejected(self):
         transport = MiniAppDwellingTransport(object(), ENTRY)

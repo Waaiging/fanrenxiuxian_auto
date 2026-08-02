@@ -364,6 +364,54 @@ def sect_farm_snapshot_status(payload: Any) -> dict[str, Any]:
     }
 
 
+def sect_farm_collection_due(
+    ready_count: Any,
+    troubled_count: Any,
+    next_wait_seconds: Any,
+) -> bool:
+    """Collect only after every occupied plot in the current batch has matured."""
+    try:
+        ready = max(0, int(ready_count or 0))
+        troubled = max(0, int(troubled_count or 0))
+        next_wait = max(0, int(next_wait_seconds or 0))
+    except (TypeError, ValueError):
+        return False
+    return next_wait <= 0 and (ready > 0 or troubled > 0)
+
+
+def sect_farm_collect_batch_operation(plot_count: Any) -> str:
+    try:
+        count = max(0, int(plot_count or 0))
+    except (TypeError, ValueError):
+        count = 0
+    return f"宗门灵圃收集精华（批量{count}个星位）"
+
+
+def sect_farm_collect_batch_result_text(
+    requested_count: Any,
+    confirmed_count: Any,
+    empty_count: Any,
+    result_text: Any = "",
+) -> str:
+    def normalized_count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    requested = normalized_count(requested_count)
+    confirmed = normalized_count(confirmed_count)
+    empty = normalized_count(empty_count)
+    summary = (
+        f"请求一次性收集 {requested} 个引星盘，确认本次清空 {confirmed} 个，"
+        f"收集后空盘 {empty} 个"
+    )
+    text = str(result_text or "").strip()
+    if text and text != "完成":
+        summary += f"；{text}"
+    return summary
+
+
 def sect_farm_pull_batch_operation(plot_keys: Any) -> str:
     keys = [str(key).strip() for key in (plot_keys or []) if str(key).strip()]
     return f"宗门灵圃牵引星辰（{len(keys)}个星位）"
