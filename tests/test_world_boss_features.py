@@ -189,6 +189,11 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             self.assertEqual(outcome["grade"], "甲等")
             self.assertEqual(outcome["hit_count"], 1)
+            self.assertEqual(WORLD_BOSS_HOLD_MS, 1200)
+            self.assertEqual(outcome["damage_yi_total"], 123)
+            self.assertEqual(outcome["damage_yi_average"], 123)
+            self.assertEqual(outcome["damage_yi_hit_count"], 1)
+            self.assertEqual(outcome["damage_yi_hits"], [123])
             self.assertEqual(
                 [path.rsplit("/", 1)[-1] for path, _ in calls],
                 ["start", "begin", "hit", "finish"],
@@ -206,6 +211,27 @@ class WorldBossFeatureTests(unittest.TestCase):
             )
 
         asyncio.run(run())
+
+    def test_outcome_summary_includes_total_average_and_per_hit_damage(self):
+        summary = WorldBossMonitor._outcome_summary({
+            "grade": "甲等",
+            "score": 100,
+            "player_hp": 84,
+            "hit_count": 3,
+            "perfect_count": 3,
+            "failed_hit_count": 0,
+            "window_count": 3,
+            "damage_yi_total": 150_000_000,
+            "damage_yi_average": 75_000_000,
+            "damage_yi_hit_count": 2,
+            "damage_yi_hits": [100_000_000, 50_000_000, 0],
+        })
+
+        self.assertIn("甲等 100分；命中 3/3，完美 3，余血 84", summary)
+        self.assertIn("伤害合计 1.50亿亿", summary)
+        self.assertIn("有效 2/3", summary)
+        self.assertIn("均击 7500.00万亿", summary)
+        self.assertIn("逐击 [1=1.00亿亿, 2=5000.00万亿, 3=0亿]", summary)
 
     def test_realtime_hit_uses_actual_elapsed_time_and_account_stagger(self):
         async def run():

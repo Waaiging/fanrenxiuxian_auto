@@ -34,7 +34,7 @@ WORLD_BOSS_BUTTON_TEXT = "进入真仙战场"
 WORLD_BOSS_TITLE_MARKERS = ("世界通告", "真仙试锋开启")
 WORLD_BOSS_TOKEN_PREFIX = "qyz_"
 WORLD_BOSS_IDENTITY = "主魂"
-WORLD_BOSS_HOLD_MS = 900
+WORLD_BOSS_HOLD_MS = 1200
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
 WORLD_BOSS_RECOVERY_WINDOW_SECONDS = 120
@@ -1046,6 +1046,17 @@ class WorldBossMonitor:
         failed_hits = len(hit_results) - successful_hits
         matched_hits = sum(1 for item in hit_results if item.get("matched"))
         perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
+        damage_yi_hits = [
+            max(0.0, float(item.get("damage") or 0))
+            for item in hit_results
+        ]
+        damage_yi_total = sum(damage_yi_hits)
+        damaging_hits = [value for value in damage_yi_hits if value > 0]
+        damage_yi_average = (
+            damage_yi_total / len(damaging_hits)
+            if damaging_hits
+            else 0.0
+        )
         hit_error_counts: dict[str, int] = {}
         for item in hit_results:
             if item.get("ok"):
@@ -1100,6 +1111,10 @@ class WorldBossMonitor:
             "failed_hit_count": failed_hits,
             "hit_error_counts": hit_error_counts,
             "window_count": len(windows),
+            "damage_yi_total": damage_yi_total,
+            "damage_yi_average": damage_yi_average,
+            "damage_yi_hit_count": len(damaging_hits),
+            "damage_yi_hits": damage_yi_hits,
         }
 
     async def _participate(
@@ -1124,6 +1139,37 @@ class WorldBossMonitor:
         return await self._fight(entry, init_data, session_token, payload)
 
     @staticmethod
+    def _format_damage_yi(value: Any) -> str:
+        try:
+            amount = max(0.0, float(value or 0))
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount >= 100_000_000:
+            return f"{amount / 100_000_000:.2f}亿亿"
+        if amount >= 10_000:
+            return f"{amount / 10_000:.2f}万亿"
+        if amount.is_integer():
+            return f"{int(amount):,}亿"
+        return f"{amount:,.2f}亿"
+
+    @classmethod
+    def _damage_summary(cls, outcome: dict[str, Any]) -> str:
+        values = outcome.get("damage_yi_hits")
+        if not isinstance(values, list) or not values:
+            return ""
+        total = cls._format_damage_yi(outcome.get("damage_yi_total"))
+        average = cls._format_damage_yi(outcome.get("damage_yi_average"))
+        damaging = int(outcome.get("damage_yi_hit_count") or 0)
+        per_hit = ", ".join(
+            f"{index}={cls._format_damage_yi(value)}"
+            for index, value in enumerate(values, start=1)
+        )
+        return (
+            f"伤害合计 {total}，有效 {damaging}/{len(values)}，均击 {average}，"
+            f"逐击 [{per_hit}]"
+        )
+
+    @staticmethod
     def _outcome_summary(outcome: dict[str, Any]) -> str:
         grade = str(outcome.get("grade") or "已结算")
         score = int(outcome.get("score") or 0)
@@ -1144,6 +1190,9 @@ class WorldBossMonitor:
                 )
                 if details:
                     summary += f"（{details}）"
+        damage_summary = WorldBossMonitor._damage_summary(outcome)
+        if damage_summary:
+            summary += f"；{damage_summary}"
         return summary
 
 
