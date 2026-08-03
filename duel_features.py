@@ -283,6 +283,7 @@ def duel_default_state():
     return {
         "version": DUEL_STATE_VERSION,
         "enabled": True,
+        "target_switch_enabled": True,
         "date": duel_date(),
         "updated_at": duel_time(),
         "interval_seconds": DUEL_INTERVAL_SECONDS,
@@ -419,6 +420,7 @@ def _ensure_duel_state_shape(data, reset_daily=True):
     data = _migrate_legacy_duel_queues(data)
     data["version"] = DUEL_STATE_VERSION
     data.setdefault("enabled", True)
+    data["target_switch_enabled"] = bool(data.get("target_switch_enabled", True))
     for field, default in (
         ("interval_seconds", DUEL_INTERVAL_SECONDS),
         ("target_interval_seconds", DUEL_TARGET_INTERVAL_SECONDS),
@@ -627,6 +629,14 @@ def duel_target_interval_seconds(data):
         return DUEL_TARGET_INTERVAL_SECONDS
 
 
+def duel_target_switch_enabled(data):
+    """Whether known duel targets must switch to and hold the configured identity."""
+    try:
+        return bool(data.get("target_switch_enabled", True))
+    except AttributeError:
+        return True
+
+
 def _validated_duel_interval_seconds(value):
     try:
         seconds = int(round(float(value)))
@@ -681,6 +691,41 @@ def set_duel_control(enabled, queue_key=""):
                     queue["preparation"] = {}
                     queue["target_preparation"] = {}
         data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def set_duel_target_switch(enabled):
+    """Choose between identity-switch duels and direct ``.斗法 @用户名`` duels.
+
+    When disabled, known target identities are no longer pre-switched or held;
+    every duel is sent as ``.斗法 @用户名`` against whatever identity the target
+    account currently controls.  Pending preparations that are not tied to an
+    in-flight duel are dropped so schedulers stop waiting on them.
+    """
+    now = duel_now()
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        data["target_switch_enabled"] = bool(enabled)
+        if not enabled:
+            note = "已改为直接 .斗法 @用户名"
+            for queue_key, container, field in _duel_target_preparation_contexts(data):
+                preparation = container.get(field) or {}
+                if not preparation:
+                    continue
+                in_flight = container.get("in_flight") or {}
+                if (
+                    _lease_active(in_flight, now)
+                    and in_flight.get("preparation_run_id") == preparation.get("run_id")
+                ):
+                    continue
+                container[field] = {}
+                container["last_result"] = note
+                _set_preparation_subject_status(queue_key, container, preparation, "ready", note)
+        for queue in data["queues"].values():
+            queue["next_at"] = ""
+        data["multi"]["next_at"] = ""
+        data["updated_at"] = duel_time(now)
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
 
@@ -928,7 +973,7 @@ def claim_duel_target_preparation(account):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
-        if not data.get("enabled"):
+        if not data.get("enabled") or not duel_target_switch_enabled(data):
             return None
         for queue_key, container, field in _duel_target_preparation_contexts(data):
             preparation = container.get(field) or {}
@@ -1093,9 +1138,10 @@ def _reserve_multi_duel_locked(data, account, now):
         return None, dirty
 
     target_username = normalize_duel_target(selected.get("username"))
-    activation = _duel_target_activation(target_username)
+    require_target_switch = duel_target_switch_enabled(data)
+    activation = _duel_target_activation(target_username) if require_target_switch else None
     preparation = multi.get("preparation") or {}
-    if preparation and not _lease_active(preparation, now):
+    if preparation and (not require_target_switch or not _lease_active(preparation, now)):
         multi["preparation"] = {}
         preparation = {}
         dirty = True
@@ -1343,7 +1389,12 @@ def claim_titan_preparation(account):
         queue = data["queues"][DUEL_ROTATION_QUEUE_KEY]
         if titan_target_status(queue.get("beast_mode"))["ready"]:
             return None
-        if not data.get("enabled") or not queue.get("enabled") or not _queue_due(queue, now, 30):
+        if (
+            not data.get("enabled")
+            or not duel_target_switch_enabled(data)
+            or not queue.get("enabled")
+            or not _queue_due(queue, now, 30)
+        ):
             return None
         if _next_rotation_target(data, queue, now).lower() != "titancreeper":
             return None
@@ -1388,6 +1439,7 @@ def reserve_duel_for_account(account):
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
         interval_seconds = duel_interval_seconds(data)
         target_interval_seconds = duel_target_interval_seconds(data)
+        require_target_switch = duel_target_switch_enabled(data)
         if not data.get("enabled"):
             return None
         multi_reservation, dirty = _reserve_multi_duel_locked(data, account, now)
@@ -1450,7 +1502,11 @@ def reserve_duel_for_account(account):
                     or duel_default_target_for_participant(item["account"], item["identity"])
                 )
                 target_identity = duel_identity_for_username(target_username)
-                activation = _duel_target_activation(target_username)
+                activation = (
+                    _duel_target_activation(target_username)
+                    if require_target_switch
+                    else None
+                )
                 if target_identity and target_identity["account"] == item["account"]:
                     detail = f"{item['identity']} 不能挑战同账号身份 @{target_username}"
                     invalid_targets.append(detail)
@@ -1508,8 +1564,9 @@ def reserve_duel_for_account(account):
             # TitanCreeper also needs its beast preparation.  Do this before
             # creating the main-soul identity hold; otherwise the target
             # scheduler would sit inside that hold and could not run the beast
-            # preparation until the lease expired.
-            if target_username.lower() == "titancreeper":
+            # preparation until the lease expired.  Direct-username mode skips
+            # every target-side preparation, including this one.
+            if require_target_switch and target_username.lower() == "titancreeper":
                 titan_status = titan_target_status(queue.get("beast_mode"))
                 if titan_status["ready"]:
                     titan_status = None
@@ -2069,6 +2126,7 @@ def _duel_event_rows(query_date, limit):
 
 def duel_dashboard_payload(date="", limit=200):
     data = load_duel_state(write_back=False)
+    target_switch_enabled = duel_target_switch_enabled(data)
     query_date = str(date or "").strip() or duel_date()
     titan_mode = data["queues"][DUEL_ROTATION_QUEUE_KEY].get(
         "beast_mode", TITAN_BEAST_MODE_DEFAULT
@@ -2107,13 +2165,16 @@ def duel_dashboard_payload(date="", limit=200):
             effective_target = configured_target or default_target
             target_identity = duel_identity_for_username(effective_target)
             activation_required = bool(
-                target_identity and target_identity.get("identity") != "主魂"
+                target_switch_enabled
+                and target_identity
+                and target_identity.get("identity") != "主魂"
             )
             state["enabled"] = bool(state.get("enabled", True))
             state["target_username"] = effective_target
             state["target_is_default"] = effective_target.lower() == default_target.lower()
             titan_required = titan_required or (
-                state["enabled"] and int(state.get("remaining", DUEL_DAILY_LIMIT) or 0) > 0
+                target_switch_enabled
+                and state["enabled"] and int(state.get("remaining", DUEL_DAILY_LIMIT) or 0) > 0
                 and effective_target.lower() == "titancreeper"
             )
             participant_rows.append({
@@ -2161,18 +2222,17 @@ def duel_dashboard_payload(date="", limit=200):
                 break
     for index, target in enumerate(raw_multi_targets):
         target_identity = duel_identity_for_username(target.get("username"))
+        multi_activation_required = bool(
+            target_switch_enabled
+            and target_identity
+            and target_identity.get("identity") != "主魂"
+        )
         multi_targets.append({
             **target,
             "is_next": index == next_multi_index,
             "known_identity": bool(target_identity),
-            "activation_required": bool(
-                target_identity and target_identity.get("identity") != "主魂"
-            ),
-            "duel_method": (
-                "reply_switch"
-                if target_identity and target_identity.get("identity") != "主魂"
-                else "username"
-            ),
+            "activation_required": multi_activation_required,
+            "duel_method": "reply_switch" if multi_activation_required else "username",
             "target_account": (target_identity or {}).get("account", ""),
             "target_account_name": (target_identity or {}).get("account_name", ""),
             "target_identity": (target_identity or {}).get("identity", ""),
@@ -2210,6 +2270,7 @@ def duel_dashboard_payload(date="", limit=200):
     }
     return {
         "enabled": bool(data.get("enabled")),
+        "target_switch_enabled": target_switch_enabled,
         "date": query_date,
         "interval_seconds": duel_interval_seconds(data),
         "target_interval_seconds": duel_target_interval_seconds(data),

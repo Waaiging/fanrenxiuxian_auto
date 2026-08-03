@@ -66,6 +66,7 @@ from duel_features import (
     set_duel_intervals,
     set_duel_multi_control,
     set_duel_participant_control,
+    set_duel_target_switch,
     set_titan_beast_mode,
     titan_target_status,
 )
@@ -4897,14 +4898,17 @@ async def red_packet_control(payload: dict = Body(...), username: str = Depends(
 
 @app.post("/api/duels/control")
 async def duel_control(payload: dict = Body(...), username: str = Depends(authenticate)):
-    """Update duel automation, an identity, or the Titan target beast mode."""
+    """Update duel automation, an identity, the duel method, or the Titan beast mode."""
     queue_key = str(payload.get("queue") or "").strip().lower()
     participant_key = str(payload.get("participant") or "").strip()
     beast_mode = payload.get("beast_mode")
+    target_switch = payload.get("target_switch")
     enabled = bool(payload.get("enabled"))
     try:
         if beast_mode is not None:
             data = set_titan_beast_mode(beast_mode)
+        elif target_switch is not None:
+            data = set_duel_target_switch(bool(target_switch))
         elif participant_key:
             data = set_duel_participant_control(
                 enabled,
@@ -4937,6 +4941,7 @@ async def duel_control(payload: dict = Body(...), username: str = Depends(authen
     return {
         "success": True,
         "enabled": bool(data.get("enabled")),
+        "target_switch_enabled": bool(data.get("target_switch_enabled", True)),
         "queue": queue_key,
         "participant": participant_key,
         "participant_enabled": bool(participant_state.get("enabled")) if participant_state else None,

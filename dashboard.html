@@ -1336,6 +1336,13 @@
                     <input id="duel-target-interval-minutes" class="record-input" type="number" min="0.02" max="10080" step="0.01" oninput="markDuelSettingsDirty()">
                 </label>
                 <button id="duel-settings-save" class="reward-refresh" type="button" onclick="saveDuelSettings()"><i data-lucide="save" aria-hidden="true"></i>保存间隔</button>
+                <label class="record-field">
+                    斗法方式
+                    <select id="duel-target-switch" class="record-select" onchange="setDuelTargetSwitch(this.value)">
+                        <option value="switch">切换指定身份后斗法</option>
+                        <option value="direct">直接 .斗法 @用户名</option>
+                    </select>
+                </label>
                 <label class="duel-global-control">
                     <input id="duel-global-enabled" type="checkbox" onchange="setDuelControl(this.checked)">
                     自动斗法
@@ -3198,6 +3205,9 @@
             const clean = String(username || '').trim().replace(/^@+/, '').toLowerCase();
             const match = (duelDashboardData.identity_options || []).find(item => String(item.username || '').toLowerCase() === clean);
             if (!match) return clean ? '外部用户名 · 使用 .斗法 @用户名' : '填写 Telegram 用户名';
+            if ((duelDashboardData || {}).target_switch_enabled === false) {
+                return `${match.account_name || match.account} · ${match.identity} · 直接 .斗法 @用户名`;
+            }
             return `${match.account_name || match.account} · ${match.identity}${match.identity === '主魂' ? ' · 使用用户名定位' : ' · 自动引用新鲜的 .切换 消息'}`;
         }
 
@@ -3377,10 +3387,16 @@
             const queues = Array.isArray(data.queues) ? data.queues : [];
             const rows = Array.isArray(data.rows) ? data.rows : [];
             const summary = data.summary || {};
+            const targetSwitchEnabled = data.target_switch_enabled !== false;
             const globalToggle = document.getElementById('duel-global-enabled');
             if (globalToggle) {
                 globalToggle.checked = Boolean(data.enabled);
                 globalToggle.disabled = duelControlPending;
+            }
+            const targetSwitchSelect = document.getElementById('duel-target-switch');
+            if (targetSwitchSelect) {
+                targetSwitchSelect.value = targetSwitchEnabled ? 'switch' : 'direct';
+                targetSwitchSelect.disabled = duelControlPending;
             }
             const summaryEl = document.getElementById('duel-summary');
             if (summaryEl) {
@@ -3401,7 +3417,9 @@
             }
             const intervalHint = document.getElementById('duel-interval-hint');
             if (intervalHint) {
-                intervalHint.textContent = `列表每 ${duelIntervalText(data.interval_seconds || 360)}轮换；同一对象至少间隔 ${duelIntervalText(data.target_interval_seconds || 660)}。已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。`;
+                intervalHint.textContent = `列表每 ${duelIntervalText(data.interval_seconds || 360)}轮换；同一对象至少间隔 ${duelIntervalText(data.target_interval_seconds || 660)}。${targetSwitchEnabled
+                    ? '已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。'
+                    : '当前为直接斗法模式：一律发送 .斗法 @用户名，被斗法者不切换身份。'}`;
             }
             renderDuelMultiPlan();
 
@@ -3463,7 +3481,9 @@
                                         <div class="duel-participant-target-meta ${participant.activation_required ? 'reply-switch' : ''}">
                                             ${participant.activation_required
                                                 ? `分身目标 · 先由 ${escapeHtml(participant.target_account_name || participant.target_account || '')} 切换至 ${escapeHtml(participant.target_identity || '')}，再 reply 回复 .斗法`
-                                                : `主魂或外部目标 · .斗法 @${escapeHtml(participant.target_username || '')}`}
+                                                : (targetSwitchEnabled
+                                                    ? `主魂或外部目标 · .斗法 @${escapeHtml(participant.target_username || '')}`
+                                                    : `直接斗法 · .斗法 @${escapeHtml(participant.target_username || '')}`)}
                                         </div>
                                     </div>
                                 `).join('')}
@@ -3551,6 +3571,27 @@
             } catch (error) {
                 console.error('Duel control failed:', error);
                 alert(`斗法控制失败：${error.message || error}`);
+            } finally {
+                duelControlPending = false;
+                await updateDuelDashboard(true);
+            }
+        }
+
+        async function setDuelTargetSwitch(value) {
+            if (duelControlPending) return;
+            duelControlPending = true;
+            renderDuelDashboard();
+            try {
+                const response = await fetch(apiUrl('/api/duels/control'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({target_switch: String(value) !== 'direct'})
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+            } catch (error) {
+                console.error('Duel target switch control failed:', error);
+                alert(`斗法方式设置失败：${error.message || error}`);
             } finally {
                 duelControlPending = false;
                 await updateDuelDashboard(true);

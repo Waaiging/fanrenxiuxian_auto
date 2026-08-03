@@ -677,5 +677,126 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(avatar_target["duel_method"], "reply_switch")
 
 
+    def test_state_shape_defaults_target_switch_enabled(self):
+        state = duel_features.load_duel_state()
+        state.pop("target_switch_enabled", None)
+
+        shaped = duel_features._ensure_duel_state_shape(state)
+
+        self.assertTrue(shaped["target_switch_enabled"])
+
+    def test_direct_mode_reserves_avatar_target_without_preparation(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|无咎子", key)
+        duel_features.set_duel_participant_control(True, "main|无咎子", "ding303")
+        duel_features.set_duel_target_switch(False)
+
+        reservation = duel_features.reserve_duel_for_account("main")
+
+        self.assertEqual(reservation["participant_key"], "main|无咎子")
+        self.assertEqual(reservation["command"], ".斗法 @ding303")
+        self.assertIsNone(reservation["reply_to_msg_id"])
+        self.assertEqual(reservation["preparation_run_id"], "")
+        self.assertEqual(
+            duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"],
+            {},
+        )
+
+    def test_direct_mode_skips_titan_gate_and_titan_claim(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|主魂", key)
+        duel_features.set_duel_participant_control(True, "main|主魂", "TitanCreeper")
+        duel_features.set_duel_target_switch(False)
+
+        self.assertIsNone(duel_features.claim_titan_preparation("xiaohao"))
+        reservation = duel_features.reserve_duel_for_account("main")
+
+        self.assertEqual(reservation["command"], ".斗法 @TitanCreeper")
+        self.assertIsNone(reservation["reply_to_msg_id"])
+
+    def test_disabling_target_switch_clears_pending_preparation(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+        )
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        self.assertEqual(
+            duel_features.load_duel_state()["multi"]["preparation"]["status"],
+            "pending",
+        )
+
+        duel_features.set_duel_target_switch(False)
+
+        self.assertEqual(duel_features.load_duel_state()["multi"]["preparation"], {})
+        self.assertIsNone(duel_features.claim_duel_target_preparation("sub"))
+        reservation = duel_features.reserve_duel_for_account("main")
+        self.assertEqual(reservation["queue_key"], "multi")
+        self.assertEqual(reservation["command"], ".斗法 @ding303")
+        self.assertIsNone(reservation["reply_to_msg_id"])
+
+    def test_claim_is_blocked_while_direct_mode_is_active(self):
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+        )
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        state = duel_features.load_duel_state()
+        self.assertEqual(state["multi"]["preparation"]["status"], "pending")
+        state["target_switch_enabled"] = False
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        self.assertIsNone(duel_features.claim_duel_target_preparation("sub"))
+
+    def test_reenabling_target_switch_restores_preparation_flow(self):
+        for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]:
+            key = duel_features.duel_participant_key(item["account"], item["identity"])
+            duel_features.set_duel_participant_control(key == "main|无咎子", key)
+        duel_features.set_duel_participant_control(True, "main|无咎子", "ding303")
+        duel_features.set_duel_target_switch(False)
+        duel_features.set_duel_target_switch(True)
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        preparation = duel_features.load_duel_state()["queues"][ROTATION]["target_preparation"]
+        self.assertEqual(
+            (preparation["owner"], preparation["target_identity"], preparation["status"]),
+            ("sub", "寻真子", "pending"),
+        )
+
+    def test_dashboard_payload_reflects_duel_method_mode(self):
+        duel_features.set_duel_participant_control(True, "main|无咎子", "ding303")
+
+        payload = duel_features.duel_dashboard_payload()
+        row = next(
+            item
+            for queue in payload["queues"]
+            for item in queue["participants"]
+            if item["key"] == "main|无咎子"
+        )
+        self.assertTrue(payload["target_switch_enabled"])
+        self.assertTrue(row["activation_required"])
+        self.assertEqual(row["duel_method"], "reply_switch")
+
+        duel_features.set_duel_target_switch(False)
+        payload = duel_features.duel_dashboard_payload()
+        row = next(
+            item
+            for queue in payload["queues"]
+            for item in queue["participants"]
+            if item["key"] == "main|无咎子"
+        )
+        self.assertFalse(payload["target_switch_enabled"])
+        self.assertFalse(row["activation_required"])
+        self.assertEqual(row["duel_method"], "username")
+        self.assertFalse(
+            any(queue["requires_titan_preparation"] for queue in payload["queues"])
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
