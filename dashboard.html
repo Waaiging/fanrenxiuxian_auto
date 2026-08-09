@@ -1850,7 +1850,7 @@
             // 优先使用 state 中的境界和修为（更准确）
             const level = stateLevel || profile.level || '未获取';
             const spiritRoot = stateSpiritRoot || profile.spirit_root || '未获取';
-            const sect = stateSect || '宗门未同步';
+            const sect = stateSect || '未同步';
             // 修为：state 是实时查询结果；日志 profile 只作为缺失时兜底。
             const profileCurrent = profile.estimated_current !== null && profile.estimated_current !== undefined
                 ? profile.estimated_current : (profile.current || 0);
@@ -1896,7 +1896,7 @@
                         <span class="cultivation-value">${currentText}</span>
                         <div class="cultivation-affiliation">
                             <span class="cultivation-root">灵根 ${escapeHtml(spiritRoot)}</span>
-                            <span class="cultivation-sect">宗门 ${escapeHtml(sect)}</span>
+                            <span class="cultivation-sect">${escapeHtml(sect)}</span>
                         </div>
                     </div>
                     <div class="cultivation-meta">
@@ -1921,7 +1921,7 @@
             const profile = data.profile || {};
             const level = stateLevel || profile.level || '境界未同步';
             const spiritRoot = stateSpiritRoot || profile.spirit_root || '灵根未同步';
-            const sect = stateSect || '宗门未同步';
+            const sect = stateSect || '未同步';
             const stateCurrentNum = Number(stateCurrent);
             const stateTotalNum = Number(stateTotal);
             const estimatedCurrent = Number(profile.estimated_current ?? profile.current);
@@ -1950,7 +1950,7 @@
                         <span class="account-profile-level" title="${escapeHtml(level)}">${escapeHtml(level)}</span>
                         <span class="account-profile-root" title="${escapeHtml(spiritRoot)}">${escapeHtml(spiritRoot)}</span>
                     </div>
-                    <div class="account-profile-sect" title="宗门 ${escapeHtml(sect)}">宗门 ${escapeHtml(sect)}</div>
+                    <div class="account-profile-sect" title="${escapeHtml(sect)}">${escapeHtml(sect)}</div>
                     <div class="account-profile-exp">
                         <span>${escapeHtml(expText)}</span>
                         <span>${current !== null && total ? `${percent.toFixed(1)}%` : '--'}</span>
@@ -4802,7 +4802,7 @@
                             const profile = dashboardIdentityProfile(s, name, val);
                             const level = profile.level || '未获取';
                             const spiritRoot = profile.spiritRoot || '灵根未获取';
-                            const sect = profile.sect || '宗门未同步';
+                            const sect = profile.sect || '未同步';
                             const avatarCurrent = profile.current;
                             const avatarTotal = profile.total;
                             const hasAvatarExp = avatarCurrent !== null && avatarTotal !== null
@@ -4883,7 +4883,7 @@
                                     ${attachedTag}
                                     <div class="avatar-level">${escapeHtml(level)}</div>
                                     <div class="avatar-root" title="${escapeHtml(spiritRoot)}">${escapeHtml(spiritRoot)}</div>
-                                    <div class="avatar-sect" title="宗门 ${escapeHtml(sect)}">宗门 ${escapeHtml(sect)}</div>
+                                    <div class="avatar-sect" title="${escapeHtml(sect)}">${escapeHtml(sect)}</div>
                                     <div class="avatar-exp" title="修为 ${escapeHtml(expText)}">修为 ${escapeHtml(expText)}</div>
                                     <div class="avatar-exp-bar" role="progressbar" aria-label="${escapeHtml(name)} 修为进度" aria-valuenow="${expPercent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${expPercent.toFixed(1)}%"></span></div>
                                     <div class="avatar-status ${statusClass}">
