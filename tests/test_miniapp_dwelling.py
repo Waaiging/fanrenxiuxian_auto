@@ -102,6 +102,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".闭关修炼",
             ".元婴出窍",
             ".我的侍妾",
+            ".安置侍妾",
             ".拼图",
             ".登天阶",
             ".观命",
@@ -290,6 +291,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             asyncio.run(transport.initialize())
             response = asyncio.run(transport.command(".元婴出窍", identity="素心子"))
             puzzle = asyncio.run(transport.command(".拼图", identity="素心子"))
+            placed = asyncio.run(transport.command(".安置侍妾", identity="主魂"))
             status = asyncio.run(transport.command(".查看闭关", identity="主魂"))
             manifest = asyncio.run(transport.command(".显灵", identity="主魂"))
             soothe = asyncio.run(transport.command(".安抚信徒", identity="主魂"))
@@ -299,6 +301,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(transport.player_id("素心子"), -200)
         self.assertEqual(response.text, "reply:.元婴出窍")
         self.assertEqual(puzzle.text, "reply:.拼图")
+        self.assertEqual(placed.text, "reply:.安置侍妾")
         self.assertEqual(status.text, "reply:status")
         self.assertEqual(manifest.text, "reply:manifest")
         self.assertEqual(soothe.text, "reply:soothe")
@@ -307,13 +310,15 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["playerId"], -200)
         self.assertEqual(calls[2][0], "/api/miniapp/xianxia-dwelling/command-center")
         self.assertEqual(calls[2][1]["command"], ".拼图")
-        self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
-        self.assertEqual(calls[4][0], "/api/miniapp/xianxia-dwelling/small-world")
-        self.assertEqual(calls[4][1]["action"], "manifest")
+        self.assertEqual(calls[3][0], "/api/miniapp/xianxia-dwelling/command-center")
+        self.assertEqual(calls[3][1]["command"], ".安置侍妾")
+        self.assertEqual(calls[4][0], "/api/miniapp/xianxia-dwelling/deep-seclusion")
         self.assertEqual(calls[5][0], "/api/miniapp/xianxia-dwelling/small-world")
-        self.assertEqual(calls[5][1]["action"], "soothe")
+        self.assertEqual(calls[5][1]["action"], "manifest")
         self.assertEqual(calls[6][0], "/api/miniapp/xianxia-dwelling/small-world")
-        self.assertEqual(calls[6][1]["action"], "collect")
+        self.assertEqual(calls[6][1]["action"], "soothe")
+        self.assertEqual(calls[7][0], "/api/miniapp/xianxia-dwelling/small-world")
+        self.assertEqual(calls[7][1]["action"], "collect")
 
     def test_forge_treasure_uses_storage_bag_endpoint(self):
         calls = []
@@ -1328,6 +1333,46 @@ class MiniAppDwellingTests(unittest.TestCase):
             meditation_prefix=False,
         )
         self.assertNotIn("restricted_miniapp_last_blocked_command", actor.state)
+
+    def test_restricted_worker_routes_concubine_place_through_command_center(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {
+                    "miniapp_beast": {"entry_url": ENTRY},
+                    "restricted_miniapp": {},
+                }
+                self.state = {}
+                self.pause_event = asyncio.Event()
+                self.pause_event.set()
+
+            def save_state(self):
+                pass
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def dashboard_command_paused(self, command, identity):
+                return False
+
+        actor = Actor()
+        worker = RestrictedMiniAppWorker(actor, "waaiging")
+        response = MiniAppCommandResponse(
+            "你已将侍妾安置在藏娇阁中。",
+            {"ok": True, "actionResult": {"ok": True}},
+        )
+        worker.transport.command = AsyncMock(return_value=response)
+
+        result = asyncio.run(
+            worker._send("主魂", ".安置侍妾", return_response_msg=True)
+        )
+
+        self.assertIs(result, response)
+        worker.transport.command.assert_awaited_once_with(
+            ".安置侍妾",
+            identity="主魂",
+            meditation_prefix=True,
+        )
 
     def test_restricted_worker_recovers_previously_blocked_puzzle(self):
         class Actor:

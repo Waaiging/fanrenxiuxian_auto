@@ -7,6 +7,10 @@ import argparse
 import asyncio
 import logging
 
+from telethon import events
+
+from auto_reply_features import maybe_restricted_exchange_place
+from log_utils import resolve_target_chat_id
 from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 from world_boss_features import install_world_boss_monitor
@@ -37,6 +41,38 @@ def build_actor(account: str):
     raise ValueError(f"Unsupported restricted account: {account}")
 
 
+def install_restricted_exchange_monitor(actor, logger=None):
+    """Listen for South Long Marquis events while the account is in standby mode."""
+    log = logger or logging.getLogger(f"red_packet.{actor.account_key}")
+
+    async def handle_event(event):
+        try:
+            await maybe_restricted_exchange_place(actor, event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.error(
+                "[%s] Restricted South Long Marquis monitor failed",
+                actor.account_key,
+                exc_info=True,
+            )
+
+    builders = (
+        events.NewMessage(chats=actor.target_chat_id),
+        events.MessageEdited(chats=actor.target_chat_id),
+    )
+    registrations = []
+    for builder in builders:
+        actor.client.add_event_handler(handle_event, builder)
+        registrations.append((handle_event, builder))
+    log.warning(
+        "[%s] Restricted South Long Marquis Mini App monitor active for chat %s",
+        actor.account_key,
+        actor.target_chat_id,
+    )
+    return registrations
+
+
 async def run(account: str) -> None:
     logger = logging.getLogger(f"red_packet.{account}")
     actor = build_actor(account)
@@ -44,18 +80,26 @@ async def run(account: str) -> None:
     monitor = None
     miniapp_worker = None
     world_boss_monitor = None
+    exchange_handlers = []
     await client.connect()
     try:
         if not await client.is_user_authorized():
             raise RuntimeError(f"Telegram session for {account} is not authorized")
         actor.my_info = await client.get_me()
+        actor.target_chat_id = await resolve_target_chat_id(
+            client,
+            actor.target_chat_id,
+            logger,
+        )
         monitor = await install_red_packet_monitor(client, account, logger=logger)
         if not monitor.topic_id:
             raise RuntimeError(f"red-packet monitor for {account} was not installed")
         miniapp_worker = RestrictedMiniAppWorker(actor, account, logger=logger)
         actor._restricted_miniapp_worker = miniapp_worker
+        miniapp_started = False
         try:
             await miniapp_worker.start()
+            miniapp_started = True
         except Exception as exc:
             actor.state["restricted_miniapp_active"] = False
             actor.state["restricted_miniapp_last_error"] = (
@@ -67,6 +111,8 @@ async def run(account: str) -> None:
                 account,
                 exc_info=True,
             )
+        if miniapp_started:
+            exchange_handlers = install_restricted_exchange_monitor(actor, logger=logger)
         world_boss_monitor = await install_world_boss_monitor(
             actor,
             account,
@@ -76,6 +122,8 @@ async def run(account: str) -> None:
         logger.warning("[%s] Restricted account entered Mini App standby mode", account)
         await client.run_until_disconnected()
     finally:
+        for callback, builder in exchange_handlers:
+            client.remove_event_handler(callback, builder)
         if world_boss_monitor is not None:
             await world_boss_monitor.stop()
         if miniapp_worker is not None:

@@ -647,6 +647,191 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state[auto_reply_features.EXCHANGE_STATE_KEY]["321"]["status"], "done")
         self.assertIsNone(actor.active_atomic_task)
 
+    def test_restricted_exchange_teaser_places_concubine_once_via_miniapp(self):
+        actions = []
+
+        class DummyActor:
+            def __init__(self):
+                self.account_key = "xiaohao"
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = ["素心子"]
+                self.avatar_usernames = {"hajiimiii": "素心子"}
+                self.identity_usernames = {"主魂": ["TitanCreeper"]}
+                self.my_info = SimpleNamespace(id=42, username="TitanCreeper")
+                self.state = {}
+
+            def save_state(self):
+                pass
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                actions.append((identity, command, kwargs.get("return_response_msg")))
+                return SimpleNamespace(
+                    text="你已将侍妾安置在藏娇阁中。",
+                    payload={"ok": True, "actionResult": {"ok": True}},
+                )
+
+        class FakeEvent:
+            def __init__(self, msg_id, text):
+                self.message = SimpleNamespace(
+                    id=msg_id,
+                    text=text,
+                    entities=[],
+                    reply_to=None,
+                )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        actor = DummyActor()
+        teaser = FakeEvent(
+            501,
+            "【天机异闻·南陇侯的交易】道友 @hajiimiii 忽然感到一股强横神念降临。",
+        )
+        offer = FakeEvent(
+            502,
+            "@hajiimiii！南陇侯给出选项：.交换 法宝 / .交换 功法",
+        )
+
+        async def scenario():
+            first = await auto_reply_features.maybe_restricted_exchange_place(actor, teaser)
+            duplicate = await auto_reply_features.maybe_restricted_exchange_place(actor, teaser)
+            fallback = await auto_reply_features.maybe_restricted_exchange_place(actor, offer)
+            return first, duplicate, fallback
+
+        handled = asyncio.run(scenario())
+
+        self.assertEqual(handled, (True, True, True))
+        self.assertEqual(actions, [("素心子", ".安置侍妾", True)])
+        state = actor.state[auto_reply_features.RESTRICTED_EXCHANGE_PLACE_STATE_KEY]
+        self.assertEqual(state["501"]["status"], "placed")
+        self.assertEqual(state["502"]["status"], "skipped_recent")
+        self.assertEqual(state["502"]["covered_by_event"], "501")
+
+    def test_restricted_exchange_offer_places_waaiging_main_soul(self):
+        actions = []
+
+        class DummyActor:
+            def __init__(self):
+                self.account_key = "waaiging"
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = []
+                self.avatar_usernames = {}
+                self.identity_usernames = {"主魂": ["Waaiging"]}
+                self.my_info = SimpleNamespace(id=42, username="Waaiging")
+                self.state = {}
+
+            def save_state(self):
+                pass
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                actions.append((identity, command))
+                return SimpleNamespace(
+                    text="藏娇阁中已有人居住，无需重复安置。",
+                    payload={"ok": False, "actionResult": {"ok": False}},
+                )
+
+        class FakeEvent:
+            message = SimpleNamespace(
+                id=601,
+                text="@Waaiging！南陇侯给出选项：.交换 法宝 / .交换 功法",
+                entities=[],
+                reply_to=None,
+            )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        actor = DummyActor()
+        handled = asyncio.run(
+            auto_reply_features.maybe_restricted_exchange_place(actor, FakeEvent())
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(actions, [("主魂", ".安置侍妾")])
+        state = actor.state[auto_reply_features.RESTRICTED_EXCHANGE_PLACE_STATE_KEY]
+        self.assertEqual(state["601"]["status"], "placed")
+
+    def test_restricted_exchange_ignores_other_accounts_and_other_mentions(self):
+        class FakeEvent:
+            def __init__(self, text):
+                self.message = SimpleNamespace(id=701, text=text, entities=[], reply_to=None)
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        actor = SimpleNamespace(
+            account_key="xiaohao",
+            watch_bot="fanrenxiuxian_bot",
+            avatars=[],
+            avatar_usernames={},
+            identity_usernames={"主魂": ["TitanCreeper"]},
+            my_info=SimpleNamespace(id=42, username="TitanCreeper"),
+            state={},
+        )
+        other_mention = asyncio.run(
+            auto_reply_features.maybe_restricted_exchange_place(
+                actor,
+                FakeEvent("@AliceI005！南陇侯给出选项：.交换 法宝 / .交换 功法"),
+            )
+        )
+        actor.account_key = "main"
+        other_account = asyncio.run(
+            auto_reply_features.maybe_restricted_exchange_place(
+                actor,
+                FakeEvent("@TitanCreeper！南陇侯给出选项：.交换 法宝 / .交换 功法"),
+            )
+        )
+
+        self.assertFalse(other_mention)
+        self.assertFalse(other_account)
+
+    def test_restricted_exchange_does_not_treat_failed_place_text_as_success(self):
+        class DummyActor:
+            def __init__(self):
+                self.account_key = "waaiging"
+                self.watch_bot = "fanrenxiuxian_bot"
+                self.avatars = []
+                self.avatar_usernames = {}
+                self.identity_usernames = {"主魂": ["Waaiging"]}
+                self.my_info = SimpleNamespace(id=42, username="Waaiging")
+                self.state = {}
+
+            def save_state(self):
+                pass
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                return SimpleNamespace(
+                    text="当前没有可安置的侍妾，无法安置侍妾。",
+                    payload={"ok": True, "actionResult": {"ok": False}},
+                )
+
+        class FakeEvent:
+            message = SimpleNamespace(
+                id=702,
+                text="@Waaiging！南陇侯给出选项：.交换 法宝 / .交换 功法",
+                entities=[],
+                reply_to=None,
+            )
+
+            async def get_sender(self):
+                return SimpleNamespace(username="fanrenxiuxian_bot")
+
+        actor = DummyActor()
+        with patch.object(
+            auto_reply_features,
+            "send_text_alert",
+            new=AsyncMock(return_value=True),
+        ) as alert:
+            handled = asyncio.run(
+                auto_reply_features.maybe_restricted_exchange_place(actor, FakeEvent())
+            )
+
+        self.assertTrue(handled)
+        state = actor.state[auto_reply_features.RESTRICTED_EXCHANGE_PLACE_STATE_KEY]
+        self.assertEqual(state["702"]["status"], "failed")
+        self.assertEqual(state["702"]["error"], "miniapp_place_unconfirmed")
+        alert.assert_awaited_once()
+
     def test_auto_merchant_ignores_other_username(self):
         class DummyActor:
             def __init__(self):

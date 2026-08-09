@@ -48,6 +48,9 @@ EXCHANGE_EVENT_TTL_SECONDS = 10 * 60
 EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS = 20
 EXCHANGE_DELAY_RANGE_SECONDS = (60, 75)
 EXCHANGE_STATE_KEY = "exchange_auto_events"
+RESTRICTED_EXCHANGE_PLACE_STATE_KEY = "restricted_exchange_place_events"
+RESTRICTED_EXCHANGE_ACCOUNTS = {"xiaohao", "waaiging"}
+RESTRICTED_EXCHANGE_PLACE_SUCCESS_STATUSES = {"placed", "skipped_recent"}
 MERCHANT_LOOK_COMMAND = ".查看货品"
 MERCHANT_BUY_COMMAND_PREFIX = ".购买商品"
 MERCHANT_PRIORITY_ITEMS = ("掌天瓶的仿制品", "九天息壤", "尘封的储物袋")
@@ -181,6 +184,61 @@ def _update_exchange_state(actor, event_key, **values):
     events[str(event_key)] = entry
     _save_exchange_state(actor)
     return entry
+
+
+def _restricted_exchange_place_state(actor):
+    state = getattr(actor, "state", None)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(actor, "state", state)
+    events = state.get(RESTRICTED_EXCHANGE_PLACE_STATE_KEY)
+    if not isinstance(events, dict):
+        events = {}
+        state[RESTRICTED_EXCHANGE_PLACE_STATE_KEY] = events
+    return events
+
+
+def _update_restricted_exchange_place_state(actor, event_key, **values):
+    events = _restricted_exchange_place_state(actor)
+    key = str(event_key or "")
+    entry = events.get(key) if isinstance(events.get(key), dict) else {}
+    entry.update(values)
+    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    events[key] = entry
+    if len(events) > 80:
+        for old_key in list(events.keys())[:-50]:
+            events.pop(old_key, None)
+    save_state = getattr(actor, "save_state", None)
+    if callable(save_state):
+        save_state()
+    return entry
+
+
+def _restricted_exchange_place_lock(actor):
+    lock = getattr(actor, "_restricted_exchange_place_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        setattr(actor, "_restricted_exchange_place_lock", lock)
+    return lock
+
+
+def _recent_restricted_exchange_place_event(actor, identity, current_key):
+    now = datetime.now()
+    for event_key, entry in reversed(list(_restricted_exchange_place_state(actor).items())):
+        if str(event_key) == str(current_key) or not isinstance(entry, dict):
+            continue
+        if entry.get("status") != "placed" or entry.get("identity") != identity:
+            continue
+        try:
+            placed_at = datetime.strptime(
+                str(entry.get("placed_at") or entry.get("updated_at") or ""),
+                "%Y-%m-%d %H:%M:%S",
+            )
+        except (TypeError, ValueError):
+            continue
+        if 0 <= (now - placed_at).total_seconds() <= EXCHANGE_EVENT_TTL_SECONDS:
+            return str(event_key)
+    return ""
 
 
 def _exchange_deadline(entry):
@@ -349,6 +407,166 @@ def _response_text(response):
     if isinstance(response, str):
         return response
     return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+
+async def maybe_restricted_exchange_place(actor, event, text=None, sender=None, source="new"):
+    """受限小号的南陇侯兜底：只经 Mini App 立即安置侍妾。"""
+    account = str(getattr(actor, "account_key", "") or "").strip().lower()
+    if account not in RESTRICTED_EXCHANGE_ACCOUNTS:
+        return False
+
+    msg = event.message
+    text = text if text is not None else (getattr(msg, "text", "") or "")
+    if not (is_exchange_teaser_text(text) or is_exchange_offer_text(text)):
+        return False
+
+    if sender is None:
+        sender = await event.get_sender()
+    if not is_game_bot_sender(actor, sender):
+        return False
+
+    identity = _mentions_self(actor, msg, text)
+    if not identity:
+        return False
+    identity = "主魂" if identity == "main" else identity
+    event_key = str(getattr(msg, "id", 0) or "")
+    if not event_key:
+        return False
+
+    async with _restricted_exchange_place_lock(actor):
+        events = _restricted_exchange_place_state(actor)
+        existing = events.get(event_key) if isinstance(events.get(event_key), dict) else {}
+        if existing.get("status") in RESTRICTED_EXCHANGE_PLACE_SUCCESS_STATUSES:
+            return True
+        if existing.get("status") == "sending":
+            return True
+
+        recent_key = _recent_restricted_exchange_place_event(actor, identity, event_key)
+        if recent_key:
+            _update_restricted_exchange_place_state(
+                actor,
+                event_key,
+                status="skipped_recent",
+                identity=identity,
+                source=source,
+                message_text=str(text or "")[:500],
+                covered_by_event=recent_key,
+            )
+            _logger(actor).info(
+                "Restricted exchange placement already completed for %s by event %s; "
+                "skipping message %s.",
+                identity,
+                recent_key,
+                event_key,
+            )
+            return True
+
+        _update_restricted_exchange_place_state(
+            actor,
+            event_key,
+            status="sending",
+            identity=identity,
+            source=source,
+            message_text=str(text or "")[:500],
+            detected_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        sender_fn = getattr(actor, "send_and_wait_feedback_identity", None)
+        if not callable(sender_fn):
+            _update_restricted_exchange_place_state(
+                actor,
+                event_key,
+                status="failed",
+                error="miniapp_identity_sender_unavailable",
+            )
+            _logger(actor).error(
+                "Restricted exchange placement unavailable for %s (message %s): "
+                "Mini App identity sender is missing.",
+                identity,
+                event_key,
+            )
+            return True
+
+        try:
+            response = await sender_fn(
+                identity,
+                CONCUBINE_PLACE_COMMAND,
+                timeout=45,
+                max_retries=1,
+                suppress_no_response_alert=True,
+                return_response_msg=True,
+            )
+        except Exception as exc:
+            _update_restricted_exchange_place_state(
+                actor,
+                event_key,
+                status="failed",
+                error=str(exc)[:300],
+            )
+            _logger(actor).error(
+                "Restricted exchange placement failed for %s (message %s): %s",
+                identity,
+                event_key,
+                exc,
+                exc_info=True,
+            )
+            await send_text_alert(
+                actor,
+                "南陇侯安置失败",
+                f"账号：{account}\n身份：{identity}\nMini App 执行 {CONCUBINE_PLACE_COMMAND} 异常：{exc}",
+                logger=_logger(actor),
+            )
+            return True
+
+        response_text = _response_text(response).replace("**", "")
+        payload = getattr(response, "payload", None)
+        action_result = payload.get("actionResult") if isinstance(payload, dict) else None
+        payload_ok = (
+            bool(action_result.get("ok"))
+            if isinstance(action_result, dict)
+            else bool(payload.get("ok")) if isinstance(payload, dict) else False
+        )
+        place_ok = bool(response is not None) and (
+            payload_ok
+            or any(
+                marker in response_text
+                for marker in (
+                    "已将侍妾安置",
+                    "安置在藏娇阁",
+                    "藏娇阁中已有人居住",
+                    "已有人居住",
+                    "居于藏娇阁",
+                )
+            )
+        )
+        _update_restricted_exchange_place_state(
+            actor,
+            event_key,
+            status="placed" if place_ok else "failed",
+            response=response_text[:500],
+            placed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S") if place_ok else "",
+            error="" if place_ok else "miniapp_place_unconfirmed",
+        )
+        if place_ok:
+            _logger(actor).warning(
+                "Restricted exchange event %s for %s: %s completed through Mini App.",
+                event_key,
+                identity,
+                CONCUBINE_PLACE_COMMAND,
+            )
+        else:
+            _logger(actor).error(
+                "Restricted exchange event %s for %s: Mini App placement was not confirmed: %s",
+                event_key,
+                identity,
+                response_text[:300] or "<empty>",
+            )
+            await send_text_alert(
+                actor,
+                "南陇侯安置未确认",
+                f"账号：{account}\n身份：{identity}\nMini App 回复：{response_text[:300] or '空回复'}",
+                logger=_logger(actor),
+            )
+        return True
 
 
 def _response_id(response):
