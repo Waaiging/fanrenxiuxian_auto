@@ -111,6 +111,8 @@ class RestrictedMiniAppWorker:
             bot_username=str(beast_settings.get("bot_username") or "fanrenxiuxian_bot"),
             timeout=int(beast_settings.get("timeout_seconds") or 20),
             logger=self.log,
+            config_file=getattr(actor, "config_file", "") or getattr(actor, "CONFIG_FILE", ""),
+            entry_chat=getattr(actor, "target_chat_id", "fanrenxxz"),
         )
         self.beast_contract = MiniAppBeastContractWorker(
             actor,

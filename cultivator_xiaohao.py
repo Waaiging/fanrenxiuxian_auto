@@ -352,6 +352,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     def __init__(self, session_name='xiaohao_session'):
         """初始化：加载配置、连接 Telegram、初始化状态"""
         self.account_key = "xiaohao"
+        self.config_file = CONFIG_FILE
         self.config = load_config()
         self.mc = self.config.get('monitor', {})
         self.session_file = os.path.join(CONFIG_DIR, session_name)

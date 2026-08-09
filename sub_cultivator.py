@@ -437,6 +437,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         """
         # ---- 配置加载 ----
         self.account_key = "sub"
+        self.config_file = CONFIG_FILE
         self.config = load_config()                    # 加载 config_sub.json
         self.mc = self.config.get('monitor', {})       # 监控配置子段
 

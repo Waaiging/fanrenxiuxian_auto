@@ -529,6 +529,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         """
         # ------ 1. 加载配置 ------
         self.account_key = "main"
+        self.config_file = CONFIG_FILE
         self.config = load_config()
         self.mc = self.config.get('monitor', {})  # monitor 配置段
 

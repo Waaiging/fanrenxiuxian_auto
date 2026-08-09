@@ -93,6 +93,8 @@ class MiniAppCommandRouter:
             bot_username=str(settings.get("bot_username") or "fanrenxiuxian_bot"),
             timeout=int(settings.get("timeout_seconds") or 20),
             logger=self.log,
+            config_file=getattr(actor, "config_file", "") or getattr(actor, "CONFIG_FILE", ""),
+            entry_chat=getattr(actor, "target_chat_id", "fanrenxxz"),
         )
         self.daily_activities = MiniAppDailyActivities(
             actor,

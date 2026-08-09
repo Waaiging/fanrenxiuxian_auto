@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from telethon import types
 
 from miniapp_beast import (
     MiniAppBeastError,
@@ -22,6 +27,7 @@ from miniapp_beast import (
 from reward_parsing import compact_reward_summary, daily_reward_items_for_command
 
 
+ENTRY_URL_REFRESH_ERROR = "dwelling_token_expired"
 AUTH_ERROR_CODES = {
     "auth_date_expired",
     "challenge_token_expired",
@@ -32,7 +38,53 @@ AUTH_ERROR_CODES = {
     "init_data_missing",
     "invalid_init_data",
     "invalid_token",
+    ENTRY_URL_REFRESH_ERROR,
 }
+ENTRY_URL_HOSTS = {"t.me", "telegram.me"}
+ENTRY_URL_PIN_SCAN_LIMIT = 50
+
+
+def normalize_pinned_entry_url(value: Any) -> str:
+    """Return a canonical dwelling entry URL, or an empty string."""
+    text = str(value or "").strip().strip("<>[](){}。，；;\"'")
+    if not text:
+        return ""
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in ENTRY_URL_HOSTS:
+        return ""
+    path = parsed.path.rstrip("/").split("/")[-1].casefold()
+    if path != "fanrenxiuxian_bot":
+        return ""
+    query = urllib.parse.parse_qs(parsed.query)
+    token = str((query.get("startapp") or query.get("start_param") or [""])[0]).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", token):
+        return ""
+    return f"https://t.me/fanrenxiuxian_bot?startapp={token}"
+
+
+def pinned_entry_url_candidates(message: Any) -> list[str]:
+    """Extract entry URLs from visible text, entities and inline buttons."""
+    values: list[str] = []
+    values.append(str(getattr(message, "raw_text", "") or getattr(message, "message", "") or ""))
+    for entity in getattr(message, "entities", None) or []:
+        url = getattr(entity, "url", None)
+        if url:
+            values.append(str(url))
+    for row in getattr(message, "buttons", None) or []:
+        for button in row or []:
+            url = getattr(button, "url", None)
+            if url:
+                values.append(str(url))
+    results: list[str] = []
+    for value in values:
+        for match in re.findall(r"https?://[^\s<>\"'\]\)}]+", value):
+            candidate = normalize_pinned_entry_url(match)
+            if candidate and candidate not in results:
+                results.append(candidate)
+        candidate = normalize_pinned_entry_url(value)
+        if candidate and candidate not in results:
+            results.append(candidate)
+    return results
 
 DESTINY_CHOICES = {"紫微", "天府", "太阴", "贪狼"}
 DESTINY_ACTIONS = {"闭关", "炼制", "探索", "斗法"}
@@ -451,6 +503,8 @@ class MiniAppDwellingTransport:
         timeout: int = 20,
         logger: Any = None,
         post_json: Any = None,
+        config_file: str = "",
+        entry_chat: Any = "fanrenxxz",
     ) -> None:
         self.client = client
         self.entry_url = str(entry_url or "").strip()
@@ -458,6 +512,8 @@ class MiniAppDwellingTransport:
         self.timeout = max(5, min(60, int(timeout or 20)))
         self.logger = logger
         self.post_json = post_json
+        self.config_file = os.path.abspath(config_file) if config_file else ""
+        self.entry_chat = entry_chat or "fanrenxxz"
         self.entry_token = miniapp_entry_start_param(self.entry_url)
         self.origin = miniapp_origin(self.entry_url)
         self.init_data = ""
@@ -466,6 +522,62 @@ class MiniAppDwellingTransport:
         self.identity_player_ids: dict[str, int] = {}
         self._external_tokens: dict[tuple[int, str], str] = {}
         self._lock = asyncio.Lock()
+
+    def _persist_entry_url(self, entry_url: str) -> None:
+        """Persist a newly discovered pinned entry without exposing its token."""
+        if not self.config_file:
+            return
+        with open(self.config_file, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        settings = config.setdefault("miniapp_beast", {})
+        if not isinstance(settings, dict):
+            raise MiniAppBeastError("miniapp_config_invalid")
+        settings["entry_url"] = entry_url
+        directory = os.path.dirname(self.config_file) or "."
+        fd, temp_path = tempfile.mkstemp(prefix=".miniapp_config_", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(config, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.config_file)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
+    async def _refresh_entry_from_pinned_message(self) -> bool:
+        """Load the newest pinned entry link from the configured game chat."""
+        chat = self.entry_chat
+        try:
+            pinned = await self.client.get_messages(
+                chat,
+                limit=ENTRY_URL_PIN_SCAN_LIMIT,
+                filter=types.InputMessagesFilterPinned(),
+            )
+        except Exception as exc:
+            self._log("warning", "Mini App pinned entry lookup failed: %s", type(exc).__name__.lower())
+            return False
+        messages = pinned if isinstance(pinned, (list, tuple)) else [pinned]
+        for message in messages:
+            for entry_url in pinned_entry_url_candidates(message):
+                if entry_url == self.entry_url:
+                    continue
+                self._persist_entry_url(entry_url)
+                self.entry_url = entry_url
+                self.entry_token = miniapp_entry_start_param(entry_url)
+                self.origin = miniapp_origin(entry_url)
+                self.init_data = ""
+                self.start_payload = {}
+                self.identity_choices = []
+                self.identity_player_ids = {}
+                self._external_tokens.clear()
+                self._log("warning", "Mini App entry refreshed from pinned group message")
+                return True
+        return False
 
     def _log(self, level: str, message: str, *args: Any) -> None:
         method = getattr(self.logger, level, None)
@@ -515,18 +627,34 @@ class MiniAppDwellingTransport:
             return await self._initialize_unlocked()
 
     async def _initialize_unlocked(self) -> dict[str, Any]:
-        self.init_data = await request_webview_init_data(
-            self.client,
-            self.bot_username,
-            self.entry_token,
-        )
-        payload = await _post_json(
-            self.origin,
-            "/api/miniapp/xianxia-dwelling/start",
-            {"token": self.entry_token, "initData": self.init_data},
-            self.timeout,
-            post_json=self.post_json,
-        )
+        try:
+            self.init_data = await request_webview_init_data(
+                self.client,
+                self.bot_username,
+                self.entry_token,
+            )
+            payload = await _post_json(
+                self.origin,
+                "/api/miniapp/xianxia-dwelling/start",
+                {"token": self.entry_token, "initData": self.init_data},
+                self.timeout,
+                post_json=self.post_json,
+            )
+        except MiniAppBeastError as exc:
+            if exc.code != ENTRY_URL_REFRESH_ERROR or not await self._refresh_entry_from_pinned_message():
+                raise
+            self.init_data = await request_webview_init_data(
+                self.client,
+                self.bot_username,
+                self.entry_token,
+            )
+            payload = await _post_json(
+                self.origin,
+                "/api/miniapp/xianxia-dwelling/start",
+                {"token": self.entry_token, "initData": self.init_data},
+                self.timeout,
+                post_json=self.post_json,
+            )
         identity = payload.get("identity") or {}
         choices = identity.get("choices") or []
         self.identity_choices = [item for item in choices if isinstance(item, dict)]

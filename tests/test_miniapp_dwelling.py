@@ -1,4 +1,6 @@
 import asyncio
+import json
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,6 +14,8 @@ from miniapp_dwelling import (
     sect_farm_action_result_ok,
     sect_farm_collection_due,
     sect_farm_snapshot_status,
+    normalize_pinned_entry_url,
+    pinned_entry_url_candidates,
 )
 from miniapp_command_routing import MiniAppCommandRouter
 from dashboard_server import apply_command_execution_channels
@@ -62,6 +66,69 @@ class FakeLogger:
 
 
 class MiniAppDwellingTests(unittest.TestCase):
+    def test_pinned_entry_url_parser_accepts_text_and_button_links(self):
+        self.assertEqual(
+            normalize_pinned_entry_url(
+                "https://t.me/fanrenxiuxian_bot?startapp=df_newtoken12345"
+            ),
+            "https://t.me/fanrenxiuxian_bot?startapp=df_newtoken12345",
+        )
+        message = SimpleNamespace(
+            raw_text="最新入口：https://t.me/fanrenxiuxian_bot?startapp=df_newtoken12345。",
+            entities=[],
+            buttons=[],
+        )
+        self.assertEqual(
+            pinned_entry_url_candidates(message),
+            ["https://t.me/fanrenxiuxian_bot?startapp=df_newtoken12345"],
+        )
+
+    def test_initialize_refreshes_expired_entry_from_pinned_message(self):
+        new_entry = "https://t.me/fanrenxiuxian_bot?startapp=df_newtoken12345"
+        calls = []
+
+        class Client:
+            async def get_messages(self, chat, **kwargs):
+                self.chat = chat
+                self.filter = kwargs.get("filter")
+                return SimpleNamespace(
+                    raw_text=f"入口：{new_entry}", entities=[], buttons=[]
+                )
+
+            async def get_entity(self, username):
+                return object()
+
+            async def get_input_entity(self, entity):
+                return object()
+
+            async def __call__(self, request):
+                return SimpleNamespace(url="https://asc.aiopenai.app/miniapp#tgWebAppData=signed")
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, payload["token"]))
+            if payload["token"] == "df_fixture":
+                raise MiniAppBeastError("dwelling_token_expired")
+            return START
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = f"{directory}/config.json"
+            with open(config_file, "w", encoding="utf-8") as handle:
+                json.dump({"miniapp_beast": {"entry_url": ENTRY}}, handle)
+            transport = MiniAppDwellingTransport(
+                Client(), ENTRY, post_json=post_json, config_file=config_file
+            )
+            with patch(
+                "miniapp_dwelling.request_webview_init_data",
+                new=AsyncMock(return_value="signed"),
+            ):
+                payload = asyncio.run(transport.initialize())
+            with open(config_file, encoding="utf-8") as handle:
+                persisted = json.load(handle)
+
+        self.assertEqual(payload, START)
+        self.assertEqual(calls, [("/api/miniapp/xianxia-dwelling/start", "df_fixture"), ("/api/miniapp/xianxia-dwelling/start", "df_newtoken12345")])
+        self.assertEqual(persisted["miniapp_beast"]["entry_url"], new_entry)
+
     def test_periodic_sync_without_previous_timestamp_runs_immediately(self):
         self.assertEqual(_periodic_wait_seconds("", 12 * 3600), 0)
         self.assertEqual(_periodic_wait_seconds("not-a-timestamp", 12 * 3600), 0)
