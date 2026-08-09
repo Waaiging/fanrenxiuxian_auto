@@ -50,7 +50,7 @@ EXCHANGE_DELAY_RANGE_SECONDS = (60, 75)
 EXCHANGE_STATE_KEY = "exchange_auto_events"
 RESTRICTED_EXCHANGE_PLACE_STATE_KEY = "restricted_exchange_place_events"
 RESTRICTED_EXCHANGE_ACCOUNTS = {"xiaohao", "waaiging"}
-RESTRICTED_EXCHANGE_PLACE_SUCCESS_STATUSES = {"placed", "skipped_recent"}
+RESTRICTED_EXCHANGE_PLACE_SUCCESS_STATUSES = {"placed", "not_applicable", "skipped_recent"}
 MERCHANT_LOOK_COMMAND = ".查看货品"
 MERCHANT_BUY_COMMAND_PREFIX = ".购买商品"
 MERCHANT_PRIORITY_ITEMS = ("掌天瓶的仿制品", "九天息壤", "尘封的储物袋")
@@ -227,11 +227,19 @@ def _recent_restricted_exchange_place_event(actor, identity, current_key):
     for event_key, entry in reversed(list(_restricted_exchange_place_state(actor).items())):
         if str(event_key) == str(current_key) or not isinstance(entry, dict):
             continue
-        if entry.get("status") != "placed" or entry.get("identity") != identity:
+        if (
+            entry.get("status") not in {"placed", "not_applicable"}
+            or entry.get("identity") != identity
+        ):
             continue
         try:
             placed_at = datetime.strptime(
-                str(entry.get("placed_at") or entry.get("updated_at") or ""),
+                str(
+                    entry.get("placed_at")
+                    or entry.get("completed_at")
+                    or entry.get("updated_at")
+                    or ""
+                ),
                 "%Y-%m-%d %H:%M:%S",
             )
         except (TypeError, ValueError):
@@ -538,20 +546,37 @@ async def maybe_restricted_exchange_place(actor, event, text=None, sender=None, 
                 )
             )
         )
+        no_concubine = any(
+            marker in response_text
+            for marker in ("没有可安置的侍妾", "暂无可安置的侍妾", "无可安置的侍妾")
+        )
+        terminal_status = "placed" if place_ok else "not_applicable" if no_concubine else "failed"
         _update_restricted_exchange_place_state(
             actor,
             event_key,
-            status="placed" if place_ok else "failed",
+            status=terminal_status,
             response=response_text[:500],
             placed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S") if place_ok else "",
-            error="" if place_ok else "miniapp_place_unconfirmed",
+            completed_at=(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if place_ok or no_concubine
+                else ""
+            ),
+            error="" if place_ok or no_concubine else "miniapp_place_unconfirmed",
         )
         if place_ok:
-            _logger(actor).warning(
+            _logger(actor).info(
                 "Restricted exchange event %s for %s: %s completed through Mini App.",
                 event_key,
                 identity,
                 CONCUBINE_PLACE_COMMAND,
+            )
+        elif no_concubine:
+            _logger(actor).info(
+                "Restricted exchange event %s for %s needs no placement: %s",
+                event_key,
+                identity,
+                response_text[:300],
             )
         else:
             _logger(actor).error(

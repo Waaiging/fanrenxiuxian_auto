@@ -37,6 +37,7 @@ FISHING_ROD_SCAN_SECONDS = 300
 FISHING_TRANSFER_RETRY_SECONDS = 60
 FISHING_TRANSFER_FAILURE_RETRY_SECONDS = 3600
 FISHING_SHOP_RETRY_SECONDS = 3600
+FISHING_MATERIAL_NOTICE_RETRY_SECONDS = 3600
 FISHING_TRANSFER_FAILURE_STATUSES = {
     "listing_failed",
     "listing_unknown",
@@ -763,23 +764,28 @@ class MiniAppFishingAutomation:
             return
         state = self._state(identity)
         notice_key = f"{kind}|{name}"
+        today = _today_text()
         last_notice_time = str(state.get("miniapp_fishing_material_notice_time") or "").strip()
         if last_notice_time:
             try:
                 elapsed = (datetime.now() - datetime.strptime(last_notice_time, TIME_FORMAT)).total_seconds()
-                if elapsed < 300:
+                if elapsed < FISHING_MATERIAL_NOTICE_RETRY_SECONDS:
                     return
             except ValueError:
                 pass
         if (
-            str(state.get("miniapp_fishing_material_notice_date") or "") == _today_text()
+            str(state.get("miniapp_fishing_material_notice_date") or "") == today
             and str(state.get("miniapp_fishing_material_notice_key") or "") == notice_key
             and bool(state.get("miniapp_fishing_material_notice_sent"))
         ):
             return
+        failure_already_logged = (
+            str(state.get("miniapp_fishing_material_notice_error_date") or "") == today
+            and str(state.get("miniapp_fishing_material_notice_error_key") or "") == notice_key
+        )
         self._record(
             identity,
-            miniapp_fishing_material_notice_date=_today_text(),
+            miniapp_fishing_material_notice_date=today,
             miniapp_fishing_material_notice_key=notice_key,
             miniapp_fishing_material_notice_time=_now_text(),
             miniapp_fishing_material_notice_sent=False,
@@ -803,14 +809,26 @@ class MiniAppFishingAutomation:
         try:
             await asyncio.wait_for(client.send_message(target, message), timeout=12)
         except Exception as exc:
-            self.log.warning("Mini App fishing material notification failed: %s", exc)
+            self._record(
+                identity,
+                miniapp_fishing_material_notice_error_date=today,
+                miniapp_fishing_material_notice_error_key=notice_key,
+                miniapp_fishing_material_notice_error=str(exc)[:300],
+                miniapp_fishing_material_notice_error_time=_now_text(),
+            )
+            if not failure_already_logged:
+                self.log.warning("Mini App fishing material notification failed: %s", exc)
             return
         self._record(
             identity,
-            miniapp_fishing_material_notice_date=_today_text(),
+            miniapp_fishing_material_notice_date=today,
             miniapp_fishing_material_notice_key=notice_key,
             miniapp_fishing_material_notice_time=_now_text(),
             miniapp_fishing_material_notice_sent=True,
+            miniapp_fishing_material_notice_error_date="",
+            miniapp_fishing_material_notice_error_key="",
+            miniapp_fishing_material_notice_error="",
+            miniapp_fishing_material_notice_error_time="",
         )
 
     def _record(self, identity: str | None = None, **updates: Any) -> None:

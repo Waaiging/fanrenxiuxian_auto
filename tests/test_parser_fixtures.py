@@ -785,7 +785,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertFalse(other_mention)
         self.assertFalse(other_account)
 
-    def test_restricted_exchange_does_not_treat_failed_place_text_as_success(self):
+    def test_restricted_exchange_treats_no_concubine_as_not_applicable(self):
         class DummyActor:
             def __init__(self):
                 self.account_key = "waaiging"
@@ -828,9 +828,9 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertTrue(handled)
         state = actor.state[auto_reply_features.RESTRICTED_EXCHANGE_PLACE_STATE_KEY]
-        self.assertEqual(state["702"]["status"], "failed")
-        self.assertEqual(state["702"]["error"], "miniapp_place_unconfirmed")
-        alert.assert_awaited_once()
+        self.assertEqual(state["702"]["status"], "not_applicable")
+        self.assertEqual(state["702"]["error"], "")
+        alert.assert_not_awaited()
 
     def test_auto_merchant_ignores_other_username(self):
         class DummyActor:

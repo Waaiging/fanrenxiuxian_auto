@@ -206,6 +206,7 @@ LOW_PRIORITY_DAILY_DEFER_SECONDS = 5 * 60
 LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS = 5 * 60
 TIANXING_RIFT_PREFIX_COMMANDS = (".推命 探索", ".改命 探索")
 TIANXING_RIFT_PREFIX_DELAY_SECONDS = 3
+TIANXING_RIFT_PREFIX_RETRY_SECONDS = 5 * 60
 TIANXING_DESTINY_CHOICES = ("天府", "紫微", "贪狼", "太阴")
 TIANXING_DESTINY_ACTION_PREFERENCES = {
     "cultivation": ("紫微", "贪狼"),
@@ -609,9 +610,13 @@ class CommonCommandMixin:
         return True
 
     def tianxing_prefix_is_pending(self, text):
-        """Detect an existing unfulfilled prediction without treating it as an action ban."""
+        """Detect an already-active prediction/change without treating it as an action ban."""
         clean = str(text or "").replace("**", "")
-        return "推命" in clean and "尚未应验" in clean
+        prediction_active = "推命" in clean and "尚未应验" in clean
+        change_active = "改命" in clean and any(
+            marker in clean for marker in ("尚未耗尽", "还可维持", "尚可维持")
+        )
+        return prediction_active or change_active
 
     def tianxing_prefix_wait_seconds(self, text):
         """Parse a standalone prediction cooldown, excluding a pending prediction reply."""
@@ -2946,11 +2951,11 @@ class CommonCommandMixin:
                 else:
                     log.warning(
                         f"Tianxing rift prefix [{identity}] {command} had no confirmed success; "
-                        "blocking .探寻裂缝."
+                        f"retrying .探寻裂缝 after {TIANXING_RIFT_PREFIX_RETRY_SECONDS}s."
                     )
                 return {
                     "ok": False,
-                    "wait": wait_seconds,
+                    "wait": wait_seconds or TIANXING_RIFT_PREFIX_RETRY_SECONDS,
                     "response": response,
                 }
             await asyncio.sleep(TIANXING_RIFT_PREFIX_DELAY_SECONDS)
@@ -2963,14 +2968,21 @@ class CommonCommandMixin:
             return await self.send_timed_command_plan(plan, identity)
         async with self.common_atomic_task(f"Tianxing-rift-{identity}"):
             if not await self.ensure_tianxing_destiny_for_action(identity, "exploration"):
+                state = self.tianxing_identity_state(identity)
+                state[plan.next_key] = add_seconds_str(
+                    now_str(), TIANXING_RIFT_PREFIX_RETRY_SECONDS
+                )
+                self.save_state()
                 return None
             prefix_result = await self.send_tianxing_rift_prefixes(identity)
             if not prefix_result.get("ok"):
-                wait_seconds = max(0, int(prefix_result.get("wait") or 0))
-                if wait_seconds > 0:
-                    state = self.tianxing_identity_state(identity)
-                    state[plan.next_key] = add_seconds_str(now_str(), wait_seconds)
-                    self.save_state()
+                wait_seconds = max(
+                    TIANXING_RIFT_PREFIX_RETRY_SECONDS,
+                    int(prefix_result.get("wait") or 0),
+                )
+                state = self.tianxing_identity_state(identity)
+                state[plan.next_key] = add_seconds_str(now_str(), wait_seconds)
+                self.save_state()
                 return None
             return await self.send_timed_command_plan(plan, identity)
 

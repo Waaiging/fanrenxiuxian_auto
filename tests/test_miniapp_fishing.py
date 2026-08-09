@@ -512,6 +512,68 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(actor.client.send_message.await_args.args[0], "@Waaiging")
         self.assertIn("材料不足", actor.client.send_message.await_args.args[1])
 
+    def test_material_notice_failure_retries_at_most_hourly(self):
+        notice_time = (datetime.now() - timedelta(minutes=10)).strftime(
+            miniapp_fishing.TIME_FORMAT
+        )
+        actor = SimpleNamespace(
+            state={
+                "miniapp_fishing_material_notice_date": datetime.now().strftime("%Y-%m-%d"),
+                "miniapp_fishing_material_notice_key": "鱼饵|妖血饵",
+                "miniapp_fishing_material_notice_time": notice_time,
+                "miniapp_fishing_material_notice_sent": False,
+            },
+            config={},
+            client=SimpleNamespace(send_message=AsyncMock()),
+            save_state=lambda: None,
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "xiaohao",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+
+        asyncio.run(
+            worker._notify_material_shortage(
+                "主魂",
+                kind="鱼饵",
+                name="妖血饵",
+                shortages=["灵石 0/220"],
+            )
+        )
+
+        actor.client.send_message.assert_not_awaited()
+
+    def test_material_notice_logs_send_failure_only_once_per_day(self):
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        actor = SimpleNamespace(
+            state={},
+            config={},
+            client=SimpleNamespace(
+                send_message=AsyncMock(side_effect=RuntimeError("Too many requests"))
+            ),
+            save_state=lambda: None,
+        )
+        worker = MiniAppFishingAutomation(actor, SimpleNamespace(), "xiaohao", logger)
+
+        async def notify():
+            await worker._notify_material_shortage(
+                "主魂",
+                kind="鱼饵",
+                name="妖血饵",
+                shortages=["灵石 0/220"],
+            )
+
+        asyncio.run(notify())
+        actor.state["miniapp_fishing_material_notice_time"] = (
+            datetime.now() - timedelta(hours=2)
+        ).strftime(miniapp_fishing.TIME_FORMAT)
+        asyncio.run(notify())
+
+        self.assertEqual(actor.client.send_message.await_count, 2)
+        logger.warning.assert_called_once()
+
     def test_transport_uses_fishing_external_token_and_scoped_endpoints(self):
         calls = []
 

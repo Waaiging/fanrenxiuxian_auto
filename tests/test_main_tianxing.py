@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -370,6 +370,105 @@ class MainTianxingTests(unittest.TestCase):
             sent,
             [".观命", ".定命 贪狼", ".推命 探索", ".改命 探索", ".探寻裂缝"],
         )
+
+    def test_main_rift_accepts_existing_exploration_prediction_and_change(self):
+        actor = self.actor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state.update(
+            {
+                "last_destiny_observation_date": today,
+                "tianxing_destiny_options": ["贪狼", "紫微", "太阴"],
+                "tianxing_destiny_options_date": today,
+                "last_destiny_date": today,
+                "last_destiny_choice": "贪狼",
+            }
+        )
+        sent = []
+
+        async def send(command, **kwargs):
+            sent.append(command)
+            if command == ".推命 探索":
+                return "你已有一道关于【探索】的推命尚未应验，还需等待 6小时。"
+            if command == ".改命 探索":
+                return "你已有一道关于【探索】的改命尚未耗尽，还可维持 1小时6分钟。"
+            return "探寻成功"
+
+        actor.send_and_wait_feedback = send
+        plan = Mock(
+            command=".探寻裂缝",
+            timeout=120,
+            max_retries=0,
+            force_identity_check=False,
+            return_response_msg=False,
+            next_key="next_rift_search_time",
+        )
+        with patch("common_command_features.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(actor.send_rift_search_plan(plan, "主魂"))
+
+        self.assertEqual(result, "探寻成功")
+        self.assertEqual(sent, [".推命 探索", ".改命 探索", ".探寻裂缝"])
+        self.assertTrue(
+            actor.tianxing_prefix_response_ok(
+                ".改命 探索",
+                "你已有一道关于【探索】的改命尚未耗尽，还可维持 1小时6分钟。",
+            )
+        )
+        self.assertEqual(
+            actor.tianxing_prefix_wait_seconds(
+                "你已有一道关于【探索】的改命尚未耗尽，还可维持 1小时6分钟。"
+            ),
+            0,
+        )
+
+    def test_main_rift_unknown_prefix_response_moves_due_time_forward(self):
+        actor = self.actor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state.update(
+            {
+                "last_destiny_observation_date": today,
+                "tianxing_destiny_options": ["贪狼", "紫微", "太阴"],
+                "tianxing_destiny_options_date": today,
+                "last_destiny_date": today,
+                "last_destiny_choice": "贪狼",
+                "next_rift_search_time": "2026-08-09 00:46:54",
+            }
+        )
+        actor.send_and_wait_feedback = AsyncMock(return_value="未知状态")
+        plan = Mock(
+            command=".探寻裂缝",
+            timeout=120,
+            max_retries=0,
+            force_identity_check=False,
+            return_response_msg=False,
+            next_key="next_rift_search_time",
+        )
+
+        before = datetime.now()
+        result = asyncio.run(actor.send_rift_search_plan(plan, "主魂"))
+        retry_at = datetime.strptime(actor.state["next_rift_search_time"], "%Y-%m-%d %H:%M:%S")
+
+        self.assertIsNone(result)
+        self.assertGreaterEqual(retry_at, before + timedelta(minutes=4, seconds=55))
+
+    def test_main_rift_destiny_failure_moves_due_time_forward(self):
+        actor = self.actor()
+        actor.state["next_rift_search_time"] = "2026-08-09 00:46:54"
+        actor.ensure_tianxing_destiny_for_action = AsyncMock(return_value=False)
+        plan = Mock(
+            command=".探寻裂缝",
+            timeout=120,
+            max_retries=0,
+            force_identity_check=False,
+            return_response_msg=False,
+            next_key="next_rift_search_time",
+        )
+
+        before = datetime.now()
+        result = asyncio.run(actor.send_rift_search_plan(plan, "主魂"))
+        retry_at = datetime.strptime(actor.state["next_rift_search_time"], "%Y-%m-%d %H:%M:%S")
+
+        self.assertIsNone(result)
+        self.assertGreaterEqual(retry_at, before + timedelta(minutes=4, seconds=55))
 
     def test_main_rift_defers_on_standalone_prefix_cooldown(self):
         actor = self.actor()
