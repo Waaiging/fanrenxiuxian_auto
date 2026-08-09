@@ -2,7 +2,7 @@
 
 Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini App 为主、Telegram 群指令为补充，并通过 Dashboard 展示身份资料、有效排程、日志、红包和斗法状态。
 
-本文档按 2026-08-05 的线上版本维护。历史解析器和状态字段可能仍保留用于兼容，但不代表对应指令仍会自动执行。
+本文档按 2026-08-09 的线上版本维护，是 Git 中可追踪的项目说明权威来源。历史解析器和状态字段可能仍保留用于兼容，但不代表对应指令仍会自动执行。
 
 ## 运行入口与 tmux
 
@@ -14,13 +14,26 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 | --- | --- | --- |
 | `xiuxian:0` | `intelligent_cultivator.py` | 主号，主魂为天星宗，启用推命、定命与天行游历 |
 | `xiuxian:1` | `sub_cultivator.py` | 副号，主魂为元婴宗 |
-| `xiuxian:2` | `cultivator_xiaohao.py` 或受限待机 worker | 小号，主魂为万灵宗 |
-| `xiuxian:3` | `cultivator_waaiging.py` 或受限待机 worker | Waaiging，天星宗单主魂 |
+| `xiuxian:2` | `cultivator_xiaohao.py` 或 `red_packet_account.py --account xiaohao` | 小号，主魂为万灵宗 |
+| `xiuxian:3` | `cultivator_waaiging.py` 或 `red_packet_account.py --account waaiging` | Waaiging，天星宗单主魂 |
 | `xiuxian:4` | `dashboard_server.py` | FastAPI Dashboard |
 
 `start_all.sh` 会先创建完整的 5 个固定窗口，再启动副号、小号、Waaiging、Dashboard，最后启动负责可见性控制的主号。不要再使用“窗口 3 是 Dashboard”的旧映射。
 
-游戏群公开或账号无群发权限时，主号的可见性控制器会在固定窗口内切换小号/Waaiging 的完整脚本与红包 + Mini App 待机 worker。缺失窗口会自动重建，最终 tmux session 关闭返回非零也不会被误判为部署失败。
+游戏群公开或账号无群发权限时，主号的可见性控制器会在固定窗口内切换小号/Waaiging 的完整脚本与 `red_packet_account.py` 待机进程。待机进程保留红包监听、受限 Mini App 排程、青元子世界 Boss 和南陇侯侍妾保护，但不会绕过权限保护向游戏群发送指令。缺失窗口会自动重建，最终 tmux session 关闭返回非零也不会被误判为部署失败。
+
+## 项目结构
+
+| 范围 | 主要文件 |
+| --- | --- |
+| 账号入口 | `intelligent_cultivator.py`、`sub_cultivator.py`、`cultivator_xiaohao.py`、`cultivator_waaiging.py`、`red_packet_account.py` |
+| 通用调度与安全 | `log_utils.py`、`command_feedback.py`、`common_command_features.py`、`group_visibility_control.py`、`automation_settings.py` |
+| 业务功能 | `concubine_features.py`、`auto_reply_features.py`、`duel_features.py`、`world_boss_features.py`、`red_packet_features.py`、`soul_curse_features.py`、`yinluo_features.py` |
+| Mini App | `miniapp_command_routing.py`、`miniapp_dwelling.py`、`restricted_miniapp_worker.py`、`miniapp_*` |
+| Dashboard | `dashboard_server.py`、`dashboard.html`、`Caddyfile.dashboard` |
+| 验证与运维 | `tests/`、`start_all.sh`、`tools/snapshot.sh`、`tools/rollback.sh` |
+
+`README.md` 随 Git 提交；`PROJECT_MEMORY.md`、`CLAUDE.md` 和 `ANTY_MEMORY.md` 是本地维护说明，默认被 `.gitignore` 排除，不能替代 README 中的当前事实。
 
 ## 身份与宗门
 
@@ -56,7 +69,7 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 
 - 闭关：`.查看闭关`、`.闭关修炼`、`.深度闭关`
 - 元婴：`.元婴出窍`
-- 侍妾：`.我的侍妾`、`.天机代卜`、`.入梦寻图`、`.拼图`
+- 侍妾：`.我的侍妾`、`.安置侍妾`、`.天机代卜`、`.入梦寻图`、`.拼图`
 - 凌霄：`.登天阶`、`.引九天罡风`、`.问心台`，以及内部状态查询 `.天阶状态`
 - 天命：`.观命`、合法命星参数的 `.定命`、合法动作参数的 `.推命` / `.改命`
 - 元婴宗：`.问道`
@@ -94,12 +107,20 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 ### 青元子世界 Boss
 
 - 主号、副号、小号与 Waaiging 均监听可信游戏机器人发布的 `【世界通告｜真仙试锋开启】`，并校验“进入真仙战场”按钮的动态 `qyz_` Mini App 入口。
-- 四个账号是否参战、以及各自使用哪个身份，由 Dashboard“自动化设置”单独开关控制；每个账号最多选择一个身份，默认是各自主魂。优先使用洞府首页已经确认的 `playerId`，固定入口不可用时也只接受事件页明确匹配所选身份的玩家，不会误选其他分身。
+- 四个账号是否参战、以及各自使用哪个身份，由 Dashboard“自动化设置”单独开关控制；每个账号最多选择一个身份。当前线上配置为 `main|主魂`、`sub|主魂`、`xiaohao|主魂`、`waaiging|主魂`。
+- 2026-08-09 实战确认：化身使用负数 `playerId` 时，伤害与 100 分能够正常结算，但可能被服务端最终排行榜和奖励聚合遗漏；Waaiging 使用主魂正数 `playerId` 时正常上榜。在服务端明确修复前，四账号均只使用主魂参战。
+- 优先使用洞府首页已经确认的 `playerId`，固定入口不可用时也只接受事件页明确匹配所选身份的玩家，不会误选其他分身。
 - 入场后等待服务端锁定战场，按 `challenge.windows` 的灵机中心依次使用“强攻”，蓄势按 `1200ms` 提交，最后用 `qyz_focus_burst_v2` proof 结算。
 - 四账号按主号 `-160ms`、副号 `-120ms`、小号 `-80ms`、Waaiging `-40ms` 提前错峰，给请求传输留出余量，避免正向偏移把到达时间推过完美中心。
 - 小号与 Waaiging 切到群发受限待机 worker 后仍保留监听；完整脚本与待机 worker 通过账号级进程锁去重，不会在切换瞬间重复参战。
 - 每轮只记录一条 Mini App 发起日志和一条最终成绩汇总，不逐次展示 `/hit` 请求。详细诊断保存在对应状态文件的 `world_boss_events[].identity_results[].diagnostics`，包括脱敏后的角色战场参数、入场轮询、开战校时、逐击计划/实际偏移、HTTP 耗时、服务端回复和结算请求。
 - Boss 诊断明确区分本地判定与服务端确认；实时回传失败的攻击不会再显示为服务端确认完美。动态入口 token、`initData`、会话 token、Cookie、签名等凭据不会写入状态或日志。
+
+### 南陇侯与侍妾保护
+
+- 完整账号脚本在南陇侯交换事件命中本人或化身时，按“安置侍妾 → 交换 → 召回侍妾”串行执行，并持久化事件状态，避免重启后重复发送不可逆的交换指令。
+- 小号与 Waaiging 处于群发受限待机模式时，监听游戏群的新消息和编辑消息；命中南陇侯预告或交换选项后，只通过 Mini App 天机阁执行 `.安置侍妾`，不发送 `.交换`。
+- 受限兜底按事件和近期成功记录去重；Mini App 安置异常或未确认时向通知目标告警，避免因无法群内回复导致侍妾被掳走。
 
 ### Mini App 日常
 
@@ -189,7 +210,7 @@ Dashboard 斗法页包含统一身份轮换和一对多主动斗法计划：
 
 Dashboard 当前行为：
 
-- 宗门、灵根、修为和境界优先显示 Mini App 首页同步结果。
+- 宗门、灵根、修为和境界优先显示 Mini App 首页同步结果；宗门字段直接显示宗门名字，不再添加“宗门”前缀。
 - 每条有效指令标记为“Mini App”或“群指令”，并按执行通道统计。
 - 已退役的无效指令不会以“暂停指令”继续占据面板；仍有效的指令可以通过 Dashboard 临时暂停。
 - 日志仅展示实际发出的指令、对应回复以及 `ERROR/CRITICAL`。
@@ -239,6 +260,7 @@ Dashboard 当前行为：
 - 运行状态保存在 `state_main.json`、`state_sub.json`、`state_xiaohao.json`、`state_waaiging.json`。
 - 共享斗法状态为 `duel_state.json`，当前结构版本为 3；旧 A/B 队列会自动合并并保留身份启停、剩余次数和自定义目标。
 - Mini App 会把语义操作记录为 `OUT [Mini App | 身份]` / `IN [Mini App | 身份]`。
+- 普通日志保留 7 天；`message_events.sqlite3` 中的消息、指令账本和收益记录保留 15 天，每 6 小时由主号清理一次。SQLite 删除后会复用空闲页，但文件不会自动缩小。
 - 周期收益事件写入 `message_events.sqlite3`，Dashboard 可按日期、账号、身份和指令筛选。
 - 日报 Telegram 推送默认关闭；需要时在配置中显式启用 `daily_reward_summary_push`。
 - 不提交 session、真实配置、日志、state、缓存、数据库、token 或 VPS 密钥。
@@ -256,6 +278,8 @@ Mini App 主要配置位于 `miniapp_beast`，包括固定入口、问心塔、�
 
 ## 开发与验证
 
+VPS 当前使用 Python 3.12；本地开发应至少使用 Python 3.12，并从 `requirements.txt` 安装依赖。当前依赖未锁定精确版本，升级依赖前必须跑完整回归。
+
 默认采用快速处理模式：
 
 1. 修改前检查 `git status --short --branch`，涉及线上状态时先读取 VPS state/日志。
@@ -268,10 +292,27 @@ Mini App 主要配置位于 `miniapp_beast`，包括固定入口、问心塔、�
 常用命令：
 
 ```powershell
+$env:PYTHONUTF8 = "1"
 python -m py_compile changed_file.py
 python -m unittest tests.test_miniapp_dwelling
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+`PYTHONUTF8=1` 用于避免 Windows GBK 控制台在输出 emoji 日志时产生 `UnicodeEncodeError`。截至 2026-08-09，完整测试集为 808 项，本地全量运行约 4 分钟。
+
+## 状态快照与回滚
+
+- VPS `cron` 每 5 分钟调用 `tools/snapshot.sh`；只有状态内容发生变化且距上次快照至少 10 分钟时才保存。
+- `state_main.json`、`state_sub.json`、`state_xiaohao.json`、`state_waaiging.json` 每个最多保留 100 份快照。连续变化时约覆盖 16 小时以上；变化稀疏时覆盖时间更长。
+- `tools/rollback.sh <state 文件>` 列出快照，`tools/rollback.sh <state 文件> <时间戳>` 执行回滚。回滚前会备份当前状态；回滚后必须重启该账号当前应运行的 worker。
+- 小号/Waaiging 若处于受限模式，不要在回滚后手动强拉完整脚本；应让主号可见性控制器恢复对应 `red_packet_account.py` 待机进程。
+
+## 已知工程债
+
+- Dashboard 登录仍使用源代码中的静态配置，且状态变更接口没有独立 CSRF 令牌。仓库扩大共享范围前，应迁移到环境变量或私有配置、轮换凭据，并补充请求来源保护和登录限速。
+- 四个账号的主 state 保存仍直接覆盖目标 JSON；进程在写入中断时可能产生截断文件并回落到默认状态。应统一改为临时文件、`fsync`、原子替换，并在加载失败时自动恢复最近快照。
+- `requirements.txt` 尚未锁定版本，仓库也没有 CI；本地 Python 与 VPS Python 版本可能不同，当前仍依赖人工执行本地全量测试和远端定向测试。
+- 主账号脚本和解析回归文件体积较大。新增公共能力应继续下沉到共享模块，并优先拆分可独立验证的解析器和状态迁移逻辑。
 
 ## VPS 部署
 
@@ -299,8 +340,10 @@ ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST "cd /home/ubuntu/deploy && /home/u
 ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST "tmux respawn-window -k -t xiuxian:2 'cd /home/ubuntu/deploy && source venv/bin/activate && exec python3 cultivator_xiaohao.py'"
 ```
 
+该示例只适用于确认小号应运行完整脚本时；账号群发受限时应保留或恢复 `red_packet_account.py --account xiaohao`，不要用部署重启绕过可见性控制器。
+
 6. 检查 tmux、进程、部署后的错误日志和 Dashboard HTTP 响应。
-7. 成功后更新远端 `deploy_version.json`，并按项目记忆要求同步最新 state/log 备份。
+7. 成功后更新远端 `deploy_version.json`，并按项目规范同步最新 state/log 备份。
 
 全量启动：
 

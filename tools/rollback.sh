@@ -17,10 +17,10 @@ ROLLBACK_DIR="${DEPLOY_DIR}/backup/rollback"
 
 # 状态文件 -> tmux 窗口映射（用于回滚后提示）
 declare -A WINDOW_MAP=(
-    [state_main.json]="0 (凌霄宫主魂 intelligent_cultivator.py)"
-    [state_sub.json]="1 (星宫化身 sub_cultivator.py)"
-    [state_xiaohao.json]="2 (万灵宗 cultivator_xiaohao.py)"
-    [state_waaiging.json]="3 (Waaiging cultivator_waaiging.py)"
+    [state_main.json]="0 (主号 intelligent_cultivator.py)"
+    [state_sub.json]="1 (副号 sub_cultivator.py)"
+    [state_xiaohao.json]="2 (小号完整脚本或受限待机 worker)"
+    [state_waaiging.json]="3 (Waaiging 完整脚本或受限待机 worker)"
 )
 
 file="${1:-}"
@@ -64,5 +64,9 @@ cp -p "$target" "$DEPLOY_DIR/$file"
 echo "[rollback] ✅ $file 已回滚到快照 ${ts}"
 
 echo ""
-echo "⚠️  运行中的脚本内存里仍是旧状态，重启对应窗口后才生效:"
+echo "⚠️  运行中的 worker 内存里仍是旧状态，重启对应窗口后才生效:"
 echo "    tmux respawn-window -k -t xiuxian:${WINDOW_MAP[$file]%% *}"
+if [ "$file" = "state_xiaohao.json" ] || [ "$file" = "state_waaiging.json" ]; then
+    echo "    若账号当前群发受限，应让主号可见性控制器恢复 red_packet_account.py，"
+    echo "    不要手动强拉完整账号脚本。"
+fi

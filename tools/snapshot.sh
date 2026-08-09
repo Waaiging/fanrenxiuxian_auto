@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # 状态文件自动快照脚本 (修仙脚本)
-# cron 每 5 分钟调用一次：md5 变化检测 + 节流，保留最近 KEEP 份
+# cron 每 5 分钟调用一次：md5 变化检测 + 10 分钟最小间隔，保留最近 KEEP 份
 # 状态污染后可用 rollback.sh 一键回滚
 # ============================================================
 set -euo pipefail
@@ -9,7 +9,7 @@ set -euo pipefail
 DEPLOY_DIR="${HOME}/deploy"
 BACKUP_DIR="${DEPLOY_DIR}/backup/state_snapshots"
 STATE_FILES=(state_main.json state_sub.json state_waaiging.json state_xiaohao.json)
-KEEP=100            # 每个状态文件保留的快照份数（5分钟粒度 ≈ 8小时回滚窗口）
+KEEP=100            # 连续变化时约覆盖 16.7 小时；变化稀疏时覆盖更久
 MIN_INTERVAL=600    # 同一文件两次快照最小间隔（秒）= 10 分钟
 LOG_FILE="${DEPLOY_DIR}/logs/snapshot.log"
 
