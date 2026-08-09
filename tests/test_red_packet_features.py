@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import red_packet_features
 
@@ -24,8 +24,22 @@ class RedPacketFeatureTests(unittest.TestCase):
         )
         self.settings_patch.start()
         self.config_dir_patch.start()
+        self.click_count_patch = patch.object(
+            red_packet_features.random,
+            "randint",
+            return_value=3,
+        )
+        self.click_interval_patch = patch.object(
+            red_packet_features,
+            "CLAIM_CLICK_INTERVAL_SECONDS",
+            0,
+        )
+        self.click_count_patch.start()
+        self.click_interval_patch.start()
 
     def tearDown(self):
+        self.click_interval_patch.stop()
+        self.click_count_patch.stop()
         self.config_dir_patch.stop()
         self.settings_patch.stop()
         self.tempdir.cleanup()
@@ -257,8 +271,213 @@ class RedPacketFeatureTests(unittest.TestCase):
 
         self.assertEqual(button.clicks, 1)
         status = red_packet_features.load_red_packet_status("main")
-        self.assertEqual(status["last_action"], "clicked")
+        self.assertEqual(status["last_action"], "claimed")
         self.assertEqual(status["last_result"], "领取成功")
+
+    def test_single_selected_account_skips_shared_coordination_before_click(self):
+        button = SimpleNamespace(
+            text="抢红包",
+            url="",
+            button=type("KeyboardButtonCallback", (), {"data": b"claim-fast"})(),
+            click=AsyncMock(return_value=SimpleNamespace(message="正在抢红包...")),
+        )
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        settings = {"enabled": True, "accounts": ["main"], "minimum_amount": "10"}
+
+        with (
+            patch.object(red_packet_features, "load_red_packet_settings", return_value=settings),
+            patch.object(red_packet_features, "_reserve_shared_claim") as reserve,
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        reserve.assert_not_called()
+        self.assertEqual(button.click.await_count, 3)
+
+    def test_pending_callback_clicks_four_times_one_second_apart(self):
+        button = SimpleNamespace(
+            text="抢红包",
+            url="",
+            button=type("KeyboardButtonCallback", (), {"data": b"claim-burst"})(),
+            click=AsyncMock(return_value=SimpleNamespace(message="正在抢红包...")),
+        )
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        settings = {"enabled": True, "accounts": ["main"], "minimum_amount": "10"}
+        sleep_mock = AsyncMock()
+
+        with (
+            patch.object(red_packet_features, "load_red_packet_settings", return_value=settings),
+            patch.object(red_packet_features.random, "randint", return_value=4),
+            patch.object(red_packet_features, "CLAIM_CLICK_INTERVAL_SECONDS", 1),
+            patch.object(red_packet_features.asyncio, "sleep", sleep_mock),
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        self.assertEqual(button.click.await_count, 4)
+        self.assertEqual(sleep_mock.await_args_list, [call(1), call(1), call(1)])
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_click_count"], 4)
+        self.assertEqual(status["last_click_target"], 4)
+        self.assertEqual(status["last_click_interval_seconds"], 1)
+
+    def test_terminal_follow_up_stops_click_burst_without_rejecting_first_submission(self):
+        button = SimpleNamespace(
+            text="抢红包",
+            url="",
+            button=type("KeyboardButtonCallback", (), {"data": b"claim-terminal"})(),
+            click=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(message="正在抢红包..."),
+                    SimpleNamespace(message="已经抢过这个红包"),
+                ]
+            ),
+        )
+        monitor = red_packet_features.RedPacketMonitor(None, "main")
+        monitor.topic_id = 42
+        settings = {"enabled": True, "accounts": ["main"], "minimum_amount": "10"}
+        sleep_mock = AsyncMock()
+
+        with (
+            patch.object(red_packet_features, "load_red_packet_settings", return_value=settings),
+            patch.object(red_packet_features.random, "randint", return_value=5),
+            patch.object(red_packet_features, "CLAIM_CLICK_INTERVAL_SECONDS", 1),
+            patch.object(red_packet_features.asyncio, "sleep", sleep_mock),
+        ):
+            asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
+
+        self.assertEqual(button.click.await_count, 2)
+        self.assertEqual(sleep_mock.await_args_list, [call(1)])
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "claim_pending")
+        self.assertEqual(status["last_click_count"], 2)
+        self.assertEqual(
+            status["last_click_results"],
+            ["正在抢红包...", "已经抢过这个红包"],
+        )
+
+    def test_same_packet_is_clicked_by_only_one_selected_account(self):
+        class FakeButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-shared"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+                return SimpleNamespace(message="正在抢红包...")
+
+        main_button = FakeButton()
+        xiaohao_button = FakeButton()
+        main = red_packet_features.RedPacketMonitor(None, "main")
+        xiaohao = red_packet_features.RedPacketMonitor(None, "xiaohao")
+        main.topic_id = xiaohao.topic_id = 42
+        settings = {
+            "enabled": True,
+            "accounts": ["main", "xiaohao"],
+            "minimum_amount": "10",
+        }
+
+        with patch.object(red_packet_features, "load_red_packet_settings", return_value=settings):
+            asyncio.run(main.process_message(self._message(main_button, amount="12"), source="new"))
+            asyncio.run(
+                xiaohao.process_message(self._message(xiaohao_button, amount="12"), source="new")
+            )
+
+        self.assertEqual(main_button.clicks, 3)
+        self.assertEqual(xiaohao_button.clicks, 0)
+        xiaohao_status = red_packet_features.load_red_packet_status("xiaohao")
+        self.assertEqual(xiaohao_status["last_action"], "claimed_by_other_account")
+        self.assertEqual(xiaohao_status["last_claim_owner"], "main")
+
+    def test_click_failure_refreshes_message_and_retries(self):
+        class FailingButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-stale"})()
+
+            async def click(self):
+                raise RuntimeError("invalid message")
+
+        class RefreshedButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-fresh"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+                return SimpleNamespace(message="正在抢红包...")
+
+        refreshed_button = RefreshedButton()
+        refreshed_message = self._message(refreshed_button, amount="12")
+        client = SimpleNamespace(get_messages=AsyncMock(return_value=refreshed_message))
+        monitor = red_packet_features.RedPacketMonitor(client, "main")
+        monitor.topic_id = 42
+        monitor.entity = SimpleNamespace(id=1)
+        settings = {"enabled": True, "accounts": ["main"], "minimum_amount": "10"}
+
+        with (
+            patch.object(red_packet_features, "load_red_packet_settings", return_value=settings),
+            patch.object(red_packet_features, "CLICK_RETRY_DELAYS", (0, 0)),
+        ):
+            asyncio.run(monitor.process_message(self._message(FailingButton(), amount="12"), source="new"))
+
+        client.get_messages.assert_awaited_once_with(monitor.entity, ids=100)
+        self.assertEqual(refreshed_button.clicks, 3)
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "claim_pending")
+
+    def test_failed_owner_releases_packet_for_another_account(self):
+        class FailingButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-fail"})()
+
+            async def click(self):
+                raise RuntimeError("invalid message")
+
+        class WorkingButton:
+            text = "抢红包"
+            url = ""
+            button = type("KeyboardButtonCallback", (), {"data": b"claim-work"})()
+
+            def __init__(self):
+                self.clicks = 0
+
+            async def click(self):
+                self.clicks += 1
+                return SimpleNamespace(message="正在抢红包...")
+
+        main = red_packet_features.RedPacketMonitor(None, "main")
+        xiaohao = red_packet_features.RedPacketMonitor(None, "xiaohao")
+        main.topic_id = xiaohao.topic_id = 42
+        working_button = WorkingButton()
+        settings = {
+            "enabled": True,
+            "accounts": ["main", "xiaohao"],
+            "minimum_amount": "10",
+        }
+
+        with patch.object(red_packet_features, "load_red_packet_settings", return_value=settings):
+            asyncio.run(main.process_message(self._message(FailingButton(), amount="12"), source="new"))
+            asyncio.run(
+                xiaohao.process_message(self._message(working_button, amount="12"), source="new")
+            )
+
+        self.assertEqual(working_button.clicks, 3)
+        self.assertEqual(
+            red_packet_features.load_red_packet_status("main")["last_action"],
+            "click_error",
+        )
+        self.assertEqual(
+            red_packet_features.load_red_packet_status("xiaohao")["last_action"],
+            "claim_pending",
+        )
 
     def test_short_claim_button_clicks(self):
         class FakeButton:
@@ -282,7 +501,7 @@ class RedPacketFeatureTests(unittest.TestCase):
         ):
             asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
 
-        self.assertEqual(button.clicks, 1)
+        self.assertEqual(button.clicks, 3)
 
     def test_matching_amount_waits_for_configured_delay(self):
         class FakeButton:
@@ -313,9 +532,9 @@ class RedPacketFeatureTests(unittest.TestCase):
             asyncio.run(monitor.process_message(self._message(button, amount="12"), source="new"))
 
         sleep_mock.assert_awaited_once_with(2.5)
-        self.assertEqual(button.clicks, 1)
+        self.assertEqual(button.clicks, 3)
         status = red_packet_features.load_red_packet_status("main")
-        self.assertEqual(status["last_action"], "clicked")
+        self.assertEqual(status["last_action"], "claim_pending")
         self.assertEqual(status["last_delay_seconds"], "2.5")
 
     def test_delay_cancels_when_switch_is_disabled(self):
@@ -417,6 +636,46 @@ class RedPacketFeatureTests(unittest.TestCase):
         self.assertEqual(status["last_claimed_amount"], "0.36")
         self.assertEqual(status["last_claimed_currency"], "LDC")
         self.assertEqual(status["last_claim_message_id"], 100)
+        self.assertEqual(status["last_action"], "claimed")
+
+    def test_receipt_reply_matches_the_correct_concurrent_packet(self):
+        client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=1)))
+        monitor = red_packet_features.RedPacketMonitor(client, "main")
+        monitor.topic_id = 42
+        monitor.self_names = {"waaiging"}
+        monitor._register_pending_claim(100, Decimal("10"))
+        monitor._register_pending_claim(200, Decimal("20"))
+        receipt_message = SimpleNamespace(
+            id=201,
+            sender_id=8547797815,
+            reply_to=SimpleNamespace(
+                reply_to_top_id=42,
+                reply_to_msg_id=200,
+                forum_topic=True,
+            ),
+            raw_text="🧧 恭喜 Waaiging 抢到 3.21 LDC！",
+            text="",
+        )
+
+        asyncio.run(monitor.process_receipt(receipt_message))
+
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_claim_message_id"], 200)
+        self.assertEqual([claim["message_id"] for claim in monitor._pending_claims], [100])
+
+    def test_unconfirmed_claim_is_marked_after_confirmation_timeout(self):
+        monitor = red_packet_features.RedPacketMonitor(SimpleNamespace(), "main")
+        monitor.topic_id = 42
+        monitor._register_pending_claim(100, Decimal("20"))
+        monitor._write_status(last_message_id=100, last_action="claim_pending", last_error="")
+
+        with patch.object(red_packet_features, "CLAIM_CONFIRMATION_TIMEOUT_SECONDS", 0):
+            asyncio.run(monitor._expire_unconfirmed_claim(100))
+
+        status = red_packet_features.load_red_packet_status("main")
+        self.assertEqual(status["last_action"], "claim_unconfirmed")
+        self.assertEqual(status["last_unconfirmed_message_id"], 100)
+        self.assertEqual([claim["message_id"] for claim in monitor._pending_claims], [100])
 
     def test_failed_notification_stays_pending_and_is_not_marked_sent(self):
         client = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("Too many requests")))
@@ -519,7 +778,7 @@ class RedPacketFeatureTests(unittest.TestCase):
             button = type("KeyboardButtonCallback", (), {"data": b"claim-finished"})()
 
             async def click(self):
-                return SimpleNamespace(message="红包已抢完")
+                return SimpleNamespace(message="红包不存在或已结束。")
 
         monitor = red_packet_features.RedPacketMonitor(None, "main")
         monitor.topic_id = 42

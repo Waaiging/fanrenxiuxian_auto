@@ -132,6 +132,14 @@ def snapshot(beasts, *, ready=True, remaining=0, ready_at=""):
 
 
 class MiniAppBeastAbyssTests(unittest.TestCase):
+    def setUp(self):
+        self.settings_patch = patch(
+            "miniapp_beast_abyss.miniapp_beast_abyss_settings",
+            return_value={"power_min": 0, "power_max": 0},
+        )
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
     def test_ready_at_takes_precedence_over_remaining_seconds(self):
         now = datetime(2026, 7, 30, 10, 0, 0)
         status = abyss_status({
@@ -151,6 +159,16 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
             beast(2, "可用弱兽", 500),
             beast(3, "可用强兽", 1200),
         ])
+
+        self.assertEqual(selected["id"], 3)
+
+    def test_power_range_filters_selection_before_power_sorting(self):
+        selected = choose_abyss_beast([
+            beast(1, "超范围强兽", 1800),
+            beast(2, "范围内中兽", 1180),
+            beast(3, "范围内强兽", 1250),
+            beast(4, "不可探渊", 1300, can_explore=False),
+        ], power_min=1100, power_max=1300)
 
         self.assertEqual(selected["id"], 3)
 
@@ -326,6 +344,8 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
         state = {
             "done": [],
             "avatars": {},
+            "sect_name": "万灵宗",
+            "identity_sect_names": {"主魂": "万灵宗"},
             "beast_abyss_miniapp_next_time": (
                 datetime.now() + timedelta(hours=4)
             ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -338,7 +358,12 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
                 rows["miniapp:spirit-beast-abyss"]["execution_channel"],
                 "miniapp",
             )
-            self.assertNotIn(".探渊 <灵兽>", rows)
+
+    def test_dashboard_shows_abyss_power_range(self):
+        with patch("dashboard_server.miniapp_beast_abyss_settings", return_value={"power_min": 1000, "power_max": 1300}):
+            panel = build_command_panels("main", {"done": [], "avatars": {}, "sect_name": "万灵宗", "identity_sect_names": {"主魂": "万灵宗"}})[0]
+        row = next(item for item in panel["commands"] if item["command"] == "miniapp:spirit-beast-abyss")
+        self.assertIn("战力 1000-1300", row["detail"])
 
 
 if __name__ == "__main__":

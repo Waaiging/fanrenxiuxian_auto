@@ -65,6 +65,7 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
+from automation_settings import miniapp_beast_abyss_power_in_range
 from common_command_features import (
     CommonCommandMixin,
     MULAN_SUPPORT_COMMAND,
@@ -83,10 +84,13 @@ from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from group_visibility_control import run_telegram_write_permission_monitor
+from miniapp_beast import MiniAppBeastError
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_daily_activities import MiniAppDailyActivities
+from miniapp_fishing import MiniAppFishingAutomation
+from miniapp_inventory import MiniAppInventoryWorker
 from world_boss_features import install_world_boss_monitor
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
@@ -2717,6 +2721,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             if any(self.beast_name_matches(name, excluded) for excluded in exclude_names):
                 log.info(f"Border patrol candidate skipped: {name} already failed this round.")
                 continue
+            if miniapp_beast_abyss_power_in_range(
+                beast.get("power"),
+                match_all_when_empty=False,
+            ):
+                log.info(f"Border patrol candidate skipped: {name} is reserved for abyss power range.")
+                continue
             if "休息" not in status:
                 log.info(f"Border patrol candidate skipped: {name} status is {status}.")
                 continue
@@ -2759,6 +2769,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 continue
             if any(self.beast_name_matches(name, excluded) for excluded in exclude_names):
                 log.info(f"Border patrol recall candidate skipped: {name} already failed this round.")
+                continue
+            if miniapp_beast_abyss_power_in_range(
+                beast.get("power"),
+                match_all_when_empty=False,
+            ):
+                log.info(f"Border patrol recall candidate skipped: {name} is reserved for abyss power range.")
                 continue
             if "休息" in status:
                 log.info(f"Border patrol recall candidate skipped: {name} is already resting but unsuitable.")
@@ -3169,7 +3185,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         retry = injury_cd if injury_cd > 0 else 1800
         self.schedule_beast_action_retry("next_beast_cruise_time", retry)
         if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
-            notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "巡游失败后休息")
+            notify_unrecognized_response(self, f"万兽谷灵兽休息 {beast_name}", rest_resp, log, "巡游失败后休息")
 
     async def prepare_focus_beast_for_cruise(self, beast=None):
         """确保目标灵兽为休息状态；仅出战中会主动召回，其他忙碌/受伤状态延后。"""
@@ -3207,7 +3223,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             retry = injury_cd if injury_cd > 0 else 1800
             self.schedule_beast_action_retry("next_beast_cruise_time", retry)
             if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
-                notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "巡游前休息")
+                notify_unrecognized_response(self, f"万兽谷灵兽休息 {beast_name}", rest_resp, log, "巡游前休息")
             return False
         retry_time = self.state.get("next_beast_status_check_time", "")
         retry_seconds = int(seconds_until(retry_time)) if retry_time and is_future(retry_time) else 1800
@@ -3528,16 +3544,6 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                     if self.is_existing_border_patrol_response(rest_resp):
                         status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
                         return self.record_beast_border_patrol_status_response(status_resp)
-                    guard_wait = self.recent_command_guard_wait(f".灵兽休息 {recall_name}", max_age_seconds=30)
-                    if guard_wait > 0:
-                        remember_failed(recall_failed_names, recall_name)
-                        remember_recall_retry(guard_wait)
-                        log.info(
-                            f"Beast border patrol: recall for {recall_name} blocked by command guard "
-                            f"for {guard_wait}s; trying another recall candidate."
-                        )
-                        await asyncio.sleep(3)
-                        continue
                     if self.handle_no_such_beast_response(recall_name, rest_resp, "border patrol recall"):
                         remember_failed(recall_failed_names, recall_name)
                         await asyncio.sleep(3)
@@ -3559,7 +3565,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                         continue
                     remember_failed(recall_failed_names, recall_name)
                     if rest_resp and not self.is_fake_beast_status_response(rest_resp):
-                        notify_unrecognized_response(self, f".灵兽休息 {recall_name}", rest_resp, log, "巡边前召回")
+                        notify_unrecognized_response(self, f"万兽谷灵兽休息 {recall_name}", rest_resp, log, "巡边前召回")
                     await asyncio.sleep(3)
                     continue
             beast_name = beast.get("full_name", "")
@@ -4000,7 +4006,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
         log.info(f"Pasture precheck: {BEAST_FOCUS_NAME} is deployed; resting before .一键放养.")
         rest_status, rest_resp = await self.rest_beast_for_abyss(focus_cache_name)
-        if self.is_focus_beast_resting_for_pasture_response(rest_resp):
+        if "休息" in str(rest_status or "") or self.is_focus_beast_resting_for_pasture_response(rest_resp):
             self.set_best_beast_status(focus_cache_name, "休息中")
             return True
         if self.is_beast_pastured_response(rest_resp, focus_cache_name) or self.is_pastured_status(rest_status):
@@ -4015,7 +4021,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             return False
 
         if rest_resp:
-            notify_unrecognized_response(self, f".灵兽休息 {BEAST_FOCUS_NAME}", rest_resp, log, "一键放养前休息")
+            notify_unrecognized_response(self, f"万兽谷灵兽休息 {BEAST_FOCUS_NAME}", rest_resp, log, "一键放养前休息")
         self.schedule_pasture_retry()
         return False
 
@@ -4066,7 +4072,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 retry = injury_cd if injury_cd > 0 else BEAST_ACTION_RETRY_SECONDS
                 self.schedule_pasture_retry(retry)
                 if rest_resp and injury_cd < 0 and not self.is_fake_beast_status_response(rest_resp):
-                    notify_unrecognized_response(self, f".灵兽休息 {focus_name}", rest_resp, log, "低体力放养前休息")
+                    notify_unrecognized_response(self, f"万兽谷灵兽休息 {focus_name}", rest_resp, log, "低体力放养前休息")
                 return False
             await asyncio.sleep(3)
 
@@ -4427,18 +4433,72 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.save_state()
 
     async def rest_beast_for_abyss(self, beast_name):
-        """休息灵兽并解析状态"""
-        rest_resp = await self.send_and_wait_feedback(f".灵兽休息 {beast_name}")
-        if self.handle_no_such_beast_response(beast_name, rest_resp, "灵兽休息"):
-            return "", rest_resp
-        rest_status = self.parse_rest_response_status(rest_resp)
-        if rest_status: self.set_best_beast_status(beast_name, rest_status)
-        return rest_status, rest_resp
+        """通过万兽谷按灵兽 ID 召回休息，绝不回退群指令。"""
+        contract = getattr(self, "_miniapp_beast_contract", None)
+        transport = getattr(contract, "transport", None)
+        if transport is None:
+            message = "万兽谷 Mini App 未配置，无法执行灵兽休息"
+            log.error(message)
+            return "", message
+
+        beast = self.get_cached_beast_by_name(beast_name)
+        try:
+            beast_id = int((beast or {}).get("id") or 0)
+        except (TypeError, ValueError):
+            beast_id = 0
+        try:
+            if beast_id <= 0:
+                snapshot = await transport.spirit_beast_snapshot("主魂", log_operation=False)
+                beasts = list((snapshot or {}).get("beasts") or [])
+                if beasts:
+                    self.state["beasts_cache"] = beasts
+                    self.update_best_beast_tracking()
+                    self.save_state()
+                beast = next(
+                    (
+                        item for item in beasts
+                        if self.beast_name_matches(item.get("full_name", ""), beast_name)
+                    ),
+                    None,
+                )
+                beast_id = int((beast or {}).get("id") or 0)
+            if beast_id <= 0:
+                message = f"万兽谷未找到灵兽【{beast_name}】"
+                log.warning(message)
+                return "", message
+
+            result = await transport.spirit_beast_rest("主魂", beast_id, beast_name)
+            beasts = list((result or {}).get("beasts") or [])
+            if beasts:
+                self.state["beasts_cache"] = beasts
+                self.update_best_beast_tracking()
+            updated = next(
+                (item for item in beasts if int(item.get("id") or 0) == beast_id),
+                None,
+            )
+            rest_status = str((updated or {}).get("status") or "").strip()
+            rest_resp = str((result or {}).get("message") or "万兽谷灵兽休息完成").strip()
+            if "休息" in rest_status:
+                self.set_best_beast_status(beast_name, "休息中")
+                self.save_state()
+                return "休息中", rest_resp
+            self.save_state()
+            return rest_status, rest_resp
+        except asyncio.CancelledError:
+            raise
+        except MiniAppBeastError as exc:
+            message = f"万兽谷灵兽休息失败：{exc.code}"
+            log.error("Wan Beast Valley rest failed for %s: %s", beast_name, exc.code)
+            return "", message
+        except Exception as exc:
+            message = f"万兽谷灵兽休息失败：{type(exc).__name__}"
+            log.exception("Wan Beast Valley rest failed for %s", beast_name)
+            return "", message
 
     async def recall_pastured_beast_for_action(self, beast_name, action=""):
-        """放养中的灵兽可用 .灵兽休息 <名> 召回后继续执行任务。"""
+        """放养中的灵兽通过万兽谷召回后继续执行任务。"""
         action_label = action or "action"
-        log.info(f"Beast {action_label}: {beast_name} is pastured; recalling with .灵兽休息.")
+        log.info(f"Beast {action_label}: {beast_name} is pastured; recalling in Wan Beast Valley.")
         rest_status, rest_resp = await self.rest_beast_for_abyss(beast_name)
         if rest_status and "休息" in rest_status:
             self.set_best_beast_status(beast_name, "休息中")
@@ -4454,7 +4514,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             log.info(f"Beast {action_label}: {beast_name} is still pastured after recall attempt.")
             return False, rest_resp
         if rest_resp and not self.is_fake_beast_status_response(rest_resp):
-            notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, f"灵兽{action_label}前召回")
+            notify_unrecognized_response(self, f"万兽谷灵兽休息 {beast_name}", rest_resp, log, f"灵兽{action_label}前召回")
         return False, rest_resp
 
     async def normalize_beast_for_steal(self, beast_name):
@@ -4469,7 +4529,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
     async def normalize_beast_for_abyss(self, beast_name):
         """
         修复探渊时的伪受伤状态（toggle 出战→休息）。
-        先发.灵兽出战切换状态，等3秒后发.灵兽休息回到休息中。
+        先发 .灵兽出战 切换状态，再通过万兽谷回到休息中。
         这种 toggle 刷新了灵兽的实际状态，清除"伪受伤"。
         """
         log.warning(f"Beast stale/fake status detected for abyss. Toggling {beast_name} battle/rest once.")
@@ -4494,7 +4554,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if self.handle_no_such_beast_response(beast_name, rest_resp, "探渊假状态休息"):
             self.schedule_abyss_retry(1800)
             return False
-        if rest_resp and not self.is_fake_beast_status_response(rest_resp): notify_unrecognized_response(self, f".灵兽休息 {beast_name}", rest_resp, log, "探渊假状态休息")
+        if rest_resp and not self.is_fake_beast_status_response(rest_resp): notify_unrecognized_response(self, f"万兽谷灵兽休息 {beast_name}", rest_resp, log, "探渊假状态休息")
         self.schedule_abyss_retry(1800); return False
 
     def mark_best_beast_pastured_if_needed(self, best_name, best_status, response_text):
@@ -4634,6 +4694,35 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     def abyss_candidate_beasts(self, cache=None):
         candidates = self.beast_action_candidates("abyss", cache, BEAST_ABYSS_MIN_STAMINA)
+        if any(
+            miniapp_beast_abyss_power_in_range(
+                beast.get("power"),
+                match_all_when_empty=False,
+            )
+            for beast in candidates
+        ):
+            filtered = []
+            for beast in candidates:
+                if not miniapp_beast_abyss_power_in_range(
+                    beast.get("power"),
+                    match_all_when_empty=True,
+                ):
+                    log.info(
+                        f"Abyss candidate skipped: {beast.get('full_name', '')} power "
+                        f"{beast.get('power', 0)} is outside configured abyss range."
+                    )
+                    continue
+                filtered.append(beast)
+            return sorted(
+                filtered,
+                key=lambda b: (
+                    b.get("power", 0),
+                    self.beast_stamina_value(b),
+                    b.get("exp", 0),
+                    b.get("full_name", ""),
+                ),
+                reverse=True,
+            )
         focus = None
         for beast in candidates:
             if self.beast_name_matches(beast.get("full_name", ""), BEAST_FOCUS_NAME):
@@ -7336,8 +7425,47 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                         log.info(f"Avatar {avatar}: restored deep meditation after exception.")
                     except Exception as e2:
                         log.error(f"Avatar {avatar}: failed to restore deep meditation: {e2}")
-            
+
             await asyncio.sleep(300)
+
+    def start_miniapp_scheduler_tasks(self):
+        """Register Mini App-backed background loops used by the XiaoHao account."""
+        if getattr(self, "_miniapp_inventory", None) is not None:
+            self.create_scheduler_task(
+                "miniapp_inventory",
+                lambda: self._miniapp_inventory.run_loop(),
+            )
+        if getattr(self, "_miniapp_fishing", None) is not None and self._miniapp_fishing.supported:
+            self.create_scheduler_task(
+                "miniapp_fishing",
+                lambda: self._miniapp_fishing.run_loop(),
+            )
+        if self._miniapp_beast_contract.enabled:
+            self.create_scheduler_task(
+                "beast_contract",
+                lambda: self._miniapp_beast_contract.run(),
+            )
+        if self._miniapp_beast_abyss.enabled:
+            self.create_scheduler_task(
+                "miniapp_beast_abyss",
+                lambda: self._miniapp_beast_abyss.run_loop(),
+            )
+        if self._miniapp_beast_seek.enabled:
+            self.create_scheduler_task(
+                "miniapp_beast_seek",
+                lambda: self._miniapp_beast_seek.run_loop(),
+            )
+        if self._miniapp_daily_activities is not None:
+            if self._miniapp_daily_activities.pagoda_enabled:
+                self.create_scheduler_task(
+                    "miniapp_pagoda",
+                    lambda: self._miniapp_daily_activities.run_pagoda_loop(),
+                )
+            if self._miniapp_daily_activities.hunt_enabled:
+                self.create_scheduler_task(
+                    "miniapp_hunt",
+                    lambda: self._miniapp_daily_activities.run_hunt_loop(),
+                )
 
     # ---- 启动 ----
 
@@ -7369,6 +7497,26 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self._miniapp_beast_contract.transport,
             self.account_key,
             log,
+        )
+        self._miniapp_inventory = (
+            MiniAppInventoryWorker(
+                self,
+                self._miniapp_beast_contract.transport,
+                self.account_key,
+                log,
+            )
+            if self._miniapp_beast_contract.transport is not None
+            else None
+        )
+        self._miniapp_fishing = (
+            MiniAppFishingAutomation(
+                self,
+                self._miniapp_beast_contract.transport,
+                self.account_key,
+                log,
+            )
+            if self._miniapp_beast_contract.transport is not None
+            else None
         )
         self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
         await self.client.get_dialogs(limit=10)
@@ -7485,32 +7633,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         # 启动所有定时任务
         self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
         self.create_scheduler_task("beast_action", lambda: self.run_beast_action_timer())
-        if self._miniapp_beast_contract.enabled:
-            self.create_scheduler_task(
-                "beast_contract",
-                lambda: self._miniapp_beast_contract.run(),
-            )
-        if self._miniapp_beast_abyss.enabled:
-            self.create_scheduler_task(
-                "miniapp_beast_abyss",
-                lambda: self._miniapp_beast_abyss.run_loop(),
-            )
-        if self._miniapp_beast_seek.enabled:
-            self.create_scheduler_task(
-                "miniapp_beast_seek",
-                lambda: self._miniapp_beast_seek.run_loop(),
-            )
-        if self._miniapp_daily_activities is not None:
-            if self._miniapp_daily_activities.pagoda_enabled:
-                self.create_scheduler_task(
-                    "miniapp_pagoda",
-                    lambda: self._miniapp_daily_activities.run_pagoda_loop(),
-                )
-            if self._miniapp_daily_activities.hunt_enabled:
-                self.create_scheduler_task(
-                    "miniapp_hunt",
-                    lambda: self._miniapp_daily_activities.run_hunt_loop(),
-                )
+        self.start_miniapp_scheduler_tasks()
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())

@@ -85,6 +85,18 @@ class FakeTransport:
 
 
 class WorldBossFeatureTests(unittest.TestCase):
+    def test_account_offsets_are_all_early_and_staggered(self):
+        window = {"perfectMs": 210}
+        offsets = {
+            account: WorldBossMonitor(FakeActor(), account)._hit_offset_ms(window)
+            for account in ("main", "sub", "xiaohao", "waaiging")
+        }
+
+        self.assertEqual(
+            offsets,
+            {"main": -160, "sub": -120, "xiaohao": -80, "waaiging": -40},
+        )
+
     def test_extracts_only_matching_trusted_entry_shape(self):
         message = DummyMessage()
         entry = extract_world_boss_entry(message, sender_username="hantianzun32_bot")
@@ -154,7 +166,12 @@ class WorldBossFeatureTests(unittest.TestCase):
                     return {
                         "sessionToken": "session_fixture",
                         "boss": {"actionsUsed": 0, "actionsRemaining": 1},
-                        "player": {"maxHp": 188},
+                        "player": {
+                            "label": "剑修",
+                            "root": "异灵根(风)",
+                            "maxHp": 188,
+                            "attackBonus": 1.08,
+                        },
                         "challenge": {
                             "challengeId": "challenge_fixture",
                             "windows": [
@@ -194,6 +211,16 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertEqual(outcome["damage_yi_average"], 123)
             self.assertEqual(outcome["damage_yi_hit_count"], 1)
             self.assertEqual(outcome["damage_yi_hits"], [123])
+            self.assertEqual(outcome["perfect_count"], 1)
+            self.assertEqual(outcome["local_perfect_count"], 1)
+            diagnostics = outcome["diagnostics"]
+            self.assertEqual(diagnostics["version"], 1)
+            self.assertEqual(diagnostics["player"]["attackBonus"], 1.08)
+            self.assertEqual(diagnostics["hits"][0]["server_status"], "accepted")
+            self.assertEqual(diagnostics["hits"][0]["account_offset_ms"], 0)
+            serialized = str(diagnostics)
+            self.assertNotIn("signed_init_data", serialized)
+            self.assertNotIn("session_fixture", serialized)
             self.assertEqual(
                 [path.rsplit("/", 1)[-1] for path, _ in calls],
                 ["start", "begin", "hit", "finish"],
@@ -269,9 +296,149 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["perfect"])
             elapsed = calls[0][1]["elapsedMs"]
-            self.assertGreaterEqual(elapsed, 875)
-            self.assertLessEqual(elapsed, 885)
+            self.assertGreaterEqual(elapsed, 855)
+            self.assertLessEqual(elapsed, 865)
             self.assertEqual(result["action"]["t"], elapsed)
+
+        asyncio.run(run())
+
+    def test_rejected_realtime_hit_records_server_timing_and_details(self):
+        async def run():
+            clock = [100.0]
+
+            async def sleep(seconds):
+                clock[0] += seconds
+
+            async def post_json(origin, path, payload, timeout):
+                clock[0] += 0.48
+                error = MiniAppBeastError("boss_hit_outside_window", 409)
+                error.details = {
+                    "error": "boss_hit_outside_window",
+                    "serverElapsedMs": 1520,
+                    "sessionToken": "must_not_persist",
+                }
+                raise error
+
+            monitor = WorldBossMonitor(
+                FakeActor(),
+                "xiaohao",
+                post_json=post_json,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+            )
+            result = await monitor._hit_window(
+                extract_world_boss_entry(DummyMessage()),
+                "signed_init_data",
+                "session_fixture",
+                "challenge_fixture",
+                100.0,
+                {
+                    "id": "w14",
+                    "centerMs": 1000,
+                    "hitMs": 460,
+                    "perfectMs": 150,
+                },
+                14,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["perfect"])
+            self.assertFalse(result["accepted_perfect"])
+            diagnostic = result["diagnostic"]
+            self.assertEqual(diagnostic["sequence"], 14)
+            self.assertEqual(diagnostic["account_offset_ms"], -70)
+            self.assertEqual(diagnostic["actual_elapsed_ms"], 930)
+            self.assertEqual(diagnostic["signed_delta_ms"], -70)
+            self.assertEqual(diagnostic["request"]["total_duration_ms"], 480)
+            self.assertEqual(diagnostic["http_status"], 409)
+            self.assertEqual(
+                diagnostic["server_details"]["serverElapsedMs"],
+                1520,
+            )
+            self.assertNotIn("sessionToken", str(diagnostic))
+
+        asyncio.run(run())
+
+    def test_failed_report_is_local_perfect_but_not_confirmed_perfect(self):
+        async def run():
+            calls = []
+
+            async def post_json(origin, path, payload, timeout):
+                calls.append((path, payload))
+                if path.endswith("/begin"):
+                    return {"startsInMs": 0}
+                if path.endswith("/finish"):
+                    return {
+                        "result": {
+                            "grade": "甲等",
+                            "score": 100,
+                            "player_hp": 84,
+                        }
+                    }
+                raise AssertionError(path)
+
+            monitor = WorldBossMonitor(
+                FakeActor(),
+                "xiaohao",
+                post_json=post_json,
+                sleep=AsyncMock(),
+                monotonic=lambda: 100.0,
+                finish_grace_seconds=0,
+            )
+            accepted = {
+                "action": {"t": 1000, "holdMs": 1200, "stance": "强攻"},
+                "ok": True,
+                "matched": True,
+                "perfect": True,
+                "accepted_perfect": True,
+                "damage": 10,
+                "diagnostic": {"sequence": 1},
+            }
+            rejected = {
+                "action": {"t": 2000, "holdMs": 1200, "stance": "强攻"},
+                "ok": False,
+                "matched": True,
+                "perfect": True,
+                "accepted_perfect": False,
+                "damage": 0,
+                "error": "boss_hit_outside_window",
+                "diagnostic": {
+                    "sequence": 2,
+                    "error": "boss_hit_outside_window",
+                },
+            }
+            monitor._hit_window = AsyncMock(side_effect=[accepted, rejected])
+            outcome = await monitor._fight(
+                extract_world_boss_entry(DummyMessage()),
+                "signed_init_data",
+                "session_fixture",
+                {
+                    "player": {"maxHp": 100},
+                    "boss": {"phase": 1},
+                    "challenge": {
+                        "challengeId": "challenge_fixture",
+                        "windows": [
+                            {"id": "w1", "centerMs": 1000, "hitMs": 460, "perfectMs": 150},
+                            {"id": "w2", "centerMs": 2000, "hitMs": 460, "perfectMs": 150},
+                        ],
+                    },
+                },
+            )
+
+            self.assertEqual(outcome["hit_count"], 1)
+            self.assertEqual(outcome["perfect_count"], 1)
+            self.assertEqual(outcome["local_matched_count"], 2)
+            self.assertEqual(outcome["local_perfect_count"], 2)
+            finish_payload = next(
+                payload for path, payload in calls if path.endswith("/finish")
+            )
+            self.assertEqual(
+                finish_payload["bossProof"]["clientStats"]["perfects"],
+                2,
+            )
+            summary = monitor._outcome_summary(outcome)
+            self.assertIn("完美 1", summary)
+            self.assertIn("本地判定 2，服务端确认 1", summary)
 
         asyncio.run(run())
 

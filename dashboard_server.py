@@ -42,6 +42,7 @@ from automation_settings import (
     MINIAPP_FISHING_PONDS,
     MULAN_SUPPORT_MODES,
     automation_dashboard_payload,
+    miniapp_beast_abyss_settings,
     miniapp_fishing_settings,
     mulan_support_command,
     mulan_support_mode,
@@ -74,6 +75,12 @@ from red_packet_features import red_packet_dashboard_payload, save_red_packet_se
 from miniapp_beast import write_refresh_request
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
 from miniapp_fishing import miniapp_fishing_global_snapshot
+from miniapp_inventory import (
+    INVENTORY_ACCOUNT_IDENTITIES,
+    read_inventory_cache,
+    search_inventory_caches,
+    write_inventory_request,
+)
 from reward_parsing import (
     compact_reward_summary,
     daily_reward_items_for_command,
@@ -114,7 +121,7 @@ from soul_curse_features import (
     SOUL_CURSE_VISIT_COMMAND,
     SOUL_CURSE_WANYING_GREETING_COMMAND,
 )
-from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
+from yinluo_features import YINLUO_APPEASE_COMMAND, YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
 security = HTTPBasic()
@@ -154,6 +161,7 @@ COMMAND_CONTROL_LOCK = threading.Lock()  # 指令开关锁
 CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
 RED_PACKET_CONTROL_LOCK = threading.Lock()  # 抢红包设置锁
 AUTOMATION_SETTINGS_LOCK = threading.Lock()  # Boss 身份与慕兰参数设置锁
+MINIAPP_INVENTORY_REQUEST_LOCK = threading.Lock()  # 储物袋主动刷新请求锁
 STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前端轮询时反复读大日志
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
@@ -196,7 +204,7 @@ SERVER_STARTED_AT = datetime.fromtimestamp(SERVER_START_TS).strftime(TIME_FORMAT
 GIT_META_CACHE = {}
 GIT_META_CACHE_SECONDS = 60
 ACCOUNT_DISPLAY_NAMES = {
-    "main": "万灵宗 (主号)",
+    "main": "天星宗 (主号)",
     "sub": "元婴宗 (副号)",
     "xiaohao": "万灵宗 (小号)",
     "waaiging": "天星宗 (@Waaiging)",
@@ -251,6 +259,63 @@ def account_profile_usernames(account):
             if normalize_profile_username(name)
         )
         for identity, names in mapping.items()
+    }
+
+
+def miniapp_inventory_dashboard_payload(query=""):
+    """Return cached inventory snapshots and cross-identity search results."""
+    caches = {
+        account: read_inventory_cache(account, CONFIG_DIR)
+        for account in INVENTORY_ACCOUNT_IDENTITIES
+    }
+    accounts = []
+    snapshot_count = 0
+    item_count = 0
+    latest_update = ""
+    for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items():
+        cache = caches[account]
+        snapshots = cache.get("snapshots") if isinstance(cache.get("snapshots"), dict) else {}
+        clean_snapshots = {}
+        for identity in identities:
+            snapshot = snapshots.get(identity)
+            if not isinstance(snapshot, dict):
+                continue
+            clean_snapshots[identity] = snapshot
+            snapshot_count += 1
+            item_count += len(snapshot.get("items") or []) if isinstance(snapshot.get("items"), list) else 0
+            latest_update = max(latest_update, str(snapshot.get("updated_at") or ""))
+        accounts.append({
+            "account": account,
+            "name": ACCOUNT_DISPLAY_NAMES.get(account, account),
+            "short_name": ACCOUNT_SHORT_NAMES.get(account, account),
+            "identities": list(identities),
+            "snapshots": clean_snapshots,
+            "updated_at": str(cache.get("updated_at") or ""),
+            "last_request": cache.get("last_request") if isinstance(cache.get("last_request"), dict) else {},
+            "request_progress": cache.get("request_progress") if isinstance(cache.get("request_progress"), dict) else {},
+        })
+    search_results = search_inventory_caches(caches, query)
+    match_quantity = 0.0
+    for row in search_results:
+        try:
+            match_quantity += float(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+    if match_quantity.is_integer():
+        match_quantity = int(match_quantity)
+    return {
+        "ok": True,
+        "accounts": accounts,
+        "search_query": str(query or "").strip(),
+        "search_results": search_results,
+        "summary": {
+            "snapshot_count": snapshot_count,
+            "item_count": item_count,
+            "match_count": len(search_results),
+            "match_quantity": match_quantity,
+            "updated_at": latest_update,
+        },
+        "server_time": time.strftime(TIME_FORMAT),
     }
 
 PROFILE_USERNAME_PATTERNS = (
@@ -314,8 +379,9 @@ BOT_REPLY_MARKERS = {
 ACCOUNT_LOG_TAGS = {
     "main": [
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
+        ".推命", ".改命", ".观命", ".定命",
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
-        ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
+        ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战",
         ".探渊", ".一键放养", ".灵兽互动", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
         ".召回侍妾", ".安置侍妾", YUANYING_OUT_COMMAND, ".元婴归窍", RIFT_SEARCH_COMMAND,
@@ -346,7 +412,7 @@ ACCOUNT_LOG_TAGS = {
     ],
     "xiaohao": [
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
-        ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战", ".灵兽休息",
+        ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游", ".灵兽巡边", ".巡边状态", ".巡边归来",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".召回侍妾", ".安置侍妾",
         DEFAULT_AVATAR_FIELD_TRAINING_COMMAND, MAIN_FIELD_TRAINING_COMMAND, ".宗门战况", ".参战", SUB_TREASURE_TOUCH_COMMAND,
@@ -1005,10 +1071,17 @@ def miniapp_beast_abyss_command(state):
     result = clean_custom_text(state.get("beast_abyss_miniapp_last_result") or "", 120)
     beast = clean_custom_text(state.get("beast_abyss_miniapp_last_beast") or "", 40)
     ready = bool(state.get("beast_abyss_miniapp_ready"))
+    abyss_settings = miniapp_beast_abyss_settings()
+    power_min = int(abyss_settings.get("power_min") or 0)
+    power_max = int(abyss_settings.get("power_max") or 0)
     target = parse_state_time(next_time)
     now = datetime.now()
     next_seconds = max(0, int((target - now).total_seconds())) if target and target > now else 0
     detail_parts = ["每 6 小时", "以 Mini App 页面冷却为准", "仅主魂"]
+    if power_min > 0 or power_max > 0:
+        detail_parts.append(f"战力 {power_min or 0}-{power_max or '∞'}")
+    else:
+        detail_parts.append("战力不限")
     if beast:
         detail_parts.append(f"上次：{beast}")
     if result:
@@ -1203,6 +1276,9 @@ def miniapp_fishing_command(state):
         "waiting_transfer": ("等待换竿", "cooldown"),
         "waiting_start": ("等待开钓", "cooldown"),
         "verifying_transfer": ("验竿中", "cooldown"),
+        "transfer_retry_wait": ("等待补跑", "cooldown"),
+        "shop_unavailable": ("等待鱼饵商店恢复", "cooldown"),
+        "waiting_resources": ("等待鱼饵材料", "cooldown"),
         "transfer_failed": ("转竿已停止", "error"),
         "identity_paused": ("身份暂停", "paused"),
         "no_participants": ("未选身份", "paused"),
@@ -1719,7 +1795,16 @@ def yinluo_commands(state):
     slots = yinluo.get("slots", {}) if isinstance(yinluo.get("slots"), dict) else {}
     fierce = int(reserves.get(YINLUO_SOUL, 0) or 0)
     empty = sum(1 for item in slots.values() if isinstance(item, dict) and item.get("status") == "空闲")
-    ready = sum(1 for item in slots.values() if isinstance(item, dict) and item.get("status") == "精华已成")
+    ready_slots = sorted(
+        int(slot)
+        for slot, item in slots.items()
+        if (
+            isinstance(item, dict)
+            and item.get("status") == "精华已成"
+            and str(item.get("soul") or "").strip() == YINLUO_SOUL
+        )
+    )
+    ready = len(ready_slots)
     exhausted = sum(1 for item in slots.values() if isinstance(item, dict) and "魂力枯竭" in str(item.get("status") or ""))
     detail = f"煞气 {sha_current}/{sha_max} · {YINLUO_SOUL} {fierce} · 空槽 {empty} · 可收 {ready}"
     if exhausted:
@@ -1744,6 +1829,7 @@ def yinluo_commands(state):
         "imprisoned": "炼化中",
         "collected": "已收取",
         "appeased": "已安抚",
+        "summon_flow_complete": "流程完成",
     }
     next_action = parse_state_time(yinluo.get("next_action_at", ""))
     tone = "ready"
@@ -1777,7 +1863,8 @@ def yinluo_commands(state):
     ))
     rows.append(time_command(yinluo, "next_blood_wash_time", ".血洗山林", "血洗山林", group="阴罗宗"))
     rows.append(time_command(yinluo, "next_summon_shadow_time", ".召唤魔影", "召唤魔影", group="阴罗宗"))
-    rows.append(command_row(".一键收取精华", "收取精华", "可收取" if ready else "按需", "ready" if ready else "manual", detail=f"精华已成槽 {ready}", group="阴罗宗"))
+    rows.append(command_row(YINLUO_APPEASE_COMMAND, "安抚幡灵", "需安抚" if exhausted else "按需", "ready" if exhausted else "manual", detail=f"魂力枯竭槽 {exhausted}", group="阴罗宗"))
+    rows.append(command_row(".收取精华 <槽位>", "收取精华", "可收取" if ready else "按需", "ready" if ready else "manual", detail=f"凶兽戾魄精华已成槽 {ready_slots}", group="阴罗宗"))
     rows.append(command_row(f".囚禁魂魄 <槽位> {YINLUO_SOUL}", "囚禁凶兽", "可炼化" if empty and fierce else "等待", "ready" if empty and fierce else "manual", detail=f"只囚禁{YINLUO_SOUL}；空槽 {empty}，储备 {fierce}", group="阴罗宗"))
     rows.append(command_row(YINLUO_CONVERT_COMMAND, "化功为煞", "煞气不足时", "manual", detail="仅囚禁凶兽戾魄且煞气不足时自动使用", group="阴罗宗"))
     return rows
@@ -2163,6 +2250,12 @@ def main_soul_panel(account, state):
     rows = []
     rows.extend(global_sync_commands())
     if account == "main":
+        identity_sects = state.get("identity_sect_names") or {}
+        main_soul_sect = str(
+            (identity_sects.get("主魂") if isinstance(identity_sects, dict) else "")
+            or state.get("sect_name")
+            or "天星宗"
+        ).strip()
         hunt_stopped = bool(state.get("beast_hunt_stopped"))
         hunt_reason = clean_custom_text(state.get("beast_hunt_stopped_reason") or "已按策略停止寻觅灵兽", 120)
         rows.extend([
@@ -2180,23 +2273,37 @@ def main_soul_panel(account, state):
         rows.extend([
             manual_command(".安置侍妾", "安置侍妾", group="侍妾"),
         ])
-        rows.extend([
-            miniapp_beast_sync_command(state),
-            miniapp_beast_contract_command(state),
-            miniapp_beast_abyss_command(state),
-            miniapp_fishing_command(state),
-            (
-                command_row(
-                    ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
-                    detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False,
-                )
-                if hunt_stopped
-                else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
-            ),
-            time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
-            manual_command(".巡边状态", "巡边状态", group="灵兽"),
-            manual_command(".巡边归来", "巡边归来", group="灵兽"),
-        ])
+        rows.append(miniapp_fishing_command(state))
+        if main_soul_sect == "天星宗":
+            rows.extend([
+                manual_command(".推命 闭关", "推命闭关", group="天星宗"),
+                daily_done_command(
+                    state,
+                    ".观命",
+                    "观命",
+                    date_key="last_destiny_date",
+                    detail=f"上次定命：{state.get('last_destiny_choice') or '未记录'}",
+                    group="天星宗",
+                ),
+                miniapp_tianxing_journey_command(state),
+            ])
+        if main_soul_sect == "万灵宗":
+            rows.extend([
+                miniapp_beast_sync_command(state),
+                miniapp_beast_contract_command(state),
+                miniapp_beast_abyss_command(state),
+                (
+                    command_row(
+                        ".寻觅灵兽", "寻觅灵兽", "已停止", "done",
+                        detail=hunt_reason, group="灵兽", schedule_type="cooldown", actionable=False,
+                    )
+                    if hunt_stopped
+                    else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
+                ),
+                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+                manual_command(".巡边状态", "巡边状态", group="灵兽"),
+                manual_command(".巡边归来", "巡边归来", group="灵兽"),
+            ])
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled(account, "主魂")))
     elif account == "sub":
         rows.extend([
@@ -2256,7 +2363,6 @@ def main_soul_panel(account, state):
             unsupported_detail = "公开群受限；该手动旧指令不属于 Mini App 自动寻觅流程"
             for command, label in (
                 (".放生 <灵兽>", "放生灵兽"),
-                (".灵兽休息 <灵兽>", "灵兽休息"),
                 (".灵兽出战 <灵兽>", "灵兽出战"),
                 (".灵兽巡边 <灵兽> 袭营", "灵兽巡边"),
                 (".巡边状态", "巡边状态"),
@@ -2286,7 +2392,6 @@ def main_soul_panel(account, state):
                 miniapp_beast_abyss_command(state),
                 time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽"),
                 manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
-                manual_command(".灵兽休息 <灵兽>", "灵兽休息", group="灵兽"),
                 manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
                 time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
                 manual_command(".巡边状态", "巡边状态", group="灵兽"),
@@ -4229,15 +4334,20 @@ def is_command_reply_log_entry(entry):
     if extract_command_from_line(label):
         return True
     label_lower = label.casefold()
+    if label_lower.startswith("edited "):
+        return True
     return label_lower.startswith("manual ") and " reply" in label_lower and "." in label
 
 
 def is_dashboard_visible_log_entry(entry):
     """Show only command traffic plus actual error diagnostics on Dashboard."""
     header = log_entry_header(entry)
+    text = str(entry.get("text") or "")
     if is_suppressed_miniapp_transport_log_entry(entry):
         return False
     if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry):
+        return True
+    if "刷天机值完成：总数" in text:
         return True
     return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))
 
@@ -4621,7 +4731,7 @@ def clear_account_history(account):
 
 def account_display_name(account):
     return {
-        "main": "万灵宗（主号）",
+        "main": "天星宗（主号）",
         "sub": "元婴宗（副号）",
         "xiaohao": "万灵宗（小号）",
         "waaiging": "天星宗（@Waaiging）",
@@ -4726,6 +4836,49 @@ def resource_stats(since_hours: int = 12, max_rows: int = RESOURCE_STATS_MAX_ROW
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
+
+@app.get("/api/miniapp-inventory")
+def miniapp_inventory(query: str = "", username: str = Depends(authenticate)):
+    """Read the latest per-identity Mini App inventory caches."""
+    return miniapp_inventory_dashboard_payload(query=query)
+
+
+@app.post("/api/miniapp-inventory/refresh")
+def refresh_miniapp_inventory(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Ask one or all account processes to refresh inventory through their live session."""
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "").strip()
+    if account == "all":
+        if identity not in ("", "*"):
+            return {"success": False, "msg": "全部账号刷新只支持全部身份"}
+        with MINIAPP_INVENTORY_REQUEST_LOCK:
+            requests = [
+                write_inventory_request(
+                    target_account,
+                    "*",
+                    requested_by=username,
+                    base_dir=CONFIG_DIR,
+                )
+                for target_account in INVENTORY_ACCOUNT_IDENTITIES
+            ]
+        return {"success": True, "requests": requests, "msg": "已请求刷新全部身份"}
+    if account not in INVENTORY_ACCOUNT_IDENTITIES:
+        return {"success": False, "msg": "未知账号"}
+    if identity not in INVENTORY_ACCOUNT_IDENTITIES[account] and identity != "*":
+        return {"success": False, "msg": "未知身份"}
+    with MINIAPP_INVENTORY_REQUEST_LOCK:
+        request = write_inventory_request(
+            account,
+            identity,
+            requested_by=username,
+            base_dir=CONFIG_DIR,
+        )
+    return {
+        "success": True,
+        "request": request,
+        "msg": "已请求刷新全部身份" if identity == "*" else f"已请求刷新 {identity}",
+    }
+
 @app.get("/api/command-records")
 def command_records(username: str = Depends(authenticate)):
     """获取各账号按身份/指令聚合的发送记录。"""
@@ -4818,20 +4971,32 @@ async def automation_settings_control(
 ):
     participants = payload.get("world_boss_participants")
     mode = payload.get("mulan_support_mode")
+    abyss = payload.get("miniapp_beast_abyss")
+    abyss = abyss if isinstance(abyss, dict) else {}
     fishing = payload.get("miniapp_fishing")
     fishing = fishing if isinstance(fishing, dict) else {}
+    tianxing = payload.get("tianxing")
+    tianxing = tianxing if isinstance(tianxing, dict) else {}
     try:
         with AUTOMATION_SETTINGS_LOCK:
             settings = save_automation_settings(
                 world_boss_participants=participants,
                 mulan_support_mode=mode,
+                miniapp_beast_abyss_power_min=abyss.get("power_min"),
+                miniapp_beast_abyss_power_max=abyss.get("power_max"),
                 miniapp_fishing_enabled=fishing.get("enabled"),
                 miniapp_fishing_pond=fishing.get("pond"),
                 miniapp_fishing_bait=fishing.get("bait"),
                 miniapp_fishing_chum=fishing.get("chum"),
                 miniapp_fishing_participants=fishing.get("participants"),
+                miniapp_fishing_rod=fishing.get("rod"),
                 miniapp_fishing_rod_owner=fishing.get("rod_owner"),
                 miniapp_fishing_start_time=fishing.get("start_time"),
+                tianxing_meditation_mode=tianxing.get("meditation_mode"),
+                tianxing_use_heqi_pill=tianxing.get("use_heqi_pill"),
+                tianxing_tianji_grind_enabled=tianxing.get("tianji_grind_enabled"),
+                tianxing_tianji_grind_target=tianxing.get("tianji_grind_target"),
+                tianxing_tianji_grind_participants=tianxing.get("tianji_grind_participants"),
                 updated_by=username,
             )
     except ValueError as exc:
@@ -4840,14 +5005,19 @@ async def automation_settings_control(
             "invalid world boss participant": "Boss 参战身份无效",
             "multiple world boss identities per account": "每个账号最多选择一个 Boss 参战身份",
             "invalid Mulan support mode": "慕兰支援参数必须是斥候、破灯、奇袭或护阵",
+            "invalid Mini App beast abyss power range": "万兽谷探渊战力区间必须是非负整数，且最大值不能小于最小值",
             "invalid Mini App fishing pond": "灵溪垂钓地点无效",
             "invalid Mini App fishing bait": "灵溪垂钓鱼饵无效",
             "invalid Mini App fishing chum": "灵溪垂钓窝料无效",
             "Mini App fishing participants must be a list": "灵溪垂钓参与身份列表格式错误",
             "invalid Mini App fishing participant": "灵溪垂钓参与身份无效",
             "Mini App fishing participants required": "启用灵溪垂钓时至少选择一个身份",
+            "invalid Mini App fishing rod": "灵溪垂钓鱼竿无效",
             "invalid Mini App fishing rod owner": "手动指定的钓竿持有者无效",
             "invalid Mini App fishing start time": "灵溪垂钓开始时间必须是 HH:MM",
+            "Tianxing Tianji grind participants must be a list": "刷天机值参与身份列表格式错误",
+            "invalid Tianxing Tianji grind participant": "刷天机值参与身份无效",
+            "Tianxing Tianji grind participants required": "启用刷天机值时至少选择一个身份",
         }
         return {"success": False, "msg": messages.get(str(exc), "自动化设置无效")}
     with STATUS_LOCK:

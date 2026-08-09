@@ -24,7 +24,9 @@ from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_daily_activities import MiniAppDailyActivities
+from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_journey import MiniAppTianxingJourney
+from miniapp_inventory import MiniAppInventoryWorker
 from miniapp_dwelling import (
     MiniAppCommandResponse,
     MiniAppDwellingTransport,
@@ -139,6 +141,18 @@ class RestrictedMiniAppWorker:
             self.account,
             self.log,
         )
+        self.inventory = MiniAppInventoryWorker(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
+        self.fishing = MiniAppFishingAutomation(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
         self._tasks: list[asyncio.Task[Any]] = []
         self._last_auth_refresh = datetime.min
 
@@ -208,6 +222,9 @@ class RestrictedMiniAppWorker:
 
         self._spawn("auth", self.run_auth_refresh_loop())
         self._spawn("details", self.run_details_sync_loop())
+        self._spawn("inventory", self.inventory.run_loop())
+        if self.fishing.supported:
+            self._spawn("fishing", self.fishing.run_loop())
         self._spawn("concubine", self.run_concubine_loop())
         self._spawn("custom", self.actor.run_custom_command_loop())
         self._spawn("meditation", self.actor.run_meditation_timer())
@@ -300,6 +317,18 @@ class RestrictedMiniAppWorker:
             await pause_event.wait()
         if hasattr(self.actor, "identity_pause_seconds") and self.actor.identity_pause_seconds(identity) > 0:
             return None
+
+        if command == ".闭关修炼" and hasattr(
+            self.actor, "ensure_tianxing_destiny_for_action"
+        ):
+            if not await self.actor.ensure_tianxing_destiny_for_action(
+                identity, "cultivation"
+            ):
+                self._record_worker_state(
+                    restricted_miniapp_last_error="tianxing_destiny_failed",
+                    restricted_miniapp_last_error_at=now_str(),
+                )
+                return None
 
         try:
             response = await self.transport.command(

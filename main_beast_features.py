@@ -10,6 +10,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
+from automation_settings import miniapp_beast_abyss_power_in_range
 from miniapp_beast import (
     DEFAULT_REFRESH_SECONDS,
     DEFAULT_RETRY_SECONDS,
@@ -466,6 +467,7 @@ class MainBeastMixin:
     def main_beast_candidates(self, action):
         cache = list(self.state.get("beasts_cache") or [])
         focus_name = self.state.get("best_beast_name", "")
+        filtered_for_abyss = []
         candidates = []
         for beast in cache:
             name = beast.get("full_name", "")
@@ -475,12 +477,42 @@ class MainBeastMixin:
                 continue
             if action == "abyss" and stamina < ABYSS_MIN_STAMINA:
                 continue
+            abyss_range_match = miniapp_beast_abyss_power_in_range(
+                beast.get("power"),
+                match_all_when_empty=(action == "abyss"),
+            )
+            if action == "abyss" and not abyss_range_match:
+                continue
             if action == "patrol":
                 if self.main_beast_name_matches(name, focus_name) or stamina < BORDER_PATROL_MIN_STAMINA:
                     continue
+                if miniapp_beast_abyss_power_in_range(
+                    beast.get("power"),
+                    match_all_when_empty=False,
+                ):
+                    continue
             candidates.append(beast)
+            if action == "abyss":
+                filtered_for_abyss.append(beast)
         candidates.sort(key=lambda item: (int(item.get("stamina", -1)), int(item.get("power", 0))), reverse=True)
         if action == "abyss":
+            if any(
+                miniapp_beast_abyss_power_in_range(
+                    beast.get("power"),
+                    match_all_when_empty=False,
+                )
+                for beast in filtered_for_abyss
+            ):
+                return sorted(
+                    candidates,
+                    key=lambda item: (
+                        int(item.get("power", 0)),
+                        int(item.get("stamina", -1)),
+                        int(item.get("tier", 0)),
+                        item.get("full_name", ""),
+                    ),
+                    reverse=True,
+                )
             focus = next((item for item in candidates if self.main_beast_name_matches(item.get("full_name"), focus_name)), None)
             ordered = []
             if focus and int(focus.get("stamina", -1)) >= FOCUS_PROTECT_STAMINA:
@@ -617,19 +649,55 @@ class MainBeastMixin:
             return True
         if any(marker in status for marker in ("受伤", "重伤", "治疗", "巡边", "探险")):
             return False
-        response = await self.send_and_wait_feedback(f".灵兽休息 {name}", timeout=60, max_retries=0)
-        text = self.main_beast_response_text(response).replace("**", "")
-        if any(marker in text for marker in ("召回", "休养", "休息中", "无需召回", "提前召回")):
-            self.set_main_beast_status(name, "休息中")
-            self.main_beast_save()
-            return True
-        wait = self.main_beast_parse_wait(text)
-        if "受伤" in text or "重伤" in text or "休养" in text:
-            self.set_main_beast_status(name, "受伤")
+        router = getattr(self, "_miniapp_command_router", None)
+        transport = getattr(router, "transport", None) if getattr(router, "enabled", False) else None
+        if transport is None:
+            self.main_beast_logger().error(
+                "Wan Beast Valley rest unavailable for %s; group command is retired.", name
+            )
+            return False
+        try:
+            try:
+                beast_id = int(beast.get("id") or 0)
+            except (TypeError, ValueError):
+                beast_id = 0
+            if beast_id <= 0:
+                snapshot = await transport.spirit_beast_snapshot("主魂", log_operation=False)
+                self.record_main_beast_miniapp_snapshot(snapshot)
+                refreshed = self.main_beast_by_name(name)
+                beast_id = int((refreshed or {}).get("id") or 0)
+            if beast_id <= 0:
+                self.main_beast_logger().warning("Wan Beast Valley did not find beast %s for rest.", name)
+                return False
+            result = await transport.spirit_beast_rest("主魂", beast_id, name)
+            beasts = list((result or {}).get("beasts") or [])
+            if beasts:
+                self.record_main_beast_miniapp_snapshot({"beasts": beasts})
+            rested = next(
+                (item for item in beasts if int(item.get("id") or 0) == beast_id),
+                None,
+            )
+            if "休息" in str((rested or {}).get("status") or ""):
+                self.set_main_beast_status(name, "休息中")
+                self.main_beast_save()
+                return True
+            self.main_beast_logger().warning(
+                "Wan Beast Valley rest did not settle %s: %s",
+                name,
+                str((result or {}).get("message") or "status_unknown")[:120],
+            )
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            self.main_beast_logger().error(
+                "Wan Beast Valley rest failed for %s: %s", name, code, exc_info=True
+            )
             if action == "abyss":
-                self.state["next_abyss_time"] = beast_add_seconds(max(ACTION_RETRY_SECONDS, wait if wait > 0 else 0))
-            self.main_beast_save()
-        return False
+                self.state["next_abyss_time"] = beast_add_seconds(ACTION_RETRY_SECONDS)
+                self.main_beast_save()
+            return False
 
     async def wait_main_abyss_result(self, response_msg, timeout=35):
         current = response_msg

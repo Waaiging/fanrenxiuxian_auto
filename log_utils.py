@@ -223,6 +223,8 @@ class CommandLogFilter(logging.Filter):
         msg = record.getMessage()
         if record.levelno >= logging.WARNING:
             return True
+        if msg.startswith("刷天机值完成：总数"):
+            return True
         return msg.startswith((
             "🟢 OUT", "🔵 IN", "⬆️ OUT", "⬇️ IN",
             "📤 OUT", "📥 IN", "OUT", "IN [",
@@ -706,8 +708,9 @@ def command_response_family(command):
     ):
         return "fishing"
     if (
-        cmd in {".我的阴罗幡", ".升级阴罗幡", ".每日献祭", ".血洗山林", ".召唤魔影", ".一键收取精华", ".一键收取"}
+        cmd in {".我的阴罗幡", ".升级阴罗幡", ".每日献祭", ".血洗山林", ".召唤魔影", ".一键安抚幡灵", ".一键收取精华", ".一键收取"}
         or cmd.startswith(".囚禁魂魄")
+        or cmd.startswith(".收取精华")
         or cmd.startswith(".安抚幡灵")
         or cmd.startswith(".化功为煞")
     ):
@@ -1648,7 +1651,9 @@ def _command_text_for_message_id(actor, msg, message_id):
         return command
 
     account = actor_account_key(actor) or actor.__class__.__name__
-    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    chat_id = _safe_message_int(
+        getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)
+    )
     try:
         with _message_db_connect() as conn:
             row = None
@@ -3396,6 +3401,65 @@ def _manual_command_record_from_ledger(actor, msg):
     return record
 
 
+def _tracked_command_record_from_ledger(actor, msg):
+    """Return any persisted command row that the edited reply points to."""
+    replied_id = meaningful_reply_to_msg_id(actor, msg)
+    if not replied_id:
+        return None
+    try:
+        replied_id = int(replied_id)
+    except Exception:
+        return None
+
+    account = actor_account_key(actor) or actor.__class__.__name__
+    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    cache = getattr(actor, "_tracked_command_ledger_cache", None)
+    if cache is None:
+        cache = {}
+        actor._tracked_command_ledger_cache = cache
+    cache_key = (account, chat_id, replied_id)
+    if cache_key in cache:
+        return cache[cache_key] or None
+
+    row = None
+    try:
+        with _message_db_connect() as conn:
+            if chat_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT command, identity, source
+                    FROM command_ledger
+                    WHERE account=? AND chat_id IS ? AND command_msg_id=?
+                    LIMIT 1
+                    """,
+                    (account, chat_id, replied_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT command, identity, source
+                    FROM command_ledger
+                    WHERE account=? AND command_msg_id=?
+                    LIMIT 1
+                    """,
+                    (account, replied_id),
+                ).fetchone()
+    except Exception:
+        return None
+
+    if row is None:
+        return None
+    record = {
+        "command": row[0] or "",
+        "identity": row[1] or "",
+        "source": row[2] or "",
+    }
+    cache[cache_key] = record
+    if len(cache) > 300:
+        actor._tracked_command_ledger_cache = dict(list(cache.items())[-150:])
+    return record
+
+
 def is_reply_to_manual_command(actor, msg):
     """检查消息是否是对手动指令的回复（reply_to 指向手动指令消息）"""
     replied_id = meaningful_reply_to_msg_id(actor, msg)
@@ -3446,7 +3510,11 @@ def tracked_command_text_for_reply(actor, msg):
     if command:
         return command
     feedback_commands = getattr(actor, "feedback_commands", None) or {}
-    return feedback_commands.get(replied_id, "")
+    command = feedback_commands.get(replied_id, "")
+    if command:
+        return command
+    record = _tracked_command_record_from_ledger(actor, msg)
+    return (record or {}).get("command", "")
 
 
 def tracked_command_identity_for_reply(actor, msg):
@@ -3462,7 +3530,11 @@ def tracked_command_identity_for_reply(actor, msg):
     if identity:
         return identity
     feedback_identities = getattr(actor, "feedback_identities", None) or {}
-    return feedback_identities.get(replied_id, "")
+    identity = feedback_identities.get(replied_id, "")
+    if identity:
+        return identity
+    record = _tracked_command_record_from_ledger(actor, msg)
+    return (record or {}).get("identity", "")
 
 
 def is_reply_to_tracked_command(actor, msg):
@@ -3476,7 +3548,7 @@ def is_reply_to_tracked_command(actor, msg):
         mapping = getattr(actor, attr, None) or {}
         if replied_id in mapping:
             return True
-    return False
+    return bool(_tracked_command_record_from_ledger(actor, msg))
 
 
 def is_reply_to_untracked_message(actor, msg):
@@ -5416,8 +5488,20 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
             if len(seen) > 500:
                 setattr(actor, cache_name, set(list(seen)[-250:]))
 
-    logging.getLogger(actor.__class__.__name__).info(format_in_log(f"{label} {msg_id}", text, sender=sender, msg=msg))
     is_edited = label == "edited"
+    logged_command = (
+        tracked_command_text_for_reply(actor, msg)
+        if is_edited
+        else command_from_log_label(label)
+    )
+    log_label = (
+        f"{logged_command} edited {msg_id}"
+        if is_edited and logged_command
+        else f"{label} {msg_id}"
+    )
+    logging.getLogger(actor.__class__.__name__).info(
+        format_in_log(log_label, text, sender=sender, msg=msg)
+    )
     record_message_event(
         actor,
         msg,
@@ -5431,7 +5515,7 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
             else "in"
         ),
         identity=current_id,
-        command=command_from_log_label(label),
+        command=logged_command,
     )
     record_command_response_for_reply(
         actor, msg, text=text, status="matched", sender=sender
@@ -5440,7 +5524,9 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
         actor, msg, text=text, status="matched", sender=sender
     )
     remember_logged_incoming_message(actor, msg, text=text)
-    remember_incoming_message_context(actor, msg, command=command_from_log_label(label), identity=current_id, text=text)
+    remember_incoming_message_context(
+        actor, msg, command=logged_command, identity=current_id, text=text
+    )
     return True
 
 
@@ -5643,6 +5729,7 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
     """记录编辑过的消息（每条消息每个版本的文本只记录一次）"""
     text = text if text is not None else (getattr(msg, "text", None) or "")
     msg_id = _message_id(msg)
+    tracked_command = tracked_command_text_for_reply(actor, msg)
     record_message_event(
         actor,
         msg,
@@ -5651,7 +5738,7 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
         event_kind="edited",
         direction="bot_edited" if sender is not None and is_game_bot_sender(actor, sender) else "edited",
         identity=tracked_command_identity_for_reply(actor, msg),
-        command=tracked_command_text_for_reply(actor, msg),
+        command=tracked_command,
     )
     edit_logger = logging.getLogger(actor.__class__.__name__)
     record_command_response_for_reply(
@@ -5671,7 +5758,14 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
         seen_texts[msg_id] = text
         if len(seen_texts) > 300:
             setattr(actor, cache_name, dict(list(seen_texts.items())[-150:]))
-    logging.getLogger(actor.__class__.__name__).info(format_in_log(f"edited {msg_id}", text, sender=sender, msg=msg))
+    log_label = (
+        f"{tracked_command} edited {msg_id}"
+        if tracked_command
+        else f"edited {msg_id}"
+    )
+    logging.getLogger(actor.__class__.__name__).info(
+        format_in_log(log_label, text, sender=sender, msg=msg)
+    )
     remember_logged_incoming_message(actor, msg, text=text)
     return True
 
@@ -5732,11 +5826,13 @@ def record_edited_cultivation_state_if_needed(actor, msg, text=None, sender=None
 
 def is_relevant_game_bot_edited_message(actor, msg, text):
     """Edited bot messages are relevant when they mention us or continue a tracked reply."""
+    if was_logged_incoming_message(actor, msg):
+        return True
+    if incoming_message_context_for_msg(actor, msg):
+        return True
     if is_reply_to_untracked_message(actor, msg):
         return False
     if managed_mention_identities(actor, msg, text):
-        return True
-    if was_logged_incoming_message(actor, msg):
         return True
     if is_reply_to_tracked_command(actor, msg):
         return True

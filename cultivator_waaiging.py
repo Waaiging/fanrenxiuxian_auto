@@ -112,7 +112,13 @@ class WaaigingCultivator(core.Cultivator):
         return "主魂" if sender_id and my_id and int(sender_id) == int(my_id) else None
 
     def account_sect_name(self):
-        return self.sect_name if self.state.get("sect_join_confirmed") else ""
+        if not self.state.get("sect_join_confirmed"):
+            return ""
+        return str(
+            getattr(self, "sect_name", "")
+            or self.state.get("sect_name")
+            or "天星宗"
+        ).strip()
 
     def identity_sect_name(self, identity="主魂"):
         if str(identity or "主魂") == "主魂" and not self.state.get("sect_join_confirmed"):
@@ -165,6 +171,10 @@ class WaaigingCultivator(core.Cultivator):
             return await super().send_and_wait_feedback(message, *args, **kwargs)
 
         async with self.common_atomic_task(f"Tianxing-{action}"):
+            if action == "meditation" and not await self.ensure_tianxing_destiny_for_action(
+                "主魂", "cultivation"
+            ):
+                return None
             if not await self._send_tianxing_prefixes(prefixes, action):
                 return None
             return await super().send_and_wait_feedback(message, *args, **kwargs)
@@ -189,7 +199,7 @@ class WaaigingCultivator(core.Cultivator):
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
         start, _ = self._tianxing_destiny_window(now)
-        if self.state.get("last_destiny_date") != today:
+        if self.state.get("last_destiny_observation_date") != today:
             if now < start:
                 return max(0, int((start - now).total_seconds()))
             retry_at = str(self.state.get("next_tianxing_destiny_retry_time") or "")
@@ -215,13 +225,6 @@ class WaaigingCultivator(core.Cultivator):
         self.save_state()
         core.log.info("Tianxing destiny deferred until %s: %s.", retry_at, reason)
 
-    def _record_tianxing_destiny(self, today, choice=""):
-        self.state["last_destiny_date"] = today
-        self.state["last_destiny_time"] = core.now_str()
-        self.state["last_destiny_choice"] = choice
-        self.state["next_tianxing_destiny_retry_time"] = ""
-        self.save_state()
-
     async def _tianxing_destiny_check(self):
         if not self.state.get("sect_join_confirmed"):
             return False
@@ -230,7 +233,7 @@ class WaaigingCultivator(core.Cultivator):
 
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
-        if self.state.get("last_destiny_date") == today:
+        if self.state.get("last_destiny_observation_date") == today:
             return True
         start, end = self._tianxing_destiny_window(now)
         if now < start:
@@ -243,50 +246,12 @@ class WaaigingCultivator(core.Cultivator):
             return False
 
         async with self.common_atomic_task("Tianxing-destiny"):
-            response = await self.send_and_wait_feedback(".观命", timeout=90)
-            text = self.response_text(response).replace("**", "")
-            if not text:
-                self._defer_tianxing_destiny(".观命 returned no usable feedback")
+            completed = await self.observe_tianxing_destiny("主魂", force=True)
+            if not completed:
+                self._defer_tianxing_destiny(".观命 was not confirmed")
                 return False
-
-            if any(marker in text for marker in ("今日已定命", "命轨已定", "今日命轨定在")):
-                choice = next((name for name in TIANXING_DESTINY_CHOICES if name in text), "")
-                self._record_tianxing_destiny(today, choice)
-                core.log.info("Tianxing destiny was already fixed today: %s.", choice or "unknown")
-                return True
-
-            if any(keyword in text for keyword in core.DESTINY_OBSERVE_FAILURE_KEYWORDS):
-                self._defer_tianxing_destiny(".观命 is temporarily unavailable")
-                return False
-
-            choice = next((name for name in TIANXING_DESTINY_CHOICES if name in text), "")
-            if not choice:
-                self._defer_tianxing_destiny("no destiny choice could be parsed")
-                return False
-
-            destiny_command = f".定命 {choice}"
-            if self.dashboard_command_paused(destiny_command, "主魂"):
-                self._defer_tianxing_destiny(f"{destiny_command} is paused")
-                return False
-
-            await asyncio.sleep(TIANXING_PREFIX_DELAY_SECONDS)
-            destiny_response = await self.send_and_wait_feedback(destiny_command, timeout=90)
-            destiny_text = self.response_text(destiny_response).replace("**", "")
-            success = (
-                bool(destiny_text)
-                and choice in destiny_text
-                and any(marker in destiny_text for marker in ("命轨定在", "定下命星", "今日命轨"))
-                and not any(
-                    keyword in destiny_text
-                    for keyword in core.DESTINY_OBSERVE_FAILURE_KEYWORDS
-                )
-            )
-            if not success:
-                self._defer_tianxing_destiny(f"{destiny_command} was not confirmed")
-                return False
-
-            self._record_tianxing_destiny(today, choice)
-            core.log.info("Tianxing destiny fixed for today: %s.", choice)
+            self.state["next_tianxing_destiny_retry_time"] = ""
+            self.save_state()
             return True
 
     async def run_tianxing_destiny_loop(self):

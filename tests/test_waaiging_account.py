@@ -211,6 +211,7 @@ class WaaigingAccountTests(unittest.TestCase):
             ".协同守山",
             ".推命 探索",
             ".改命 探索",
+            ".灵兽休息 六翼",
         ):
             self.assertTrue(command_feedback.is_retired_auto_command(command))
         self.assertTrue(command_feedback.is_retired_auto_command(".宗门点卯"))
@@ -237,7 +238,15 @@ class WaaigingAccountTests(unittest.TestCase):
 
     def test_tianxing_rift_restores_exploration_prefixes_and_meditation_prefix_remains(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)
-        actor.state = {"sect_join_confirmed": True}
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.state = {
+            "sect_join_confirmed": True,
+            "last_destiny_observation_date": today,
+            "tianxing_destiny_options_date": today,
+            "tianxing_destiny_options": ["贪狼"],
+            "last_destiny_date": today,
+            "last_destiny_choice": "贪狼",
+        }
         actor.sect_name = "天星宗"
         actor.identity_sect_names = {"主魂": "天星宗"}
         actor.active_atomic_task = None
@@ -305,10 +314,7 @@ class WaaigingAccountTests(unittest.TestCase):
         actor.response_text = lambda response: str(response or "")
         actor.save_state = lambda: None
         sent = []
-        responses = [
-            "【观命结果】今日可定下的命星如下：【太阴】。",
-            "你将今日命轨定在【太阴】。",
-        ]
+        responses = ["【观命结果】今日可定下的命星如下：【太阴】。"]
 
         async def fake_send(command, **kwargs):
             sent.append(command)
@@ -318,14 +324,16 @@ class WaaigingAccountTests(unittest.TestCase):
             return None
 
         actor.send_and_wait_feedback = fake_send
-        with patch("cultivator_waaiging.datetime", FixedDatetime), patch.object(
-            asyncio, "sleep", fake_sleep
-        ):
+        with patch("cultivator_waaiging.datetime", FixedDatetime), patch(
+            "common_command_features.datetime", FixedDatetime
+        ), patch.object(asyncio, "sleep", fake_sleep):
             self.assertTrue(asyncio.run(actor._tianxing_destiny_check()))
 
-        self.assertEqual(sent, [".观命", ".定命 太阴"])
-        self.assertEqual(actor.state["last_destiny_date"], "2026-07-19")
-        self.assertEqual(actor.state["last_destiny_choice"], "太阴")
+        self.assertEqual(sent, [".观命"])
+        self.assertEqual(actor.state["last_destiny_observation_date"], "2026-07-19")
+        self.assertEqual(actor.state["tianxing_destiny_options"], ["太阴"])
+        self.assertEqual(actor.state.get("last_destiny_date", ""), "")
+        self.assertEqual(actor.state.get("last_destiny_choice", ""), "")
 
 
 if __name__ == "__main__":

@@ -118,7 +118,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".血洗山林",
             ".召唤魔影",
             ".召回魔影",
+            ".一键安抚幡灵",
             ".一键收取精华",
+            ".收取精华 1",
             ".化功为煞 10000",
             ".囚禁魂魄 1 凶兽戾魄",
             ".安抚幡灵 1",
@@ -149,6 +151,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".我的阴罗幡",
             ".每日献祭",
             ".召回魔影",
+            ".一键安抚幡灵",
+            ".一键收取精华",
+            ".收取精华 <槽位>",
             ".囚禁魂魄 <槽位> 凶兽戾魄",
         )
         group_commands = (
@@ -228,6 +233,45 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(response, "group fallback")
         fallback.assert_awaited_once_with(".借幡镇魂 @Weeguu")
 
+    def test_main_and_sub_yuanshengzi_yinluo_commands_route_to_miniapp(self):
+        commands = (
+            ".我的阴罗幡",
+            ".囚禁魂魄 1 凶兽戾魄",
+            ".一键安抚幡灵",
+            ".收取精华 1",
+        )
+
+        for account in ("main", "sub"):
+            with self.subTest(account=account):
+                actor = SimpleNamespace(
+                    client=object(),
+                    config={"miniapp_beast": {"entry_url": ENTRY}},
+                    state={"avatars": {"缘生子": {}}},
+                    avatars=["缘生子"],
+                    save_state=lambda: None,
+                    identity_pause_seconds=lambda identity: 0,
+                )
+                router = MiniAppCommandRouter(actor, account, logger=FakeLogger())
+                router.transport.identity_player_ids = {"主魂": 100, "缘生子": -200}
+                router.transport.command = AsyncMock(
+                    return_value=MiniAppCommandResponse("完成", {"actionResult": {"ok": True}})
+                )
+                router._maybe_refresh_auth = AsyncMock()
+                fallback = AsyncMock(return_value="group fallback")
+
+                for command in commands:
+                    response = asyncio.run(
+                        router._route("缘生子", command, fallback, (), {})
+                    )
+                    self.assertEqual(response, "完成")
+
+                self.assertEqual(
+                    [call.args for call in router.transport.command.await_args_list],
+                    [(command,) for command in commands],
+                )
+                self.assertTrue(all(call.kwargs == {"identity": "缘生子"} for call in router.transport.command.await_args_list))
+                fallback.assert_not_awaited()
+
     def test_identity_mapping_and_command_routes(self):
         calls = []
 
@@ -271,6 +315,29 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(calls[6][0], "/api/miniapp/xianxia-dwelling/small-world")
         self.assertEqual(calls[6][1]["action"], "collect")
 
+    def test_forge_treasure_uses_storage_bag_endpoint(self):
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/forge/craft"):
+                return {
+                    "ok": True,
+                    "actionResult": {"ok": True, "rawMessage": "炼制玄铁剑成功"},
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            result = asyncio.run(transport.forge_treasure("主魂", "treasure_001", 1))
+
+        self.assertTrue(result["actionResult"]["ok"])
+        self.assertEqual(calls[-1][0], "/api/miniapp/xianxia-dwelling/forge/craft")
+        self.assertEqual(calls[-1][1]["targetItemId"], "treasure_001")
+        self.assertEqual(calls[-1][1]["times"], 1)
+        self.assertEqual(calls[-1][1]["playerId"], 100)
     def test_completed_status_is_settled_for_maintenance_loop(self):
         calls = []
         logger = FakeLogger()
@@ -471,6 +538,48 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertIn("OUT [Mini App | 主魂]:\n万兽谷寻觅灵兽", combined)
         self.assertIn("万兽谷放生新寻灵兽（新来的风雀）", combined)
 
+    def test_spirit_beast_rest_uses_exact_id(self):
+        logger = FakeLogger()
+        calls = []
+        rested = {
+            "id": 7,
+            "name": "六翼",
+            "beastType": "太古冰蜈",
+            "tier": 4,
+            "stamina": 34,
+            "combatPower": 4096,
+            "status": "休息中",
+        }
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-spirit-beast?startapp=spiritbeast_fixture",
+                }
+            if path.endswith("/xianxia-spirit-beast/action"):
+                self.assertEqual(payload["action"], "rest")
+                self.assertEqual(payload["beastId"], 7)
+                return {
+                    "ok": True,
+                    "message": "六翼已返回灵兽袋。",
+                    "beasts": [rested],
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(
+            object(), ENTRY, logger=logger, post_json=post_json
+        )
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            result = asyncio.run(transport.spirit_beast_rest("主魂", 7, "六翼"))
+
+        self.assertEqual(result["beasts"][0]["status"], "休息中")
+        self.assertEqual(calls[-1][1]["action"], "rest")
+        self.assertIn("万兽谷灵兽休息（六翼）", "\n".join(logger.info_messages))
+
     def test_pagoda_logs_action_while_hunt_steps_stay_silent(self):
         logger = FakeLogger()
         calls = []
@@ -630,6 +739,54 @@ class MiniAppDwellingTests(unittest.TestCase):
 
         self.assertIn(
             "Mini App [主魂] 指令 .元婴出窍失败：fixture_failure",
+            logger.error_messages,
+        )
+
+    def test_tianji_operations_can_suppress_success_logs_but_keep_errors(self):
+        logger = FakeLogger()
+
+        async def post_json(origin, path, payload, timeout):
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/command-center"):
+                return {
+                    "ok": True,
+                    "actionResult": {"ok": True, "rawMessage": "推命炼制成功"},
+                }
+            if path.endswith("/xianxia-dwelling/forge/craft"):
+                return {
+                    "ok": True,
+                    "actionResult": {"ok": True, "rawMessage": "玄铁剑炼制完成"},
+                }
+            raise MiniAppBeastError("fixture_failure")
+
+        transport = MiniAppDwellingTransport(
+            object(), ENTRY, logger=logger, post_json=post_json
+        )
+
+        async def run():
+            await transport.initialize()
+            logger.info_messages.clear()
+            await transport.command(".推命 炼制", log_operation=False)
+            await transport.forge_treasure(
+                "主魂", "treasure_001", 1, log_operation=False
+            )
+            async def failing_post_json(origin, path, payload, timeout):
+                raise MiniAppBeastError("fixture_failure")
+
+            transport.post_json = failing_post_json
+            with self.assertRaises(MiniAppBeastError):
+                await transport.command(".推命 炼制", log_operation=False)
+
+        with patch(
+            "miniapp_dwelling.request_webview_init_data",
+            new=AsyncMock(return_value="signed"),
+        ):
+            asyncio.run(run())
+
+        self.assertEqual(logger.info_messages, [])
+        self.assertIn(
+            "Mini App [主魂] 指令 .推命 炼制失败：fixture_failure",
             logger.error_messages,
         )
 
@@ -1077,6 +1234,61 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertIsNone(response)
         worker.transport.command.assert_not_awaited()
         self.assertEqual(actor.state["restricted_miniapp_last_blocked_command"], ".切换 主魂")
+
+    def test_restricted_worker_starts_shared_fishing_loop(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {
+                    "miniapp_beast": {"entry_url": ENTRY},
+                    "restricted_miniapp": {},
+                }
+                self.state = {}
+                self.avatars = []
+                self.is_running = True
+                self.pause_event = asyncio.Event()
+                self.pause_event.set()
+                self.startup_done = asyncio.Event()
+
+            def save_state(self):
+                pass
+
+            async def run_custom_command_loop(self):
+                pass
+
+            async def run_meditation_timer(self):
+                pass
+
+            async def run_yuanying_out_loop(self):
+                pass
+
+        async def exercise():
+            actor = Actor()
+            worker = RestrictedMiniAppWorker(actor, "xiaohao")
+            worker.transport.initialize = AsyncMock()
+            worker.transport.identity_player_ids = {"主魂": 100}
+            worker.sync_all_details = AsyncMock()
+            worker.daily_activities.pagoda_enabled = False
+            worker.daily_activities.hunt_enabled = False
+            worker.tianxing_journey.enabled = False
+            worker.beast_abyss.enabled = False
+            worker.beast_seek.enabled = False
+            worker.beast_enabled = False
+            worker.beast_contract.enabled = False
+            spawned = []
+
+            def capture(name, coroutine):
+                spawned.append(name)
+                coroutine.close()
+
+            worker._spawn = capture
+            await worker.start()
+            return worker, spawned
+
+        worker, spawned = asyncio.run(exercise())
+
+        self.assertTrue(worker.fishing.supported)
+        self.assertIn("fishing", spawned)
 
     def test_restricted_worker_routes_puzzle_through_miniapp(self):
         class Actor:

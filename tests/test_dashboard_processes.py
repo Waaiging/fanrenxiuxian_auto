@@ -1,8 +1,10 @@
 import unittest
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import dashboard_server
+from log_utils import CommandLogFilter
 
 
 class DashboardProcessTests(unittest.TestCase):
@@ -43,6 +45,42 @@ class DashboardProcessTests(unittest.TestCase):
         with patch.object(dashboard_server.subprocess, "run", return_value=completed):
             self.assertEqual(dashboard_server.account_process_pids("xiaohao"), [101, 103])
             self.assertEqual(dashboard_server.account_process_pids("waaiging"), [102])
+
+    def test_tianji_total_summary_is_visible_without_per_round_transport_logs(self):
+        summary = "2026-08-08 12:00:00,000 [INFO] 刷天机值完成：总数 20"
+        entry = {"text": summary, "lines": [summary]}
+
+        self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(entry))
+
+        routine = "2026-08-08 12:00:00,000 [INFO] routine scheduler message"
+        routine_entry = {"text": routine, "lines": [routine]}
+        self.assertFalse(dashboard_server.is_dashboard_visible_log_entry(routine_entry))
+
+        record = logging.LogRecord(
+            "test", logging.INFO, __file__, 1, "刷天机值完成：总数 %s", (20,), None
+        )
+        self.assertTrue(CommandLogFilter().filter(record))
+
+    def test_edited_bot_reply_is_visible_in_dashboard_logs(self):
+        historical = (
+            "2026-08-08 12:47:00,943 [INFO] "
+            "🔵 IN [edited 756018] 韩天尊(@xlqlcy_bot):\n【探寻成功】"
+        )
+        historical_entry = {
+            "text": historical,
+            "lines": historical.splitlines(),
+        }
+        attributed = (
+            "2026-08-08 12:47:00,943 [INFO] "
+            "🔵 IN [.探寻裂缝 edited 756018] 韩天尊(@xlqlcy_bot):\n【探寻成功】"
+        )
+        attributed_entry = {
+            "text": attributed,
+            "lines": attributed.splitlines(),
+        }
+
+        self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(historical_entry))
+        self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(attributed_entry))
 
 
 if __name__ == "__main__":

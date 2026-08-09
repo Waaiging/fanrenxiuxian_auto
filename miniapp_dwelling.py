@@ -73,11 +73,13 @@ EXACT_COMMANDS = {
     ".血洗山林",
     ".召唤魔影",
     ".召回魔影",
+    ".一键安抚幡灵",
     ".一键收取精华",
 }
 PREFIX_COMMANDS = {
     ".化功为煞",
     ".囚禁魂魄",
+    ".收取精华",
     ".安抚幡灵",
 }
 SMALL_WORLD_COMMAND_ACTIONS = {
@@ -475,9 +477,11 @@ class MiniAppDwellingTransport:
         operation: str,
         callback: Any,
         summarize: Any = None,
+        log_operation: bool = True,
     ) -> dict[str, Any]:
-        """Execute one semantic Mini App operation and always leave an audit log."""
-        self._log("info", "OUT [Mini App | %s]:\n%s", identity, operation)
+        """Execute one Mini App operation; errors are logged even in quiet mode."""
+        if log_operation:
+            self._log("info", "OUT [Mini App | %s]:\n%s", identity, operation)
         try:
             payload = await callback()
         except asyncio.CancelledError:
@@ -486,6 +490,8 @@ class MiniAppDwellingTransport:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self._log("error", "Mini App [%s] %s失败：%s", identity, operation, code)
             raise
+        if not log_operation:
+            return payload
         try:
             summary = summarize(payload) if callable(summarize) else miniapp_operation_result_text(payload)
         except Exception:
@@ -638,6 +644,45 @@ class MiniAppDwellingTransport:
             identity=identity,
         )
 
+    async def inventory_sections(self, identity: str = "主魂") -> dict[str, dict[str, Any]]:
+        """Read the bag inventory under the transport lock."""
+        async with self._lock:
+            inventory = await self._request_unlocked(
+                "/api/miniapp/xianxia-dwelling/section",
+                {"section": "inventory"},
+                identity=identity,
+            )
+        return {"inventory": inventory}
+
+    async def forge_treasure(
+        self,
+        identity: str,
+        target_item_id: str,
+        times: int = 1,
+        log_operation: bool = True,
+    ) -> dict[str, Any]:
+        """Forge a learned treasure recipe from the Mini App storage bag."""
+        target_item_id = str(target_item_id or "").strip()
+        try:
+            times = int(times)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("craft_times_invalid") from exc
+        if not target_item_id:
+            raise MiniAppBeastError("craft_target_invalid")
+        if times < 1 or times > 100:
+            raise MiniAppBeastError("craft_times_invalid")
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                f"储物袋炼器 {target_item_id} x{times}",
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/forge/craft",
+                    {"targetItemId": target_item_id, "times": times},
+                    identity=identity,
+                ),
+                log_operation=log_operation,
+            )
+
     async def small_world_snapshot(self, identity: str = "主魂") -> dict[str, Any]:
         """Read small-world state silently for cooldown-aware scheduling."""
         async with self._lock:
@@ -735,6 +780,7 @@ class MiniAppDwellingTransport:
         command: str,
         identity: str = "主魂",
         meditation_prefix: bool = False,
+        log_operation: bool = True,
     ) -> MiniAppCommandResponse:
         command = normalize_miniapp_command(command)
         if not miniapp_command_allowed(command):
@@ -749,6 +795,7 @@ class MiniAppDwellingTransport:
                         {"command": ".推命 闭关"},
                         identity=identity,
                     ),
+                    log_operation=log_operation,
                 )
                 if not command_result_ok(prefix):
                     return MiniAppCommandResponse(command_result_text(prefix), prefix)
@@ -775,6 +822,7 @@ class MiniAppDwellingTransport:
                 identity,
                 f"指令 {command}",
                 lambda: self._request_unlocked(path, payload, identity=identity),
+                log_operation=log_operation,
             )
             if command == ".查看闭关":
                 deep = (
@@ -790,6 +838,7 @@ class MiniAppDwellingTransport:
                             {"action": "settle"},
                             identity=identity,
                         ),
+                        log_operation=log_operation,
                     )
             text = small_world_status_text(result) if command == ".小世界" else command_result_text(result)
             return MiniAppCommandResponse(text, result)
@@ -948,6 +997,43 @@ class MiniAppDwellingTransport:
                     },
                 ),
                 summarize=spirit_beast_release_result_text,
+            )
+            return {
+                "beasts": normalize_spirit_beast_roster(payload),
+                "player": payload.get("player") or {},
+                "message": miniapp_operation_result_text(payload),
+                "raw": payload,
+            }
+
+    async def spirit_beast_rest(
+        self,
+        identity: str,
+        beast_id: int,
+        beast_name: str = "",
+    ) -> dict[str, Any]:
+        """Return one exact beast to rest through Wan Beast Valley."""
+        try:
+            beast_id = int(beast_id)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("spirit_beast_id_invalid") from exc
+        if beast_id <= 0:
+            raise MiniAppBeastError("spirit_beast_id_invalid")
+        detail = str(beast_name or beast_id).strip()
+        async with self._lock:
+            payload = await self._logged_operation(
+                identity,
+                f"万兽谷灵兽休息（{detail}）",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/action",
+                    payload={
+                        "action": "rest",
+                        "beastId": beast_id,
+                    },
+                ),
+                summarize=miniapp_operation_result_text,
             )
             return {
                 "beasts": normalize_spirit_beast_roster(payload),
@@ -1133,6 +1219,7 @@ class MiniAppDwellingTransport:
         token: str,
         bait_key: str,
         quantity: int,
+        cost: Any = None,
         log_operation: bool = True,
     ) -> dict[str, Any]:
         bait_key = str(bait_key or "").strip()
@@ -1140,11 +1227,14 @@ class MiniAppDwellingTransport:
         if not bait_key or quantity < 1 or quantity > 99:
             raise MiniAppBeastError("fishing_quantity_invalid")
         async with self._lock:
+            payload = {"baitKey": bait_key, "quantity": quantity}
+            if isinstance(cost, list) and cost:
+                payload["cost"] = cost
             request = lambda: self._fishing_request_unlocked(
                 identity,
                 token,
                 "/api/miniapp/xianxia-fishing/buy-bait",
-                {"baitKey": bait_key, "quantity": quantity},
+                payload,
             )
             if log_operation:
                 return await self._logged_operation(

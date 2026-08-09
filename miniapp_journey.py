@@ -29,7 +29,7 @@ ACCOUNT_MINUTE_OFFSETS = {
     "waaiging": 30,
 }
 ACCOUNT_IDENTITY_SCOPE = {
-    "main": ("无咎子",),
+    "main": ("主魂", "无咎子"),
     "waaiging": ("主魂",),
 }
 
@@ -214,7 +214,7 @@ class MiniAppTianxingJourney:
         return ""
 
     def identities(self, candidates: list[str] | None = None) -> list[str]:
-        """Return only main/无咎子 and Waaiging/主魂 when Mini App says 天星宗."""
+        """Return scoped identities whose authoritative sect is Tianxing."""
         allowed = ACCOUNT_IDENTITY_SCOPE.get(self.account, ())
         candidate_set = set(candidates) if candidates is not None else None
         ids = getattr(self.transport, "identity_player_ids", {}) or {}
@@ -327,6 +327,15 @@ class MiniAppTianxingJourney:
                     )
                 wait = max(5, remaining_seconds or self.retry_seconds)
                 return False, wait
+
+            ensure_destiny = getattr(
+                self.actor, "ensure_tianxing_destiny_for_action", None
+            )
+            if callable(ensure_destiny) and not await ensure_destiny(
+                identity, "exploration"
+            ):
+                self._record_error(identity, "tianxing_destiny_failed")
+                return False, self.retry_seconds
 
             combined = getattr(self.transport, "journey_with_destiny_prefix", None)
             if callable(combined):

@@ -15,6 +15,8 @@ from typing import Any
 from automation_settings import (
     ACCOUNT_IDENTITIES,
     ACCOUNT_NAMES,
+    DEFAULT_MINIAPP_FISHING_ROD,
+    MINIAPP_FISHING_RODS,
     MINIAPP_FISHING_SUPPORTED_ACCOUNTS,
     automation_participant_key,
     miniapp_fishing_settings,
@@ -29,11 +31,18 @@ DEFAULT_RETRY_SECONDS = 60
 DEFAULT_DISABLED_SECONDS = 30
 DEFAULT_RESULT_ATTEMPTS = 18
 BAIT_PURCHASE_QUANTITY = 10
-FISHING_ROD_ITEM = "银竹钓竿"
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
-FISHING_ROD_LISTING_COMMAND = f".上架 {FISHING_ROD_LISTING_MATERIAL} 换 {FISHING_ROD_ITEM}1"
+FISHING_ROD_ITEMS = frozenset(key for key, _ in MINIAPP_FISHING_RODS if key != "auto")
 FISHING_ROD_SCAN_SECONDS = 300
 FISHING_TRANSFER_RETRY_SECONDS = 60
+FISHING_TRANSFER_FAILURE_RETRY_SECONDS = 3600
+FISHING_SHOP_RETRY_SECONDS = 3600
+FISHING_TRANSFER_FAILURE_STATUSES = {
+    "listing_failed",
+    "listing_unknown",
+    "purchase_failed",
+    "purchase_unknown",
+}
 MINIAPP_FISHING_GLOBAL_FILE = Path(__file__).resolve().parent / "miniapp_fishing_global.json"
 
 
@@ -104,17 +113,64 @@ def fishing_participant_label(value: Any) -> str:
     return f"{ACCOUNT_NAMES.get(account, account)}｜{identity}"
 
 
+def configured_fishing_rod(settings: dict[str, Any]) -> str:
+    value = str(settings.get("rod") or DEFAULT_MINIAPP_FISHING_ROD).strip()
+    return value if value == "auto" or value in FISHING_ROD_ITEMS else DEFAULT_MINIAPP_FISHING_ROD
+
+
+def fishing_rod_matches(settings: dict[str, Any], rod_name: Any) -> bool:
+    actual = str(rod_name or "").strip()
+    configured = configured_fishing_rod(settings)
+    return actual in FISHING_ROD_ITEMS and (configured == "auto" or actual == configured)
+
+
+def fishing_rod_listing_command(rod_name: Any) -> str:
+    name = str(rod_name or "").strip()
+    if name not in FISHING_ROD_ITEMS:
+        raise ValueError("invalid Mini App fishing rod")
+    return f".上架 {FISHING_ROD_LISTING_MATERIAL} 换 {name}1"
+
+
+def fishing_rod_name_in_text(value: Any) -> str:
+    text = str(value or "")
+    return next((name for name in FISHING_ROD_ITEMS if name in text), "")
+
+
+def fishing_scan_keys(settings: dict[str, Any]) -> list[str]:
+    """Identities the automation is allowed to inspect or use for the shared rod."""
+    keys = [
+        str(item).strip()
+        for item in settings.get("participants") or []
+        if fishing_participant_parts(item) != ("", "")
+    ]
+    owner = str(settings.get("rod_owner") or "auto").strip()
+    owner_account, owner_identity = fishing_participant_parts(owner)
+    if owner != "auto" and owner_account and owner_identity:
+        # A transfer interrupted mid-flight can leave the configured owner's rod
+        # on another identity of the same Telegram account.  Keep that account
+        # searchable for recovery without re-enabling unrelated accounts.
+        keys.extend(
+            automation_participant_key(owner_account, identity)
+            for identity in ACCOUNT_IDENTITIES.get(owner_account, ())
+        )
+    return list(dict.fromkeys(keys))
+
+
 def _global_default_state() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 3,
         "date": _today_text(),
         "participants": [],
         "current_key": "",
         "rod_holder": "",
+        "rod_name": "",
+        "configured_rod": "",
         "rod_holder_source": "",
         "rod_holder_verified_at": "",
         "scans": {},
         "completed_today": {},
+        "round_records": {},
+        "summary_emitted_ids": {},
         "transfer": {},
         "last_transfer": {},
         "last_round": {},
@@ -138,10 +194,20 @@ def _load_global_state() -> dict[str, Any]:
     if str(data.get("date") or "") != _today_text():
         data["date"] = _today_text()
         data["completed_today"] = {}
+        data["round_records"] = {}
+        data["summary_emitted_ids"] = {}
         data["last_round"] = {}
         if not _mapping(data.get("transfer")):
             data["current_key"] = ""
-    for key in ("scans", "completed_today", "transfer", "last_transfer", "last_round"):
+    for key in (
+        "scans",
+        "completed_today",
+        "round_records",
+        "summary_emitted_ids",
+        "transfer",
+        "last_transfer",
+        "last_round",
+    ):
         if not isinstance(data.get(key), dict):
             data[key] = {}
     if not isinstance(data.get("participants"), list):
@@ -152,7 +218,7 @@ def _load_global_state() -> dict[str, Any]:
 def _save_global_state(data: dict[str, Any]) -> None:
     path = MINIAPP_FISHING_GLOBAL_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    data["version"] = 1
+    data["version"] = 3
     data["date"] = _today_text()
     data["updated_at"] = _now_text()
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -216,18 +282,111 @@ def _next_participant(
 
 
 def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> None:
+    configured_rod = configured_fishing_rod(settings)
+    previous_rod = str(data.get("configured_rod") or "").strip()
+    if previous_rod and previous_rod != configured_rod:
+        data["rod_holder"] = ""
+        data["rod_name"] = ""
+        data["rod_holder_source"] = ""
+        data["rod_holder_verified_at"] = ""
+        data["scans"] = {}
+        data["transfer"] = {}
+        data["status"] = "scanning"
+        data["detail"] = "鱼竿设置已变更，等待重新扫描"
+    data["configured_rod"] = configured_rod
+
     participants = [
         str(item).strip()
         for item in settings.get("participants") or []
         if fishing_participant_parts(item) != ("", "")
     ]
     participants = list(dict.fromkeys(participants))
+    scan_keys = fishing_scan_keys(settings)
+    scan_key_set = set(scan_keys)
+    participant_set = set(participants)
     old_participants = [str(item) for item in data.get("participants") or []]
     data["participants"] = participants
+
     completed = _mapping(data.get("completed_today"))
     data["completed_today"] = {
-        key: value for key, value in completed.items() if key in participants
+        key: value for key, value in completed.items() if key in participant_set
     }
+    round_records = _mapping(data.get("round_records"))
+    data["round_records"] = {
+        key: value
+        for key, value in round_records.items()
+        if key in participant_set and isinstance(value, list)
+    }
+    emitted_ids = _mapping(data.get("summary_emitted_ids"))
+    data["summary_emitted_ids"] = {
+        key: value
+        for key, value in emitted_ids.items()
+        if key in participant_set and isinstance(value, list)
+    }
+
+    scans = {
+        str(key): value
+        for key, value in _mapping(data.get("scans")).items()
+        if str(key) in scan_key_set and isinstance(value, dict)
+    }
+    data["scans"] = scans
+
+    holder_key = str(data.get("rod_holder") or "").strip()
+    if holder_key and holder_key not in scan_key_set:
+        data["rod_holder"] = ""
+        data["rod_name"] = ""
+        data["rod_holder_source"] = ""
+        data["rod_holder_verified_at"] = ""
+        holder_key = ""
+        data["status"] = "scanning"
+        data["detail"] = "原持竿身份已取消勾选，等待在当前参与身份中重新识别"
+
+    transfer = _mapping(data.get("transfer"))
+    holder_scan = _mapping(scans.get(holder_key))
+    holder_rod = str(holder_scan.get("rod_name") or "").strip()
+    if transfer and not str(transfer.get("rod_name") or "").strip():
+        inferred_rod = fishing_rod_name_in_text(transfer.get("response"))
+        if not inferred_rod:
+            inferred_rod = str(_mapping(scans.get(transfer.get("from"))).get("rod_name") or "")
+        if inferred_rod in FISHING_ROD_ITEMS:
+            transfer["rod_name"] = inferred_rod
+    transfer_rod = str(transfer.get("rod_name") or "").strip()
+    if (
+        not previous_rod
+        and transfer
+        and transfer_rod
+        and holder_rod
+        and transfer_rod != holder_rod
+    ):
+        superseded_transfer = dict(transfer)
+        superseded_transfer.update(
+            status="superseded_rod_mismatch",
+            superseded_at=_now_text(),
+        )
+        data["last_transfer"] = superseded_transfer
+        data["transfer"] = {}
+        transfer = {}
+        data["status"] = "scanning"
+        data["detail"] = (
+            f"旧挂单索要{transfer_rod}，但持竿者实际使用{holder_rod}；"
+            "已停止错误重试并重新识别"
+        )
+    if transfer:
+        transfer_from = str(transfer.get("from") or "").strip()
+        transfer_to = str(transfer.get("to") or "").strip()
+        if transfer_from not in scan_key_set or transfer_to not in participant_set:
+            cancelled = dict(transfer)
+            cancelled.update(
+                status="cancelled_participant_removed",
+                cancelled_at=_now_text(),
+            )
+            data["last_transfer"] = cancelled
+            data["transfer"] = {}
+            transfer = {}
+            data["status"] = "scanning"
+            data["detail"] = "转竿涉及已取消勾选的身份，已停止旧流程并重新识别"
+    if holder_rod and fishing_rod_matches(settings, holder_rod):
+        data["rod_name"] = holder_rod
     current = str(data.get("current_key") or "")
     if old_participants != participants or current not in participants:
         holder = str(data.get("rod_holder") or "")
@@ -280,6 +439,7 @@ def miniapp_fishing_global_snapshot(
     result = dict(data)
     result["current_label"] = fishing_participant_label(data.get("current_key"))
     result["rod_holder_label"] = fishing_participant_label(data.get("rod_holder"))
+    result["rod_name"] = str(data.get("rod_name") or "")
     transfer = _mapping(data.get("transfer"))
     result["transfer_from_label"] = fishing_participant_label(transfer.get("from"))
     result["transfer_to_label"] = fishing_participant_label(transfer.get("to"))
@@ -307,6 +467,35 @@ def fishing_bait_by_name(shop: Any, name: Any) -> dict[str, Any]:
         if str(item.get("name") or "").strip() == wanted:
             return item
     return {}
+
+
+def affordable_bait_quantity(bait: dict[str, Any], requested: int, minimum: int = 1) -> int:
+    """Limit a batch purchase to the quantity the shop costs can afford."""
+    requested = max(1, _integer(requested, 1))
+    minimum = max(1, _integer(minimum, 1))
+    maximum = requested
+    costs = _items(bait.get("cost"))
+    for cost in costs:
+        required = max(0, _integer(cost.get("qty"), 0))
+        owned = max(0, _integer(cost.get("owned"), 0))
+        if required:
+            maximum = min(maximum, owned // required)
+    if maximum < minimum:
+        raise MiniAppBeastError("fishing_bait_unaffordable")
+    return max(minimum, maximum)
+
+
+def cost_shortages(costs: Any, quantity: int = 1) -> list[str]:
+    """Describe shop materials whose owned quantity cannot cover a purchase."""
+    multiplier = max(1, _integer(quantity, 1))
+    shortages = []
+    for cost in _items(costs):
+        required = max(0, _integer(cost.get("qty"), 0)) * multiplier
+        owned = max(0, _integer(cost.get("owned"), 0))
+        if required > owned:
+            name = str(cost.get("name") or cost.get("itemId") or "材料")
+            shortages.append(f"{name}（当前 {owned}，需要 {required}）")
+    return shortages
 
 
 def _javascript_char_code_sum(value: Any) -> int:
@@ -443,7 +632,7 @@ def fishing_result_summary(finish_payload: Any, catch_payload: Any) -> str:
     return "，".join(part for part in parts if part)
 
 
-def fishing_rounds_summary(records: Any) -> str:
+def fishing_rounds_summary(records: Any, *, daily_limit_reached: bool = False) -> str:
     """Build one readable log entry from all buffered rounds for an identity."""
     rounds = _items(records)
     if not rounds:
@@ -461,9 +650,18 @@ def fishing_rounds_summary(records: Any) -> str:
 
     if len(configurations) == 1:
         pond, bait, chum = configurations[0]
-        title = f"灵溪垂钓汇总（{pond} · {bait} · {chum}，共 {len(rounds)} 竿）"
+        count_text = (
+            f"本次记录 {len(rounds)} 竿，服务端今日竿数已尽"
+            if daily_limit_reached
+            else f"共 {len(rounds)} 竿"
+        )
+        title = f"灵溪垂钓汇总（{pond} · {bait} · {chum}，{count_text}）"
     else:
-        title = f"灵溪垂钓汇总（共 {len(rounds)} 竿）"
+        title = (
+            f"灵溪垂钓汇总（本次记录 {len(rounds)} 竿，服务端今日竿数已尽）"
+            if daily_limit_reached
+            else f"灵溪垂钓汇总（共 {len(rounds)} 竿）"
+        )
 
     purchase_totals: dict[str, int] = {}
     loot_totals: dict[str, int] = {}
@@ -512,6 +710,8 @@ def fishing_rounds_summary(records: Any) -> str:
             "伴生机缘 "
             + "、".join(f"{name}x{quantity}" for name, quantity in loot_totals.items())
         )
+    if daily_limit_reached:
+        lines.append("服务端状态：今日竿数已尽；重启或人工垂钓产生的未记录鱼获不计入下方合计。")
     lines.append("合计：" + "，".join(total_parts))
     return "\n".join([title, *lines])
 
@@ -550,6 +750,69 @@ class MiniAppFishingAutomation:
         except Exception:
             self.log.warning("Mini App fishing state save failed", exc_info=True)
 
+    async def _notify_material_shortage(
+        self,
+        identity: str,
+        *,
+        kind: str,
+        name: str,
+        shortages: list[str],
+    ) -> None:
+        """Send one daily direct notice when fishing materials are insufficient."""
+        if not shortages:
+            return
+        state = self._state(identity)
+        notice_key = f"{kind}|{name}"
+        last_notice_time = str(state.get("miniapp_fishing_material_notice_time") or "").strip()
+        if last_notice_time:
+            try:
+                elapsed = (datetime.now() - datetime.strptime(last_notice_time, TIME_FORMAT)).total_seconds()
+                if elapsed < 300:
+                    return
+            except ValueError:
+                pass
+        if (
+            str(state.get("miniapp_fishing_material_notice_date") or "") == _today_text()
+            and str(state.get("miniapp_fishing_material_notice_key") or "") == notice_key
+            and bool(state.get("miniapp_fishing_material_notice_sent"))
+        ):
+            return
+        self._record(
+            identity,
+            miniapp_fishing_material_notice_date=_today_text(),
+            miniapp_fishing_material_notice_key=notice_key,
+            miniapp_fishing_material_notice_time=_now_text(),
+            miniapp_fishing_material_notice_sent=False,
+        )
+        client = getattr(self.actor, "client", None)
+        if client is None or not hasattr(client, "send_message"):
+            return
+        config = getattr(self.actor, "config", {}) or {}
+        target = config.get("notify_target_username") or config.get("notify_target") or "@Waaiging"
+        if isinstance(target, str) and target.lstrip("-").isdigit():
+            target = "@Waaiging"
+        if isinstance(target, str) and not target.startswith("@") and not target.lstrip("-").isdigit():
+            target = f"@{target}"
+        message = (
+            "⚠️ 灵溪自动垂钓材料不足\n"
+            f"账号：{ACCOUNT_NAMES.get(self.account, self.account)}；身份：{identity}\n"
+            f"{kind}：{name}\n"
+            "缺少：" + "、".join(shortages) + "\n"
+            "本轮已暂停，1小时后自动重试。"
+        )
+        try:
+            await asyncio.wait_for(client.send_message(target, message), timeout=12)
+        except Exception as exc:
+            self.log.warning("Mini App fishing material notification failed: %s", exc)
+            return
+        self._record(
+            identity,
+            miniapp_fishing_material_notice_date=_today_text(),
+            miniapp_fishing_material_notice_key=notice_key,
+            miniapp_fishing_material_notice_time=_now_text(),
+            miniapp_fishing_material_notice_sent=True,
+        )
+
     def _record(self, identity: str | None = None, **updates: Any) -> None:
         state = self._state(identity)
         state.update(updates)
@@ -557,6 +820,132 @@ class MiniAppFishingAutomation:
         state["miniapp_fishing_identity"] = str(identity or self._current_identity or "主魂")
         state["miniapp_fishing_updated_at"] = _now_text()
         self._save()
+
+    def _local_selected_identities(self, settings: dict[str, Any]) -> list[str]:
+        identities = []
+        for key in settings.get("participants") or []:
+            account, identity = fishing_participant_parts(key)
+            if account == self.account and identity not in identities:
+                identities.append(identity)
+        return identities
+
+    def _local_relevant_identities(self, settings: dict[str, Any]) -> list[str]:
+        identities = []
+        for key in fishing_scan_keys(settings):
+            account, identity = fishing_participant_parts(key)
+            if account == self.account and identity not in identities:
+                identities.append(identity)
+        return identities
+
+    def _status_identity(self, settings: dict[str, Any]) -> str:
+        relevant = self._local_relevant_identities(settings)
+        if self._current_identity in relevant:
+            return self._current_identity
+        selected = self._local_selected_identities(settings)
+        return (selected or relevant or ["主魂"])[0]
+
+    def _clear_irrelevant_local_statuses(self, settings: dict[str, Any]) -> None:
+        relevant = set(self._local_relevant_identities(settings))
+        changed = False
+        for identity in ACCOUNT_IDENTITIES.get(self.account, ()):
+            if identity in relevant:
+                continue
+            state = self._state(identity)
+            if (
+                str(state.get("miniapp_fishing_status") or "") == "not_selected"
+                and not state.get("miniapp_fishing_next_run_time")
+                and not state.get("miniapp_fishing_last_error")
+            ):
+                continue
+            state.update(
+                miniapp_fishing_status="not_selected",
+                miniapp_fishing_last_error="",
+                miniapp_fishing_next_run_time="",
+                miniapp_fishing_account=self.account,
+                miniapp_fishing_identity=identity,
+                miniapp_fishing_updated_at=_now_text(),
+            )
+            changed = True
+        if changed:
+            self._save()
+
+    def _journal_round_record(self, identity: str, record: dict[str, Any]) -> None:
+        participant_key = automation_participant_key(self.account, identity)
+        record_id = str(record.get("id") or "").strip()
+
+        def update(data: dict[str, Any]) -> None:
+            records_by_participant = data.setdefault("round_records", {})
+            records = [
+                dict(item)
+                for item in _items(records_by_participant.get(participant_key))
+            ]
+            if record_id and any(str(item.get("id") or "") == record_id for item in records):
+                return
+            records.append(dict(record))
+            records_by_participant[participant_key] = records[-50:]
+
+        _update_global_state(update)
+
+    def _merged_round_records(self, identity: str) -> tuple[list[dict[str, Any]], set[str]]:
+        participant_key = automation_participant_key(self.account, identity)
+        runtime = _update_global_state()
+        global_records = [
+            dict(item)
+            for item in _items(_mapping(runtime.get("round_records")).get(participant_key))
+        ]
+        state = self._state(identity)
+        local_records = (
+            [dict(item) for item in _items(state.get("miniapp_fishing_round_records"))]
+            if str(state.get("miniapp_fishing_summary_date") or "") == _today_text()
+            else []
+        )
+        merged: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate([*global_records, *local_records]):
+            record_id = str(item.get("id") or "").strip()
+            key = record_id or (
+                f"legacy:{str(item.get('completed_at') or '')}:"
+                f"{str(item.get('summary') or '')}:{index}"
+            )
+            merged[key] = item
+        records = sorted(
+            merged.values(),
+            key=lambda item: str(item.get("completed_at") or ""),
+        )[-50:]
+        emitted_ids = {
+            str(item)
+            for item in _mapping(runtime.get("summary_emitted_ids")).get(participant_key, [])
+            if str(item).strip()
+        }
+        local_emitted_count = max(
+            0,
+            min(
+                len(local_records),
+                _integer(state.get("miniapp_fishing_summary_emitted_count"), 0),
+            ),
+        )
+        emitted_ids.update(
+            str(item.get("id") or "")
+            for item in local_records[:local_emitted_count]
+            if str(item.get("id") or "").strip()
+        )
+        return records, emitted_ids
+
+    def _mark_global_summary_emitted(self, identity: str, record_ids: list[str]) -> None:
+        participant_key = automation_participant_key(self.account, identity)
+        normalized = [str(item).strip() for item in record_ids if str(item).strip()]
+
+        def update(data: dict[str, Any]) -> None:
+            emitted_by_participant = data.setdefault("summary_emitted_ids", {})
+            emitted = [
+                str(item)
+                for item in emitted_by_participant.get(participant_key) or []
+                if str(item).strip()
+            ]
+            emitted_by_participant[participant_key] = list(
+                dict.fromkeys([*emitted, *normalized])
+            )[-50:]
+
+        _update_global_state(update)
 
     def _append_round_summary(
         self,
@@ -586,23 +975,38 @@ class MiniAppFishingAutomation:
             else 0
         )
         normalized_id = str(record_id or "").strip()
-        if normalized_id and any(str(item.get("id") or "") == normalized_id for item in records):
-            return
-        records.append(
-            {
-                "id": normalized_id or f"{_now_text()}-{len(records) + 1}",
-                "completed_at": _now_text(),
-                "pond": str(pond or "灵溪"),
-                "bait": str(bait or "鱼饵"),
-                "chum": str(chum or "不打窝"),
-                "purchases": [dict(item) for item in _items(purchases)],
-                "summary": str(summary or "本竿结果未记录")[:1200],
-                "caught": bool(caught),
-                "weight": max(0.0, _number(weight, 0)),
-                "exp_gain": max(0, _integer(exp_gain, 0)),
-                "bonus_loot": [dict(item) for item in _items(bonus_loot)],
-            }
+        existing = next(
+            (
+                item
+                for item in records
+                if normalized_id and str(item.get("id") or "") == normalized_id
+            ),
+            None,
         )
+        if existing is not None:
+            try:
+                self._journal_round_record(identity, existing)
+            except Exception:
+                self.log.warning("Mini App fishing round journal write failed", exc_info=True)
+            return
+        record = {
+            "id": normalized_id or f"{_now_text()}-{len(records) + 1}",
+            "completed_at": _now_text(),
+            "pond": str(pond or "灵溪"),
+            "bait": str(bait or "鱼饵"),
+            "chum": str(chum or "不打窝"),
+            "purchases": [dict(item) for item in _items(purchases)],
+            "summary": str(summary or "本竿结果未记录")[:1200],
+            "caught": bool(caught),
+            "weight": max(0.0, _number(weight, 0)),
+            "exp_gain": max(0, _integer(exp_gain, 0)),
+            "bonus_loot": [dict(item) for item in _items(bonus_loot)],
+        }
+        try:
+            self._journal_round_record(identity, record)
+        except Exception:
+            self.log.warning("Mini App fishing round journal write failed", exc_info=True)
+        records.append(record)
         records = records[-50:]
         self._record(
             identity,
@@ -612,25 +1016,54 @@ class MiniAppFishingAutomation:
             miniapp_fishing_summary_emitted_count=min(emitted_count, len(records)),
         )
 
-    def _emit_daily_summary(self, identity: str) -> bool:
+    def _emit_daily_summary(self, identity: str, *, daily_limit_reached: bool = False) -> bool:
         state = self._state(identity)
-        if str(state.get("miniapp_fishing_summary_date") or "") != _today_text():
+        try:
+            records, emitted_ids = self._merged_round_records(identity)
+        except Exception:
+            self.log.warning("Mini App fishing round journal read failed", exc_info=True)
+            if str(state.get("miniapp_fishing_summary_date") or "") != _today_text():
+                return False
+            records = [dict(item) for item in _items(state.get("miniapp_fishing_round_records"))]
+            emitted_count = max(
+                0,
+                min(
+                    len(records),
+                    _integer(state.get("miniapp_fishing_summary_emitted_count"), 0),
+                ),
+            )
+            emitted_ids = {
+                str(item.get("id") or "")
+                for item in records[:emitted_count]
+                if str(item.get("id") or "").strip()
+            }
+        if not records:
             return False
-        records = [dict(item) for item in _items(state.get("miniapp_fishing_round_records"))]
-        emitted_count = max(
-            0,
-            min(
-                len(records),
-                _integer(state.get("miniapp_fishing_summary_emitted_count"), 0),
-            ),
+        pending = [
+            item
+            for item in records
+            if not str(item.get("id") or "").strip()
+            or str(item.get("id") or "").strip() not in emitted_ids
+        ]
+        summary_text = fishing_rounds_summary(
+            pending,
+            daily_limit_reached=daily_limit_reached,
         )
-        pending = records[emitted_count:]
-        summary_text = fishing_rounds_summary(pending)
         if not summary_text:
             return False
         self.log.info("IN [Mini App | %s]:\n%s", identity, summary_text)
+        try:
+            self._mark_global_summary_emitted(
+                identity,
+                [str(item.get("id") or "") for item in pending],
+            )
+        except Exception:
+            self.log.warning("Mini App fishing summary journal write failed", exc_info=True)
         self._record(
             identity,
+            miniapp_fishing_summary_date=_today_text(),
+            miniapp_fishing_round_records=records,
+            miniapp_fishing_round_count_today=len(records),
             miniapp_fishing_summary_emitted_count=len(records),
             miniapp_fishing_last_daily_summary=summary_text[:5000],
             miniapp_fishing_last_daily_summary_time=_now_text(),
@@ -657,6 +1090,7 @@ class MiniAppFishingAutomation:
                     "name": str(item.get("name") or ""),
                     "count": _integer(item.get("count"), 0),
                     "unlocked": bool(item.get("unlocked")),
+                    "cost": [dict(cost) for cost in _items(item.get("cost"))],
                 }
                 for item in _items(shop.get("baits"))
             ],
@@ -667,6 +1101,7 @@ class MiniAppFishingAutomation:
                     "uses": _integer(item.get("uses"), 0),
                     "remaining_today": _integer(item.get("remainingToday"), 0),
                     "affordable": bool(item.get("affordable")),
+                    "cost": [dict(cost) for cost in _items(item.get("cost"))],
                 }
                 for item in _items(shop.get("chums"))
             ],
@@ -690,12 +1125,24 @@ class MiniAppFishingAutomation:
         missing = max(0, int(minimum) - _integer(bait.get("count"), 0))
         if missing <= 0:
             return shop, bait
-        quantity = BAIT_PURCHASE_QUANTITY
+        try:
+            quantity = affordable_bait_quantity(bait, BAIT_PURCHASE_QUANTITY, minimum)
+        except MiniAppBeastError as exc:
+            if exc.code == "fishing_bait_unaffordable":
+                shortages = cost_shortages(bait.get("cost"), minimum)
+                await self._notify_material_shortage(
+                    identity,
+                    kind="鱼饵",
+                    name=str(bait.get("name") or bait_key),
+                    shortages=shortages,
+                )
+            raise
         bought = await self.transport.fishing_buy_bait(
             identity,
             token,
             str(bait.get("key") or bait_key),
             quantity,
+            bait.get("cost"),
             log_operation=False,
         )
         updated_shop = fishing_shop(bought) or shop
@@ -751,20 +1198,31 @@ class MiniAppFishingAutomation:
             bait = fishing_bait_by_name(shop, cost.get("name"))
             if not bait:
                 continue
-            shop, _ = await self._ensure_bait(
-                identity,
-                token,
-                shop,
-                str(bait.get("key") or ""),
-                required,
-            )
+            try:
+                shop, _ = await self._ensure_bait(
+                    identity,
+                    token,
+                    shop,
+                    str(bait.get("key") or ""),
+                    required,
+                )
+            except MiniAppBeastError as exc:
+                if exc.code == "fishing_bait_unaffordable":
+                    return self._use_no_chum_after_unaffordable(identity, shop, chum)
+                raise
         refreshed = fishing_shop(
             await self.transport.fishing_shop(identity, token)
         ) or shop
         self._record_shop(identity, refreshed)
         chum = fishing_option(refreshed.get("chums"), chum_key)
         if not chum.get("affordable"):
-            raise MiniAppBeastError("fishing_chum_unaffordable")
+            await self._notify_material_shortage(
+                identity,
+                kind="鱼窝",
+                name=str(chum.get("name") or chum_key),
+                shortages=cost_shortages(chum.get("cost")),
+            )
+            return self._use_no_chum_after_unaffordable(identity, refreshed, chum)
         try:
             applied = await self.transport.fishing_apply_chum(
                 identity,
@@ -775,6 +1233,8 @@ class MiniAppFishingAutomation:
         except MiniAppBeastError as exc:
             if exc.code == "fishing_chum_daily_limit":
                 return self._use_no_chum_after_daily_limit(identity, refreshed, chum)
+            if exc.code == "fishing_chum_unaffordable":
+                return self._use_no_chum_after_unaffordable(identity, refreshed, chum)
             raise
         updated = fishing_shop(applied) or refreshed
         self._record_shop(identity, updated)
@@ -791,7 +1251,39 @@ class MiniAppFishingAutomation:
         shop: dict[str, Any],
         chum: dict[str, Any],
     ) -> dict[str, Any]:
-        """Treat an exhausted configured chum as a normal same-day fallback."""
+        return self._use_no_chum_fallback(
+            identity,
+            shop,
+            chum,
+            reason="daily_limit",
+            detail_suffix="今日打窝次数已尽",
+        )
+
+    def _use_no_chum_after_unaffordable(
+        self,
+        identity: str,
+        shop: dict[str, Any],
+        chum: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Continue without optional chum when its materials are insufficient."""
+        return self._use_no_chum_fallback(
+            identity,
+            shop,
+            chum,
+            reason="unaffordable",
+            detail_suffix="所需材料不足",
+        )
+
+    def _use_no_chum_fallback(
+        self,
+        identity: str,
+        shop: dict[str, Any],
+        chum: dict[str, Any],
+        *,
+        reason: str,
+        detail_suffix: str,
+    ) -> dict[str, Any]:
+        """Treat an unavailable configured chum as a normal fallback."""
         today = _today_text()
         chum_key = str(chum.get("key") or "")
         chum_name = str(chum.get("name") or chum_key or "所选鱼窝")
@@ -805,19 +1297,19 @@ class MiniAppFishingAutomation:
             miniapp_fishing_chum_fallback_date=today,
             miniapp_fishing_chum_fallback_key=chum_key,
             miniapp_fishing_chum_fallback_name=chum_name,
-            miniapp_fishing_chum_fallback_reason="daily_limit",
+            miniapp_fishing_chum_fallback_reason=reason,
             miniapp_fishing_chum_fallback_detail=(
-                f"{chum_name}今日打窝次数已尽；本日后续继续不打窝"
+                f"{chum_name}{detail_suffix}；本日后续继续不打窝"
             ),
         )
         if not already_recorded:
             logger = getattr(self.log, "info", None)
             if callable(logger):
                 logger(
-                    "Mini App fishing chum daily limit reached for %s (%s); "
-                    "continuing without chum.",
+                    "Mini App fishing chum fallback for %s (%s): %s; continuing without chum.",
                     identity,
                     chum_name,
+                    reason,
                 )
         return shop
 
@@ -995,16 +1487,19 @@ class MiniAppFishingAutomation:
         shop = fishing_shop(shop_payload)
         self._record_shop(identity, shop)
         rod = _mapping(session.get("rod"))
+        rod_name = str(rod.get("name") or "").strip()
         if rod:
             self._record(
                 identity,
-                miniapp_fishing_rod=str(rod.get("name") or ""),
+                miniapp_fishing_rod=rod_name,
                 miniapp_fishing_rod_item_id=str(rod.get("itemId") or ""),
             )
         if challenge:
             return await self._finish_challenge(identity, token, session, challenge)
         phase = str(session.get("phase") or "").strip().lower()
         if phase == "lobby":
+            if not fishing_rod_matches(settings, rod_name):
+                raise MiniAppBeastError("fishing_rod_type_mismatch")
             return await self._start_cast(identity, token, shop, settings)
         if phase == "waiting":
             wait = self._wait_for_bite(session)
@@ -1075,6 +1570,14 @@ class MiniAppFishingAutomation:
             return float("inf")
         return max(0.0, (datetime.now() - parsed).total_seconds())
 
+    @staticmethod
+    def _seconds_until(value: Any) -> int:
+        try:
+            parsed = datetime.strptime(str(value or ""), TIME_FORMAT)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, math.ceil((parsed - datetime.now()).total_seconds()))
+
     @classmethod
     def _scan_fresh(cls, scan: Any, seconds: int = FISHING_ROD_SCAN_SECONDS) -> bool:
         info = _mapping(scan)
@@ -1089,18 +1592,26 @@ class MiniAppFishingAutomation:
                 for identity in available
                 if identity in transport_ids or identity.casefold() in transport_ids
             ]
+        allowed_keys = set(fishing_scan_keys(settings))
+        transfer = _mapping(runtime.get("transfer"))
         priority_keys = [
             str(settings.get("rod_owner") or ""),
             str(runtime.get("rod_holder") or ""),
             str(runtime.get("current_key") or ""),
+            str(transfer.get("from") or ""),
+            str(transfer.get("to") or ""),
             *(str(item) for item in settings.get("participants") or []),
         ]
         result = []
         for key in priority_keys:
             account, identity = fishing_participant_parts(key)
-            if account == self.account and identity in available and identity not in result:
+            if (
+                key in allowed_keys
+                and account == self.account
+                and identity in available
+                and identity not in result
+            ):
                 result.append(identity)
-        result.extend(identity for identity in available if identity not in result)
         return result
 
     async def _scan_identity(
@@ -1113,7 +1624,9 @@ class MiniAppFishingAutomation:
             "account": self.account,
             "identity": identity,
             "has_rod": False,
+            "has_any_rod": False,
             "rod_name": "",
+            "rod_matches": False,
             "phase": "",
             "active": False,
             "challenge": False,
@@ -1127,9 +1640,13 @@ class MiniAppFishingAutomation:
             rod = _mapping(session.get("rod"))
             phase = str(session.get("phase") or "").strip().lower()
             challenge = bool(_mapping(payload.get("challenge")))
+            rod_name = str(rod.get("name") or "").strip()
+            rod_matches = fishing_rod_matches(settings, rod_name)
             info.update(
-                has_rod=bool(rod),
-                rod_name=str(rod.get("name") or ""),
+                has_rod=rod_matches,
+                has_any_rod=bool(rod),
+                rod_name=rod_name,
+                rod_matches=rod_matches,
                 phase=phase,
                 challenge=challenge,
                 active=challenge or phase in {"waiting", "bite", "reeling"},
@@ -1142,11 +1659,19 @@ class MiniAppFishingAutomation:
             info["error"] = type(exc).__name__.lower()
 
         def update(data: dict[str, Any]) -> None:
+            if key not in set(fishing_scan_keys(settings)):
+                data.setdefault("scans", {}).pop(key, None)
+                return
+            transfer = _mapping(data.get("transfer"))
+            transfer_rod = str(transfer.get("rod_name") or "").strip()
+            if transfer_rod and str(info.get("rod_name") or "") != transfer_rod:
+                info["has_rod"] = False
+                info["rod_matches"] = False
             scans = data.setdefault("scans", {})
             scans[key] = dict(info)
-            transfer = _mapping(data.get("transfer"))
             if info.get("has_rod"):
                 data["rod_holder"] = key
+                data["rod_name"] = str(info.get("rod_name") or "")
                 data["rod_holder_source"] = (
                     "manual" if str(settings.get("rod_owner") or "") == key else "auto"
                 )
@@ -1158,6 +1683,7 @@ class MiniAppFishingAutomation:
                     and transfer.get("from") != key
                 ):
                     transfer["from"] = key
+                    transfer.setdefault("rod_name", str(info.get("rod_name") or ""))
                     transfer["status"] = "listed"
                     transfer["updated_at"] = info["updated_at"]
                     data["status"] = "transferring"
@@ -1165,7 +1691,7 @@ class MiniAppFishingAutomation:
                         f"已重新识别持竿者 {fishing_participant_label(key)}；"
                         f"继续购买原挂单 {transfer.get('listing_id')}"
                     )
-                if transfer.get("status") == "purchased" and transfer.get("to") == key:
+                if transfer and transfer.get("to") == key:
                     completed_transfer = dict(transfer)
                     completed_transfer.update(
                         status="verified",
@@ -1174,9 +1700,13 @@ class MiniAppFishingAutomation:
                     data["last_transfer"] = completed_transfer
                     data["transfer"] = {}
                     data["status"] = "ready"
-                    data["detail"] = f"转竿后已由 Mini App 验证 {fishing_participant_label(key)} 持竿"
+                    data["detail"] = (
+                        f"转竿后已由 Mini App 验证 {fishing_participant_label(key)} "
+                        f"持有{info.get('rod_name')}"
+                    )
             elif info.get("definitive") and str(data.get("rod_holder") or "") == key:
                 data["rod_holder"] = ""
+                data["rod_name"] = ""
                 data["rod_holder_source"] = ""
                 data["rod_holder_verified_at"] = ""
 
@@ -1184,6 +1714,7 @@ class MiniAppFishingAutomation:
         self._record(
             identity,
             miniapp_fishing_scan_has_rod=bool(info.get("has_rod")),
+            miniapp_fishing_scan_rod_name=str(info.get("rod_name") or ""),
             miniapp_fishing_scan_phase=str(info.get("phase") or ""),
             miniapp_fishing_scan_error=str(info.get("error") or ""),
             miniapp_fishing_scan_time=info["updated_at"],
@@ -1210,6 +1741,72 @@ class MiniAppFishingAutomation:
             data["detail"] = str(detail or "")[:500]
 
         return _update_global_state(update, settings=settings)
+
+    def _schedule_transfer_retry(
+        self,
+        data: dict[str, Any],
+        current: dict[str, Any],
+        *,
+        failed_status: str,
+        detail: str,
+        failure_code: str = "",
+    ) -> None:
+        next_retry_at = (
+            datetime.now() + timedelta(seconds=FISHING_TRANSFER_FAILURE_RETRY_SECONDS)
+        ).strftime(TIME_FORMAT)
+        current["status"] = failed_status
+        current["updated_at"] = _now_text()
+        current["last_failure_at"] = _now_text()
+        current["retry_count"] = max(0, _integer(current.get("retry_count"), 0)) + 1
+        current["next_retry_at"] = next_retry_at
+        if failure_code:
+            current["failure_code"] = failure_code
+        elif "failure_code" in current:
+            current.pop("failure_code", None)
+        data["status"] = "transfer_retry_wait"
+        data["detail"] = (
+            f"{detail}；已安排于 {next_retry_at} 自动补跑，之后每小时重试一次"
+        )
+
+    def _finalize_verified_transfer(
+        self,
+        settings: dict[str, Any],
+        request_id: str,
+        holder_key: str,
+    ) -> bool:
+        finalized = False
+
+        def update(data: dict[str, Any]) -> None:
+            nonlocal finalized
+            current = _mapping(data.get("transfer"))
+            if not current or str(current.get("id") or "") != request_id:
+                return
+            target_key = str(holder_key or current.get("to") or "").strip()
+            if not target_key:
+                return
+            scan = _mapping(_mapping(data.get("scans")).get(target_key))
+            transfer_rod = str(current.get("rod_name") or "").strip()
+            if not scan.get("has_rod") or (
+                transfer_rod and str(scan.get("rod_name") or "") != transfer_rod
+            ):
+                return
+            completed_transfer = dict(current)
+            completed_transfer.update(
+                status="verified",
+                verified_at=_now_text(),
+            )
+            data["last_transfer"] = completed_transfer
+            data["transfer"] = {}
+            data["status"] = "ready"
+            data["rod_name"] = str(scan.get("rod_name") or transfer_rod)
+            data["detail"] = (
+                f"转竿后已由 Mini App 验证 {fishing_participant_label(target_key)} "
+                f"持有{data['rod_name']}"
+            )
+            finalized = True
+
+        _update_global_state(update, settings=settings)
+        return finalized
 
     def _complete_round(
         self,
@@ -1292,29 +1889,67 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
         holder_key: str,
         target_key: str,
+        *,
+        reuse_request_id: str = "",
     ) -> bool:
         target_account, target_identity = fishing_participant_parts(target_key)
         if target_account != self.account:
             return False
-        request_id = f"{int(time.time() * 1000)}-{os.getpid()}"
+        request_id = str(reuse_request_id or f"{int(time.time() * 1000)}-{os.getpid()}")
         started = False
+        rod_name = ""
 
         def begin(data: dict[str, Any]) -> None:
-            nonlocal started
-            if _mapping(data.get("transfer")):
+            nonlocal rod_name, started
+            current = _mapping(data.get("transfer"))
+            configured_rod = configured_fishing_rod(settings)
+            holder_scan = _mapping(_mapping(data.get("scans")).get(holder_key))
+            rod_name = str(current.get("rod_name") or "").strip()
+            if not rod_name and configured_rod != "auto":
+                rod_name = configured_rod
+            if not rod_name:
+                rod_name = str(holder_scan.get("rod_name") or "").strip()
+            if rod_name not in FISHING_ROD_ITEMS:
+                data["status"] = "scanning"
+                data["detail"] = (
+                    f"尚未识别 {fishing_participant_label(holder_key)} 的鱼竿类型，"
+                    "暂不创建换竿挂单"
+                )
                 return
-            data["transfer"] = {
-                "id": request_id,
-                "status": "listing_sending",
-                "from": holder_key,
-                "to": target_key,
-                "listing_id": "",
-                "started_at": _now_text(),
-                "updated_at": _now_text(),
-            }
+            if current:
+                if not reuse_request_id or str(current.get("id") or "") != request_id:
+                    return
+                current.update({
+                    "status": "listing_sending",
+                    "from": holder_key,
+                    "to": target_key,
+                    "rod_name": rod_name,
+                    "listing_id": "",
+                    "updated_at": _now_text(),
+                })
+                current.setdefault("started_at", _now_text())
+                for key in (
+                    "response",
+                    "purchase_response",
+                    "failure_code",
+                    "next_retry_at",
+                    "last_failure_at",
+                ):
+                    current.pop(key, None)
+            else:
+                data["transfer"] = {
+                    "id": request_id,
+                    "status": "listing_sending",
+                    "from": holder_key,
+                    "to": target_key,
+                    "rod_name": rod_name,
+                    "listing_id": "",
+                    "started_at": _now_text(),
+                    "updated_at": _now_text(),
+                }
             data["status"] = "transferring"
             data["detail"] = (
-                f"{fishing_participant_label(target_key)} 正在上架凝血草换取银竹钓竿"
+                f"{fishing_participant_label(target_key)} 正在上架凝血草换取{rod_name}"
             )
             started = True
 
@@ -1323,7 +1958,7 @@ class MiniAppFishingAutomation:
             return False
         response_text = await self._send_trade_command(
             target_identity,
-            FISHING_ROD_LISTING_COMMAND,
+            fishing_rod_listing_command(rod_name),
         )
         parsed = parse_trade_listing_response(response_text)
         if parsed.get("status") == "insufficient_resource":
@@ -1334,7 +1969,7 @@ class MiniAppFishingAutomation:
             ):
                 response_text = await self._send_trade_command(
                     target_identity,
-                    FISHING_ROD_LISTING_COMMAND,
+                    fishing_rod_listing_command(rod_name),
                 )
                 parsed = parse_trade_listing_response(response_text)
         listing_id = str(parsed.get("listing_id") or "").strip()
@@ -1348,17 +1983,20 @@ class MiniAppFishingAutomation:
             if parsed.get("status") == "success" and listing_id:
                 transfer["status"] = "listed"
                 transfer["listing_id"] = listing_id
+                transfer.pop("next_retry_at", None)
                 data["status"] = "transferring"
                 data["detail"] = (
                     f"挂单 {listing_id} 已生成，等待 "
                     f"{fishing_participant_label(holder_key)} 购买"
                 )
             else:
-                transfer["status"] = "listing_failed" if response_text else "listing_unknown"
-                data["status"] = "transfer_failed"
-                data["detail"] = (
-                    f"{fishing_participant_label(target_key)} 上架失败或未识别挂单ID；"
-                    "为避免重复挂单已停止自动重试"
+                self._schedule_transfer_retry(
+                    data,
+                    transfer,
+                    failed_status=("listing_failed" if response_text else "listing_unknown"),
+                    detail=(
+                        f"{fishing_participant_label(target_key)} 上架失败或未识别挂单ID"
+                    ),
                 )
 
         _update_global_state(finish, settings=settings)
@@ -1408,6 +2046,7 @@ class MiniAppFishingAutomation:
             if parsed.get("status") == "success":
                 current["status"] = "purchased"
                 current["purchased_at"] = _now_text()
+                current.pop("next_retry_at", None)
                 data["rod_holder"] = ""
                 data["rod_holder_source"] = "transfer"
                 data["rod_holder_verified_at"] = ""
@@ -1417,12 +2056,14 @@ class MiniAppFishingAutomation:
                     f"{fishing_participant_label(current.get('to'))} 持竿"
                 )
             else:
-                current["status"] = "purchase_failed" if response_text else "purchase_unknown"
-                current["failure_code"] = str(parsed.get("status") or "unrecognized")
-                data["status"] = "transfer_failed"
-                data["detail"] = (
-                    f"{fishing_participant_label(holder_key)} 购买挂单 {listing_id} 失败；"
-                    "为避免错误转移已停止自动重试"
+                self._schedule_transfer_retry(
+                    data,
+                    current,
+                    failed_status=("purchase_failed" if response_text else "purchase_unknown"),
+                    detail=(
+                        f"{fishing_participant_label(holder_key)} 购买挂单 {listing_id} 失败"
+                    ),
+                    failure_code=str(parsed.get("status") or "unrecognized"),
                 )
                 if parsed.get("status") == "missing_required_rod":
                     data["rod_holder"] = ""
@@ -1430,6 +2071,92 @@ class MiniAppFishingAutomation:
 
         _update_global_state(finish, settings=settings)
         return parsed.get("status") == "success"
+
+    async def _resume_failed_transfer(
+        self,
+        settings: dict[str, Any],
+        transfer: dict[str, Any],
+    ) -> int:
+        request_id = str(transfer.get("id") or "").strip()
+        if not request_id:
+            return FISHING_TRANSFER_RETRY_SECONDS
+        from_key = str(transfer.get("from") or "").strip()
+        to_key = str(transfer.get("to") or "").strip()
+        listing_id = str(transfer.get("listing_id") or "").strip()
+        from_account, from_identity = fishing_participant_parts(from_key)
+        to_account, to_identity = fishing_participant_parts(to_key)
+        if from_account == self.account:
+            await self._scan_identity(from_identity, settings)
+        if to_account == self.account:
+            await self._scan_identity(to_identity, settings)
+
+        runtime = miniapp_fishing_global_snapshot(settings)
+        current = _mapping(runtime.get("transfer"))
+        if str(current.get("id") or "") != request_id:
+            return 2
+        holder_key = str(runtime.get("rod_holder") or current.get("from") or "").strip()
+        target_key = str(current.get("to") or to_key).strip()
+        if holder_key == target_key and target_key:
+            self._finalize_verified_transfer(settings, request_id, target_key)
+            return 2
+        if holder_key and holder_key != from_key:
+            def rewrite_holder(data: dict[str, Any]) -> None:
+                update_transfer = _mapping(data.get("transfer"))
+                if str(update_transfer.get("id") or "") != request_id:
+                    return
+                update_transfer["from"] = holder_key
+                update_transfer["updated_at"] = _now_text()
+
+            _update_global_state(rewrite_holder, settings=settings)
+            current = _mapping(miniapp_fishing_global_snapshot(settings).get("transfer"))
+            from_key = str(current.get("from") or holder_key).strip()
+            from_account, from_identity = fishing_participant_parts(from_key)
+            listing_id = str(current.get("listing_id") or listing_id).strip()
+        if holder_key == from_key and listing_id and from_account == self.account:
+            def rearm_purchase(data: dict[str, Any]) -> None:
+                update_transfer = _mapping(data.get("transfer"))
+                if str(update_transfer.get("id") or "") != request_id:
+                    return
+                update_transfer["from"] = from_key
+                update_transfer["status"] = "listed"
+                update_transfer["updated_at"] = _now_text()
+                update_transfer.pop("next_retry_at", None)
+                data["status"] = "transferring"
+                data["detail"] = f"补跑中：继续购买挂单 {listing_id}"
+
+            _update_global_state(rearm_purchase, settings=settings)
+            await self._purchase_listing(
+                settings,
+                {
+                    **current,
+                    "status": "listed",
+                    "from": from_key,
+                },
+            )
+            return 5
+        if holder_key == from_key and to_account == self.account:
+            await self._create_listing(
+                settings,
+                from_key,
+                target_key,
+                reuse_request_id=request_id,
+            )
+            return 5
+
+        def reschedule(data: dict[str, Any]) -> None:
+            update_transfer = _mapping(data.get("transfer"))
+            if str(update_transfer.get("id") or "") != request_id:
+                return
+            self._schedule_transfer_retry(
+                data,
+                update_transfer,
+                failed_status=str(update_transfer.get("status") or "transfer_failed"),
+                detail="转竿恢复时仍未确认鱼竿位置",
+                failure_code=str(update_transfer.get("failure_code") or ""),
+            )
+
+        _update_global_state(reschedule, settings=settings)
+        return min(FISHING_TRANSFER_FAILURE_RETRY_SECONDS, 300)
 
     async def _handle_transfer(
         self,
@@ -1452,13 +2179,17 @@ class MiniAppFishingAutomation:
                 f"等待 {fishing_participant_label(transfer.get('to'))} 的鱼竿到账",
             )
             return 5
-        if status in {
-            "listing_failed",
-            "listing_unknown",
-            "purchase_failed",
-            "purchase_unknown",
-        }:
-            return FISHING_TRANSFER_RETRY_SECONDS
+        if status in FISHING_TRANSFER_FAILURE_STATUSES:
+            retry_at = str(transfer.get("next_retry_at") or "").strip()
+            remaining = self._seconds_until(retry_at)
+            if remaining > 0:
+                self._set_global_status(
+                    settings,
+                    "transfer_retry_wait",
+                    f"转竿异常，已安排于 {retry_at} 自动补跑",
+                )
+                return min(300, max(5, remaining))
+            return await self._resume_failed_transfer(settings, transfer)
         if status in {"listing_sending", "purchase_sending"} and self._seconds_since(
             transfer.get("updated_at")
         ) > 180:
@@ -1466,12 +2197,15 @@ class MiniAppFishingAutomation:
                 current = _mapping(data.get("transfer"))
                 if current.get("id") != transfer.get("id"):
                     return
-                current["status"] = (
-                    "listing_unknown" if status == "listing_sending" else "purchase_unknown"
+                self._schedule_transfer_retry(
+                    data,
+                    current,
+                    failed_status=(
+                        "listing_unknown" if status == "listing_sending" else "purchase_unknown"
+                    ),
+                    detail="转竿操作结果未知",
+                    failure_code=str(current.get("failure_code") or ""),
                 )
-                current["updated_at"] = _now_text()
-                data["status"] = "transfer_failed"
-                data["detail"] = "转竿操作结果未知；为避免重复交易已停止自动重试"
 
             _update_global_state(mark_unknown, settings=settings)
         return 5
@@ -1524,16 +2258,26 @@ class MiniAppFishingAutomation:
 
         holder_key = str(runtime.get("rod_holder") or "")
         if not holder_key:
-            expected = [
-                automation_participant_key(account, identity)
-                for account in MINIAPP_FISHING_SUPPORTED_ACCOUNTS
-                for identity in ACCOUNT_IDENTITIES.get(account, ())
-            ]
+            expected = fishing_scan_keys(settings)
             all_scanned = all(self._scan_fresh(scans.get(key)) for key in expected)
+            configured_rod = configured_fishing_rod(settings)
+            detected_rods = sorted(
+                {
+                    str(_mapping(scan).get("rod_name") or "").strip()
+                    for scan in scans.values()
+                    if str(_mapping(scan).get("rod_name") or "").strip()
+                }
+            )
+            if configured_rod == "auto":
+                missing_detail = "未在全部账号身份中找到支持的鱼竿"
+            else:
+                missing_detail = f"未找到所选鱼竿{configured_rod}"
+                if detected_rods:
+                    missing_detail += f"；已识别：{'、'.join(detected_rods)}"
             self._set_global_status(
                 settings,
                 "no_rod" if all_scanned else "scanning",
-                "未在主号/副号身份中找到鱼竿" if all_scanned else "正在扫描鱼竿所在身份",
+                missing_detail if all_scanned else "正在扫描鱼竿所在身份及类型",
             )
             return 300 if all_scanned else 5
 
@@ -1584,14 +2328,19 @@ class MiniAppFishingAutomation:
             wait = self.retry_seconds
             settings = self.settings()
             try:
+                self._clear_irrelevant_local_statuses(settings)
                 if not settings.get("enabled"):
                     self._record(
-                        "主魂",
+                        self._status_identity(settings),
                         miniapp_fishing_status="paused",
                         miniapp_fishing_last_error="",
                         miniapp_fishing_next_run_time="",
                     )
                     self._set_global_status(settings, "paused", "灵溪自动垂钓已暂停")
+                    wait = DEFAULT_DISABLED_SECONDS
+                elif not self._local_relevant_identities(settings):
+                    miniapp_fishing_global_snapshot(settings)
+                    self._scan_started = False
                     wait = DEFAULT_DISABLED_SECONDS
                 else:
                     pause = getattr(self.actor, "pause_event", None)
@@ -1599,7 +2348,7 @@ class MiniAppFishingAutomation:
                         await pause.wait()
                     start_wait, start_at = fishing_start_wait(settings.get("start_time"))
                     if start_wait > 0:
-                        identity = str(self._current_identity or "主魂")
+                        identity = self._status_identity(settings)
                         self._record(
                             identity,
                             miniapp_fishing_status="waiting_start",
@@ -1617,7 +2366,7 @@ class MiniAppFishingAutomation:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                identity = str(self._current_identity or "主魂")
+                identity = self._status_identity(settings)
                 participant_key = automation_participant_key(self.account, identity)
                 previous_status = str(
                     self._state(identity).get("miniapp_fishing_status") or ""
@@ -1627,15 +2376,19 @@ class MiniAppFishingAutomation:
                 if code == "fishing_daily_limit_reached":
                     status = "daily_done"
                     wait = 5
-                    summary_emitted = self._emit_daily_summary(identity)
+                    summary_emitted = self._emit_daily_summary(
+                        identity,
+                        daily_limit_reached=True,
+                    )
                     self._mark_daily_done(settings, participant_key)
-                elif code == "fishing_rod_missing":
+                elif code in {"fishing_rod_missing", "fishing_rod_type_mismatch"}:
                     status = "no_rod"
                     wait = 5
 
                     def clear_holder(data: dict[str, Any]) -> None:
                         if str(data.get("rod_holder") or "") == participant_key:
                             data["rod_holder"] = ""
+                            data["rod_name"] = ""
                             data["rod_holder_source"] = ""
                             data["rod_holder_verified_at"] = ""
                         scan = data.setdefault("scans", {}).setdefault(participant_key, {})
@@ -1652,6 +2405,25 @@ class MiniAppFishingAutomation:
                     status = "auth_refresh"
                     wait = 5
                     self._set_global_status(settings, status, "Mini App 授权刷新中")
+                elif code == "fishing_shop_cost_missing":
+                    # The fishing API can temporarily publish a shop item without
+                    # its cost metadata.  Treat it as a recoverable service-side
+                    # condition and retry hourly instead of flooding the log.
+                    status = "shop_unavailable"
+                    wait = FISHING_SHOP_RETRY_SECONDS
+                    self._set_global_status(
+                        settings,
+                        status,
+                        "鱼饵商店价格数据暂不可用，1小时后自动重试",
+                    )
+                elif code == "fishing_bait_unaffordable":
+                    status = "waiting_resources"
+                    wait = FISHING_SHOP_RETRY_SECONDS
+                    self._set_global_status(
+                        settings,
+                        status,
+                        "鱼饵材料不足，1小时后自动重试",
+                    )
                 else:
                     status = "error"
                     wait = self.retry_seconds
@@ -1679,4 +2451,14 @@ class MiniAppFishingAutomation:
                     self.log.info("Mini App fishing authorization refreshed; retrying shortly.")
                 elif status == "error":
                     self.log.error("Mini App fishing loop failed: %s", code, exc_info=True)
+                elif status == "shop_unavailable" and previous_status != status:
+                    self.log.warning(
+                        "Mini App fishing shop cost metadata unavailable for %s; retrying hourly.",
+                        identity,
+                    )
+                elif status == "waiting_resources" and previous_status != status:
+                    self.log.warning(
+                        "Mini App fishing bait materials unavailable for %s; retrying hourly.",
+                        identity,
+                    )
             await asyncio.sleep(max(1, min(int(wait), 300)))

@@ -917,6 +917,53 @@ def _target_blocked_until(data, target_username, now=None):
     return blocked_until if blocked_until and blocked_until > now else None
 
 
+def _is_rolling_target_cooldown(result):
+    return (
+        str((result or {}).get("cooldown_kind") or "") == "rolling_target"
+        or str((result or {}).get("outcome") or "") == "目标24小时冷却"
+    )
+
+
+def _rolling_target_ready_at(reservation, now=None):
+    """Return 24 hours after the oldest settled duel still in the window."""
+    now = now or duel_now()
+    fallback = now + timedelta(seconds=DUEL_ROLLING_TARGET_COOLDOWN_SECONDS)
+    if not os.path.exists(DUEL_DB_FILE):
+        return fallback
+    try:
+        account = str((reservation or {}).get("account") or "").strip()
+        target = normalize_duel_target((reservation or {}).get("target_username"))
+    except ValueError:
+        return fallback
+    if not account or not target:
+        return fallback
+    cutoff = now - timedelta(seconds=DUEL_ROLLING_TARGET_COOLDOWN_SECONDS)
+    conn = sqlite3.connect(DUEL_DB_FILE, timeout=5)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        row = conn.execute(
+            """
+            SELECT MIN(event_time)
+            FROM duel_events
+            WHERE account=?
+              AND target_username=? COLLATE NOCASE
+              AND status='settled'
+              AND event_time>?
+              AND event_time<=?
+            """,
+            (account, target, duel_time(cutoff), duel_time(now)),
+        ).fetchone()
+    except sqlite3.Error:
+        return fallback
+    finally:
+        conn.close()
+    first_at = parse_duel_time(row[0] if row else "")
+    return (
+        first_at + timedelta(seconds=DUEL_ROLLING_TARGET_COOLDOWN_SECONDS)
+        if first_at else fallback
+    )
+
+
 def _multi_target_by_id(multi, target_id):
     target_id = str(target_id or "")
     for target in multi.get("targets") or []:
@@ -1767,12 +1814,18 @@ def finish_duel_reservation(reservation, result):
             ).lower()
             target_next_at = data.setdefault("target_next_at", {})
             if status == "cooldown":
-                target_ready = now + timedelta(
-                    seconds=max(
-                        target_interval_seconds,
-                        int(result.get("wait_seconds") or 0),
+                if _is_rolling_target_cooldown(result):
+                    target_ready = max(
+                        now + timedelta(seconds=target_interval_seconds),
+                        _rolling_target_ready_at(reservation, now),
                     )
-                )
+                else:
+                    target_ready = now + timedelta(
+                        seconds=max(
+                            target_interval_seconds,
+                            int(result.get("wait_seconds") or 0),
+                        )
+                    )
             else:
                 target_ready = now + timedelta(seconds=target_interval_seconds)
             reserved_ready = parse_duel_time(target_next_at.get(target_key))
@@ -1813,8 +1866,11 @@ def finish_duel_reservation(reservation, result):
         target_preparation = queue.get("target_preparation") or {}
         if target_preparation.get("run_id") == reservation.get("preparation_run_id"):
             queue["target_preparation"] = {}
+        rolling_target_ready = None
         retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else interval_seconds
-        if status == "cooldown":
+        if status == "cooldown" and _is_rolling_target_cooldown(result):
+            rolling_target_ready = _rolling_target_ready_at(reservation, now)
+        elif status == "cooldown":
             retry_seconds = max(retry_seconds, int(result.get("wait_seconds") or 0))
         completed_next_at = now + timedelta(seconds=retry_seconds)
         reserved_next_at = parse_duel_time(queue.get("next_at"))
@@ -1831,6 +1887,8 @@ def finish_duel_reservation(reservation, result):
         target_completed_at = now + timedelta(
             seconds=max(target_interval_seconds, retry_seconds)
         )
+        if rolling_target_ready is not None:
+            target_completed_at = max(target_completed_at, rolling_target_ready)
         target_next_at[target_key] = (
             duel_time(max(target_completed_at, reserved_target_next_at))
             if reserved_target_next_at else duel_time(target_completed_at)
@@ -1923,6 +1981,7 @@ def parse_duel_result(text, challenger_username, target_username):
         result.update(
             status="cooldown",
             outcome="目标24小时冷却",
+            cooldown_kind="rolling_target",
             wait_seconds=max(
                 DUEL_ROLLING_TARGET_COOLDOWN_SECONDS,
                 duel_wait_seconds(clean),
@@ -2105,6 +2164,127 @@ def record_duel_event(reservation, result, command_msg_id=None, response_msg_id=
         return True
     finally:
         conn.close()
+
+
+def repair_duel_rolling_cooldowns(now=None):
+    """Correct legacy now-plus-24h blocks from the authoritative duel history."""
+    now = now or duel_now()
+    if not os.path.exists(DUEL_DB_FILE):
+        return {"updated": False, "targets": {}}
+    conn = sqlite3.connect(DUEL_DB_FILE, timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        ensure_duel_events_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT event.account,event.target_username,event.event_time
+            FROM duel_events AS event
+            WHERE event.outcome='目标24小时冷却'
+              AND event.event_time>?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM duel_events AS newer
+                  WHERE newer.account=event.account
+                    AND newer.target_username=event.target_username COLLATE NOCASE
+                    AND (
+                        newer.event_time>event.event_time
+                        OR (newer.event_time=event.event_time AND newer.id>event.id)
+                    )
+              )
+            """,
+            (duel_time(now - timedelta(days=2)),),
+        ).fetchall()
+    except sqlite3.Error:
+        return {"updated": False, "targets": {}}
+    finally:
+        conn.close()
+
+    pair_ready = {}
+    target_ready = {}
+    for row in rows:
+        cooldown_at = parse_duel_time(row["event_time"])
+        if cooldown_at is None:
+            continue
+        account = str(row["account"] or "").strip()
+        try:
+            target = normalize_duel_target(row["target_username"])
+        except ValueError:
+            continue
+        ready_at = _rolling_target_ready_at(
+            {"account": account, "target_username": target},
+            cooldown_at,
+        )
+        pair_ready[(account, target.lower())] = ready_at
+        current = target_ready.get(target.lower())
+        target_ready[target.lower()] = max(current, ready_at) if current else ready_at
+    if not target_ready:
+        return {"updated": False, "targets": {}}
+
+    changed = False
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        target_next_at = data.setdefault("target_next_at", {})
+        for target_key, ready_at in target_ready.items():
+            ready_text = duel_time(ready_at)
+            if target_next_at.get(target_key) != ready_text:
+                target_next_at[target_key] = ready_text
+                changed = True
+
+        multi = data.get("multi") or {}
+        multi_waits = [
+            pair_ready[(str(multi.get("initiator_account") or ""), target_key)]
+            for target_key in (
+                normalize_duel_target(target.get("username")).lower()
+                for target in multi.get("targets") or []
+                if int(target.get("remaining") or 0) > 0
+            )
+            if (str(multi.get("initiator_account") or ""), target_key) in pair_ready
+        ]
+        multi_next = parse_duel_time(multi.get("next_at"))
+        if (
+            multi_waits
+            and str(multi.get("last_result") or "").startswith("等待 @")
+            and multi_next
+            and multi_next > min(multi_waits)
+        ):
+            ready_at = min(multi_waits)
+            multi["next_at"] = "" if ready_at <= now else duel_time(ready_at)
+            changed = True
+
+        for queue_key, queue in (data.get("queues") or {}).items():
+            if "24小时冷却" not in str(queue.get("last_result") or ""):
+                continue
+            queue_waits = []
+            for participant_key, participant in (queue.get("participants") or {}).items():
+                config = duel_participant_config(queue_key, participant_key)
+                if not config:
+                    continue
+                try:
+                    target_key = (
+                        normalize_duel_target(participant.get("target_username"))
+                        or duel_default_target_for_participant(
+                            config["account"], config["identity"]
+                        )
+                    ).lower()
+                except ValueError:
+                    continue
+                ready_at = pair_ready.get((config["account"], target_key))
+                if ready_at:
+                    queue_waits.append(ready_at)
+            queue_next = parse_duel_time(queue.get("next_at"))
+            if queue_waits and queue_next and queue_next > min(queue_waits):
+                ready_at = min(queue_waits)
+                queue["next_at"] = "" if ready_at <= now else duel_time(ready_at)
+                changed = True
+
+        if changed:
+            data["updated_at"] = duel_time(now)
+            _atomic_write_json(DUEL_STATE_FILE, data)
+    return {
+        "updated": changed,
+        "targets": {key: duel_time(value) for key, value in target_ready.items()},
+    }
 
 
 def _duel_event_rows(query_date, limit):
@@ -2408,13 +2588,10 @@ class DuelMixin:
             last_response = ""
             if "出战" not in beast_status:
                 if "放养" in beast_status:
-                    rest_resp = await self.send_and_wait_feedback(
-                        ".灵兽休息 六翼", timeout=60, max_retries=0, force_identity_check=True
-                    )
-                    rest_text = self.response_text(rest_resp) if hasattr(self, "response_text") else str(rest_resp or "")
-                    rest_status = self.parse_rest_response_status(rest_text) if hasattr(self, "parse_rest_response_status") else ""
-                    if rest_status and hasattr(self, "set_best_beast_status"):
-                        self.set_best_beast_status("六翼", rest_status)
+                    rest_action = getattr(self, "rest_beast_for_abyss", None)
+                    if not callable(rest_action):
+                        return False, "小号缺少万兽谷灵兽休息能力"
+                    rest_status, rest_text = await rest_action("六翼")
                     if not rest_status:
                         return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
                     await asyncio.sleep(2)
@@ -2514,6 +2691,12 @@ class DuelMixin:
         startup_done = getattr(self, "startup_done", None)
         if startup_done is not None:
             await startup_done.wait()
+        repaired = repair_duel_rolling_cooldowns()
+        if repaired.get("updated"):
+            logger.info(
+                "Duel rolling cooldowns repaired from first settled attempts: %s",
+                repaired.get("targets"),
+            )
         if initial_delay:
             await asyncio.sleep(max(0, int(initial_delay)))
         logger.info("Shared duel scheduler started for account=%s", getattr(self, "account_key", ""))

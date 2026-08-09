@@ -29,11 +29,16 @@ soul_curse_commissions.json
 bot_activity_shared.json
 red_packet_settings.json
 red_packet_status_*.json
+red_packet_claim_coordination.json
+red_packet_claim_coordination.lock
 automation_settings.json
+_remote_automation_settings.json
 miniapp_fishing_global.json
 miniapp_fishing_global.json.lock
 miniapp_beast_session.json
 miniapp_beast_refresh_request.json
+miniapp_inventory_request_*.json
+miniapp_inventory_cache_*.json
 star_gazing_events.jsonl
 star_gazing_events.lock
 duel_state.json
@@ -89,6 +94,7 @@ package.json
 package-lock.json
 switch-codex-provider.ps1
 watch-codex-provider-model.ps1
+codex.ps1
 
 # Local editor/system files
 .DS_Store

@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -155,6 +155,103 @@ class DuelFeatureTests(unittest.TestCase):
         self.assertGreaterEqual(
             (target_ready - datetime.now()).total_seconds(),
             duel_features.DUEL_ROLLING_TARGET_COOLDOWN_SECONDS - 2,
+        )
+
+    def test_rolling_target_cooldown_starts_at_first_settled_duel(self):
+        cooldown_at = datetime.now().replace(microsecond=0)
+        first_at = cooldown_at - timedelta(hours=2, minutes=15)
+        history = {
+            "run_id": "history-first",
+            "queue_key": ROTATION,
+            "account": "main",
+            "identity": "主魂",
+            "challenger_username": "Weeguu",
+            "target_username": "ExternalTarget1",
+            "command": ".斗法 @ExternalTarget1",
+        }
+        with patch.object(duel_features, "duel_now", return_value=first_at):
+            duel_features.record_duel_event(
+                history,
+                {"status": "settled", "outcome": "胜利", "remaining": 9},
+                command_msg_id=8101,
+            )
+
+        self.use_external_rotation_targets()
+        with patch.object(duel_features, "duel_now", return_value=cooldown_at):
+            reservation = duel_features.reserve_duel_for_account("main")
+            result = duel_features.parse_duel_result(
+                "天道有则！你与 @ExternalTarget1 在24小时内已交锋过多，暂不可再次斗法！",
+                reservation["challenger_username"],
+                reservation["target_username"],
+            )
+            duel_features.record_duel_event(
+                reservation,
+                result,
+                command_msg_id=8102,
+            )
+            duel_features.finish_duel_reservation(reservation, result)
+
+        state = duel_features.load_duel_state()
+        expected_ready = first_at + timedelta(hours=24)
+        target_ready = duel_features.parse_duel_time(
+            state["target_next_at"]["externaltarget1"]
+        )
+        queue_ready = duel_features.parse_duel_time(
+            state["queues"][ROTATION]["next_at"]
+        )
+        self.assertEqual(result["cooldown_kind"], "rolling_target")
+        self.assertEqual(target_ready, expected_ready)
+        self.assertEqual(
+            (queue_ready - cooldown_at).total_seconds(),
+            duel_features.DUEL_INTERVAL_SECONDS,
+        )
+
+    def test_repair_replaces_legacy_now_plus_24_hour_target_block(self):
+        cooldown_at = datetime.now().replace(microsecond=0)
+        first_at = cooldown_at - timedelta(hours=3)
+        history = {
+            "run_id": "repair-history",
+            "queue_key": ROTATION,
+            "account": "main",
+            "identity": "主魂",
+            "challenger_username": "Weeguu",
+            "target_username": "ExternalTarget1",
+            "command": ".斗法 @ExternalTarget1",
+        }
+        with patch.object(duel_features, "duel_now", return_value=first_at):
+            duel_features.record_duel_event(
+                history,
+                {"status": "settled", "outcome": "失败", "remaining": 9},
+                command_msg_id=8201,
+            )
+        with patch.object(duel_features, "duel_now", return_value=cooldown_at):
+            duel_features.record_duel_event(
+                {**history, "run_id": "repair-cooldown"},
+                {"status": "cooldown", "outcome": "目标24小时冷却"},
+                command_msg_id=8202,
+            )
+
+        self.use_external_rotation_targets()
+        state = duel_features.load_duel_state()
+        stale_ready = cooldown_at + timedelta(hours=24)
+        state["target_next_at"]["externaltarget1"] = duel_features.duel_time(stale_ready)
+        rotation = state["queues"][ROTATION]
+        rotation["last_result"] = "主魂 · 目标24小时冷却"
+        rotation["next_at"] = duel_features.duel_time(stale_ready)
+        duel_features._atomic_write_json(duel_features.DUEL_STATE_FILE, state)
+
+        repaired = duel_features.repair_duel_rolling_cooldowns(cooldown_at)
+        state = duel_features.load_duel_state()
+        expected_ready = first_at + timedelta(hours=24)
+
+        self.assertTrue(repaired["updated"])
+        self.assertEqual(
+            duel_features.parse_duel_time(state["target_next_at"]["externaltarget1"]),
+            expected_ready,
+        )
+        self.assertEqual(
+            duel_features.parse_duel_time(state["queues"][ROTATION]["next_at"]),
+            expected_ready,
         )
 
     def test_busy_target_does_not_consume_attempt_and_retries_soon(self):
@@ -439,10 +536,13 @@ class DuelFeatureTests(unittest.TestCase):
             def get_cached_beast_by_name(self, name):
                 return self.state["beasts_cache"][0]
 
+            async def rest_beast_for_abyss(self, name):
+                self.sent.append(f"万兽谷休息 {name}")
+                self.set_best_beast_status(name, "休息中")
+                return "休息中", f"灵兽【{name}】已返回灵兽袋。"
+
             async def send_and_wait_feedback(self, command, **kwargs):
                 self.sent.append(command)
-                if command == ".灵兽休息 六翼":
-                    return "灵兽【六翼】已回到休息状态。"
                 if command == ".灵兽出战 六翼":
                     return "灵兽【六翼】已进入出战状态。"
                 return ""
@@ -468,7 +568,8 @@ class DuelFeatureTests(unittest.TestCase):
         success, detail = asyncio.run(actor.prepare_titan_target_for_duel())
 
         self.assertTrue(success, detail)
-        self.assertEqual(actor.sent, ["切回主魂", ".灵兽休息 六翼", ".灵兽出战 六翼"])
+        self.assertEqual(actor.sent, ["切回主魂", "万兽谷休息 六翼", ".灵兽出战 六翼"])
+        self.assertNotIn(".灵兽休息 六翼", actor.sent)
         self.assertIn("六翼已出战", detail)
 
     def test_rotation_skips_xiaohao_only_while_write_restricted(self):

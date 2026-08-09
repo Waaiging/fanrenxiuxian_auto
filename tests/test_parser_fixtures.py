@@ -46,6 +46,7 @@ from fishing_features import (
     parse_trade_purchase_response,
 )
 from yinluo_features import (
+    YINLUO_APPEASE_COMMAND,
     YINLUO_CONVERT_COMMAND,
     YINLUO_MASTER_COMMAND,
     YINLUO_SOUL,
@@ -106,6 +107,14 @@ class DummyCommon(CommonCommandMixin):
 
     def parse_wait_time(self, text, *args, **kwargs):
         return parse_duration_seconds(text)
+
+    def response_text(self, response):
+        if isinstance(response, str):
+            return response
+        return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+    def mulan_support_command(self):
+        return common_command_features.MULAN_SUPPORT_COMMAND
 
 
 class IncomingTelemetryFailureActor:
@@ -1476,7 +1485,14 @@ class ParserFixtureTests(unittest.TestCase):
 
             def __init__(self):
                 super().__init__()
-                self.state = {"avatars": {"无咎子": {}}}
+                today = datetime.now().strftime("%Y-%m-%d")
+                self.state = {"avatars": {"无咎子": {
+                    "last_destiny_observation_date": today,
+                    "tianxing_destiny_options_date": today,
+                    "tianxing_destiny_options": ["贪狼", "太阴"],
+                    "last_destiny_date": today,
+                    "last_destiny_choice": "贪狼",
+                }}}
                 self.identity_sect_names = {"无咎子": "天星宗"}
                 self.sent = []
 
@@ -1490,7 +1506,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.sent.append((identity, command))
                 if command == ".探寻裂缝":
                     return "你运转全身法力，撕开一道漆黑的空间裂缝，将元婴送入其中探寻机缘。"
-                return "司命演算完成。"
+                return "司命演算执行成功。"
 
         async def fake_sleep(_seconds):
             return None
@@ -1514,7 +1530,14 @@ class ParserFixtureTests(unittest.TestCase):
 
             def __init__(self):
                 super().__init__()
-                self.state = {"avatars": {"无咎子": {}}}
+                today = datetime.now().strftime("%Y-%m-%d")
+                self.state = {"avatars": {"无咎子": {
+                    "last_destiny_observation_date": today,
+                    "tianxing_destiny_options_date": today,
+                    "tianxing_destiny_options": ["贪狼", "太阴"],
+                    "last_destiny_date": today,
+                    "last_destiny_choice": "贪狼",
+                }}}
                 self.identity_sect_names = {"无咎子": "天星宗"}
                 self.sent = []
 
@@ -1531,7 +1554,7 @@ class ParserFixtureTests(unittest.TestCase):
                     return "探寻裂缝成功，发现秘藏，获得【空间碎片】x2。"
                 if command == ".探寻裂缝":
                     return "空间裂缝尚未稳定，请在 **4小时1分钟40秒** 后再行探寻。"
-                return "司命演算完成。"
+                return "司命演算执行成功。"
 
         actor = DummyWujiuziRift()
         self.assertTrue(asyncio.run(actor.common_avatar_rift_search_check("无咎子", 12 * 3600)))
@@ -2576,6 +2599,8 @@ class ParserFixtureTests(unittest.TestCase):
             "miniapp_route_active": True,
             "done": [],
             "avatars": {},
+            "sect_name": "万灵宗",
+            "identity_sect_names": {"主魂": "万灵宗"},
         }
 
         commands = build_command_panels("main", state)[0]["commands"]
@@ -4596,7 +4621,12 @@ class ParserFixtureTests(unittest.TestCase):
         ))
 
     def test_dashboard_patrol_mode_changes_route_without_exposing_beast_name(self):
-        state = {"done": [], "avatars": {}}
+        state = {
+            "done": [],
+            "avatars": {},
+            "sect_name": "万灵宗",
+            "identity_sect_names": {"主魂": "万灵宗"},
+        }
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             dashboard_server, "CONFIG_DIR", tmpdir
         ):
@@ -4912,6 +4942,11 @@ class ParserFixtureTests(unittest.TestCase):
         summon_success = parse_yinluo_summon_shadow("魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
         self.assertEqual(summon_success["status"], "success")
         self.assertEqual(summon_success["soul"], YINLUO_SOUL)
+        summon_failure = parse_yinluo_summon_shadow(
+            "你消耗了 5000 点修为和一枚【三级妖丹】，开始撕裂空间，召唤成功，镇压失败！"
+        )
+        self.assertEqual(summon_failure["status"], "failed")
+        self.assertEqual(summon_failure["cooldown_seconds"], 8 * 3600)
 
         convert_cd = parse_yinluo_convert("化功为煞失败，魔功反噬尚需调息，请在 **1小时2分钟3秒** 后再试。")
         self.assertTrue(convert_cd["matched"])
@@ -5000,23 +5035,48 @@ class ParserFixtureTests(unittest.TestCase):
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
-                if command != ".召唤魔影":
-                    raise AssertionError(f"unexpected command: {command}")
-                return DummyMessage(301, text="魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
+                if command == ".召唤魔影":
+                    return DummyMessage(301, text="魔影被你成功击溃，消散前留下了一道精纯的【凶兽戾魄】，已被你的阴罗幡吸收！")
+                if command == YINLUO_MASTER_COMMAND:
+                    return DummyMessage(
+                        302,
+                        text=(
+                            "**【缘生子的阴罗幡】**\n\n"
+                            "**煞气池**: 1800 / 25000 (7%)\n"
+                            "**幡魂总炼化**: 2 缕\n\n"
+                            "**魂魄储备**:\n"
+                            " - 凶兽戾魄: 1 缕\n\n"
+                            "**炼化槽:**\n"
+                            "**1号槽**: [空闲]\n"
+                        ),
+                    )
+                if command == YINLUO_APPEASE_COMMAND:
+                    return DummyMessage(303, text="安抚成功！成功安抚了 0 个炼化槽。")
+                if command == ".囚禁魂魄 1 凶兽戾魄":
+                    return DummyMessage(304, text="一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
+                raise AssertionError(f"unexpected command: {command}")
 
         actor = DummyYinluo()
-        wait = asyncio.run(actor.yinluo_tick("缘生子"))
+        with patch("yinluo_features.asyncio.sleep", new=AsyncMock()):
+            wait = asyncio.run(actor.yinluo_tick("缘生子"))
         yinluo_state = actor.get_yinluo_state("缘生子")
 
         self.assertEqual(wait, 5)
-        self.assertEqual(actor.sent[0][0], "缘生子")
-        self.assertEqual(actor.sent[0][1], ".召唤魔影")
+        self.assertEqual(
+            [item[1] for item in actor.sent],
+            [
+                ".召唤魔影",
+                YINLUO_MASTER_COMMAND,
+                YINLUO_APPEASE_COMMAND,
+                ".囚禁魂魄 1 凶兽戾魄",
+            ],
+        )
         self.assertTrue(actor.sent[0][2]["return_response_msg"])
-        self.assertEqual(yinluo_state["last_status"], "summoned")
-        self.assertTrue(yinluo_state["imprison_sync_pending"])
+        self.assertEqual(yinluo_state["last_status"], "summon_flow_complete")
+        self.assertFalse(yinluo_state["imprison_sync_pending"])
         self.assertNotEqual(yinluo_state["last_status"], "meditation_blocked")
 
-    def test_yinluo_summon_triggers_single_pre_imprison_sync(self):
+    def test_yinluo_summon_runs_indexed_collect_appease_and_refill_sequence(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
             def __init__(self):
                 super().__init__()
@@ -5046,31 +5106,86 @@ class ParserFixtureTests(unittest.TestCase):
                         402,
                         text=(
                             "**【缘生子的阴罗幡】**\n\n"
-                            "**煞气池**: 1800 / 25000 (7%)\n"
+                            "**煞气池**: 3000 / 25000 (12%)\n"
                             "**幡魂总炼化**: 2 缕\n\n"
                             "**魂魄储备**:\n"
                             " - 凶兽戾魄: 1 缕\n\n"
                             "**炼化槽:**\n"
-                            "**1号槽**: [空闲]\n"
+                            "**1号槽**: [精华已成] - 凶兽戾魄\n"
+                            "**2号槽**: [空闲]\n"
                         ),
                     )
+                if command == ".收取精华 1":
+                    return DummyMessage(403, text="收取成功！凶兽戾魄+1")
+                if command == YINLUO_APPEASE_COMMAND:
+                    return DummyMessage(404, text="安抚成功！成功安抚了 1 个炼化槽。")
                 if command == ".囚禁魂魄 1 凶兽戾魄":
-                    return DummyMessage(403, text="一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
+                    return DummyMessage(405, text="一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
                 raise AssertionError(f"unexpected command: {command}")
 
         actor = DummyYinluo()
-        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
-        actor.get_yinluo_state("缘生子")["next_action_at"] = ""
-        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
-        self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+        with patch("yinluo_features.asyncio.sleep", new=AsyncMock()):
+            self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
 
         self.assertEqual(
             [item[1] for item in actor.sent],
-            [".召唤魔影", YINLUO_MASTER_COMMAND, ".囚禁魂魄 1 凶兽戾魄"],
+            [
+                ".召唤魔影",
+                YINLUO_MASTER_COMMAND,
+                ".收取精华 1",
+                YINLUO_APPEASE_COMMAND,
+                ".囚禁魂魄 1 凶兽戾魄",
+            ],
         )
         yinluo_state = actor.get_yinluo_state("缘生子")
         self.assertFalse(yinluo_state["imprison_sync_pending"])
-        self.assertEqual(yinluo_state["last_status"], "imprisoned")
+        self.assertEqual(yinluo_state["last_status"], "summon_flow_complete")
+        self.assertEqual(yinluo_state["reserves"][YINLUO_SOUL], 0)
+        self.assertEqual(yinluo_state["slots"][1]["status"], "炼化中")
+        self.assertEqual(yinluo_state["slots"][2]["status"], "空闲")
+
+    def test_yinluo_failed_summon_sets_full_cooldown_without_retry(self):
+        class DummyYinluo(DummyAvatarCommon, YinluoMixin):
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+                self.get_yinluo_state("缘生子").update({
+                    "last_daily_sacrifice_date": datetime.now().strftime("%Y-%m-%d"),
+                    "next_blood_wash_time": add_seconds_str(now_str(), 3600),
+                    "next_summon_shadow_time": "",
+                    "reserves": {},
+                    "slots": {},
+                })
+
+            def identity_pause_seconds(self, identity):
+                return 0
+
+            def get_identity_impending_command_wait(self, identity):
+                return -1
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.sent.append(command)
+                if command == ".召唤魔影":
+                    return DummyMessage(
+                        406,
+                        text=(
+                            "你消耗了 **5000** 点修为和一枚【三级妖丹】，开始撕裂空间，"
+                            "召唤成功，镇压失败！魔影过于强大，你遭其反噬。"
+                        ),
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        actor = DummyYinluo()
+        with patch("yinluo_features.asyncio.sleep", new=AsyncMock()):
+            self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
+            second_wait = asyncio.run(actor.yinluo_tick("缘生子"))
+
+        state = actor.get_yinluo_state("缘生子")
+        self.assertEqual(actor.sent, [".召唤魔影"])
+        self.assertEqual(state["last_status"], "summon_failed")
+        self.assertEqual(state["post_summon_stage"], "")
+        self.assertGreater(seconds_until(state["next_summon_shadow_time"]), 7 * 3600 + 50 * 60)
+        self.assertGreaterEqual(second_wait, 30)
 
     def test_yinluo_slot_busy_syncs_banner_before_next_imprison(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
@@ -5308,14 +5423,23 @@ class ParserFixtureTests(unittest.TestCase):
                             "**1号槽**: [精华已成] - 凶兽戾魄\n"
                         ),
                     )
-                if command == ".一键收取精华":
+                if command == ".收取精华 1":
                     return DummyMessage(703, text="收取成功！凶兽戾魄+1")
+                if command == YINLUO_APPEASE_COMMAND:
+                    return DummyMessage(704, text="安抚成功！成功安抚了 1 个炼化槽。")
                 raise AssertionError(f"unexpected command: {command}")
 
         actor = DummyYinluo()
         self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
         self.assertEqual(asyncio.run(actor.yinluo_tick("缘生子")), 5)
-        self.assertEqual(actor.sent, [YINLUO_MASTER_COMMAND, ".一键收取精华"])
+        self.assertEqual(
+            actor.sent,
+            [
+                YINLUO_MASTER_COMMAND,
+                ".收取精华 1",
+                YINLUO_APPEASE_COMMAND,
+            ],
+        )
         self.assertEqual(actor.get_yinluo_state("缘生子")["slots"][1]["status"], "空闲")
 
     def test_yinluo_stale_next_action_is_recomputed_to_future_trigger(self):
@@ -5367,24 +5491,26 @@ class ParserFixtureTests(unittest.TestCase):
                 super().__init__()
                 self.sent = []
                 self.get_yinluo_state("缘生子")["slots"] = {
-                    "1": {"status": "魂力枯竭", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""}
+                    "1": {"status": "魂力枯竭", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""},
+                    "2": {"status": "魂力枯竭", "soul": "", "remaining_seconds": 0, "remaining_text": "", "due_at": ""},
                 }
 
             async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
                 self.sent.append((identity, command, kwargs))
                 return DummyMessage(
                     302,
-                    text="[Avatar: 缘生子]\n**安抚成功！**\n你消耗了 **50** 点修为，成功安抚了 1 个炼化槽。",
+                    text="[Avatar: 缘生子]\n**安抚成功！**\n你消耗了 **100** 点修为，成功安抚了 2 个炼化槽。",
                 )
 
         actor = DummyYinluo()
-        self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [1])
+        self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [1, 2])
         self.assertTrue(asyncio.run(actor.yinluo_appease_slot("缘生子", 1)))
         yinluo_state = actor.get_yinluo_state("缘生子")
 
-        self.assertEqual(actor.sent[0][1], ".安抚幡灵 1")
+        self.assertEqual(actor.sent[0][1], YINLUO_APPEASE_COMMAND)
         self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [])
         self.assertEqual(yinluo_state["slots"]["1"]["status"], "空闲")
+        self.assertEqual(yinluo_state["slots"]["2"]["status"], "空闲")
         self.assertEqual(yinluo_state["next_sync_at"], "")
         self.assertEqual(yinluo_state["last_status"], "appeased")
 
@@ -5409,10 +5535,9 @@ class ParserFixtureTests(unittest.TestCase):
         yinluo_state = actor.get_yinluo_state("缘生子")
 
         self.assertEqual(yinluo_state["last_status"], "appease_noop")
-        self.assertEqual(yinluo_state["slots"]["1"]["status"], "空闲")
+        self.assertEqual(yinluo_state["slots"]["1"]["status"], "魂力枯竭")
         self.assertGreater(common_seconds_until(yinluo_state["appease_suppressed_until"]["1"]), 60)
 
-        yinluo_state["slots"]["1"]["status"] = "魂力枯竭"
         self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [])
 
     def test_dashboard_main_yuanshengzi_yinluo_commands_enabled_by_default(self):
@@ -5435,9 +5560,12 @@ class ParserFixtureTests(unittest.TestCase):
         panel = next(p for p in panels if p.get("identity") == "缘生子")
         rows = {r.get("command"): r for r in panel.get("commands", [])}
         self.assertIn(".我的阴罗幡", rows)
+        self.assertIn(YINLUO_APPEASE_COMMAND, rows)
+        self.assertIn(".收取精华 <槽位>", rows)
         self.assertIn(".囚禁魂魄 <槽位> 凶兽戾魄", rows)
         self.assertIn(".化功为煞 10000", rows)
         self.assertFalse(rows[".我的阴罗幡"].get("control_disabled"))
+        self.assertEqual(rows[".收取精华 <槽位>"]["control_key"], ".收取精华 *")
         self.assertEqual(rows[".囚禁魂魄 <槽位> 凶兽戾魄"]["control_key"], ".囚禁魂魄 *")
         self.assertNotIn(".囚禁魂魄 <槽位> 妖兽精魄", rows)
 
@@ -5447,9 +5575,10 @@ class ParserFixtureTests(unittest.TestCase):
             for row in dashboard_server.xiaohao_avatar_commands("问心子", {"last_tower_date": "2026-07-06"})
         }
         self.assertNotIn(".闯塔", rows)
-        self.assertIn(common_command_features.MULAN_SUPPORT_COMMAND, rows)
+        command = dashboard_server.mulan_support_command()
+        self.assertIn(command, rows)
         self.assertEqual(
-            rows[common_command_features.MULAN_SUPPORT_COMMAND]["detail"],
+            rows[command]["detail"],
             "每日 10:00 独立执行",
         )
 
@@ -6517,7 +6646,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state.get("pending_star_gazing_manifest_time", ""), "")
         self.assertEqual(xiaohao_state.get("star_gazing_claimed_manifest_time", ""), "")
 
-    def test_main_daily_star_gazing_fallback_uses_synced_star_palace_avatar(self):
+    def test_main_daily_star_gazing_fallback_is_disabled(self):
         class FixedDatetime(datetime):
             @classmethod
             def now(cls, tz=None):
@@ -6562,15 +6691,13 @@ class ParserFixtureTests(unittest.TestCase):
 
         handled, state, scheduled = asyncio.run(run_case())
 
-        self.assertTrue(handled)
-        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-29")
-        self.assertEqual(state["star_gazing_claimed_avatar"], "素缘子")
-        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-30 00:00:00")
-        self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][1]["avatar"], "素缘子")
-        self.assertNotEqual(scheduled[0][1]["avatar"], "主魂")
+        self.assertFalse(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "")
+        self.assertNotIn("star_gazing_claimed_avatar", state)
+        self.assertNotIn("star_gazing_claimed_manifest_time", state)
+        self.assertEqual(scheduled, [])
 
-    def test_sub_daily_star_gazing_fallback_uses_avatar_when_main_star_palace_disabled(self):
+    def test_sub_daily_star_gazing_fallback_is_disabled(self):
         class FixedDatetime(datetime):
             @classmethod
             def now(cls, tz=None):
@@ -6601,16 +6728,13 @@ class ParserFixtureTests(unittest.TestCase):
             return handled, actor.state, scheduled
 
         handled, state, scheduled = asyncio.run(run_case())
-        self.assertTrue(handled)
-        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-01")
-        self.assertEqual(state["star_gazing_claimed_avatar"], "厚土")
-        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-02 00:00:00")
-        self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][1]["avatar"], "厚土")
-        self.assertEqual(scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"), "2026-07-02 00:00:00")
-        self.assertEqual(scheduled[0][1]["gazing_date"], "2026-07-01")
+        self.assertFalse(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "")
+        self.assertNotIn("star_gazing_claimed_avatar", state)
+        self.assertNotIn("star_gazing_claimed_manifest_time", state)
+        self.assertEqual(scheduled, [])
 
-    def test_xiaohao_daily_star_gazing_fallback_schedules_rotating_avatar(self):
+    def test_xiaohao_daily_star_gazing_fallback_is_disabled(self):
         class FixedDatetime(datetime):
             @classmethod
             def now(cls, tz=None):
@@ -6641,14 +6765,11 @@ class ParserFixtureTests(unittest.TestCase):
             return handled, actor.state, scheduled
 
         handled, state, scheduled = asyncio.run(run_case())
-        self.assertTrue(handled)
-        self.assertEqual(state["last_star_gazing_fallback_date"], "2026-07-01")
-        self.assertEqual(state["star_gazing_claimed_avatar"], "素心子")
-        self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-07-02 00:00:00")
-        self.assertEqual(len(scheduled), 1)
-        self.assertEqual(scheduled[0][0][0], "素心子")
-        self.assertEqual(scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"), "2026-07-02 00:00:00")
-        self.assertEqual(scheduled[0][1]["gazing_date"], "2026-07-01")
+        self.assertFalse(handled)
+        self.assertEqual(state["last_star_gazing_fallback_date"], "")
+        self.assertNotIn("star_gazing_claimed_avatar", state)
+        self.assertNotIn("star_gazing_claimed_manifest_time", state)
+        self.assertEqual(scheduled, [])
 
     def test_xiaohao_daily_star_gazing_fallback_skips_after_avatar_observed(self):
         class FixedDatetime(datetime):
@@ -8097,11 +8218,15 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            if command == ".灵兽休息 麻花藤":
-                return "已将灵兽【麻花藤】召回休息。"
             if command == ".灵兽出战 麻花藤":
                 return "已将灵兽【麻花藤】设为出战状态。"
             if command == ".灵兽偷菜":
@@ -8109,9 +8234,11 @@ class ParserFixtureTests(unittest.TestCase):
             return ""
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
-        self.assertEqual(sent, [".灵兽休息 麻花藤", ".灵兽出战 麻花藤", ".灵兽偷菜"])
+        self.assertEqual(rested, ["麻花藤"])
+        self.assertEqual(sent, [".灵兽出战 麻花藤", ".灵兽偷菜"])
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "出战中")
         self.assertTrue(actor.state.get("next_steal_time"))
 
@@ -8174,6 +8301,12 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
@@ -8181,19 +8314,18 @@ class ParserFixtureTests(unittest.TestCase):
                 return "已将灵兽【六翼】设为出战状态。"
             if command == ".灵兽偷菜":
                 return "灵兽偷菜成功，获得【灵石】x1。"
-            if command == ".灵兽休息 六翼":
-                return "已将灵兽【六翼】召回休息。"
             if command == ".一键放养":
                 return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
             return ""
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
+        self.assertEqual(rested, ["六翼"])
         self.assertEqual(sent, [
             ".灵兽出战 六翼",
             ".灵兽偷菜",
-            ".灵兽休息 六翼",
             ".一键放养",
         ])
         self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
@@ -8385,13 +8517,17 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
             if command == ".灵兽巡边 猴哥 袭营" and sent.count(command) == 1:
                 return "灵兽【猴哥】当前正在(放养中)，无法巡边。"
-            if command == ".灵兽休息 猴哥":
-                return "已将灵兽【猴哥】召回休息。"
             if command == ".灵兽巡边 猴哥 袭营":
                 return "灵兽【猴哥】领命前往边境巡行，执行【袭营】。"
             return ""
@@ -8400,14 +8536,16 @@ class ParserFixtureTests(unittest.TestCase):
             return None
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
             self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
 
         self.assertEqual(
             sent,
-            [".灵兽巡边 猴哥 袭营", ".灵兽休息 猴哥", ".灵兽巡边 猴哥 袭营"],
+            [".灵兽巡边 猴哥 袭营", ".灵兽巡边 猴哥 袭营"],
         )
+        self.assertEqual(rested, ["猴哥"])
         self.assertEqual(actor.state["beast_border_patrol_name"], "猴哥")
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "巡边中")
 
@@ -8422,23 +8560,29 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            if command == ".灵兽休息 麻花藤":
-                return "已将灵兽【麻花藤】召回休息。"
             if command == ".灵兽巡边 麻花藤 袭营":
                 return "灵兽【麻花藤】领命前往边境巡行，执行【袭营】。"
             return ""
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
-        self.assertEqual(sent, [".灵兽休息 麻花藤", ".灵兽巡边 麻花藤 袭营"])
+        self.assertEqual(rested, ["麻花藤"])
+        self.assertEqual(sent, [".灵兽巡边 麻花藤 袭营"])
         self.assertEqual(actor.state["beast_border_patrol_name"], "麻花藤")
         self.assertEqual(actor.state["beasts_cache"][2]["status"], "巡边中")
 
-    def test_border_patrol_does_not_dispatch_after_early_pasture_recall(self):
+    def test_border_patrol_defers_when_wan_beast_valley_recall_fails(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "beasts_cache": [
@@ -8457,26 +8601,29 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            return "", "万兽谷灵兽休息失败：beast_busy"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            return (
-                "你已提前召回放养中的灵兽【铁甲龟 (之贰)】。\n"
-                "原本还需 **27分钟18秒** 才会自行归来。\n"
-                "提前召回不会结算放养收获。"
-            )
+            return ""
 
         async def fake_sleep(*args, **kwargs):
             return None
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
             self.assertFalse(asyncio.run(actor.run_beast_border_patrol()))
 
-        self.assertEqual(sent, [".灵兽休息 铁甲龟 (之贰)"])
+        self.assertEqual(rested, ["铁甲龟 (之贰)"])
+        self.assertEqual(sent, [])
         self.assertEqual(actor.get_cached_beast_by_name("铁甲龟 (之贰)")["status"], "放养中")
-        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 25 * 60)
+        self.assertGreater(common_seconds_until(actor.state["next_beast_border_patrol_time"]), 29 * 60)
 
     def test_border_patrol_recalls_low_cached_pastured_beasts_until_one_has_stamina(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -8488,15 +8635,17 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            if command == ".灵兽休息 麻花藤":
-                return "已将灵兽【麻花藤】召回休息。"
             if command == ".灵兽巡边 麻花藤 袭营":
                 return "灵兽【麻花藤】体力不足。本次夜嗅敌营需要 **24** 体力，当前 **10**。"
-            if command == ".灵兽休息 猴哥":
-                return "已将灵兽【猴哥】召回休息。"
             if command == ".灵兽巡边 猴哥 袭营":
                 return "灵兽【猴哥】领命前往边境巡行，执行【袭营】。"
             return ""
@@ -8505,6 +8654,7 @@ class ParserFixtureTests(unittest.TestCase):
             return None
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
             self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
@@ -8512,17 +8662,16 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(
             sent,
             [
-                ".灵兽休息 麻花藤",
                 ".灵兽巡边 麻花藤 袭营",
-                ".灵兽休息 猴哥",
                 ".灵兽巡边 猴哥 袭营",
             ],
         )
+        self.assertEqual(rested, ["麻花藤", "猴哥"])
         self.assertEqual(actor.state["beasts_cache"][0]["stamina"], 10)
         self.assertEqual(actor.state["beast_border_patrol_name"], "猴哥")
         self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
 
-    def test_border_patrol_recall_guard_tries_next_candidate(self):
+    def test_border_patrol_miniapp_failure_tries_next_candidate(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "beasts_cache": [
@@ -8532,20 +8681,17 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            if name == "猴哥":
+                return "", "万兽谷灵兽休息失败：temporary_failure"
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            if command == ".灵兽休息 猴哥":
-                actor._last_command_guard_block = {
-                    "key": ".灵兽休息 猴哥",
-                    "wait": 805,
-                    "blocked_until": time.monotonic() + 805,
-                    "reason": "command_guard",
-                    "at": time.monotonic(),
-                }
-                return ""
-            if command == ".灵兽休息 谛听":
-                return "已将灵兽【谛听】召回休息。"
             if command == ".灵兽巡边 谛听 袭营":
                 return "灵兽【谛听】领命前往边境巡行，执行【袭营】。"
             return ""
@@ -8554,18 +8700,20 @@ class ParserFixtureTests(unittest.TestCase):
             return None
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
             self.assertTrue(asyncio.run(actor.run_beast_border_patrol()))
 
         self.assertEqual(
             sent,
-            [".灵兽休息 猴哥", ".灵兽休息 谛听", ".灵兽巡边 谛听 袭营"],
+            [".灵兽巡边 谛听 袭营"],
         )
+        self.assertEqual(rested, ["猴哥", "谛听"])
         self.assertEqual(actor.state["beast_border_patrol_name"], "谛听")
         self.assertEqual(actor.state["beasts_cache"][1]["status"], "巡边中")
 
-    def test_border_patrol_all_recall_guards_use_shortest_retry(self):
+    def test_border_patrol_all_miniapp_recall_failures_use_safe_retry(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "beasts_cache": [
@@ -8574,30 +8722,30 @@ class ParserFixtureTests(unittest.TestCase):
         }
         actor.save_state = lambda: None
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            return "", "万兽谷灵兽休息失败：temporary_failure"
 
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
-            actor._last_command_guard_block = {
-                "key": ".灵兽休息 猴哥",
-                "wait": 805,
-                "blocked_until": time.monotonic() + 805,
-                "reason": "command_guard",
-                "at": time.monotonic(),
-            }
             return ""
 
         async def fake_sleep(*args, **kwargs):
             return None
 
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         with patch.object(cultivator_xiaohao.asyncio, "sleep", fake_sleep):
             self.assertFalse(asyncio.run(actor.run_beast_border_patrol()))
 
-        self.assertEqual(sent, [".灵兽休息 猴哥"])
+        self.assertEqual(rested, ["猴哥"])
+        self.assertEqual(sent, [])
         retry = common_seconds_until(actor.state["next_beast_border_patrol_time"])
-        self.assertGreaterEqual(retry, 780)
-        self.assertLess(retry, 830)
+        self.assertGreaterEqual(retry, 1780)
+        self.assertLess(retry, 1830)
 
     def test_border_patrol_existing_runner_queries_status_cooldown(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -9184,6 +9332,12 @@ class ParserFixtureTests(unittest.TestCase):
         actor.save_state = lambda: None
         actor.record_daily_reward_event = lambda *args, **kwargs: True
         sent = []
+        rested = []
+
+        async def fake_rest(name):
+            rested.append(name)
+            actor.set_best_beast_status(name, "休息中")
+            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
         async def fake_update():
             return True
@@ -9198,8 +9352,6 @@ class ParserFixtureTests(unittest.TestCase):
                 return "已将灵兽【六翼】设为出战状态。"
             if command == ".灵兽偷菜":
                 return "灵兽偷菜成功，获得【灵石】x1。"
-            if command == ".灵兽休息 六翼":
-                return "已将灵兽【六翼】召回休息。"
             if command == ".一键放养":
                 return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
             return ""
@@ -9207,6 +9359,7 @@ class ParserFixtureTests(unittest.TestCase):
         actor.update_beast_cache = fake_update
         actor.send_abyss_with_busy_retry = fake_abyss
         actor.send_and_wait_feedback = fake_send
+        actor.rest_beast_for_abyss = fake_rest
 
         async def run_actions():
             self.assertTrue(await actor.execute_abyss_with_fallback(defer_focus_pasture=True))
@@ -9215,11 +9368,11 @@ class ParserFixtureTests(unittest.TestCase):
 
         asyncio.run(run_actions())
 
+        self.assertEqual(rested, ["六翼"])
         self.assertEqual(sent, [
             ".探渊 六翼",
             ".灵兽出战 六翼",
             ".灵兽偷菜",
-            ".灵兽休息 六翼",
             ".一键放养",
         ])
         self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
@@ -9895,57 +10048,49 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = old_db
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
-    def test_destiny_catches_up_after_primary_window_and_records_only_confirmed_success(self):
+    def test_destiny_catches_up_after_primary_window_and_records_candidates_only(self):
         class FixedDatetime(datetime):
             @classmethod
             def now(cls, tz=None):
                 return cls(2026, 7, 17, 12, 0, 0)
 
         actor = Cultivator.__new__(Cultivator)
-        state = {"last_destiny_date": ""}
-        saved = []
+        state = {}
         sent = []
-        responses = [
-            "【观命结果】今日可定下的命星如下：【贪狼】、【太阴】。",
-            "天机紊乱，未能定下命星。",
-        ]
         actor.active_atomic_task = None
+        actor.state = {"avatars": {"无咎子": state}}
+        actor.identity_sect_names = {"无咎子": "天星宗"}
         actor.dashboard_command_paused = lambda command, identity: False
         actor.daily_one_shot_should_defer = lambda *args, **kwargs: True
         actor.get_avatar_state = lambda avatar: state
-        actor.set_avatar_state = lambda avatar, key, value: (state.__setitem__(key, value), saved.append((key, value)))
+        actor.save_state = lambda: None
         actor.response_text = lambda response: str(response or "")
 
         async def fake_send(identity, command, **kwargs):
             sent.append(command)
-            return responses.pop(0)
+            return "【观命结果】今日可定下的命星如下：【贪狼】、【太阴】。"
 
         async def fake_sleep(seconds):
             return None
 
         actor.send_and_wait_feedback_identity = fake_send
         with patch.object(intelligent_cultivator, "datetime", FixedDatetime), patch.object(
-            intelligent_cultivator.asyncio, "sleep", fake_sleep
-        ):
+            common_command_features, "datetime", FixedDatetime
+        ), patch.object(intelligent_cultivator.asyncio, "sleep", fake_sleep):
             self.assertEqual(actor._avatar_destiny_wait_seconds("无咎子"), 0)
             asyncio.run(actor._avatar_destiny_check("无咎子"))
 
-        self.assertEqual(sent, [".观命", ".定命 贪狼"])
-        self.assertNotIn("last_destiny_date", {k: v for k, v in saved})
+        self.assertEqual(sent, [".观命"])
+        self.assertEqual(state["last_destiny_observation_date"], "2026-07-17")
+        self.assertEqual(state["tianxing_destiny_options"], ["贪狼", "太阴"])
+        self.assertNotIn("last_destiny_date", state)
 
-        responses.extend([
-            "【观命结果】今日可定下的命星如下：【太阴】。",
-            "你将今日命轨定在【太阴】。",
-        ])
-        sent.clear()
         with patch.object(intelligent_cultivator, "datetime", FixedDatetime), patch.object(
-            intelligent_cultivator.asyncio, "sleep", fake_sleep
-        ):
+            common_command_features, "datetime", FixedDatetime
+        ), patch.object(intelligent_cultivator.asyncio, "sleep", fake_sleep):
             asyncio.run(actor._avatar_destiny_check("无咎子"))
 
-        self.assertEqual(sent, [".观命", ".定命 太阴"])
-        self.assertEqual(state["last_destiny_date"], "2026-07-17")
-        self.assertEqual(state["last_destiny_choice"], "太阴")
+        self.assertEqual(sent, [".观命"])
 
     def test_force_exit_restart_sends_deep_meditation_directly(self):
         actor = Cultivator.__new__(Cultivator)
@@ -10514,8 +10659,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "beasts_cache": [
-                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 34},
-                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+                {"id": 7, "full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 34},
+                {"id": 8, "full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
             ],
             "best_beast_name": "六翼",
             "best_beast_status": "出战中",
@@ -10524,6 +10669,17 @@ class ParserFixtureTests(unittest.TestCase):
         actor.save_state = lambda: None
         sent = []
 
+        transport = SimpleNamespace(
+            spirit_beast_rest=AsyncMock(return_value={
+                "beasts": [
+                    {"id": 7, "full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 34},
+                    {"id": 8, "full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
+                ],
+                "message": "六翼已返回灵兽袋。",
+            })
+        )
+        actor._miniapp_beast_contract = SimpleNamespace(transport=transport)
+
         async def fake_send(command, *args, **kwargs):
             sent.append(command)
             return "已将灵兽【六翼】召回休息。"
@@ -10531,7 +10687,8 @@ class ParserFixtureTests(unittest.TestCase):
         actor.send_and_wait_feedback = fake_send
 
         self.assertTrue(asyncio.run(actor.ensure_focus_beast_ready_for_pasture()))
-        self.assertEqual(sent, [".灵兽休息 六翼"])
+        self.assertEqual(sent, [])
+        transport.spirit_beast_rest.assert_awaited_once_with("主魂", 7, "六翼")
         self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "休息中")
 
     def test_concubine_status_blocks_chain_during_active_voyage(self):
@@ -13575,8 +13732,15 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn(SOUL_CURSE_WANYING_GREETING_COMMAND, xiaohao_commands)
         self.assertNotIn(SOUL_CURSE_CO_STUDY_COMMAND, xiaohao_commands)
 
-    def test_dashboard_shows_main_soul_wanling_beast_commands(self):
-        panels = build_command_panels("main", {"avatars": {}})
+    def test_dashboard_hides_main_soul_wanling_commands_after_leaving_sect(self):
+        panels = build_command_panels(
+            "main",
+            {
+                "avatars": {},
+                "sect_name": "散修",
+                "identity_sect_names": {"主魂": "散修"},
+            },
+        )
         main_panel = next(panel for panel in panels if panel.get("identity") == "主魂")
         commands = {row.get("command") for row in main_panel.get("commands", [])}
 
@@ -13584,11 +13748,11 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn(".登天阶", commands)
         self.assertNotIn(".引九天罡风", commands)
         self.assertNotIn(".问心台", commands)
-        self.assertTrue({
+        self.assertFalse({
             ".寻觅灵兽",
             "miniapp:spirit-beast-contract",
             ".灵兽巡边 <灵兽> 袭营",
-        }.issubset(commands))
+        } & commands)
         self.assertNotIn(".探渊 <灵兽>", commands)
         self.assertNotIn(".一键放养", commands)
         self.assertNotIn(".灵兽互动 <重点灵兽>", commands)

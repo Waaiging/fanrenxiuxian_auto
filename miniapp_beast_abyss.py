@@ -8,6 +8,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
+from automation_settings import miniapp_beast_abyss_settings
 from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import identity_state, spirit_beast_abyss_result_text
 
@@ -110,14 +111,26 @@ def abyss_status(payload: Any, now: datetime | None = None) -> dict[str, Any]:
     }
 
 
-def choose_abyss_beast(beasts: Any) -> dict[str, Any] | None:
+def choose_abyss_beast(
+    beasts: Any,
+    *,
+    power_min: int = 0,
+    power_max: int = 0,
+) -> dict[str, Any] | None:
     """Choose the strongest beast that the Mini App explicitly enables."""
     candidates = []
+    filter_active = int(power_min or 0) > 0 or int(power_max or 0) > 0
     for beast in beasts if isinstance(beasts, list) else []:
         if not isinstance(beast, dict) or not beast.get("can_explore_abyss"):
             continue
         if _nonnegative_int(beast.get("id")) <= 0:
             continue
+        power = _nonnegative_int(beast.get("power"))
+        if filter_active:
+            if power_min > 0 and power < int(power_min):
+                continue
+            if power_max > 0 and power > int(power_max):
+                continue
         candidates.append(beast)
     if not candidates:
         return None
@@ -298,10 +311,15 @@ class MiniAppBeastAbyssWorker:
         return await self._run_once_unlocked(identity, now)
 
     async def _run_once_unlocked(self, identity: str, now: datetime) -> int:
+        selection = miniapp_beast_abyss_settings()
+        power_min = _nonnegative_int(selection.get("power_min"))
+        power_max = _nonnegative_int(selection.get("power_max"))
         self._record(
             identity,
             beast_abyss_miniapp_enabled=True,
             beast_abyss_miniapp_last_attempt_time=now.strftime(TIME_FORMAT),
+            beast_abyss_miniapp_power_min=power_min,
+            beast_abyss_miniapp_power_max=power_max,
         )
         snapshot = await self._snapshot(identity)
         status = abyss_status(snapshot.get("raw"), now=now)
@@ -316,12 +334,18 @@ class MiniAppBeastAbyssWorker:
             self._record_error(identity, "beast_abyss_not_ready")
             return self.retry_seconds
 
-        beast = choose_abyss_beast(snapshot.get("beasts"))
+        beast = choose_abyss_beast(
+            snapshot.get("beasts"),
+            power_min=power_min,
+            power_max=power_max,
+        )
         if beast is None:
             self._record_error(identity, "beast_abyss_no_available_beast")
             self.log.warning(
-                "Mini App abyss has no eligible beast for [%s]; retrying in %ss",
+                "Mini App abyss has no eligible beast for [%s] in power range %s-%s; retrying in %ss",
                 identity,
+                power_min or 0,
+                power_max or "inf",
                 self.retry_seconds,
             )
             return self.retry_seconds

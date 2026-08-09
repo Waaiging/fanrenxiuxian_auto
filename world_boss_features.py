@@ -42,11 +42,12 @@ WORLD_BOSS_FINISH_GRACE_SECONDS = 2.2
 WORLD_BOSS_HISTORY_LIMIT = 20
 WORLD_BOSS_SCAN_LIMIT = 30
 WORLD_BOSS_TIMEOUT_SECONDS = 20
+WORLD_BOSS_DIAGNOSTIC_VERSION = 1
 WORLD_BOSS_ACCOUNT_OFFSET_SLOTS = {
-    "main": -3,
-    "sub": -1,
-    "xiaohao": 1,
-    "waaiging": 3,
+    "main": -4,
+    "sub": -3,
+    "xiaohao": -2,
+    "waaiging": -1,
 }
 
 AUTH_TOKEN_ERRORS = {
@@ -74,6 +75,42 @@ COMPLETED_EVENT_STATUSES = {
     "event_closed",
     "expired",
 }
+
+WORLD_BOSS_DIAGNOSTIC_SENSITIVE_PARTS = (
+    "token",
+    "initdata",
+    "authorization",
+    "cookie",
+    "secret",
+    "signature",
+)
+
+
+def _diagnostic_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep useful server metadata while excluding credentials and large payloads."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:240]
+    if depth >= 4:
+        return str(value)[:240]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:40]:
+            key = str(raw_key or "")[:80]
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if any(part in normalized for part in WORLD_BOSS_DIAGNOSTIC_SENSITIVE_PARTS):
+                continue
+            result[key] = _diagnostic_value(raw_value, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_diagnostic_value(item, depth=depth + 1) for item in list(value)[:20]]
+    return str(value)[:240]
+
+
+def _error_diagnostics(exc: BaseException) -> dict[str, Any]:
+    details = _diagnostic_value(getattr(exc, "details", {}))
+    return details if isinstance(details, dict) else {}
 
 
 class _PersistentWorldBossJsonClient:
@@ -167,7 +204,9 @@ class _PersistentWorldBossJsonClient:
         if not isinstance(data, dict):
             raise MiniAppBeastError("invalid_response", status)
         if status >= 400 or data.get("ok") is False:
-            raise MiniAppBeastError(data.get("error") or f"http_{status}", status)
+            error = MiniAppBeastError(data.get("error") or f"http_{status}", status)
+            error.details = _diagnostic_value(data)
+            raise error
         return data
 
     async def post(
@@ -697,6 +736,7 @@ class WorldBossMonitor:
             raise
         except MiniAppBeastError as exc:
             code = exc.code
+            failure_diagnostics = _error_diagnostics(exc)
             status_map = {
                 "boss_action_limit": "already_completed",
                 "boss_join_closed": "join_closed",
@@ -719,7 +759,14 @@ class WorldBossMonitor:
                 )
             else:
                 self.log.error("Mini App [%s] 青元子世界 Boss失败：%s", identity, code)
-            return {"identity": identity, "status": status, "error": code}
+            result = {"identity": identity, "status": status, "error": code}
+            if failure_diagnostics:
+                result["diagnostics"] = {
+                    "version": WORLD_BOSS_DIAGNOSTIC_VERSION,
+                    "recorded_at": _now_text(),
+                    "failure": failure_diagnostics,
+                }
+            return result
         except Exception as exc:
             code = _error_code(exc)
             self.log.error(
@@ -775,8 +822,18 @@ class WorldBossMonitor:
         *,
         retries: int = 0,
         timeout: int | None = None,
+        trace: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        trace_started_at = self.monotonic()
+        if trace is not None:
+            trace.update(
+                {
+                    "path": "/" + str(path or "").rstrip("/").rsplit("/", 1)[-1],
+                    "attempts": [],
+                }
+            )
         for attempt in range(max(0, retries) + 1):
+            attempt_started_at = self.monotonic()
             try:
                 request_timeout = int(timeout or self.timeout)
                 if self.post_json is None:
@@ -785,19 +842,76 @@ class WorldBossMonitor:
                     if client is None:
                         client = _PersistentWorldBossJsonClient(normalized_origin)
                         self._json_clients[normalized_origin] = client
-                    return await client.post(path, payload, request_timeout)
-                return await _post_json(
-                    origin,
-                    path,
-                    payload,
-                    request_timeout,
-                    post_json=self.post_json,
-                )
+                    result = await client.post(path, payload, request_timeout)
+                else:
+                    result = await _post_json(
+                        origin,
+                        path,
+                        payload,
+                        request_timeout,
+                        post_json=self.post_json,
+                    )
             except MiniAppBeastError as exc:
+                if trace is not None:
+                    attempt_trace = {
+                        "attempt": attempt + 1,
+                        "duration_ms": max(
+                            0,
+                            int(round((self.monotonic() - attempt_started_at) * 1000)),
+                        ),
+                        "ok": False,
+                        "error": exc.code,
+                        "http_status": int(exc.status or 0),
+                    }
+                    details = _error_diagnostics(exc)
+                    if details:
+                        attempt_trace["server_details"] = details
+                    trace["attempts"].append(attempt_trace)
+                    trace["total_duration_ms"] = max(
+                        0,
+                        int(round((self.monotonic() - trace_started_at) * 1000)),
+                    )
                 retryable = exc.status in RETRY_HTTP_STATUSES or exc.code in TRANSIENT_WORLD_BOSS_ERRORS
                 if attempt >= retries or not retryable:
                     raise
                 await self.sleep(min(2.5, 0.45 * (attempt + 1)))
+            except Exception as exc:
+                if trace is not None:
+                    trace["attempts"].append(
+                        {
+                            "attempt": attempt + 1,
+                            "duration_ms": max(
+                                0,
+                                int(round((self.monotonic() - attempt_started_at) * 1000)),
+                            ),
+                            "ok": False,
+                            "error": _error_code(exc),
+                            "http_status": 0,
+                        }
+                    )
+                    trace["total_duration_ms"] = max(
+                        0,
+                        int(round((self.monotonic() - trace_started_at) * 1000)),
+                    )
+                raise
+            else:
+                if trace is not None:
+                    trace["attempts"].append(
+                        {
+                            "attempt": attempt + 1,
+                            "duration_ms": max(
+                                0,
+                                int(round((self.monotonic() - attempt_started_at) * 1000)),
+                            ),
+                            "ok": True,
+                            "http_status": 200,
+                        }
+                    )
+                    trace["total_duration_ms"] = max(
+                        0,
+                        int(round((self.monotonic() - trace_started_at) * 1000)),
+                    )
+                return result
         raise MiniAppBeastError("request_failed")
 
     async def _start_request(
@@ -806,6 +920,8 @@ class WorldBossMonitor:
         init_data: str,
         token: str,
         player_id: int | None,
+        *,
+        trace: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._request(
             entry.origin,
@@ -817,6 +933,7 @@ class WorldBossMonitor:
             },
             retries=2,
             timeout=min(self.timeout, 12),
+            trace=trace,
         )
 
     async def _wait_for_challenge(
@@ -829,10 +946,28 @@ class WorldBossMonitor:
         token = entry.token
         deadline = self.monotonic() + WORLD_BOSS_ENTRY_WAIT_SECONDS
         was_waiting = False
+        entry_requests: list[dict[str, Any]] = []
+        entry_request_count = 0
         while self.monotonic() < deadline:
+            request_trace: dict[str, Any] = {}
+            entry_request_count += 1
             try:
-                payload = await self._start_request(entry, init_data, token, player_id)
+                payload = await self._start_request(
+                    entry,
+                    init_data,
+                    token,
+                    player_id,
+                    trace=request_trace,
+                )
             except MiniAppBeastError as exc:
+                observation = {
+                    "sequence": entry_request_count,
+                    "request": request_trace,
+                    "error": exc.code,
+                    "http_status": int(exc.status or 0),
+                }
+                if len(entry_requests) < 30:
+                    entry_requests.append(observation)
                 if exc.code == "boss_battle_not_started" or (
                     was_waiting and exc.code in AUTH_TOKEN_ERRORS
                 ):
@@ -840,8 +975,30 @@ class WorldBossMonitor:
                         token = entry.token
                     await self.sleep(1.2)
                     continue
+                details = _error_diagnostics(exc)
+                details["entry_request_count"] = entry_request_count
+                details["entry_requests"] = entry_requests
+                exc.details = details
                 raise
 
+            boss_observation = payload.get("boss") if isinstance(payload.get("boss"), dict) else {}
+            observation = {
+                "sequence": entry_request_count,
+                "request": request_trace,
+                "identity_selection": bool(payload.get("needsIdentitySelection")),
+                "challenge_ready": bool(
+                    isinstance(payload.get("challenge"), dict)
+                    and payload["challenge"].get("challengeId")
+                ),
+                "room_status": str(boss_observation.get("roomStatus") or ""),
+                "join_remaining_seconds": float(
+                    boss_observation.get("joinRemainingSeconds")
+                    or (payload.get("room") or {}).get("joinRemainingSeconds")
+                    or 0
+                ),
+            }
+            if len(entry_requests) < 30:
+                entry_requests.append(observation)
             if payload.get("needsIdentitySelection"):
                 choices = payload.get("identityChoices") or []
                 available_ids = {
@@ -870,6 +1027,12 @@ class WorldBossMonitor:
                 raise MiniAppBeastError("boss_not_enough_participants")
             challenge = payload.get("challenge")
             if isinstance(challenge, dict) and challenge.get("challengeId"):
+                payload = dict(payload)
+                payload["_client_diagnostics"] = {
+                    "entry_request_count": entry_request_count,
+                    "entry_requests": entry_requests,
+                    "selected_player_id": player_id,
+                }
                 return token, payload
 
             was_waiting = True
@@ -879,7 +1042,12 @@ class WorldBossMonitor:
                 or 0
             )
             await self.sleep(5.0 if remain > 5 else 1.2)
-        raise MiniAppBeastError("boss_challenge_timeout")
+        error = MiniAppBeastError("boss_challenge_timeout")
+        error.details = {
+            "entry_request_count": entry_request_count,
+            "entry_requests": entry_requests,
+        }
+        raise error
 
     @staticmethod
     def _windows(challenge: dict[str, Any]) -> list[dict[str, Any]]:
@@ -917,10 +1085,10 @@ class WorldBossMonitor:
         return normalized
 
     def _hit_offset_ms(self, window: dict[str, Any]) -> int:
-        """Spread accounts inside the perfect window instead of bursting one VPS IP."""
+        """Stagger accounts early so network latency does not push hits past center."""
         slot = int(WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0))
         perfect_ms = max(1, int(window.get("perfectMs") or 1))
-        step = min(40, max(0, (perfect_ms - 10) // 3))
+        step = min(40, max(0, (perfect_ms - 10) // 4))
         return slot * step
 
     async def _hit_window(
@@ -931,14 +1099,17 @@ class WorldBossMonitor:
         challenge_id: str,
         battle_start: float,
         window: dict[str, Any],
+        window_index: int = 0,
     ) -> dict[str, Any]:
-        target_ms = max(0, int(window["centerMs"]) + self._hit_offset_ms(window))
+        offset_ms = self._hit_offset_ms(window)
+        target_ms = max(0, int(window["centerMs"]) + offset_ms)
         target = battle_start + target_ms / 1000.0
         wait = target - self.monotonic()
         if wait > 0:
             await self.sleep(wait)
         elapsed_ms = max(0, int((self.monotonic() - battle_start) * 1000))
-        delta_ms = abs(elapsed_ms - int(window["centerMs"]))
+        signed_delta_ms = elapsed_ms - int(window["centerMs"])
+        delta_ms = abs(signed_delta_ms)
         action = {
             "t": elapsed_ms,
             "holdMs": WORLD_BOSS_HOLD_MS,
@@ -946,15 +1117,40 @@ class WorldBossMonitor:
         }
         matched = delta_ms <= int(window["hitMs"])
         perfect = matched and delta_ms <= int(window["perfectMs"])
+        diagnostic = {
+            "sequence": max(1, int(window_index or 0)),
+            "window_id": str(window.get("id") or "")[:120],
+            "center_ms": int(window["centerMs"]),
+            "hit_ms": int(window["hitMs"]),
+            "perfect_ms": int(window["perfectMs"]),
+            "account_offset_ms": offset_ms,
+            "target_ms": target_ms,
+            "actual_elapsed_ms": elapsed_ms,
+            "signed_delta_ms": signed_delta_ms,
+            "wake_lateness_ms": elapsed_ms - target_ms,
+            "hold_ms": WORLD_BOSS_HOLD_MS,
+            "local_matched": matched,
+            "local_perfect": perfect,
+        }
         if not matched:
+            diagnostic.update(
+                {
+                    "server_status": "not_sent",
+                    "error": "local_window_missed",
+                    "http_status": 0,
+                }
+            )
             return {
                 "action": action,
                 "ok": False,
                 "matched": False,
                 "perfect": False,
+                "accepted_perfect": False,
                 "damage": 0.0,
                 "error": "local_window_missed",
+                "diagnostic": diagnostic,
             }
+        request_trace: dict[str, Any] = {}
         try:
             payload = await self._request(
                 entry.origin,
@@ -969,25 +1165,61 @@ class WorldBossMonitor:
                 },
                 retries=2,
                 timeout=min(self.timeout, 10),
+                trace=request_trace,
             )
             hit = payload.get("hit") if isinstance(payload.get("hit"), dict) else {}
+            accepted_perfect = bool(hit.get("perfect")) if "perfect" in hit else perfect
+            diagnostic.update(
+                {
+                    "request_completed_elapsed_ms": max(
+                        0,
+                        int((self.monotonic() - battle_start) * 1000),
+                    ),
+                    "request": request_trace,
+                    "server_status": "accepted",
+                    "http_status": 200,
+                    "accepted_perfect": accepted_perfect,
+                    "server_hit": _diagnostic_value(hit),
+                }
+            )
             return {
                 "action": action,
                 "ok": True,
                 "matched": matched,
                 "perfect": perfect,
+                "accepted_perfect": accepted_perfect,
                 "damage": float(hit.get("damageYi") or 0),
+                "diagnostic": diagnostic,
             }
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            status = int(getattr(exc, "status", 0) or 0)
+            diagnostic.update(
+                {
+                    "request_completed_elapsed_ms": max(
+                        0,
+                        int((self.monotonic() - battle_start) * 1000),
+                    ),
+                    "request": request_trace,
+                    "server_status": "rejected",
+                    "http_status": status,
+                    "accepted_perfect": False,
+                    "error": _error_code(exc),
+                }
+            )
+            server_details = _error_diagnostics(exc)
+            if server_details:
+                diagnostic["server_details"] = server_details
             return {
                 "action": action,
                 "ok": False,
                 "matched": matched,
                 "perfect": perfect,
+                "accepted_perfect": False,
                 "damage": 0.0,
                 "error": _error_code(exc),
+                "diagnostic": diagnostic,
             }
 
     async def _fight(
@@ -1003,6 +1235,7 @@ class WorldBossMonitor:
             raise MiniAppBeastError("boss_challenge_missing")
         windows = self._windows(challenge)
 
+        begin_trace: dict[str, Any] = {}
         started_request_at = self.monotonic()
         sync = await self._request(
             entry.origin,
@@ -1014,10 +1247,12 @@ class WorldBossMonitor:
             },
             retries=1,
             timeout=min(self.timeout, 10),
+            trace=begin_trace,
         )
         response_at = self.monotonic()
         round_trip = max(0.0, response_at - started_request_at)
-        starts_in = max(0.0, float(sync.get("startsInMs") or 0) / 1000.0 - round_trip / 2.0)
+        server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))
+        starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
         battle_start = response_at + starts_in
 
         tasks = [
@@ -1029,9 +1264,10 @@ class WorldBossMonitor:
                     challenge_id,
                     battle_start,
                     window,
+                    index,
                 )
             )
-            for window in windows
+            for index, window in enumerate(windows, start=1)
         ]
         hit_results = await asyncio.gather(*tasks)
         last_end_ms = max(item["centerMs"] + item["hitMs"] for item in windows)
@@ -1044,8 +1280,11 @@ class WorldBossMonitor:
         actions.sort(key=lambda item: item["t"])
         successful_hits = sum(1 for item in hit_results if item["ok"])
         failed_hits = len(hit_results) - successful_hits
-        matched_hits = sum(1 for item in hit_results if item.get("matched"))
-        perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
+        local_matched_hits = sum(1 for item in hit_results if item.get("matched"))
+        local_perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
+        accepted_perfect_hits = sum(
+            1 for item in hit_results if item.get("ok") and item.get("accepted_perfect")
+        )
         damage_yi_hits = [
             max(0.0, float(item.get("damage") or 0))
             for item in hit_results
@@ -1081,16 +1320,19 @@ class WorldBossMonitor:
             "dead": False,
             "actions": actions,
             "clientStats": {
-                "dodges": matched_hits,
+                # Match the browser proof: locally matched actions stay in clientStats
+                # even when a realtime /hit report is rejected by the server.
+                "dodges": local_matched_hits,
                 "grazes": 0,
                 "damage": 0,
-                "hits": matched_hits,
-                "perfects": perfect_hits,
-                "combo": matched_hits,
-                "bestCombo": matched_hits,
+                "hits": local_matched_hits,
+                "perfects": local_perfect_hits,
+                "combo": local_matched_hits,
+                "bestCombo": local_matched_hits,
             },
             "realtimeDamageApplied": realtime_damage,
         }
+        finish_trace: dict[str, Any] = {}
         finished = await self._request(
             entry.origin,
             "/api/miniapp/xianxia-world-boss/finish",
@@ -1100,14 +1342,58 @@ class WorldBossMonitor:
                 "bossProof": proof,
             },
             retries=1,
+            trace=finish_trace,
         )
         result = finished.get("result") if isinstance(finished.get("result"), dict) else {}
+        player = _diagnostic_value(player)
+        boss = payload.get("boss") if isinstance(payload.get("boss"), dict) else {}
+        challenge_profile = {
+            key: value
+            for key, value in challenge.items()
+            if key not in {"challengeId", "windows"}
+        }
+        challenge_diagnostics = _diagnostic_value(challenge_profile)
+        diagnostics = {
+            "version": WORLD_BOSS_DIAGNOSTIC_VERSION,
+            "recorded_at": _now_text(),
+            "strategy": {
+                "stance": WORLD_BOSS_STANCE,
+                "hold_ms": WORLD_BOSS_HOLD_MS,
+                "account_offset_slot": int(
+                    WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0)
+                ),
+            },
+            "player": player if isinstance(player, dict) else {},
+            "boss": _diagnostic_value(boss),
+            "challenge": {
+                **(
+                    challenge_diagnostics
+                    if isinstance(challenge_diagnostics, dict)
+                    else {}
+                ),
+                "window_count": len(windows),
+            },
+            "entry": _diagnostic_value(payload.get("_client_diagnostics") or {}),
+            "clock_sync": {
+                "request": begin_trace,
+                "round_trip_ms": int(round(round_trip * 1000)),
+                "server_starts_in_ms": int(round(server_starts_in_ms)),
+                "applied_wait_ms": int(round(starts_in * 1000)),
+            },
+            "hits": [item.get("diagnostic") or {} for item in hit_results],
+            "finish": {
+                "request": finish_trace,
+                "server_result": _diagnostic_value(result),
+            },
+        }
         return {
             "grade": str(result.get("grade") or ""),
             "score": int(result.get("score") or 0),
             "player_hp": int(result.get("player_hp") if result.get("player_hp") is not None else player_hp),
             "hit_count": successful_hits,
-            "perfect_count": perfect_hits,
+            "perfect_count": accepted_perfect_hits,
+            "local_matched_count": local_matched_hits,
+            "local_perfect_count": local_perfect_hits,
             "failed_hit_count": failed_hits,
             "hit_error_counts": hit_error_counts,
             "window_count": len(windows),
@@ -1115,6 +1401,7 @@ class WorldBossMonitor:
             "damage_yi_average": damage_yi_average,
             "damage_yi_hit_count": len(damaging_hits),
             "damage_yi_hits": damage_yi_hits,
+            "diagnostics": diagnostics,
         }
 
     async def _participate(
@@ -1136,6 +1423,10 @@ class WorldBossMonitor:
             player_id,
             identity=identity,
         )
+        client_diagnostics = payload.get("_client_diagnostics")
+        if isinstance(client_diagnostics, dict):
+            client_diagnostics["requested_identity"] = identity
+            client_diagnostics["fixed_player_id_available"] = player_id is not None
         return await self._fight(entry, init_data, session_token, payload)
 
     @staticmethod
@@ -1170,6 +1461,82 @@ class WorldBossMonitor:
         )
 
     @staticmethod
+    def _timing_diagnostic_summary(outcome: dict[str, Any]) -> str:
+        diagnostics = outcome.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return ""
+        parts: list[str] = []
+        player = diagnostics.get("player")
+        if isinstance(player, dict) and player:
+            preferred_keys = (
+                "label",
+                "root",
+                "maxHp",
+                "attackBonus",
+                "attackPower",
+                "damageBonus",
+                "power",
+                "cultivationLevel",
+                "realm",
+                "sect",
+            )
+            profile = {
+                key: player[key]
+                for key in preferred_keys
+                if key in player and not isinstance(player[key], (dict, list))
+            }
+            if profile:
+                parts.append(
+                    "战场参数 "
+                    + json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+                )
+        clock_sync = diagnostics.get("clock_sync")
+        if isinstance(clock_sync, dict):
+            parts.append(
+                "校时 RTT {rtt}ms/服务端等待 {server}ms/实际等待 {applied}ms".format(
+                    rtt=int(clock_sync.get("round_trip_ms") or 0),
+                    server=int(clock_sync.get("server_starts_in_ms") or 0),
+                    applied=int(clock_sync.get("applied_wait_ms") or 0),
+                )
+            )
+        hits = diagnostics.get("hits")
+        if isinstance(hits, list):
+            durations = sorted(
+                int((item.get("request") or {}).get("total_duration_ms") or 0)
+                for item in hits
+                if isinstance(item, dict) and isinstance(item.get("request"), dict)
+            )
+            if durations:
+                median = durations[(len(durations) - 1) // 2]
+                p95 = durations[max(0, (len(durations) * 95 + 99) // 100 - 1)]
+                parts.append(
+                    f"逐击 HTTP p50/p95/max {median}/{p95}/{durations[-1]}ms"
+                )
+            failures = []
+            for item in hits:
+                if not isinstance(item, dict) or not item.get("error"):
+                    continue
+                request = item.get("request") if isinstance(item.get("request"), dict) else {}
+                failure = (
+                    f"#{int(item.get('sequence') or 0)} {item.get('error')} "
+                    f"计划{int(item.get('account_offset_ms') or 0):+d}ms/"
+                    f"实际{int(item.get('signed_delta_ms') or 0):+d}ms/"
+                    f"HTTP {int(request.get('total_duration_ms') or 0)}ms/"
+                    f"状态{int(item.get('http_status') or 0)}"
+                )
+                details = item.get("server_details")
+                if isinstance(details, dict) and details:
+                    failure += "/服务端" + json.dumps(
+                        details,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )[:240]
+                failures.append(failure)
+            if failures:
+                parts.append("失败定位 [" + "；".join(failures) + "]")
+        return "；".join(parts)
+
+    @staticmethod
     def _outcome_summary(outcome: dict[str, Any]) -> str:
         grade = str(outcome.get("grade") or "已结算")
         score = int(outcome.get("score") or 0)
@@ -1179,6 +1546,9 @@ class WorldBossMonitor:
         hp = int(outcome.get("player_hp") or 0)
         failed = int(outcome.get("failed_hit_count") or 0)
         summary = f"{grade} {score}分；命中 {hits}/{total}，完美 {perfects}，余血 {hp}"
+        local_perfects = int(outcome.get("local_perfect_count") or perfects)
+        if local_perfects != perfects:
+            summary += f"（本地判定 {local_perfects}，服务端确认 {perfects}）"
         if failed:
             summary += f"；{failed} 次实时回传失败"
             error_counts = outcome.get("hit_error_counts")
@@ -1193,6 +1563,9 @@ class WorldBossMonitor:
         damage_summary = WorldBossMonitor._damage_summary(outcome)
         if damage_summary:
             summary += f"；{damage_summary}"
+        diagnostic_summary = WorldBossMonitor._timing_diagnostic_summary(outcome)
+        if diagnostic_summary:
+            summary += f"；诊断：{diagnostic_summary}"
         return summary
 
 

@@ -239,6 +239,30 @@
         .reward-summary-text { color: #d1fae5; font-family: 'JetBrains Mono', monospace; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
         .reward-excerpt { color: var(--text-secondary); white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 
+        .inventory-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
+        .inventory-toolbar { display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(9rem, 13rem) auto minmax(14rem, 1fr) auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .inventory-action { min-height: 2.04rem; display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; border: 1px solid rgba(0,210,255,0.38); background: rgba(0,210,255,0.1); color: var(--accent-color); border-radius: 8px; padding: 0.48rem 0.72rem; font-size: 0.76rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
+        .inventory-action:hover { background: rgba(0,210,255,0.18); }
+        .inventory-action.secondary { color: #bbf7d0; border-color: rgba(34,197,94,0.38); background: rgba(34,197,94,0.1); }
+        .inventory-action.secondary:hover { background: rgba(34,197,94,0.17); }
+        .inventory-action:disabled { opacity: 0.55; cursor: wait; }
+        .inventory-action svg { width: 0.86rem; height: 0.86rem; }
+        .inventory-state-line { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap; min-height: 2.25rem; padding: 0.5rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; }
+        .inventory-table-wrap { max-height: 430px; overflow: auto; }
+        .inventory-table { min-width: 760px; }
+        .inventory-table.search-table { min-width: 980px; }
+        .inventory-type { display: inline-flex; min-width: 2.8rem; align-items: center; justify-content: center; border-radius: 5px; padding: 0.13rem 0.38rem; font-weight: 900; white-space: nowrap; }
+        .inventory-type.treasure { color: #fcd34d; background: rgba(245,158,11,0.14); }
+        .inventory-type.item { color: #93c5fd; background: rgba(59,130,246,0.14); }
+        .inventory-type.material { color: #6ee7b7; background: rgba(16,185,129,0.14); }
+        .inventory-name { color: var(--text-primary); font-weight: 800; }
+        .inventory-quantity { color: #d1fae5; font-family: 'JetBrains Mono', monospace; font-weight: 800; }
+        .inventory-detail { color: var(--text-secondary); overflow-wrap: anywhere; }
+        .inventory-search-band { border-top: 1px solid var(--border-color); }
+        .inventory-search-band[hidden] { display: none; }
+        .inventory-search-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.68rem 1rem; color: var(--text-primary); font-size: 0.78rem; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .inventory-search-head span:last-child { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; font-weight: 500; }
+
         .duel-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
         .duel-toolbar { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border-color); display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
         .duel-interval-field { width: 8.5rem; }
@@ -1220,6 +1244,10 @@
             .red-packet-save { width: 100%; }
             .automation-account-grid { grid-template-columns: 1fr; }
             .automation-save { width: 100%; }
+            .inventory-toolbar { grid-template-columns: 1fr; align-items: stretch; }
+            .inventory-action { width: 100%; }
+            .inventory-section .record-header { flex-direction: column; align-items: flex-start; }
+            .inventory-section .record-summary { width: 100%; text-align: left; overflow-wrap: anywhere; line-height: 1.4; }
         }
     </style>
 </head>
@@ -1246,6 +1274,7 @@
         <nav class="workspace-tabs" aria-label="Dashboard 工作区">
             <button class="workspace-tab is-active" type="button" data-workspace-target="records" aria-selected="true" onclick="setWorkspaceView('records', this)"><i data-lucide="list-checks" aria-hidden="true"></i>指令记录</button>
             <button class="workspace-tab" type="button" data-workspace-target="rewards" aria-selected="false" onclick="setWorkspaceView('rewards', this)"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>周期收益</button>
+            <button class="workspace-tab" type="button" data-workspace-target="inventory" aria-selected="false" onclick="setWorkspaceView('inventory', this)"><i data-lucide="backpack" aria-hidden="true"></i>储物袋</button>
             <button class="workspace-tab" type="button" data-workspace-target="duels" aria-selected="false" onclick="setWorkspaceView('duels', this)"><i data-lucide="swords" aria-hidden="true"></i>斗法</button>
             <button class="workspace-tab" type="button" data-workspace-target="automation" aria-selected="false" onclick="setWorkspaceView('automation', this)"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>自动化设置</button>
             <button class="workspace-tab" type="button" data-workspace-target="red-packets" aria-selected="false" onclick="setWorkspaceView('red-packets', this)"><i data-lucide="gift" aria-hidden="true"></i>抢红包</button>
@@ -1314,6 +1343,42 @@
             </div>
             <div class="reward-table-wrap" id="daily-reward-content">
                 <div class="record-empty">加载中...</div>
+            </div>
+        </section>
+        <section class="workspace-view inventory-section" data-workspace-view="inventory">
+            <div class="record-header">
+                <div class="record-title">Mini App 储物袋</div>
+                <div class="record-summary" id="inventory-summary">加载中...</div>
+            </div>
+            <div class="inventory-toolbar">
+                <label class="record-field">
+                    账号
+                    <select id="inventory-account-select" class="record-select" onchange="changeInventoryAccount()"></select>
+                </label>
+                <label class="record-field">
+                    身份
+                    <select id="inventory-identity-select" class="record-select" onchange="renderInventoryDashboard()"></select>
+                </label>
+                <button class="inventory-action" id="inventory-refresh-selected" type="button" onclick="refreshSelectedInventory()"><i data-lucide="refresh-cw" aria-hidden="true"></i>刷新身份</button>
+                <label class="record-field">
+                    搜索物品
+                    <input id="inventory-search-input" class="record-input" type="search" placeholder="输入物品名称" oninput="scheduleInventorySearch()">
+                </label>
+                <button class="inventory-action secondary" id="inventory-refresh-all" type="button" onclick="refreshAllInventory()"><i data-lucide="refresh-cw" aria-hidden="true"></i>刷新全部</button>
+            </div>
+            <div class="inventory-state-line">
+                <span id="inventory-selected-state">等待数据...</span>
+                <span id="inventory-refresh-state"></span>
+            </div>
+            <div class="inventory-table-wrap" id="inventory-content">
+                <div class="record-empty">加载中...</div>
+            </div>
+            <div class="inventory-search-band" id="inventory-search-band" hidden>
+                <div class="inventory-search-head">
+                    <span>跨身份搜索</span>
+                    <span id="inventory-search-summary"></span>
+                </div>
+                <div class="inventory-table-wrap" id="inventory-search-content"></div>
             </div>
         </section>
         <section class="workspace-view duel-record-section" data-workspace-view="duels">
@@ -1385,7 +1450,7 @@
         </section>
         <section class="workspace-view automation-section" data-workspace-view="automation">
             <div class="record-header">
-                <div class="record-title">青元子 Boss 与慕兰支援</div>
+                <div class="record-title">自动化设置</div>
                 <div class="record-summary" id="automation-summary">加载中...</div>
             </div>
             <div class="automation-settings-grid">
@@ -1404,8 +1469,53 @@
                     </div>
                 </div>
                 <div class="automation-card">
+                    <div class="automation-card-title">万兽谷探渊</div>
+                    <div class="automation-card-hint">主号/小号的 Mini App 探渊只会选择战力落在区间内的灵兽；留空表示不限。落在区间内的灵兽不会参与巡边。</div>
+                    <label class="record-field">
+                        最低战力（留空不限）
+                        <input id="miniapp-beast-abyss-power-min" class="record-input" type="number" min="0" step="1" placeholder="例如 1000" oninput="markAutomationSettingsDirty()">
+                    </label>
+                    <label class="record-field">
+                        最高战力（留空不限）
+                        <input id="miniapp-beast-abyss-power-max" class="record-input" type="number" min="0" step="1" placeholder="例如 1300" oninput="markAutomationSettingsDirty()">
+                    </label>
+                    <div class="automation-card-hint" id="miniapp-beast-abyss-runtime">当前按战力不限选取可探渊灵兽。</div>
+                </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">天星宗 · 主号主魂闭关</div>
+                    <div class="automation-mode-options" id="tianxing-meditation-mode-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="tianxing-use-heqi-pill" type="checkbox" onchange="syncTianxingControls(); markAutomationSettingsDirty()">
+                            服用合气丹
+                        </label>
+                    </div>
+                    <div class="automation-card-hint" id="tianxing-runtime">等待运行状态...</div>
+                </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">天星宗 · 刷天机值</div>
+                    <div class="automation-card-hint">独立通用技能。启用后，本账号所有宗门为天星宗的身份都会分别完成本轮目标，互不共用进度。</div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="tianxing-tianji-grind-enabled" type="checkbox" onchange="syncTianxingControls(); markAutomationSettingsDirty()">
+                            启用刷天机值
+                        </label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="tianxing-tianji-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <label class="record-field">
+                        每个身份本轮目标
+                        <input id="tianxing-tianji-grind-target" class="record-input" type="number" min="1" max="10000" step="1" value="1" oninput="markAutomationSettingsDirty()">
+                    </label>
+                    <div class="automation-card-hint" id="tianxing-tianji-runtime">等待运行状态...</div>
+                </div>
+                <div class="automation-card">
                     <div class="automation-card-title">灵溪自动垂钓</div>
-                    <div class="automation-card-hint">所选身份按每竿轮转。系统自动识别当前持竿者，通过“上架凝血草换银竹钓竿 → 持竿者购买挂单”完成转移，并在 Mini App 验竿后继续。自动购饵固定每次 10 份。</div>
+                    <div class="automation-card-hint">所选身份按每竿轮转。自动模式以 Mini App 返回的实际竿型为准；指定竿型时只使用所选鱼竿。转移挂单会自动匹配同一种鱼竿，并在 Mini App 验竿后继续。</div>
                     <div class="automation-mode-options">
                         <label class="automation-option">
                             <input id="miniapp-fishing-enabled" type="checkbox" onchange="markAutomationSettingsDirty()">
@@ -1416,6 +1526,10 @@
                     <div class="automation-account-grid" id="miniapp-fishing-participant-controls">
                         <div class="record-empty">加载中...</div>
                     </div>
+                    <label class="record-field">
+                        使用鱼竿
+                        <select id="miniapp-fishing-rod" class="record-select" onchange="markAutomationSettingsDirty()"></select>
+                    </label>
                     <label class="record-field">
                         当前钓竿持有者
                         <select id="miniapp-fishing-rod-owner" class="record-select" onchange="markAutomationSettingsDirty()"></select>
@@ -1535,7 +1649,8 @@
             dailyRewards: 60000,
             duels: 15000,
             automation: 15000,
-            redPackets: 10000
+            redPackets: 10000,
+            inventory: 5000
         };
         const pollBusy = {
             status: false,
@@ -1544,7 +1659,8 @@
             dailyRewards: false,
             duels: false,
             automation: false,
-            redPackets: false
+            redPackets: false,
+            inventory: false
         };
         let logState = {
             lines: [],
@@ -1573,7 +1689,12 @@
         let redPacketDashboardData = {settings: {}, accounts: []};
         let redPacketSettingsDirty = false;
         let redPacketSavePending = false;
-        let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_fishing: {}};
+        let inventoryDashboardData = {accounts: [], search_results: [], summary: {}};
+        let inventoryExpectedRequests = {};
+        let inventoryLastActionState = '';
+        let inventoryRequestStartedAt = 0;
+        let inventorySearchTimer = null;
+        let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
         let automationSettingsDirty = false;
         let automationSavePending = false;
         let lastFishingAutoSummary = null;
@@ -1606,6 +1727,7 @@
             if (target === 'duels') updateDuelDashboard(true);
             if (target === 'automation') updateAutomationDashboard(true);
             if (target === 'red-packets') updateRedPacketDashboard(true);
+            if (target === 'inventory') updateInventoryDashboard(true);
             if (trigger) trigger.blur();
             refreshIcons();
         }
@@ -3919,18 +4041,40 @@
             if (summary) summary.innerText = '设置未保存';
         }
 
+        function syncTianxingControls() {
+            const mode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || 'deep';
+            const pill = document.getElementById('tianxing-use-heqi-pill');
+            const grind = document.getElementById('tianxing-tianji-grind-enabled');
+            const target = document.getElementById('tianxing-tianji-grind-target');
+            if (pill) pill.disabled = mode !== 'fate';
+            if (target) target.disabled = !Boolean(grind?.checked);
+            document.querySelectorAll('#tianxing-tianji-participant-controls input[type="checkbox"]').forEach(input => {
+                input.disabled = !Boolean(grind?.checked);
+            });
+        }
+
         function renderAutomationDashboard(data) {
-            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_fishing: {}};
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
+            const abyss = automationDashboardData.miniapp_beast_abyss || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
+            const tianxing = automationDashboardData.tianxing || {};
+            const abyssSettings = settings.miniapp_beast_abyss || {};
             const fishingSettings = settings.miniapp_fishing || {};
+            const tianxingSettings = settings.tianxing || {};
             const accounts = Array.isArray(worldBoss.accounts) ? worldBoss.accounts : [];
             const selected = new Set(settings.world_boss?.participants || []);
             const mode = String(mulan.mode || settings.mulan_support?.mode || '护阵');
+            const abyssPowerMin = Number(abyss.power_min ?? abyssSettings.power_min ?? 0);
+            const abyssPowerMax = Number(abyss.power_max ?? abyssSettings.power_max ?? 0);
+            const abyssRangeText = (abyssPowerMin > 0 || abyssPowerMax > 0)
+                ? `${abyssPowerMin || 0}-${abyssPowerMax || '∞'}`
+                : '不限';
             const fishingEnabled = Boolean(fishing.enabled ?? fishingSettings.enabled ?? true);
             const fishingParticipants = new Set(fishing.participants || fishingSettings.participants || []);
+            const fishingRod = String(fishing.rod || fishingSettings.rod || 'auto');
             const fishingRodOwner = String(fishing.rod_owner || fishingSettings.rod_owner || 'auto');
             const fishingPond = String(fishing.pond || fishingSettings.pond || 'qingxi');
             const fishingBait = String(fishing.bait || fishingSettings.bait || 'demon_blood');
@@ -3938,12 +4082,19 @@
             const fishingStartTime = String(fishing.start_time ?? fishingSettings.start_time ?? '');
             const fishingAccounts = Array.isArray(fishing.accounts) ? fishing.accounts : [];
             const fishingRuntime = fishing.runtime || {};
+            const tianxingMeditationMode = String(tianxing.meditation_mode || tianxingSettings.meditation_mode || 'deep');
+            const tianxingUsePill = Boolean(tianxing.use_heqi_pill ?? tianxingSettings.use_heqi_pill ?? false);
+            const tianxingGrindEnabled = Boolean(tianxing.tianji_grind_enabled ?? tianxingSettings.tianji_grind_enabled ?? false);
+            const tianxingGrindTarget = Number(tianxing.tianji_grind_target ?? tianxingSettings.tianji_grind_target ?? 0);
+            const tianxingTianjiParticipants = new Set(tianxing.tianji_grind_participants ?? tianxingSettings.tianji_grind_participants ?? []);
+            const tianxingTianjiAccounts = Array.isArray(tianxing.tianji_accounts) ? tianxing.tianji_accounts : [];
+            const tianxingModeName = (tianxing.meditation_modes || []).find(item => item.key === tianxingMeditationMode)?.name || tianxingMeditationMode;
             const fishingOptionName = (options, key) => (
                 (Array.isArray(options) ? options : []).find(item => String(item.key || '') === String(key || ''))?.name || key
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -3982,6 +4133,42 @@
                 }
                 const fishingEnabledControl = document.getElementById('miniapp-fishing-enabled');
                 if (fishingEnabledControl) fishingEnabledControl.checked = fishingEnabled;
+                const tianxingModeControls = document.getElementById('tianxing-meditation-mode-controls');
+                if (tianxingModeControls) {
+                    tianxingModeControls.innerHTML = (tianxing.meditation_modes || []).map(item => `
+                        <label class="automation-option">
+                            <input type="radio" name="tianxing-meditation-mode" value="${escapeHtml(item.key || '')}" ${item.key === tianxingMeditationMode ? 'checked' : ''} onchange="syncTianxingControls(); markAutomationSettingsDirty()">
+                            ${escapeHtml(item.name || item.key || '')}
+                        </label>
+                    `).join('');
+                }
+                const tianxingPillControl = document.getElementById('tianxing-use-heqi-pill');
+                if (tianxingPillControl) tianxingPillControl.checked = tianxingUsePill;
+                const tianxingGrindControl = document.getElementById('tianxing-tianji-grind-enabled');
+                if (tianxingGrindControl) tianxingGrindControl.checked = tianxingGrindEnabled;
+                const tianxingGrindTargetControl = document.getElementById('tianxing-tianji-grind-target');
+                if (tianxingGrindTargetControl) tianxingGrindTargetControl.value = String(Math.max(1, tianxingGrindTarget || 1));
+                const tianxingTianjiParticipantControls = document.getElementById('tianxing-tianji-participant-controls');
+                if (tianxingTianjiParticipantControls) {
+                    tianxingTianjiParticipantControls.innerHTML = tianxingTianjiAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${tianxingTianjiParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置的天星宗身份。</div>';
+                }
+                syncTianxingControls();
+                const abyssPowerMinControl = document.getElementById('miniapp-beast-abyss-power-min');
+                if (abyssPowerMinControl) abyssPowerMinControl.value = abyssPowerMin > 0 ? String(abyssPowerMin) : '';
+                const abyssPowerMaxControl = document.getElementById('miniapp-beast-abyss-power-max');
+                if (abyssPowerMaxControl) abyssPowerMaxControl.value = abyssPowerMax > 0 ? String(abyssPowerMax) : '';
                 const fishingParticipantControls = document.getElementById('miniapp-fishing-participant-controls');
                 if (fishingParticipantControls) {
                     fishingParticipantControls.innerHTML = fishingAccounts.map(account => `
@@ -4018,17 +4205,25 @@
                     `).join('');
                     select.value = value;
                 };
+                renderFishingSelect('miniapp-fishing-rod', fishing.rods, fishingRod);
                 renderFishingSelect('miniapp-fishing-pond', fishing.ponds, fishingPond);
                 renderFishingSelect('miniapp-fishing-bait', fishing.baits, fishingBait);
                 renderFishingSelect('miniapp-fishing-chum', fishing.chums, fishingChum);
                 const fishingStartTimeControl = document.getElementById('miniapp-fishing-start-time');
                 if (fishingStartTimeControl) fishingStartTimeControl.value = fishingStartTime;
             }
+            const abyssRuntimeControl = document.getElementById('miniapp-beast-abyss-runtime');
+            if (abyssRuntimeControl) {
+                abyssRuntimeControl.innerText = (abyssPowerMin > 0 || abyssPowerMax > 0)
+                    ? `当前仅允许战力 ${abyssPowerMin || 0}-${abyssPowerMax || '∞'} 的灵兽探渊，并自动排除巡边。`
+                    : '当前按战力不限选取可探渊灵兽。';
+            }
             const fishingRuntimeControl = document.getElementById('miniapp-fishing-runtime');
             if (fishingRuntimeControl) {
                 const runtimeParts = [
                     `状态：${fishingRuntime.detail || fishingRuntime.status || '等待启动'}`,
-                    `当前持竿：${fishingRuntime.rod_holder_label || '尚未识别'}`,
+                    `目标鱼竿：${fishingOptionName(fishing.rods, fishingRod)}`,
+                    `当前持竿：${fishingRuntime.rod_holder_label || '尚未识别'}${fishingRuntime.rod_name ? `（${fishingRuntime.rod_name}）` : ''}`,
                     `下一位：${fishingRuntime.current_label || '待定'}`
                 ];
                 if (fishingRuntime.transfer_from_label || fishingRuntime.transfer_to_label) {
@@ -4036,11 +4231,22 @@
                 }
                 fishingRuntimeControl.innerText = runtimeParts.join(' · ');
             }
+            const tianxingRuntimeControl = document.getElementById('tianxing-runtime');
+            if (tianxingRuntimeControl) {
+                const pillText = tianxingMeditationMode === 'fate' && tianxingUsePill ? '每两轮用丹' : '不用丹';
+                tianxingRuntimeControl.innerText = `${tianxingModeName} · ${pillText}`;
+            }
+            const tianxingTianjiRuntimeControl = document.getElementById('tianxing-tianji-runtime');
+            if (tianxingTianjiRuntimeControl) {
+                tianxingTianjiRuntimeControl.innerText = tianxingGrindEnabled
+                    ? `${tianxingTianjiParticipants.size} 个身份分别执行 · 每个身份目标 ${tianxingGrindTarget}`
+                    : '刷天机值已暂停';
+            }
             const hint = document.getElementById('automation-updated-hint');
             if (hint) {
                 const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
-                const fishingText = `${fishingOptionName(fishing.ponds, fishingPond)} / ${fishingOptionName(fishing.baits, fishingBait)} / ${fishingOptionName(fishing.chums, fishingChum)}`;
-                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 垂钓 ${fishingText} · ${fishingParticipants.size} 个身份 · ${fishingStartTime ? `${fishingStartTime} 开始` : '立即开始'}`;
+                const fishingText = `${fishingOptionName(fishing.rods, fishingRod)} / ${fishingOptionName(fishing.ponds, fishingPond)} / ${fishingOptionName(fishing.baits, fishingBait)} / ${fishingOptionName(fishing.chums, fishingChum)}`;
+                hint.innerText = `${updated} · 当前指令 ${mulan.command || `.支援慕兰 ${mode}`} · 探渊战力 ${abyssRangeText} · 垂钓 ${fishingText} · ${fishingParticipants.size} 个身份 · ${fishingStartTime ? `${fishingStartTime} 开始` : '立即开始'}`;
             }
             const saveButton = document.getElementById('automation-save');
             if (saveButton) saveButton.disabled = automationSavePending;
@@ -4072,25 +4278,47 @@
                 .map(input => input.value)
                 .filter(Boolean);
             const mode = document.querySelector('#mulan-support-mode-controls input[type="radio"]:checked')?.value || '';
+            const abyssPowerMin = document.getElementById('miniapp-beast-abyss-power-min')?.value || '';
+            const abyssPowerMax = document.getElementById('miniapp-beast-abyss-power-max')?.value || '';
             const fishingEnabled = Boolean(document.getElementById('miniapp-fishing-enabled')?.checked);
             const fishingParticipants = Array.from(document.querySelectorAll('#miniapp-fishing-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
+            const fishingRod = document.getElementById('miniapp-fishing-rod')?.value || 'auto';
             const fishingRodOwner = document.getElementById('miniapp-fishing-rod-owner')?.value || 'auto';
             const fishingPond = document.getElementById('miniapp-fishing-pond')?.value || '';
             const fishingBait = document.getElementById('miniapp-fishing-bait')?.value || '';
             const fishingChum = document.getElementById('miniapp-fishing-chum')?.value || '';
             const fishingStartTime = document.getElementById('miniapp-fishing-start-time')?.value || '';
+            const tianxingMeditationMode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || '';
+            const tianxingUsePill = Boolean(document.getElementById('tianxing-use-heqi-pill')?.checked);
+            const tianxingGrindEnabled = Boolean(document.getElementById('tianxing-tianji-grind-enabled')?.checked);
+            const tianxingGrindTarget = document.getElementById('tianxing-tianji-grind-target')?.value || '';
+            const tianxingTianjiParticipants = Array.from(document.querySelectorAll('#tianxing-tianji-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
             if (!mode) {
                 alert('请选择慕兰支援参数。');
                 return;
             }
-            if (!fishingPond || !fishingBait || !fishingChum) {
+            if (!fishingRod || !fishingPond || !fishingBait || !fishingChum) {
                 alert('请选择完整的灵溪垂钓设置。');
                 return;
             }
             if (fishingEnabled && !fishingParticipants.length) {
                 alert('启用灵溪垂钓时至少选择一个参与身份。');
+                return;
+            }
+            if (!tianxingMeditationMode) {
+                alert('请选择天星宗闭关模式。');
+                return;
+            }
+            if (tianxingGrindEnabled && Number(tianxingGrindTarget) <= 0) {
+                alert('请输入本轮需要刷的天机值。');
+                return;
+            }
+            if (tianxingGrindEnabled && !tianxingTianjiParticipants.length) {
+                alert('启用刷天机值时至少选择一个身份。');
                 return;
             }
             automationSavePending = true;
@@ -4102,14 +4330,26 @@
                     body: JSON.stringify({
                         world_boss_participants: participants,
                         mulan_support_mode: mode,
+                        miniapp_beast_abyss: {
+                            power_min: abyssPowerMin,
+                            power_max: abyssPowerMax,
+                        },
                         miniapp_fishing: {
                             enabled: fishingEnabled,
                             participants: fishingParticipants,
+                            rod: fishingRod,
                             rod_owner: fishingRodOwner,
                             pond: fishingPond,
                             bait: fishingBait,
                             chum: fishingChum,
                             start_time: fishingStartTime
+                        },
+                        tianxing: {
+                            meditation_mode: tianxingMeditationMode,
+                            use_heqi_pill: tianxingUsePill,
+                            tianji_grind_enabled: tianxingGrindEnabled,
+                            tianji_grind_target: tianxingGrindTarget,
+                            tianji_grind_participants: tianxingTianjiParticipants
                         }
                     })
                 });
@@ -4148,12 +4388,16 @@
             return ({
                 listening: '监听中',
                 clicked: '已点击',
+                claim_pending: '等待到账',
+                claimed: '领取成功',
+                claim_unconfirmed: '未确认到账',
                 claim_rejected: '领取未受理',
                 below_minimum: '金额不足',
                 amount_unknown: '金额未识别',
                 outside_schedule: '不在时段',
                 waiting_delay: '延时等待',
                 delay_cancelled: '延时已取消',
+                claimed_by_other_account: '由其他账号领取',
                 unsupported_button: '按钮不支持',
                 click_error: '点击失败',
                 install_error: '接入失败'
@@ -4303,6 +4547,226 @@
                 redPacketSavePending = false;
                 const saveButton = document.getElementById('red-packet-save');
                 if (saveButton) saveButton.disabled = false;
+            }
+        }
+
+        function inventoryTypeClass(type) {
+            return ({'法宝': 'treasure', '物品': 'item', '材料': 'material'})[String(type || '')] || 'item';
+        }
+
+        function inventoryQuantity(value) {
+            const number = Number(value);
+            return Number.isFinite(number) ? number.toLocaleString('zh-CN') : String(value ?? '0');
+        }
+
+        function inventoryAccountByKey(key) {
+            return (inventoryDashboardData.accounts || []).find(item => item.account === key) || null;
+        }
+
+        function syncInventorySelectors() {
+            const accountSelect = document.getElementById('inventory-account-select');
+            const identitySelect = document.getElementById('inventory-identity-select');
+            if (!accountSelect || !identitySelect) return;
+            const accounts = Array.isArray(inventoryDashboardData.accounts) ? inventoryDashboardData.accounts : [];
+            const oldAccount = accountSelect.value;
+            accountSelect.innerHTML = accounts.map(item =>
+                `<option value="${escapeHtml(item.account)}">${escapeHtml(item.name || item.account)}</option>`
+            ).join('');
+            accountSelect.value = accounts.some(item => item.account === oldAccount) ? oldAccount : (accounts[0]?.account || '');
+            const account = inventoryAccountByKey(accountSelect.value);
+            const identities = Array.isArray(account?.identities) ? account.identities : [];
+            const oldIdentity = identitySelect.value;
+            identitySelect.innerHTML = identities.map(identity =>
+                `<option value="${escapeHtml(identity)}">${escapeHtml(identity)}</option>`
+            ).join('');
+            identitySelect.value = identities.includes(oldIdentity) ? oldIdentity : (identities[0] || '');
+        }
+
+        function changeInventoryAccount() {
+            const accountSelect = document.getElementById('inventory-account-select');
+            const identitySelect = document.getElementById('inventory-identity-select');
+            const account = inventoryAccountByKey(accountSelect?.value || '');
+            const identities = Array.isArray(account?.identities) ? account.identities : [];
+            if (identitySelect) {
+                identitySelect.innerHTML = identities.map(identity =>
+                    `<option value="${escapeHtml(identity)}">${escapeHtml(identity)}</option>`
+                ).join('');
+            }
+            renderInventoryDashboard();
+        }
+
+        function inventoryRowsTable(rows, searchMode = false) {
+            if (!Array.isArray(rows) || !rows.length) {
+                return `<div class="record-empty">${searchMode ? '没有找到匹配物品。' : '该身份暂无储物袋数据。'}</div>`;
+            }
+            const searchColumns = searchMode ? '<th>账号</th><th>身份</th>' : '';
+            return `
+                <table class="record-table inventory-table ${searchMode ? 'search-table' : ''}">
+                    <thead><tr><th>类型</th><th>名称</th><th>数量</th>${searchColumns}<th>状态 / 说明</th><th>更新时间</th></tr></thead>
+                    <tbody>${rows.map(row => {
+                        const account = inventoryAccountByKey(row.account);
+                        return `<tr>
+                            <td><span class="inventory-type ${inventoryTypeClass(row.type)}">${escapeHtml(row.type || '物品')}</span></td>
+                            <td><span class="inventory-name">${escapeHtml(row.name || row.item_id || '---')}</span></td>
+                            <td><span class="inventory-quantity">${escapeHtml(inventoryQuantity(row.quantity))}</span></td>
+                            ${searchMode ? `<td><span class="record-account">${escapeHtml(account?.short_name || account?.name || row.account || '---')}</span></td><td><span class="record-identity">${escapeHtml(row.identity || '---')}</span></td>` : ''}
+                            <td><span class="inventory-detail">${escapeHtml(row.detail || '---')}</span></td>
+                            <td><span class="record-time">${escapeHtml(row.updated_at || '---')}</span></td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>`;
+        }
+
+        function updateInventoryRequestState() {
+            const expectedEntries = Object.entries(inventoryExpectedRequests || {});
+            const refreshState = document.getElementById('inventory-refresh-state');
+            let pending = false;
+            if (expectedEntries.length) {
+                let finished = 0;
+                let failures = 0;
+                for (const [accountKey, requestId] of expectedEntries) {
+                    const account = inventoryAccountByKey(accountKey);
+                    const lastRequest = account?.last_request || {};
+                    if (lastRequest.request_id === requestId && ['completed', 'partial', 'error'].includes(lastRequest.status)) {
+                        finished += 1;
+                        failures += Object.keys(lastRequest.errors || {}).length;
+                    }
+                }
+                pending = finished < expectedEntries.length;
+                const timedOut = pending && inventoryRequestStartedAt && Date.now() - inventoryRequestStartedAt > 180000;
+                if (timedOut) {
+                    pending = false;
+                    inventoryLastActionState = `刷新等待超时 · 已完成 ${finished}/${expectedEntries.length} 个账号`;
+                    inventoryExpectedRequests = {};
+                    inventoryRequestStartedAt = 0;
+                } else if (pending) {
+                    inventoryLastActionState = `刷新中 ${finished}/${expectedEntries.length} 个账号`;
+                } else {
+                    inventoryLastActionState = failures ? `刷新完成 · ${failures} 个身份失败` : '刷新完成';
+                    inventoryExpectedRequests = {};
+                    inventoryRequestStartedAt = 0;
+                }
+            }
+            if (refreshState) refreshState.innerText = inventoryLastActionState;
+            const selectedButton = document.getElementById('inventory-refresh-selected');
+            const allButton = document.getElementById('inventory-refresh-all');
+            if (selectedButton) selectedButton.disabled = pending;
+            if (allButton) allButton.disabled = pending;
+        }
+
+        function renderInventoryDashboard() {
+            const accountKey = document.getElementById('inventory-account-select')?.value || '';
+            const identity = document.getElementById('inventory-identity-select')?.value || '';
+            const account = inventoryAccountByKey(accountKey);
+            const snapshot = account?.snapshots?.[identity] || null;
+            const summary = inventoryDashboardData.summary || {};
+            const summaryNode = document.getElementById('inventory-summary');
+            if (summaryNode) {
+                const totalIdentities = (inventoryDashboardData.accounts || []).reduce((sum, item) => sum + (item.identities?.length || 0), 0);
+                summaryNode.innerText = `已缓存 ${Number(summary.snapshot_count || 0)}/${totalIdentities} 个身份 · ${Number(summary.item_count || 0)} 条 · ${summary.updated_at || '未刷新'}`;
+            }
+            const selectedState = document.getElementById('inventory-selected-state');
+            if (selectedState) {
+                if (snapshot) {
+                    const counts = snapshot.counts || {};
+                    selectedState.innerText = `${account?.name || accountKey} · ${identity} · 法宝 ${counts['法宝'] || 0} / 物品 ${counts['物品'] || 0} / 材料 ${counts['材料'] || 0} · ${snapshot.updated_at || '---'}`;
+                } else {
+                    const progress = account?.request_progress || {};
+                    selectedState.innerText = progress.status === 'running'
+                        ? `${account?.name || accountKey} · ${identity} · 正在刷新 ${progress.completed || 0}/${progress.total || 0}`
+                        : `${account?.name || accountKey} · ${identity} · 尚未刷新`;
+                }
+            }
+            const content = document.getElementById('inventory-content');
+            if (content) {
+                const rows = Array.isArray(snapshot?.items)
+                    ? snapshot.items.map(row => ({...row, updated_at: snapshot.updated_at || ''}))
+                    : [];
+                content.innerHTML = inventoryRowsTable(rows, false);
+            }
+
+            const query = String(document.getElementById('inventory-search-input')?.value || '').trim();
+            const searchBand = document.getElementById('inventory-search-band');
+            const searchContent = document.getElementById('inventory-search-content');
+            const searchSummary = document.getElementById('inventory-search-summary');
+            if (searchBand) searchBand.hidden = !query;
+            if (query && searchContent) {
+                const rows = Array.isArray(inventoryDashboardData.search_results) ? inventoryDashboardData.search_results : [];
+                searchContent.innerHTML = inventoryRowsTable(rows, true);
+                const matchQuantity = inventoryDashboardData.summary?.match_quantity ?? 0;
+                if (searchSummary) searchSummary.innerText = `“${query}” · ${rows.length} 条 · 数量合计 ${inventoryQuantity(matchQuantity)}`;
+            }
+            updateInventoryRequestState();
+            refreshIcons();
+        }
+
+        async function updateInventoryDashboard(force = false) {
+            if (document.hidden || pollBusy.inventory) return;
+            const view = document.querySelector('[data-workspace-view="inventory"]');
+            if (!force && view && !view.classList.contains('is-active')) return;
+            pollBusy.inventory = true;
+            try {
+                const query = String(document.getElementById('inventory-search-input')?.value || '').trim();
+                const response = await fetch(apiUrl(`/api/miniapp-inventory?query=${encodeURIComponent(query)}`), {cache: 'no-store'});
+                const data = await response.json();
+                if (!response.ok || data.ok === false) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+                inventoryDashboardData = data;
+                syncInventorySelectors();
+                renderInventoryDashboard();
+            } catch (error) {
+                console.error('Inventory dashboard update failed:', error);
+                const summary = document.getElementById('inventory-summary');
+                if (summary) summary.innerText = '加载失败';
+            } finally {
+                pollBusy.inventory = false;
+            }
+        }
+
+        function scheduleInventorySearch() {
+            if (inventorySearchTimer) clearTimeout(inventorySearchTimer);
+            inventorySearchTimer = setTimeout(() => updateInventoryDashboard(true), 250);
+        }
+
+        async function requestInventoryRefresh(account, identity) {
+            const response = await fetch(apiUrl('/api/miniapp-inventory/refresh'), {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({account, identity})
+            });
+            const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+            if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+            return data;
+        }
+
+        async function refreshSelectedInventory() {
+            if (Object.keys(inventoryExpectedRequests).length) return;
+            const account = document.getElementById('inventory-account-select')?.value || '';
+            const identity = document.getElementById('inventory-identity-select')?.value || '';
+            try {
+                const data = await requestInventoryRefresh(account, identity);
+                inventoryExpectedRequests = {[account]: data.request?.request_id || ''};
+                inventoryRequestStartedAt = Date.now();
+                inventoryLastActionState = `等待 ${identity} 刷新`;
+                updateInventoryRequestState();
+                setTimeout(() => updateInventoryDashboard(true), 600);
+            } catch (error) {
+                inventoryLastActionState = `刷新失败：${error.message || error}`;
+                updateInventoryRequestState();
+            }
+        }
+
+        async function refreshAllInventory() {
+            if (Object.keys(inventoryExpectedRequests).length) return;
+            try {
+                const data = await requestInventoryRefresh('all', '*');
+                inventoryExpectedRequests = Object.fromEntries((data.requests || []).map(request => [request.account, request.request_id]));
+                inventoryRequestStartedAt = Date.now();
+                inventoryLastActionState = '等待全部账号刷新';
+                updateInventoryRequestState();
+                setTimeout(() => updateInventoryDashboard(true), 600);
+            } catch (error) {
+                inventoryLastActionState = `刷新失败：${error.message || error}`;
+                updateInventoryRequestState();
             }
         }
 
@@ -4791,6 +5255,7 @@
         setInterval(updateDuelDashboard, POLL_INTERVALS.duels);
         setInterval(updateAutomationDashboard, POLL_INTERVALS.automation);
         setInterval(updateRedPacketDashboard, POLL_INTERVALS.redPackets);
+        setInterval(updateInventoryDashboard, POLL_INTERVALS.inventory);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
             if (ev.key === 'Enter') applyLogSearch();
         });
@@ -4806,6 +5271,7 @@
             updateDuelDashboard(true);
             updateAutomationDashboard(true);
             updateRedPacketDashboard(true);
+            updateInventoryDashboard(true);
             updateLogs(true);
         });
         selectedDailyRewardDate();
@@ -4816,6 +5282,7 @@
         updateDuelDashboard();
         updateAutomationDashboard();
         updateRedPacketDashboard();
+        updateInventoryDashboard();
         updateLogKindButtons();
         loadLogTags(currentLogAccount);
         updateLogs();

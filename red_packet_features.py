@@ -6,9 +6,12 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
+import time
 import unicodedata
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -20,6 +23,8 @@ from telethon import events
 CONFIG_DIR = Path(__file__).resolve().parent
 RED_PACKET_SETTINGS_FILE = CONFIG_DIR / "red_packet_settings.json"
 RED_PACKET_STATUS_TEMPLATE = "red_packet_status_{account}.json"
+RED_PACKET_COORDINATION_FILE = "red_packet_claim_coordination.json"
+RED_PACKET_COORDINATION_LOCK_FILE = "red_packet_claim_coordination.lock"
 RED_PACKET_CHAT = "ja_netfilter_group"
 RED_PACKET_ANCHOR_MESSAGE_ID = 458347
 RED_PACKET_LINK = f"https://t.me/{RED_PACKET_CHAT}/{RED_PACKET_ANCHOR_MESSAGE_ID}"
@@ -45,6 +50,15 @@ MAX_HANDLED_MESSAGE_IDS = 200
 MAX_NOTIFIED_RECEIPT_IDS = 200
 MAX_DIAGNOSTIC_TEXT_LENGTH = 2000
 PENDING_CLAIM_TTL_SECONDS = 120
+CLAIM_CONFIRMATION_TIMEOUT_SECONDS = 60
+# Cover all three 12-second click attempts so another process can take over if
+# the first owner exhausts its retries and releases the reservation.
+CLAIM_RESERVATION_WAIT_SECONDS = 40
+CLAIM_RESERVATION_POLL_SECONDS = 0.1
+CLICK_RETRY_DELAYS = (0, 0.2, 0.5)
+CLAIM_CLICK_MIN_COUNT = 3
+CLAIM_CLICK_MAX_COUNT = 5
+CLAIM_CLICK_INTERVAL_SECONDS = 1
 NOTIFICATION_RETRY_DELAYS = (0, 2, 5)
 NOTIFICATION_BACKGROUND_RETRY_SECONDS = 60
 
@@ -71,7 +85,17 @@ _CLAIM_RECEIPT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TIME_PATTERN = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
-_REJECTED_CLICK_MARKERS = ("已抢完", "已经抢", "抢过", "失败", "过期", "无效")
+_REJECTED_CLICK_MARKERS = (
+    "已抢完",
+    "已经抢",
+    "抢过",
+    "失败",
+    "过期",
+    "无效",
+    "不存在",
+    "已结束",
+)
+_CONFIRMED_CLICK_MARKERS = ("领取成功", "成功领取")
 _RECEIPT_BOT_USERNAME_PATTERN = re.compile(r"^hantianz+_bot$", re.IGNORECASE)
 
 
@@ -94,6 +118,97 @@ def _read_json(path: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _coordination_path() -> Path:
+    return CONFIG_DIR / RED_PACKET_COORDINATION_FILE
+
+
+def _coordination_lock_path() -> Path:
+    return CONFIG_DIR / RED_PACKET_COORDINATION_LOCK_FILE
+
+
+def _load_coordination_unlocked() -> dict[str, Any]:
+    data = _read_json(_coordination_path())
+    claims = data.get("claims") if isinstance(data.get("claims"), dict) else {}
+    return {"claims": claims}
+
+
+def _purge_shared_claims(data: dict[str, Any], now: float) -> None:
+    cutoff = now - PENDING_CLAIM_TTL_SECONDS
+    data["claims"] = {
+        str(message_id): claim
+        for message_id, claim in data.get("claims", {}).items()
+        if isinstance(claim, dict) and float(claim.get("updated_at") or 0) >= cutoff
+    }
+
+
+def _reserve_shared_claim(account: str, message_id: int, amount: Decimal) -> dict[str, Any]:
+    now = time.time()
+    with _exclusive_file_lock(_coordination_lock_path()):
+        data = _load_coordination_unlocked()
+        _purge_shared_claims(data, now)
+        key = str(message_id)
+        claim = data["claims"].get(key)
+        if not isinstance(claim, dict):
+            claim = {
+                "account": account,
+                "message_id": message_id,
+                "packet_amount": format(amount, "f"),
+                "state": "reserved",
+                "created_at": now,
+                "updated_at": now,
+            }
+            data["claims"][key] = claim
+            _atomic_write_json(_coordination_path(), data)
+        return dict(claim)
+
+
+def _set_shared_claim_state(message_id: int, account: str, state: str) -> None:
+    now = time.time()
+    with _exclusive_file_lock(_coordination_lock_path()):
+        data = _load_coordination_unlocked()
+        _purge_shared_claims(data, now)
+        claim = data["claims"].get(str(message_id))
+        if not isinstance(claim, dict) or claim.get("account") != account:
+            return
+        claim["state"] = state
+        claim["updated_at"] = now
+        _atomic_write_json(_coordination_path(), data)
+
+
+def _release_shared_claim(message_id: int, account: str) -> None:
+    with _exclusive_file_lock(_coordination_lock_path()):
+        data = _load_coordination_unlocked()
+        claim = data["claims"].get(str(message_id))
+        if not isinstance(claim, dict) or claim.get("account") != account:
+            return
+        data["claims"].pop(str(message_id), None)
+        _atomic_write_json(_coordination_path(), data)
 
 
 def _notification_bot_config() -> tuple[str, Any]:
@@ -426,8 +541,10 @@ class RedPacketMonitor:
         self._pending_claims: list[dict[str, Any]] = []
         self._pending_notifications: list[dict[str, Any]] = []
         self._notification_retry_task: asyncio.Task[Any] | None = None
+        self._claim_confirmation_tasks: dict[int, asyncio.Task[Any]] = {}
         self._notification_lock = asyncio.Lock()
         self._inflight: set[int] = set()
+        self._logged_edited_versions: dict[int, tuple[str, str]] = {}
         self._load_handled()
 
     def _load_handled(self) -> None:
@@ -674,6 +791,156 @@ class RedPacketMonitor:
         if pending in self._pending_claims:
             self._pending_claims.remove(pending)
 
+    def _cancel_claim_confirmation(self, message_id: int) -> None:
+        task = self._claim_confirmation_tasks.pop(message_id, None)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    async def _expire_unconfirmed_claim(self, message_id: int) -> None:
+        try:
+            await asyncio.sleep(CLAIM_CONFIRMATION_TIMEOUT_SECONDS)
+            pending = next(
+                (
+                    claim
+                    for claim in self._pending_claims
+                    if int(claim.get("message_id") or 0) == message_id
+                ),
+                None,
+            )
+            if pending is None:
+                return
+            _set_shared_claim_state(message_id, self.account, "unconfirmed")
+            status = load_red_packet_status(self.account)
+            updates: dict[str, Any] = {
+                "last_unconfirmed_message_id": message_id,
+                "last_unconfirmed_at": _now_text(),
+            }
+            if int(status.get("last_message_id") or 0) == message_id:
+                updates.update(
+                    last_action="claim_unconfirmed",
+                    last_error=(
+                        f"领取请求已受理，但 {CLAIM_CONFIRMATION_TIMEOUT_SECONDS} 秒内未收到到账回执"
+                    ),
+                )
+            self._write_status(**updates)
+            self.log.warning(
+                "[%s] Red packet %s was not confirmed within %ss",
+                self.account,
+                message_id,
+                CLAIM_CONFIRMATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._claim_confirmation_tasks.get(message_id) is current:
+                self._claim_confirmation_tasks.pop(message_id, None)
+
+    def _schedule_claim_confirmation(self, message_id: int) -> None:
+        if self.client is None:
+            return
+        self._cancel_claim_confirmation(message_id)
+        try:
+            self._claim_confirmation_tasks[message_id] = asyncio.create_task(
+                self._expire_unconfirmed_claim(message_id),
+                name=f"red_packet_confirmation_{self.account}_{message_id}",
+            )
+        except RuntimeError:
+            self._claim_confirmation_tasks.pop(message_id, None)
+
+    async def _acquire_shared_claim(self, message_id: int, amount: Decimal) -> dict[str, Any]:
+        deadline = time.monotonic() + CLAIM_RESERVATION_WAIT_SECONDS
+        while True:
+            claim = _reserve_shared_claim(self.account, message_id, amount)
+            if claim.get("account") == self.account:
+                return claim
+            if claim.get("state") != "reserved" or time.monotonic() >= deadline:
+                return claim
+            await asyncio.sleep(CLAIM_RESERVATION_POLL_SECONDS)
+
+    async def _click_with_retry(self, message_id: int, button: Any) -> tuple[Any, str, Any]:
+        current_button = button
+        last_error: Exception | None = None
+        for attempt, retry_delay in enumerate(CLICK_RETRY_DELAYS, start=1):
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+            try:
+                result = await asyncio.wait_for(current_button.click(), timeout=12)
+                return (
+                    result,
+                    type(getattr(current_button, "button", current_button)).__name__,
+                    current_button,
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt >= len(CLICK_RETRY_DELAYS) or self.client is None:
+                    break
+                try:
+                    refreshed = await self.client.get_messages(self.entity, ids=message_id)
+                    refreshed_button = red_packet_button(refreshed) if refreshed else None
+                except Exception as refresh_exc:
+                    self.log.warning(
+                        "[%s] Red packet %s refresh before retry %s failed: %s",
+                        self.account,
+                        message_id,
+                        attempt + 1,
+                        refresh_exc,
+                    )
+                    continue
+                if refreshed_button is None:
+                    break
+                current_button = refreshed_button
+                self.log.warning(
+                    "[%s] Red packet %s click failed, retrying with refreshed message: %s",
+                    self.account,
+                    message_id,
+                    exc,
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("red-packet callback button is unavailable")
+
+    async def _click_burst(
+        self,
+        message_id: int,
+        button: Any,
+    ) -> tuple[str, int, int, list[str]]:
+        target_count = random.randint(CLAIM_CLICK_MIN_COUNT, CLAIM_CLICK_MAX_COUNT)
+        current_button = button
+        button_type = type(getattr(button, "button", button)).__name__
+        results: list[str] = []
+
+        for click_index in range(target_count):
+            if click_index and CLAIM_CLICK_INTERVAL_SECONDS:
+                await asyncio.sleep(CLAIM_CLICK_INTERVAL_SECONDS)
+            try:
+                result, button_type, current_button = await self._click_with_retry(
+                    message_id,
+                    current_button,
+                )
+            except Exception as exc:
+                if not results:
+                    raise
+                self.log.warning(
+                    "[%s] Red packet %s follow-up click %s/%s failed after submission: %s",
+                    self.account,
+                    message_id,
+                    click_index + 1,
+                    target_count,
+                    exc,
+                )
+                break
+
+            result_message = str(getattr(result, "message", "") or "")
+            results.append(result_message)
+            if any(
+                marker in result_message
+                for marker in (*_CONFIRMED_CLICK_MARKERS, *_REJECTED_CLICK_MARKERS)
+            ):
+                break
+
+        return button_type, len(results), target_count, results
+
     def _write_status(self, **updates: Any) -> None:
         status = load_red_packet_status(self.account)
         status.update(
@@ -760,7 +1027,7 @@ class RedPacketMonitor:
 
         @self.client.on(events.MessageEdited(chats=self.entity))
         async def edited_message_handler(event: Any) -> None:
-            await self.process_message(event.message, source="edited")
+            await self.process_edited_message(event)
 
         self._write_status(listening=True, last_action="listening", last_error="")
         self._ensure_notification_retry_task(initial_delay=0)
@@ -773,6 +1040,61 @@ class RedPacketMonitor:
             self.anchor_buttons,
         )
         return True
+
+    def _log_edited_bot_message(self, message: Any, sender: Any = None) -> bool:
+        if not self._is_target_topic(message):
+            return False
+        sender_id = int(getattr(message, "sender_id", 0) or 0)
+        sender_username = str(getattr(sender, "username", "") or "").strip()
+        is_bot = bool(
+            getattr(sender, "bot", False)
+            or sender_username.lower().endswith("_bot")
+            or sender_id in RED_PACKET_RECEIPT_BOT_IDS
+            or red_packet_button(message) is not None
+        )
+        if not is_bot:
+            return False
+
+        message_id = int(getattr(message, "id", 0) or 0)
+        message_text = str(
+            getattr(message, "raw_text", "") or getattr(message, "text", "") or ""
+        )
+        buttons = red_packet_button_metadata(message)
+        buttons_json = json.dumps(buttons, ensure_ascii=False, sort_keys=True)
+        version = (message_text, buttons_json)
+        if message_id and self._logged_edited_versions.get(message_id) == version:
+            return False
+        if message_id:
+            self._logged_edited_versions[message_id] = version
+            if len(self._logged_edited_versions) > 300:
+                self._logged_edited_versions = dict(
+                    list(self._logged_edited_versions.items())[-150:]
+                )
+
+        sender_label = f"@{sender_username}" if sender_username else f"sender:{sender_id}"
+        button_suffix = f"\nbuttons={buttons_json}" if buttons else ""
+        self.log.info(
+            "[%s] Red-packet bot edited message %s from %s:\n%s%s",
+            self.account,
+            message_id or "unknown",
+            sender_label,
+            message_text,
+            button_suffix,
+        )
+        return True
+
+    async def process_edited_message(self, event: Any) -> bool:
+        message = event.message
+        if not self._is_target_topic(message):
+            return False
+        try:
+            sender = await event.get_sender()
+        except Exception:
+            sender = None
+        logged = self._log_edited_bot_message(message, sender)
+        await self.process_receipt(message)
+        await self.process_message(message, source="edited")
+        return logged
 
     def _is_target_topic(self, message: Any) -> bool:
         message_id = int(getattr(message, "id", 0) or 0)
@@ -822,18 +1144,33 @@ class RedPacketMonitor:
         self._purge_pending_claims()
         if not self._pending_claims:
             return
-        pending = self._pending_claims.pop(0)
+        reply = getattr(message, "reply_to", None)
+        reply_message_id = int(getattr(reply, "reply_to_msg_id", 0) or 0)
+        pending = next(
+            (
+                claim
+                for claim in self._pending_claims
+                if reply_message_id != self.topic_id
+                and int(claim.get("message_id") or 0) == reply_message_id
+            ),
+            self._pending_claims[0],
+        )
+        self._pending_claims.remove(pending)
+        claim_message_id = int(pending.get("message_id") or 0)
+        self._cancel_claim_confirmation(claim_message_id)
+        _set_shared_claim_state(claim_message_id, self.account, "confirmed")
         amount_text = format(receipt["amount"], "f")
         currency = receipt["currency"]
         record = {
             "receipt_id": message_id,
-            "claim_message_id": int(pending.get("message_id") or 0),
+            "claim_message_id": claim_message_id,
             "amount": amount_text,
             "currency": currency,
             "created_at": _now_text(),
         }
         self._enqueue_notification(record)
         self._write_status(
+            last_action="claimed",
             last_claimed_amount=amount_text,
             last_claimed_currency=currency,
             last_claim_receipt_id=message_id,
@@ -1014,17 +1351,74 @@ class RedPacketMonitor:
                     )
                     return
                 minimum = current_minimum
+                settings = current_settings
+
+            shared_claim_reserved = len(settings["accounts"]) > 1
+            if shared_claim_reserved:
+                shared_claim = await self._acquire_shared_claim(message_id, amount)
+                if shared_claim.get("account") != self.account:
+                    owner = str(shared_claim.get("account") or "")
+                    self._remember(message_id)
+                    self._write_status(
+                        last_seen_at=_now_text(),
+                        last_message_id=message_id,
+                        last_amount=format(amount, "f"),
+                        last_minimum_amount=format(minimum, "f"),
+                        last_delay_seconds=format(delay_seconds, "f"),
+                        last_source=source,
+                        last_action="claimed_by_other_account",
+                        last_claim_owner=owner,
+                        last_error="",
+                    )
+                    self.log.info(
+                        "[%s] Red packet %s delegated to account %s",
+                        self.account,
+                        message_id,
+                        owner,
+                    )
+                    return
 
             pending_claim = self._register_pending_claim(message_id, amount)
             try:
-                result = await asyncio.wait_for(button.click(), timeout=12)
+                button_type, click_count, click_target, click_results = await self._click_burst(
+                    message_id,
+                    button,
+                )
             except Exception:
                 self._remove_pending_claim(pending_claim)
+                if shared_claim_reserved:
+                    _release_shared_claim(message_id, self.account)
                 raise
-            result_message = str(getattr(result, "message", "") or "")
-            rejected = any(marker in result_message for marker in _REJECTED_CLICK_MARKERS)
+            confirmed_results = [
+                message
+                for message in click_results
+                if any(marker in message for marker in _CONFIRMED_CLICK_MARKERS)
+            ]
+            accepted_results = [
+                message
+                for message in click_results
+                if not any(marker in message for marker in _REJECTED_CLICK_MARKERS)
+            ]
+            confirmed = bool(confirmed_results)
+            rejected = not accepted_results and not confirmed
+            result_message = (
+                confirmed_results[-1]
+                if confirmed_results
+                else accepted_results[0]
+                if accepted_results
+                else click_results[-1]
+            )
             if rejected:
                 self._remove_pending_claim(pending_claim)
+                if shared_claim_reserved:
+                    _set_shared_claim_state(message_id, self.account, "closed")
+            elif confirmed:
+                self._remove_pending_claim(pending_claim)
+                if shared_claim_reserved:
+                    _set_shared_claim_state(message_id, self.account, "confirmed")
+            else:
+                if shared_claim_reserved:
+                    _set_shared_claim_state(message_id, self.account, "awaiting_receipt")
             self._remember(message_id)
             self._write_status(
                 last_seen_at=_now_text(),
@@ -1034,18 +1428,30 @@ class RedPacketMonitor:
                 last_minimum_amount=format(minimum, "f"),
                 last_delay_seconds=format(delay_seconds, "f"),
                 last_source=source,
-                last_action="claim_rejected" if rejected else "clicked",
+                last_action=(
+                    "claim_rejected" if rejected else "claimed" if confirmed else "claim_pending"
+                ),
                 last_button_type=button_type,
+                last_click_count=click_count,
+                last_click_target=click_target,
+                last_click_interval_seconds=CLAIM_CLICK_INTERVAL_SECONDS,
+                last_click_results=click_results,
                 last_result=result_message,
                 last_error="",
             )
+            if not rejected and not confirmed:
+                self._schedule_claim_confirmation(message_id)
             self.log.warning(
-                "[%s] Red packet %s clicked: amount=%s minimum=%s delay=%ss result=%s",
+                "[%s] Red packet %s claim submitted: amount=%s minimum=%s delay=%ss "
+                "clicks=%s/%s interval=%ss result=%s",
                 self.account,
                 message_id,
                 amount,
                 minimum,
                 delay_seconds,
+                click_count,
+                click_target,
+                CLAIM_CLICK_INTERVAL_SECONDS,
                 result_message or "callback sent",
             )
         except Exception as exc:
@@ -1067,6 +1473,9 @@ class RedPacketMonitor:
     def mark_stopped(self, action: str = "stopped") -> None:
         if self._notification_retry_task is not None:
             self._notification_retry_task.cancel()
+        for task in self._claim_confirmation_tasks.values():
+            task.cancel()
+        self._claim_confirmation_tasks.clear()
         self._write_status(listening=False, last_action=action)
 
 

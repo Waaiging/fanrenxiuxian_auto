@@ -206,6 +206,16 @@ LOW_PRIORITY_DAILY_DEFER_SECONDS = 5 * 60
 LOW_PRIORITY_DAILY_LOG_INTERVAL_SECONDS = 5 * 60
 TIANXING_RIFT_PREFIX_COMMANDS = (".推命 探索", ".改命 探索")
 TIANXING_RIFT_PREFIX_DELAY_SECONDS = 3
+TIANXING_DESTINY_CHOICES = ("天府", "紫微", "贪狼", "太阴")
+TIANXING_DESTINY_ACTION_PREFERENCES = {
+    "cultivation": ("紫微", "贪狼"),
+    "exploration": ("贪狼", "太阴"),
+    "crafting": ("天府", "太阴"),
+}
+TIANXING_DESTINY_FAILURE_KEYWORDS = (
+    "无法", "不能", "不可", "闭关中", "深度闭关", "正在闭关", "闭关状态",
+    "冷却", "修为不足", "并非", "未开启", "错误",
+)
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
@@ -295,6 +305,10 @@ def common_command_default_state():
         "next_mulan_support_time": "",
         "last_mulan_support_response": "",
         "last_mulan_support_error": "",
+        "last_destiny_observation_date": "",
+        "last_destiny_observation_time": "",
+        "tianxing_destiny_options": [],
+        "tianxing_destiny_options_date": "",
     }
 
 
@@ -309,9 +323,10 @@ class _CommonAtomicTask:
     active_atomic_task，普通发送会等待它释放，避免中途被其他循环切身份。
     """
 
-    def __init__(self, actor, label):
+    def __init__(self, actor, label, log_lifecycle=True):
         self.actor = actor
         self.label = str(label or "Task")
+        self.log_lifecycle = bool(log_lifecycle)
         self.task = None
         self.acquired = False
         self.reentrant = False
@@ -330,10 +345,11 @@ class _CommonAtomicTask:
         self.actor._common_atomic_label = self.label
         self.actor._common_atomic_started_at = time.monotonic()
         self.acquired = True
-        try:
-            self.actor.common_command_logger().info(f"Atomic task acquired by {self.label}.")
-        except Exception:
-            pass
+        if self.log_lifecycle:
+            try:
+                self.actor.common_command_logger().info(f"Atomic task acquired by {self.label}.")
+            except Exception:
+                pass
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -343,10 +359,11 @@ class _CommonAtomicTask:
             self.actor._common_atomic_task = None
             self.actor._common_atomic_label = ""
             self.actor._common_atomic_started_at = 0.0
-            try:
-                self.actor.common_command_logger().info(f"Atomic task released by {self.label}.")
-            except Exception:
-                pass
+            if self.log_lifecycle:
+                try:
+                    self.actor.common_command_logger().info(f"Atomic task released by {self.label}.")
+                except Exception:
+                    pass
         return False
 
 
@@ -538,6 +555,231 @@ class CommonCommandMixin:
         )
         return True
 
+    # ---- 天星宗命星前置 ----
+
+    def tianxing_identity_state(self, identity="主魂"):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity == "主魂":
+            return self.state
+        getter = getattr(self, "get_avatar_state", None)
+        if callable(getter):
+            return getter(identity)
+        avatars = self.state.setdefault("avatars", {})
+        return avatars.setdefault(identity, {})
+
+    def tianxing_identity_enabled(self, identity="主魂"):
+        return self.identity_sect_name(identity) == "天星宗"
+
+    def tianxing_identity_names(self):
+        """Return every locally configured identity currently belonging to Tianxing."""
+        identities = ["主魂"]
+        for identity in getattr(self, "avatars", []) or []:
+            if identity not in identities:
+                identities.append(identity)
+        return [identity for identity in identities if self.tianxing_identity_enabled(identity)]
+
+    def parse_tianxing_destiny_options(self, text):
+        clean = str(text or "").replace("**", "")
+        found = []
+        for match in re.finditer("|".join(TIANXING_DESTINY_CHOICES), clean):
+            name = match.group(0)
+            if name not in found:
+                found.append(name)
+        return found
+
+    def tianxing_prefix_response_ok(self, command, text):
+        """Require semantic success before following a .推命/.改命 action."""
+        command = str(command or "").strip()
+        clean = str(text or "").replace("**", "")
+        if not clean:
+            return False
+        if self.tianxing_prefix_is_pending(clean):
+            return True
+        failure_markers = (
+            "已有一道", "尚未应验", "还需等待", "冷却", "无法", "不能",
+            "不足", "失败",
+        )
+        if any(marker in clean for marker in failure_markers):
+            return False
+        if command.startswith((".推命 ", ".改命 ")):
+            return any(
+                marker in clean
+                for marker in ("推命命中", "推下一段命数", "预留了一次", "执行成功", "成功")
+            )
+        return True
+
+    def tianxing_prefix_is_pending(self, text):
+        """Detect an existing unfulfilled prediction without treating it as an action ban."""
+        clean = str(text or "").replace("**", "")
+        return "推命" in clean and "尚未应验" in clean
+
+    def tianxing_prefix_wait_seconds(self, text):
+        """Parse a standalone prediction cooldown, excluding a pending prediction reply."""
+        clean = str(text or "").replace("**", "")
+        if self.tianxing_prefix_is_pending(clean):
+            return 0
+        if not any(marker in clean for marker in ("还需等待", "冷却", "后再")):
+            return 0
+        wait_seconds = self.parse_wait_time(text)
+        return max(0, int(wait_seconds or 0))
+
+    async def send_tianxing_identity_command(self, identity, command, **kwargs):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+            return await self.send_and_wait_feedback_identity(identity, command, **kwargs)
+        return await self.send_and_wait_feedback(command, **kwargs)
+
+    def record_tianxing_destiny_observation(self, identity, options, today=None):
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        state = self.tianxing_identity_state(identity)
+        state["last_destiny_observation_date"] = today
+        state["last_destiny_observation_time"] = now_str()
+        state["tianxing_destiny_options_date"] = today
+        state["tianxing_destiny_options"] = list(dict.fromkeys(options))
+        self.save_state()
+
+    async def observe_tianxing_destiny(self, identity="主魂", force=False):
+        identity = str(identity or "主魂").strip() or "主魂"
+        if not self.tianxing_identity_enabled(identity):
+            return True
+        today = datetime.now().strftime("%Y-%m-%d")
+        state = self.tianxing_identity_state(identity)
+        if not force and state.get("last_destiny_observation_date") == today:
+            return bool(state.get("tianxing_destiny_options"))
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(
+            ".观命", identity
+        ):
+            return False
+
+        response = await self.send_tianxing_identity_command(
+            identity,
+            ".观命",
+            timeout=90,
+            max_retries=0,
+        )
+        text = self.response_text(response).replace("**", "")
+        options = self.parse_tianxing_destiny_options(text)
+        already_fixed = any(
+            marker in text
+            for marker in ("今日已定命", "命轨已定", "今日命轨定在")
+        )
+        if not text or (
+            any(keyword in text for keyword in TIANXING_DESTINY_FAILURE_KEYWORDS)
+            and not already_fixed
+        ):
+            self.common_command_logger().warning(
+                "Tianxing destiny observation failed [%s]: %s",
+                identity,
+                text[:160] or "empty response",
+            )
+            return False
+        if not options:
+            self.common_command_logger().warning(
+                "Tianxing destiny observation had no candidates [%s]: %s",
+                identity,
+                text[:160],
+            )
+            return False
+
+        self.record_tianxing_destiny_observation(identity, options, today=today)
+        if already_fixed:
+            current = next(
+                (
+                    name
+                    for name in TIANXING_DESTINY_CHOICES
+                    if re.search(rf"(?:定在|命星)[^天府紫微贪狼太阴]*{name}", text)
+                ),
+                options[0] if len(options) == 1 else "",
+            )
+            if current:
+                state["last_destiny_date"] = today
+                state["last_destiny_time"] = now_str()
+                state["last_destiny_choice"] = current
+                self.save_state()
+        self.common_command_logger().info(
+            "Tianxing destiny candidates [%s]: %s",
+            identity,
+            "、".join(options),
+        )
+        return True
+
+    async def ensure_tianxing_destiny_for_action(self, identity, action):
+        identity = str(identity or "主魂").strip() or "主魂"
+        action = str(action or "").strip().casefold()
+        preferences = TIANXING_DESTINY_ACTION_PREFERENCES.get(action)
+        if not preferences or not self.tianxing_identity_enabled(identity):
+            return True
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        state = self.tianxing_identity_state(identity)
+        if (
+            state.get("last_destiny_observation_date") != today
+            or state.get("tianxing_destiny_options_date") != today
+            or not state.get("tianxing_destiny_options")
+        ):
+            if not await self.observe_tianxing_destiny(identity):
+                return False
+            state = self.tianxing_identity_state(identity)
+
+        options = [
+            name
+            for name in state.get("tianxing_destiny_options", [])
+            if name in TIANXING_DESTINY_CHOICES
+        ]
+        choice = next((name for name in preferences if name in options), "")
+        if not choice:
+            self.common_command_logger().error(
+                "Tianxing destiny has no usable candidate [%s/%s]: %s",
+                identity,
+                action,
+                "、".join(options) or "none",
+            )
+            return False
+        if (
+            state.get("last_destiny_date") == today
+            and state.get("last_destiny_choice") == choice
+        ):
+            return True
+
+        command = f".定命 {choice}"
+        if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(
+            command, identity
+        ):
+            return False
+        response = await self.send_tianxing_identity_command(
+            identity,
+            command,
+            timeout=90,
+            max_retries=0,
+        )
+        text = self.response_text(response).replace("**", "")
+        success = (
+            bool(text)
+            and choice in text
+            and any(
+                marker in text
+                for marker in ("命轨定在", "定下命星", "今日命轨", "定命成功", "命星切换")
+            )
+            and not any(keyword in text for keyword in TIANXING_DESTINY_FAILURE_KEYWORDS)
+        )
+        if not success:
+            self.common_command_logger().error(
+                "Tianxing destiny was not confirmed [%s/%s]: %s",
+                identity,
+                action,
+                text[:160] or "empty response",
+            )
+            return False
+
+        state["last_destiny_date"] = today
+        state["last_destiny_time"] = now_str()
+        state["last_destiny_choice"] = choice
+        self.save_state()
+        self.common_command_logger().info(
+            "Tianxing destiny selected [%s/%s]: %s", identity, action, choice
+        )
+        return True
+
     # ---- 状态管理 ----
 
     def ensure_common_command_state(self):
@@ -561,8 +803,8 @@ class CommonCommandMixin:
     def mulan_support_command(self):
         return current_mulan_support_command()
 
-    def common_atomic_task(self, label):
-        return _CommonAtomicTask(self, label)
+    def common_atomic_task(self, label, log_lifecycle=True):
+        return _CommonAtomicTask(self, label, log_lifecycle=log_lifecycle)
 
     async def run_avatar_meditation_restart_chain(
         self,
@@ -605,6 +847,8 @@ class CommonCommandMixin:
                     return {"status": "unknown_check", "wait": 600, "text": check_text}
 
             await asyncio.sleep(3)
+            if not await self.ensure_tianxing_destiny_for_action(avatar, "cultivation"):
+                return {"status": "destiny_failed", "wait": 600, "text": ""}
             prefix = str(prefix or "").strip()
             if prefix:
                 await self.send_and_wait_feedback_identity(avatar, f"{prefix} 闭关")
@@ -2634,6 +2878,9 @@ class CommonCommandMixin:
     async def send_timed_command_plan(self, plan, identity="主魂"):
         """Send a TimedCommandPlan using the right identity-aware sender."""
         identity = str(identity or "主魂").strip() or "主魂"
+        if str(plan.command or "").split()[0] == ".野外历练":
+            if not await self.ensure_tianxing_destiny_for_action(identity, "exploration"):
+                return None
         kwargs = {
             "timeout": plan.timeout,
             "max_retries": plan.max_retries,
@@ -2665,7 +2912,7 @@ class CommonCommandMixin:
         identity = str(identity or "主魂").strip() or "主魂"
         prefixes = self.tianxing_rift_prefix_commands(identity)
         if not prefixes:
-            return True
+            return {"ok": True, "wait": 0, "response": None}
         log = self.common_command_logger()
         for command in prefixes:
             log.info(f"Tianxing rift prefix [{identity}]: sending {command}.")
@@ -2688,14 +2935,26 @@ class CommonCommandMixin:
                     )
             finally:
                 self._tianxing_rift_prefix_command = ""
-            if not self.timed_command_response_text(response).strip():
-                log.warning(
-                    f"Tianxing rift prefix [{identity}] {command} had no confirmed feedback; "
-                    "blocking .探寻裂缝."
-                )
-                return False
+            response_text = self.timed_command_response_text(response)
+            if not self.tianxing_prefix_response_ok(command, response_text):
+                wait_seconds = self.tianxing_prefix_wait_seconds(response_text)
+                if wait_seconds > 0:
+                    log.info(
+                        f"Tianxing rift prefix [{identity}] {command} is cooling down; "
+                        f"retrying after {wait_seconds}s."
+                    )
+                else:
+                    log.warning(
+                        f"Tianxing rift prefix [{identity}] {command} had no confirmed success; "
+                        "blocking .探寻裂缝."
+                    )
+                return {
+                    "ok": False,
+                    "wait": wait_seconds,
+                    "response": response,
+                }
             await asyncio.sleep(TIANXING_RIFT_PREFIX_DELAY_SECONDS)
-        return True
+        return {"ok": True, "wait": 0, "response": None}
 
     async def send_rift_search_plan(self, plan, identity="主魂"):
         identity = str(identity or "主魂").strip() or "主魂"
@@ -2703,7 +2962,15 @@ class CommonCommandMixin:
         if not prefixes:
             return await self.send_timed_command_plan(plan, identity)
         async with self.common_atomic_task(f"Tianxing-rift-{identity}"):
-            if not await self.send_tianxing_rift_prefixes(identity):
+            if not await self.ensure_tianxing_destiny_for_action(identity, "exploration"):
+                return None
+            prefix_result = await self.send_tianxing_rift_prefixes(identity)
+            if not prefix_result.get("ok"):
+                wait_seconds = max(0, int(prefix_result.get("wait") or 0))
+                if wait_seconds > 0:
+                    state = self.tianxing_identity_state(identity)
+                    state[plan.next_key] = add_seconds_str(now_str(), wait_seconds)
+                    self.save_state()
                 return None
             return await self.send_timed_command_plan(plan, identity)
 
@@ -5158,21 +5425,8 @@ class CommonCommandMixin:
         return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def common_pending_daily_star_gazing_fallback_dt(self, now=None):
-        """Return today's fallback .观星 time when the account still needs one."""
-        now = now or datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        if self.star_gazing_sent_on_date(today):
-            return None
-        if self.state.get("last_star_gazing_fallback_date") == today:
-            return None
-        if self.star_shift_done_today(today):
-            return None
-        if self.has_pending_star_gazing_action():
-            return None
-        fallback_dt = self.daily_star_gazing_fallback_dt(now)
-        if now >= fallback_dt + timedelta(minutes=1):
-            return None
-        return fallback_dt
+        """Daily fallback is disabled; only confirmed Good events may schedule .观星."""
+        return None
 
     def common_parse_avatar_star_observatory(self, text):
         clean = (text or "").replace("**", "").replace("`", "")

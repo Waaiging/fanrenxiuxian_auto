@@ -304,6 +304,33 @@ class MiniAppBeastSeekTests(unittest.TestCase):
         self.assertEqual(len(transport.current), 10)
         self.assertIn("未放生任何现有灵兽", actor.state["beast_seek_miniapp_last_result"])
 
+    def test_zero_second_cooldown_schedules_short_retry_instead_of_six_hours(self):
+        class CooldownTransport(FakeTransport):
+            async def spirit_beast_seek(self, identity):
+                self.seek_calls.append(identity)
+                result = self._snapshot()
+                result["message"] = "你刚刚寻觅过，灵兽都被吓跑了，请在 0秒 后再来。"
+                return result
+
+        actor = FakeActor()
+        transport = CooldownTransport(EXISTING)
+        logger = FakeLogger()
+        worker = MiniAppBeastSeekWorker(actor, transport, "xiaohao", logger)
+        started = datetime.now()
+
+        self.assertTrue(asyncio.run(worker.run_cycle()))
+
+        retry_at = datetime.strptime(
+            actor.state["beast_seek_miniapp_seek_next_time"],
+            "%Y-%m-%d %H:%M:%S",
+        )
+        self.assertEqual(transport.seek_calls, ["主魂"])
+        self.assertNotIn("last_hunt_time", actor.state)
+        self.assertEqual(actor.state["beast_seek_miniapp_last_cooldown_seconds"], 0)
+        self.assertGreaterEqual((retry_at - started).total_seconds(), 1)
+        self.assertLessEqual((retry_at - started).total_seconds(), 4)
+        self.assertTrue(any("retrying in 2s" in message for message in logger.info_messages))
+
     def test_non_wanling_account_is_disabled(self):
         actor = FakeActor(account="sub")
         actor.sect_name = "元婴宗"

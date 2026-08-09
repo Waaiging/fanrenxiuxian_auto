@@ -46,14 +46,37 @@ MINIAPP_FISHING_CHUMS = (
     ("grass", "灵草窝"),
     ("demon", "妖腥窝"),
 )
+MINIAPP_FISHING_RODS = (
+    ("auto", "自动识别"),
+    ("青竹钓竿", "青竹钓竿"),
+    ("银竹钓竿", "银竹钓竿"),
+    ("金竹钓竿", "金竹钓竿"),
+    ("金雷竹钓竿", "金雷竹钓竿"),
+)
+TIANXING_MEDITATION_MODES = (
+    ("deep", "深度闭关"),
+    ("fate", "推命闭关"),
+)
+DEFAULT_TIANXING_MEDITATION_MODE = "deep"
+DEFAULT_TIANXING_USE_HEQI_PILL = False
+DEFAULT_TIANXING_TIANJI_GRIND_ENABLED = False
+DEFAULT_TIANXING_TIANJI_GRIND_TARGET = 0
+TIANXING_TIANJI_SUPPORTED_IDENTITIES = {
+    "main": ("主魂", "无咎子"),
+    "waaiging": ("主魂",),
+}
+DEFAULT_TIANXING_TIANJI_GRIND_PARTICIPANTS = ("main|主魂",)
 DEFAULT_MINIAPP_FISHING_ENABLED = True
 DEFAULT_MINIAPP_FISHING_POND = "qingxi"
 DEFAULT_MINIAPP_FISHING_BAIT = "demon_blood"
 DEFAULT_MINIAPP_FISHING_CHUM = "none"
-MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub")
+DEFAULT_MINIAPP_FISHING_ROD = "auto"
+MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub", "xiaohao", "waaiging")
 DEFAULT_MINIAPP_FISHING_PARTICIPANTS = ("main|主魂",)
 DEFAULT_MINIAPP_FISHING_ROD_OWNER = "auto"
 DEFAULT_MINIAPP_FISHING_START_TIME = ""
+DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN = 0
+DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX = 0
 DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
     (account, "主魂") for account in ACCOUNT_IDENTITIES
 )
@@ -92,9 +115,29 @@ def _normalize_clock_time(value: Any) -> str:
     return text if parsed.strftime("%H:%M") == text else ""
 
 
+def _normalize_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        number = int(text)
+    except (TypeError, ValueError):
+        raise ValueError(error_message)
+    if number < 0:
+        raise ValueError(error_message)
+    return number
+
+
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 9,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -102,14 +145,28 @@ def default_automation_settings() -> dict[str, Any]:
             ],
         },
         "mulan_support": {"mode": DEFAULT_MULAN_SUPPORT_MODE},
+        "miniapp_beast_abyss": {
+            "power_min": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN,
+            "power_max": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX,
+        },
         "miniapp_fishing": {
             "enabled": DEFAULT_MINIAPP_FISHING_ENABLED,
             "participants": list(DEFAULT_MINIAPP_FISHING_PARTICIPANTS),
+            "rod": DEFAULT_MINIAPP_FISHING_ROD,
             "rod_owner": DEFAULT_MINIAPP_FISHING_ROD_OWNER,
             "pond": DEFAULT_MINIAPP_FISHING_POND,
             "bait": DEFAULT_MINIAPP_FISHING_BAIT,
             "chum": DEFAULT_MINIAPP_FISHING_CHUM,
             "start_time": DEFAULT_MINIAPP_FISHING_START_TIME,
+        },
+        "tianxing": {
+            "meditation_mode": DEFAULT_TIANXING_MEDITATION_MODE,
+            "meditation_switch_id": "",
+            "use_heqi_pill": DEFAULT_TIANXING_USE_HEQI_PILL,
+            "tianji_grind_enabled": DEFAULT_TIANXING_TIANJI_GRIND_ENABLED,
+            "tianji_grind_target": DEFAULT_TIANXING_TIANJI_GRIND_TARGET,
+            "tianji_grind_participants": list(DEFAULT_TIANXING_TIANJI_GRIND_PARTICIPANTS),
+            "tianji_round_id": "",
         },
         "updated_at": "",
         "updated_by": "",
@@ -141,6 +198,22 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
         mode = str(mulan.get("mode") or "").strip()
         if mode in MULAN_SUPPORT_MODES:
             result["mulan_support"]["mode"] = mode
+
+    abyss = source.get("miniapp_beast_abyss")
+    if isinstance(abyss, dict):
+        power_min = _normalize_nonnegative_int(
+            abyss.get("power_min"),
+            DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN,
+        )
+        power_max = _normalize_nonnegative_int(
+            abyss.get("power_max"),
+            DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX,
+        )
+        if power_max > 0 and power_min > 0 and power_max < power_min:
+            power_min = DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN
+            power_max = DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX
+        result["miniapp_beast_abyss"]["power_min"] = power_min
+        result["miniapp_beast_abyss"]["power_max"] = power_max
 
     fishing = source.get("miniapp_fishing")
     if isinstance(fishing, dict):
@@ -174,6 +247,9 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             result["miniapp_fishing"]["rod_owner"] = "auto"
         elif normalized_owner is not None and normalized_owner[0] in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
             result["miniapp_fishing"]["rod_owner"] = automation_participant_key(*normalized_owner)
+        rod = str(fishing.get("rod") or DEFAULT_MINIAPP_FISHING_ROD).strip()
+        if rod in {item[0] for item in MINIAPP_FISHING_RODS}:
+            result["miniapp_fishing"]["rod"] = rod
         pond = str(fishing.get("pond") or "").strip()
         bait = str(fishing.get("bait") or "").strip()
         chum = str(fishing.get("chum") or "").strip()
@@ -185,6 +261,46 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
         if chum in {item[0] for item in MINIAPP_FISHING_CHUMS}:
             result["miniapp_fishing"]["chum"] = chum
         result["miniapp_fishing"]["start_time"] = start_time
+
+    tianxing = source.get("tianxing")
+    if isinstance(tianxing, dict):
+        meditation_mode = str(tianxing.get("meditation_mode") or "").strip()
+        if meditation_mode in {item[0] for item in TIANXING_MEDITATION_MODES}:
+            result["tianxing"]["meditation_mode"] = meditation_mode
+        result["tianxing"]["meditation_switch_id"] = str(
+            tianxing.get("meditation_switch_id") or ""
+        )[:40]
+        # Read the old key once so upgrading keeps an existing checkbox setting.
+        result["tianxing"]["use_heqi_pill"] = bool(
+            tianxing.get(
+                "use_heqi_pill",
+                tianxing.get("use_" + "zengyuan_pill", DEFAULT_TIANXING_USE_HEQI_PILL),
+            )
+        )
+        result["tianxing"]["tianji_grind_enabled"] = bool(
+            tianxing.get("tianji_grind_enabled", DEFAULT_TIANXING_TIANJI_GRIND_ENABLED)
+        )
+        result["tianxing"]["tianji_grind_target"] = _normalize_nonnegative_int(
+            tianxing.get("tianji_grind_target"),
+            DEFAULT_TIANXING_TIANJI_GRIND_TARGET,
+        )
+        raw_participants = tianxing.get("tianji_grind_participants")
+        if isinstance(raw_participants, list):
+            participants = []
+            for item in raw_participants:
+                normalized = _normalize_participant(item)
+                if normalized is None:
+                    continue
+                account, identity = normalized
+                if identity not in TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ()):
+                    continue
+                key = automation_participant_key(account, identity)
+                if key not in participants:
+                    participants.append(key)
+            result["tianxing"]["tianji_grind_participants"] = participants
+        result["tianxing"]["tianji_round_id"] = str(
+            tianxing.get("tianji_round_id") or ""
+        )[:40]
 
     result["updated_at"] = str(source.get("updated_at") or "")
     result["updated_by"] = str(source.get("updated_by") or "")
@@ -208,8 +324,16 @@ def save_automation_settings(
     miniapp_fishing_bait: Any = None,
     miniapp_fishing_chum: Any = None,
     miniapp_fishing_participants: Any = None,
+    miniapp_fishing_rod: Any = None,
     miniapp_fishing_rod_owner: Any = None,
     miniapp_fishing_start_time: Any = None,
+    miniapp_beast_abyss_power_min: Any = None,
+    miniapp_beast_abyss_power_max: Any = None,
+    tianxing_meditation_mode: Any = None,
+    tianxing_use_heqi_pill: Any = None,
+    tianxing_tianji_grind_enabled: Any = None,
+    tianxing_tianji_grind_target: Any = None,
+    tianxing_tianji_grind_participants: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     if not isinstance(world_boss_participants, list):
@@ -229,7 +353,8 @@ def save_automation_settings(
     if len(selected_accounts) != len(set(selected_accounts)):
         raise ValueError("multiple world boss identities per account")
 
-    current_fishing = (load_automation_settings().get("miniapp_fishing") or {})
+    current_settings = load_automation_settings()
+    current_fishing = current_settings.get("miniapp_fishing") or {}
     fishing_enabled = (
         bool(current_fishing.get("enabled", DEFAULT_MINIAPP_FISHING_ENABLED))
         if miniapp_fishing_enabled is None
@@ -275,6 +400,13 @@ def save_automation_settings(
             fishing_participants.append(key)
     if fishing_enabled and not fishing_participants:
         raise ValueError("Mini App fishing participants required")
+    fishing_rod = str(
+        current_fishing.get("rod", DEFAULT_MINIAPP_FISHING_ROD)
+        if miniapp_fishing_rod is None
+        else miniapp_fishing_rod
+    ).strip()
+    if fishing_rod not in {item[0] for item in MINIAPP_FISHING_RODS}:
+        raise ValueError("invalid Mini App fishing rod")
     fishing_rod_owner = str(
         current_fishing.get("rod_owner", DEFAULT_MINIAPP_FISHING_ROD_OWNER)
         if miniapp_fishing_rod_owner is None
@@ -292,19 +424,118 @@ def save_automation_settings(
         raise ValueError("invalid Mini App fishing bait")
     if fishing_chum not in {item[0] for item in MINIAPP_FISHING_CHUMS}:
         raise ValueError("invalid Mini App fishing chum")
+    current_abyss = current_settings.get("miniapp_beast_abyss") or {}
+    power_min = _parse_optional_nonnegative_int(
+        current_abyss.get("power_min")
+        if miniapp_beast_abyss_power_min is None
+        else miniapp_beast_abyss_power_min,
+        "invalid Mini App beast abyss power range",
+    )
+    power_max = _parse_optional_nonnegative_int(
+        current_abyss.get("power_max")
+        if miniapp_beast_abyss_power_max is None
+        else miniapp_beast_abyss_power_max,
+        "invalid Mini App beast abyss power range",
+    )
+    if power_max > 0 and power_min > 0 and power_max < power_min:
+        raise ValueError("invalid Mini App beast abyss power range")
+
+    current_tianxing = current_settings.get("tianxing") or {}
+    meditation_mode = str(
+        current_tianxing.get("meditation_mode", DEFAULT_TIANXING_MEDITATION_MODE)
+        if tianxing_meditation_mode is None
+        else tianxing_meditation_mode
+    ).strip()
+    if meditation_mode not in {item[0] for item in TIANXING_MEDITATION_MODES}:
+        raise ValueError("invalid Tianxing meditation mode")
+    meditation_switch_id = str(current_tianxing.get("meditation_switch_id") or "")
+    if (
+        not meditation_switch_id
+        or meditation_mode
+        != str(current_tianxing.get("meditation_mode") or DEFAULT_TIANXING_MEDITATION_MODE)
+    ):
+        meditation_switch_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    use_heqi_pill = (
+        bool(
+            current_tianxing.get(
+                "use_heqi_pill",
+                current_tianxing.get(
+                    "use_" + "zengyuan_pill", DEFAULT_TIANXING_USE_HEQI_PILL
+                ),
+            )
+        )
+        if tianxing_use_heqi_pill is None
+        else bool(tianxing_use_heqi_pill)
+    )
+    tianji_grind_enabled = (
+        bool(current_tianxing.get("tianji_grind_enabled", DEFAULT_TIANXING_TIANJI_GRIND_ENABLED))
+        if tianxing_tianji_grind_enabled is None
+        else bool(tianxing_tianji_grind_enabled)
+    )
+    tianji_grind_target = _parse_optional_nonnegative_int(
+        current_tianxing.get("tianji_grind_target", DEFAULT_TIANXING_TIANJI_GRIND_TARGET)
+        if tianxing_tianji_grind_target is None
+        else tianxing_tianji_grind_target,
+        "invalid Tianxing Tianji grind target",
+    )
+    if tianji_grind_target > 10000:
+        raise ValueError("invalid Tianxing Tianji grind target")
+    raw_tianji_participants = (
+        current_tianxing.get("tianji_grind_participants")
+        if tianxing_tianji_grind_participants is None
+        else tianxing_tianji_grind_participants
+    )
+    if not isinstance(raw_tianji_participants, list):
+        raise ValueError("Tianxing Tianji grind participants must be a list")
+    tianji_grind_participants = []
+    for item in raw_tianji_participants:
+        normalized = _normalize_participant(item)
+        if normalized is None:
+            raise ValueError("invalid Tianxing Tianji grind participant")
+        account, identity = normalized
+        if identity not in TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ()):
+            raise ValueError("invalid Tianxing Tianji grind participant")
+        key = automation_participant_key(account, identity)
+        if key not in tianji_grind_participants:
+            tianji_grind_participants.append(key)
+    if tianji_grind_enabled and tianji_grind_target <= 0:
+        raise ValueError("Tianxing Tianji grind target required")
+    if tianji_grind_enabled and not tianji_grind_participants:
+        raise ValueError("Tianxing Tianji grind participants required")
+    tianji_round_id = str(current_tianxing.get("tianji_round_id") or "")
+    if tianji_grind_enabled and (
+        not bool(current_tianxing.get("tianji_grind_enabled"))
+        or tianji_grind_target
+        != _normalize_nonnegative_int(current_tianxing.get("tianji_grind_target"))
+    ):
+        tianji_round_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
 
     settings = normalize_automation_settings(
         {
             "world_boss": {"participants": world_boss_participants},
             "mulan_support": {"mode": mode},
+            "miniapp_beast_abyss": {
+                "power_min": power_min,
+                "power_max": power_max,
+            },
             "miniapp_fishing": {
                 "enabled": fishing_enabled,
                 "participants": fishing_participants,
+                "rod": fishing_rod,
                 "rod_owner": fishing_rod_owner,
                 "pond": fishing_pond,
                 "bait": fishing_bait,
                 "chum": fishing_chum,
                 "start_time": fishing_start_time,
+            },
+            "tianxing": {
+                "meditation_mode": meditation_mode,
+                "meditation_switch_id": meditation_switch_id,
+                "use_heqi_pill": use_heqi_pill,
+                "tianji_grind_enabled": tianji_grind_enabled,
+                "tianji_grind_target": tianji_grind_target,
+                "tianji_grind_participants": tianji_grind_participants,
+                "tianji_round_id": tianji_round_id,
             },
             "updated_at": datetime.now().strftime(TIME_FORMAT),
             "updated_by": str(updated_by or "dashboard")[:80],
@@ -345,9 +576,78 @@ def mulan_support_command(settings: dict[str, Any] | None = None) -> str:
     return f".支援慕兰 {mulan_support_mode(settings)}"
 
 
+def miniapp_beast_abyss_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(source.get("miniapp_beast_abyss") or default_automation_settings()["miniapp_beast_abyss"])
+
+
+def miniapp_beast_abyss_power_in_range(
+    power: Any,
+    settings: dict[str, Any] | None = None,
+    *,
+    match_all_when_empty: bool = True,
+) -> bool:
+    config = miniapp_beast_abyss_settings(settings)
+    power_min = _normalize_nonnegative_int(config.get("power_min"))
+    power_max = _normalize_nonnegative_int(config.get("power_max"))
+    filter_active = power_min > 0 or power_max > 0
+    if not filter_active:
+        return bool(match_all_when_empty)
+    try:
+        current = int(power)
+    except (TypeError, ValueError):
+        return False
+    if current < 0:
+        return False
+    if power_min > 0 and current < power_min:
+        return False
+    if power_max > 0 and current > power_max:
+        return False
+    return True
+
+
 def miniapp_fishing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
     return dict(source.get("miniapp_fishing") or default_automation_settings()["miniapp_fishing"])
+
+
+def tianxing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(source.get("tianxing") or default_automation_settings()["tianxing"])
+
+
+def tianxing_tianji_identities_for_account(
+    account: str,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    account = str(account or "").strip()
+    supported = TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ())
+    if not supported:
+        return []
+    config = tianxing_settings(settings)
+    selected = set(config.get("tianji_grind_participants") or [])
+    return [
+        identity
+        for identity in supported
+        if automation_participant_key(account, identity) in selected
+    ]
+
+
+def set_tianxing_heqi_pill_enabled(
+    enabled: bool,
+    *,
+    updated_by: str = "runtime",
+) -> dict[str, Any]:
+    """Update the runtime pill switch without changing unrelated settings."""
+    current = load_automation_settings()
+    return save_automation_settings(
+        world_boss_participants=list(
+            (current.get("world_boss") or {}).get("participants") or []
+        ),
+        mulan_support_mode=(current.get("mulan_support") or {}).get("mode"),
+        tianxing_use_heqi_pill=bool(enabled),
+        updated_by=updated_by,
+    )
 
 
 def automation_dashboard_payload() -> dict[str, Any]:
@@ -378,6 +678,9 @@ def automation_dashboard_payload() -> dict[str, Any]:
             "command": mulan_support_command(settings),
             "modes": list(MULAN_SUPPORT_MODES),
         },
+        "miniapp_beast_abyss": {
+            **miniapp_beast_abyss_settings(settings),
+        },
         "miniapp_fishing": {
             **miniapp_fishing_settings(settings),
             "accounts": [
@@ -405,6 +708,31 @@ def automation_dashboard_payload() -> dict[str, Any]:
             "chums": [
                 {"key": key, "name": name}
                 for key, name in MINIAPP_FISHING_CHUMS
+            ],
+            "rods": [
+                {"key": key, "name": name}
+                for key, name in MINIAPP_FISHING_RODS
+            ],
+        },
+        "tianxing": {
+            **tianxing_settings(settings),
+            "meditation_modes": [
+                {"key": key, "name": name}
+                for key, name in TIANXING_MEDITATION_MODES
+            ],
+            "tianji_accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                        }
+                        for identity in identities
+                    ],
+                }
+                for account, identities in TIANXING_TIANJI_SUPPORTED_IDENTITIES.items()
             ],
         },
         "server_time": datetime.now().strftime(TIME_FORMAT),

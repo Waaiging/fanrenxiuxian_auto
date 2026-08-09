@@ -5,7 +5,8 @@
 避免两个脚本改漏。主要流程：
   1. `.我的阴罗幡` 同步槽位、幡灵、煞气等状态。
   2. `.化功为煞 10000` 失败/冷却时必须解析回复时间，不能盲目重试。
-  3. 囚禁魂魄、安抚幡灵、血洗山林等流程按 state 里的冷却时间推进。
+  3. 每次召唤魔影成功后固定执行：同步阴罗幡、按槽收取凶兽戾魄
+     精华、一键安抚幡灵、再把储备凶兽戾魄逐槽囚禁。
 
 调用方只需要继承 YinluoMixin，并提供发送指令、状态读写和日志能力。
 """
@@ -21,6 +22,8 @@ YINLUO_MASTER_COMMAND = ".我的阴罗幡"
 YINLUO_SOUL = "凶兽戾魄"
 YINLUO_REFINE_COST_SHA = 1000
 YINLUO_CONVERT_COMMAND = ".化功为煞 10000"
+YINLUO_APPEASE_COMMAND = ".一键安抚幡灵"
+YINLUO_COLLECT_COMMAND = ".收取精华"
 YINLUO_CONVERT_FAILURE_RETRY_SECONDS = 60 * 60  # 明确转化失败后固定等待 1 小时
 YINLUO_RETRY_SECONDS = 10 * 60              # 未知/短失败的保守重试间隔
 YINLUO_SYNC_SECONDS = 30 * 60               # 状态缓存最多 30 分钟刷新一次
@@ -116,6 +119,9 @@ def yinluo_default_state():
         "slots": {},
         "appease_suppressed_until": {},
         "imprison_sync_pending": False,
+        "post_summon_stage": "",
+        "post_summon_target_slots": [],
+        "post_summon_started_at": "",
         "last_daily_sacrifice_date": "",
         "last_collected_at": "",
     }
@@ -231,6 +237,13 @@ def parse_yinluo_summon_shadow(text):
             "cooldown_seconds": 8 * 3600,
             "soul": soul_match.group(1).strip() if soul_match else YINLUO_SOUL,
         }
+    if "镇压失败" in clean:
+        return {
+            "matched": True,
+            "status": "failed",
+            "cooldown_seconds": 8 * 3600,
+            "soul": "",
+        }
     if "三级妖丹" in clean and "开始撕裂空间" in clean:
         return {"matched": True, "status": "pending", "cooldown_seconds": 60, "soul": ""}
     if "缺少" in clean or "不足" in clean:
@@ -285,21 +298,23 @@ def parse_yinluo_imprison(text):
 
 def parse_yinluo_collect(text):
     clean = _strip_markdown(text)
-    if "收取成功" in clean:
+    if "收取成功" in clean or "成功收取" in clean:
         refined = {}
         for name, count in re.findall(r"([^,，:：\s]+)\+(\d+)", clean):
             refined[name.strip()] = int(count)
         return {"matched": True, "status": "success", "refined": refined}
-    if "没有" in clean and ("精华" in clean or "可收取" in clean):
+    if any(key in clean for key in ("没有", "暂无", "尚未")) and ("精华" in clean or "可收取" in clean):
         return {"matched": True, "status": "empty", "refined": {}}
     return {"matched": False, "status": "", "refined": {}}
 
 
 def parse_yinluo_appease(text):
     clean = _strip_markdown(text)
-    if "安抚成功" in clean:
-        count_match = re.search(r"成功安抚了\s*(\d+)\s*个炼化槽", clean)
+    count_match = re.search(r"成功安抚(?:了)?\s*(\d+)\s*个炼化槽", clean)
+    if "安抚成功" in clean or count_match:
         return {"matched": True, "status": "success", "count": int(count_match.group(1)) if count_match else 0}
+    if any(key in clean for key in ("无需安抚", "没有需要安抚", "暂无需要安抚")):
+        return {"matched": True, "status": "success", "count": 0}
     return {"matched": False, "status": "", "count": 0}
 
 
@@ -314,6 +329,9 @@ class YinluoMixin:
             defaults = yinluo_default_state()
             for key, value in defaults.items():
                 state.setdefault(key, value)
+        if state.get("imprison_sync_pending") and not state.get("post_summon_stage"):
+            state["post_summon_stage"] = "sync"
+            state["post_summon_started_at"] = state.get("post_summon_started_at") or now_str()
         return state
 
     def yinluo_logger(self):
@@ -443,6 +461,29 @@ class YinluoMixin:
         slots = self.get_yinluo_state(identity).get("slots") or {}
         return sorted(int(slot) for slot, item in slots.items() if isinstance(item, dict) and item.get("status") == "精华已成")
 
+    def yinluo_completed_fierce_slots(self, identity):
+        slots = self.get_yinluo_state(identity).get("slots") or {}
+        return sorted(
+            int(slot)
+            for slot, item in slots.items()
+            if (
+                isinstance(item, dict)
+                and item.get("status") == "精华已成"
+                and str(item.get("soul") or "").strip() == YINLUO_SOUL
+            )
+        )
+
+    def yinluo_slot_item(self, identity, slot):
+        slots = self.get_yinluo_state(identity).get("slots") or {}
+        return slots.get(slot) or slots.get(str(slot)) or {}
+
+    def yinluo_replace_slot(self, identity, slot, item):
+        slots = self.get_yinluo_state(identity).setdefault("slots", {})
+        key = slot if slot in slots else str(slot)
+        slots.pop(slot, None)
+        slots.pop(str(slot), None)
+        slots[key] = dict(item)
+
     def yinluo_exhausted_slots(self, identity):
         state = self.get_yinluo_state(identity)
         slots = state.get("slots") or {}
@@ -544,32 +585,52 @@ class YinluoMixin:
         return False
 
     async def yinluo_summon_shadow(self, identity):
-        text = await self.send_yinluo_command(identity, ".召唤魔影", timeout=60, edited_wait=8)
-        parsed = parse_yinluo_summon_shadow(text)
-        state = self.get_yinluo_state(identity)
-        if parsed.get("status") == "success":
-            soul = parsed.get("soul") or YINLUO_SOUL
-            reserves = state.setdefault("reserves", {})
-            reserves[soul] = int(reserves.get(soul, 0)) + 1
-            state["next_summon_shadow_time"] = add_seconds_str(now_str(), int(parsed.get("cooldown_seconds") or 8 * 3600))
-            if soul == YINLUO_SOUL:
+        async with _YinluoAtomicTask(self, f"YinluoSummonFlow-{identity}"):
+            text = await self.send_yinluo_command(identity, ".召唤魔影", timeout=60, edited_wait=8)
+            parsed = parse_yinluo_summon_shadow(text)
+            state = self.get_yinluo_state(identity)
+            if parsed.get("status") == "success":
+                soul = parsed.get("soul") or YINLUO_SOUL
+                reserves = state.setdefault("reserves", {})
+                reserves[soul] = int(reserves.get(soul, 0)) + 1
+                state["next_summon_shadow_time"] = add_seconds_str(
+                    now_str(), int(parsed.get("cooldown_seconds") or 8 * 3600)
+                )
                 state["imprison_sync_pending"] = True
+                state["post_summon_stage"] = "sync"
+                state["post_summon_target_slots"] = []
+                state["post_summon_started_at"] = now_str()
                 state["next_sync_at"] = ""
-                detail = f"召唤魔影获得 {soul}，囚禁前校准阴罗幡"
-            else:
-                detail = f"召唤魔影获得 {soul}"
-            self.yinluo_set_status(identity, "summoned", detail, 5, text)
-            return True
-        if parsed.get("status") == "cooldown":
-            wait = max(60, int(parsed.get("cooldown_seconds") or YINLUO_RETRY_SECONDS))
-            state["next_summon_shadow_time"] = add_seconds_str(now_str(), wait)
-            self.yinluo_set_status(identity, "summon_cd", f"召唤魔影冷却 {wait}秒", None, text)
-            return True
-        if parsed.get("status") == "pending":
-            self.yinluo_set_status(identity, "summon_pending", "等待召唤魔影结算", 60, text)
-            return True
-        self.yinluo_set_status(identity, "summon_failed", "召唤魔影未成功或材料不足", 3600, text)
-        return False
+                self.yinluo_set_status(
+                    identity,
+                    "summoned",
+                    f"召唤魔影获得 {soul}，开始阴罗幡收取、安抚与囚禁流程",
+                    5,
+                    text,
+                )
+                await self.yinluo_run_post_summon_flow(identity)
+                return True
+            if parsed.get("status") == "cooldown":
+                wait = max(60, int(parsed.get("cooldown_seconds") or YINLUO_RETRY_SECONDS))
+                state["next_summon_shadow_time"] = add_seconds_str(now_str(), wait)
+                self.yinluo_set_status(identity, "summon_cd", f"召唤魔影冷却 {wait}秒", None, text)
+                return True
+            if parsed.get("status") == "failed":
+                wait = max(60, int(parsed.get("cooldown_seconds") or 8 * 3600))
+                state["next_summon_shadow_time"] = add_seconds_str(now_str(), wait)
+                self.yinluo_set_status(
+                    identity,
+                    "summon_failed",
+                    f"召唤魔影镇压失败，{wait}秒后再试",
+                    None,
+                    text,
+                )
+                return True
+            if parsed.get("status") == "pending":
+                self.yinluo_set_status(identity, "summon_pending", "等待召唤魔影结算", 60, text)
+                return True
+            self.yinluo_set_status(identity, "summon_failed", "召唤魔影未成功或材料不足", 3600, text)
+            return False
 
     async def yinluo_convert_sha(self, identity):
         text = await self.send_yinluo_command(identity, YINLUO_CONVERT_COMMAND, timeout=60, edited_wait=6)
@@ -589,9 +650,14 @@ class YinluoMixin:
         self.yinluo_set_status(identity, "convert_failed", "化功为煞回复未识别", YINLUO_CONVERT_FAILURE_RETRY_SECONDS, text)
         return False
 
-    async def yinluo_imprison_fierce_soul(self, identity):
+    async def yinluo_imprison_fierce_soul(self, identity, preferred_slots=None):
         state = self.get_yinluo_state(identity)
         slots = self.yinluo_empty_slots(identity)
+        preferred = [int(slot) for slot in (preferred_slots or [])]
+        if preferred:
+            slots = [slot for slot in preferred if slot in slots] + [
+                slot for slot in slots if slot not in preferred
+            ]
         if not slots:
             return False
         if int(state.get("reserves", {}).get(YINLUO_SOUL, 0)) <= 0:
@@ -607,6 +673,10 @@ class YinluoMixin:
         synced_after_busy = False
         while True:
             slots = [slot for slot in self.yinluo_empty_slots(identity) if slot not in attempted_slots]
+            if preferred:
+                slots = [slot for slot in preferred if slot in slots] + [
+                    slot for slot in slots if slot not in preferred
+                ]
             if not slots:
                 self.yinluo_set_status(identity, "no_empty_slot_after_sync", "未解析到可囚禁的空闲炼化槽", YINLUO_SYNC_SECONDS)
                 return False
@@ -620,7 +690,13 @@ class YinluoMixin:
                 state["sha_current"] = max(0, int(state.get("sha_current") or 0) - YINLUO_REFINE_COST_SHA)
                 reserves = state.setdefault("reserves", {})
                 reserves[YINLUO_SOUL] = max(0, int(reserves.get(YINLUO_SOUL, 0)) - 1)
-                state.setdefault("slots", {})[slot] = {"status": "炼化中", "soul": YINLUO_SOUL, "remaining_seconds": 12 * 3600, "due_at": add_seconds_str(now_str(), 12 * 3600)}
+                self.yinluo_replace_slot(identity, slot, {
+                    "status": "炼化中",
+                    "soul": YINLUO_SOUL,
+                    "remaining_seconds": 12 * 3600,
+                    "remaining_text": "",
+                    "due_at": add_seconds_str(now_str(), 12 * 3600),
+                })
                 self.yinluo_set_status(identity, "imprisoned", f"{slot}号槽囚禁 {YINLUO_SOUL}", 5, text)
                 return True
             if parsed.get("status") == "slot_busy":
@@ -650,57 +726,179 @@ class YinluoMixin:
             self.yinluo_set_status(identity, "imprison_failed", "囚禁魂魄失败", YINLUO_RETRY_SECONDS, text)
             return False
 
-    async def yinluo_collect_essence(self, identity):
-        text = await self.send_yinluo_command(identity, ".一键收取精华", timeout=60)
+    async def yinluo_collect_essence(self, identity, slot):
+        slot = int(slot)
+        item = self.yinluo_slot_item(identity, slot)
+        if (
+            item.get("status") != "精华已成"
+            or str(item.get("soul") or "").strip() != YINLUO_SOUL
+        ):
+            return True
+        text = await self.send_yinluo_command(
+            identity, f"{YINLUO_COLLECT_COMMAND} {slot}", timeout=60
+        )
         parsed = parse_yinluo_collect(text)
         state = self.get_yinluo_state(identity)
         if parsed.get("status") == "success":
             state["last_collected_at"] = now_str()
-            for slot, item in list((state.get("slots") or {}).items()):
-                if isinstance(item, dict) and item.get("status") == "精华已成":
-                    state.setdefault("slots", {})[slot] = {
+            self.yinluo_replace_slot(identity, slot, {
+                "status": "魂力枯竭",
+                "soul": "",
+                "remaining_seconds": 0,
+                "remaining_text": "",
+                "due_at": "",
+            })
+            state["next_sync_at"] = ""
+            self.yinluo_set_status(
+                identity,
+                "collected",
+                f"已收取 {slot}号槽 {YINLUO_SOUL} 精华",
+                5,
+                text,
+            )
+            return True
+        if parsed.get("status") == "empty":
+            self.yinluo_replace_slot(identity, slot, {
+                "status": "状态待同步",
+                "soul": "",
+                "remaining_seconds": 0,
+                "remaining_text": "",
+                "due_at": "",
+            })
+            self.yinluo_set_status(
+                identity,
+                "collect_empty",
+                f"{slot}号槽暂无可收取精华",
+                5,
+                text,
+            )
+            return True
+        self.yinluo_set_status(
+            identity,
+            "collect_failed",
+            f"收取 {slot}号槽精华回复未识别",
+            YINLUO_RETRY_SECONDS,
+            text,
+        )
+        return False
+
+    async def yinluo_appease_all(self, identity, force=False):
+        if force:
+            target_slots = sorted(
+                int(slot)
+                for slot, item in (self.get_yinluo_state(identity).get("slots") or {}).items()
+                if isinstance(item, dict) and "魂力枯竭" in str(item.get("status") or "")
+            )
+        else:
+            target_slots = self.yinluo_exhausted_slots(identity)
+        if not target_slots and not force:
+            return True
+        text = await self.send_yinluo_command(identity, YINLUO_APPEASE_COMMAND, timeout=60)
+        parsed = parse_yinluo_appease(text)
+        if parsed.get("matched"):
+            count = int(parsed.get("count") or 0)
+            state = self.get_yinluo_state(identity)
+            state["next_sync_at"] = ""
+            suppressed = state.setdefault("appease_suppressed_until", {})
+            if count > 0:
+                for target_slot in target_slots:
+                    self.yinluo_replace_slot(identity, target_slot, {
                         "status": "空闲",
                         "soul": "",
                         "remaining_seconds": 0,
                         "remaining_text": "",
                         "due_at": "",
-                    }
-            state["next_sync_at"] = ""
-            self.yinluo_set_status(identity, "collected", "已收取阴罗幡精华", 5, text)
+                    })
+                    suppressed.pop(str(target_slot), None)
+                    suppressed.pop(target_slot, None)
+                self.yinluo_set_status(identity, "appeased", f"一键安抚 {count} 个炼化槽成功", 5, text)
+            else:
+                for target_slot in target_slots:
+                    suppressed[str(target_slot)] = add_seconds_str(now_str(), YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS)
+                detail = f"炼化槽无需安抚，{YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS // 60}分钟内不重复"
+                self.yinluo_set_status(identity, "appease_noop", detail, 5, text)
             return True
-        if parsed.get("status") == "empty":
-            self.yinluo_set_status(identity, "collect_empty", "暂无可收取精华", YINLUO_SYNC_SECONDS, text)
-            return True
-        self.yinluo_set_status(identity, "collect_failed", "收取精华回复未识别", YINLUO_RETRY_SECONDS, text)
+        self.yinluo_set_status(identity, "appease_failed", "一键安抚幡灵失败", YINLUO_RETRY_SECONDS, text)
         return False
 
     async def yinluo_appease_slot(self, identity, slot):
-        text = await self.send_yinluo_command(identity, f".安抚幡灵 {slot}", timeout=60)
-        parsed = parse_yinluo_appease(text)
-        if parsed.get("matched"):
-            count = int(parsed.get("count") or 0)
-            state = self.get_yinluo_state(identity)
-            slots = state.setdefault("slots", {})
-            slots.pop(slot, None)
-            slots[str(slot)] = {
-                "status": "空闲",
-                "soul": "",
-                "remaining_seconds": 0,
-                "remaining_text": "",
-                "due_at": "",
-            }
-            state["next_sync_at"] = ""
-            suppressed = state.setdefault("appease_suppressed_until", {})
-            if count > 0:
-                suppressed.pop(str(slot), None)
-                self.yinluo_set_status(identity, "appeased", f"安抚 {slot}号槽成功", 5, text)
-            else:
-                suppressed[str(slot)] = add_seconds_str(now_str(), YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS)
-                detail = f"{slot}号槽无需安抚，{YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS // 60}分钟内不重复"
-                self.yinluo_set_status(identity, "appease_noop", detail, 5, text)
-            return True
-        self.yinluo_set_status(identity, "appease_failed", f"安抚 {slot}号槽失败", YINLUO_RETRY_SECONDS, text)
-        return False
+        return await self.yinluo_appease_all(identity, force=True)
+
+    async def yinluo_run_post_summon_flow(self, identity):
+        """Resume the fixed Mini App refinery chain after a successful summon."""
+        async with _YinluoAtomicTask(self, f"YinluoPostSummon-{identity}"):
+            while True:
+                state = self.get_yinluo_state(identity)
+                stage = str(state.get("post_summon_stage") or "").strip()
+                if not stage:
+                    return True
+
+                if stage == "sync":
+                    if not await self.yinluo_sync_banner(identity):
+                        return False
+                    state = self.get_yinluo_state(identity)
+                    state["post_summon_target_slots"] = self.yinluo_completed_fierce_slots(identity)
+                    state["post_summon_stage"] = "collect"
+                    self.save_state()
+                    continue
+
+                if stage == "collect":
+                    targets = [
+                        int(slot)
+                        for slot in (state.get("post_summon_target_slots") or [])
+                    ]
+                    for slot in targets:
+                        item = self.yinluo_slot_item(identity, slot)
+                        if (
+                            item.get("status") != "精华已成"
+                            or str(item.get("soul") or "").strip() != YINLUO_SOUL
+                        ):
+                            continue
+                        if not await self.yinluo_collect_essence(identity, slot):
+                            return False
+                    state = self.get_yinluo_state(identity)
+                    state["post_summon_stage"] = "appease"
+                    self.save_state()
+                    continue
+
+                if stage == "appease":
+                    if not await self.yinluo_appease_all(identity, force=True):
+                        return False
+                    state = self.get_yinluo_state(identity)
+                    state["post_summon_stage"] = "imprison"
+                    self.save_state()
+                    continue
+
+                if stage == "imprison":
+                    preferred = [
+                        int(slot)
+                        for slot in (state.get("post_summon_target_slots") or [])
+                    ]
+                    while (
+                        self.yinluo_empty_slots(identity)
+                        and int(
+                            self.get_yinluo_state(identity)
+                            .get("reserves", {})
+                            .get(YINLUO_SOUL, 0)
+                        ) > 0
+                    ):
+                        if not await self.yinluo_imprison_fierce_soul(
+                            identity, preferred_slots=preferred
+                        ):
+                            return False
+                    state = self.get_yinluo_state(identity)
+                    state["post_summon_stage"] = ""
+                    state["post_summon_target_slots"] = []
+                    state["post_summon_started_at"] = ""
+                    state["imprison_sync_pending"] = False
+                    state["next_action_at"] = ""
+                    state["last_status"] = "summon_flow_complete"
+                    state["last_detail"] = "召唤后的收取、安抚与囚禁流程已完成"
+                    self.save_state()
+                    return True
+
+                state["post_summon_stage"] = "sync"
+                self.save_state()
 
     async def yinluo_tick(self, identity=YINLUO_IDENTITY):
         if identity != YINLUO_IDENTITY:
@@ -715,14 +913,37 @@ class YinluoMixin:
             return wait
 
         state = self.get_yinluo_state(identity)
+        if state.get("post_summon_stage"):
+            if is_future(state.get("next_action_at", "")):
+                return max(
+                    10,
+                    min(int(seconds_until(state.get("next_action_at", ""))), 600),
+                )
+            await self.yinluo_run_post_summon_flow(identity)
+            return 5
+
         due_slots = self.yinluo_refining_slots_due(identity)
         if due_slots:
             self.yinluo_set_status(identity, "sync_due_slot", f"{due_slots[0]}号槽炼化到点，重新同步阴罗幡")
-            await self.yinluo_sync_banner(identity)
+            if await self.yinluo_sync_banner(identity):
+                completed = self.yinluo_completed_fierce_slots(identity)
+                if completed:
+                    state = self.get_yinluo_state(identity)
+                    state["post_summon_stage"] = "collect"
+                    state["post_summon_target_slots"] = completed
+                    state["post_summon_started_at"] = now_str()
+                    state["next_action_at"] = ""
+                    self.save_state()
             return 5
 
-        if self.yinluo_completed_slots(identity):
-            await self.yinluo_collect_essence(identity)
+        completed = self.yinluo_completed_fierce_slots(identity)
+        if completed:
+            state["post_summon_stage"] = "collect"
+            state["post_summon_target_slots"] = completed
+            state["post_summon_started_at"] = now_str()
+            state["next_action_at"] = ""
+            self.save_state()
+            await self.yinluo_run_post_summon_flow(identity)
             return 5
 
         exhausted = self.yinluo_exhausted_slots(identity)
@@ -732,15 +953,6 @@ class YinluoMixin:
 
         if is_future(state.get("next_action_at", "")):
             return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 3600))
-
-        if state.get("imprison_sync_pending"):
-            if is_future(state.get("next_action_at", "")):
-                return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 300))
-            if await self.yinluo_sync_banner(identity):
-                state = self.get_yinluo_state(identity)
-                state["imprison_sync_pending"] = False
-                self.save_state()
-            return 5
 
         if state.get("last_daily_sacrifice_date") != _today() and not is_future(state.get("next_daily_sacrifice_time", "")):
             await self.yinluo_daily_sacrifice(identity)

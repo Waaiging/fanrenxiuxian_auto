@@ -22,6 +22,8 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_INTERVAL_SECONDS = 6 * 3600
 DEFAULT_RETRY_SECONDS = 5 * 60
 DEFAULT_TARGET_BEAST = "双瞳鼠"
+COOLDOWN_RETRY_GRACE_SECONDS = 2
+MIN_COOLDOWN_RETRY_SECONDS = 2
 
 
 def _now_text(value: datetime | None = None) -> str:
@@ -42,6 +44,26 @@ def _seconds_until(value: Any, now: datetime | None = None) -> int:
 
 def _error_code(exc: Exception) -> str:
     return exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+
+
+def _seek_cooldown_seconds(text: Any) -> int | None:
+    clean = str(text or "").replace("**", "").replace("`", "")
+    match = re.search(r"请在\s*([^后\n]+?)\s*后再来", clean)
+    if not match:
+        return None
+    duration = match.group(1)
+    total = 0
+    matched = False
+    for pattern, factor in (
+        (r"(\d+)\s*天", 86400),
+        (r"(\d+)\s*(?:小时|时)", 3600),
+        (r"(\d+)\s*(?:分钟|分)", 60),
+        (r"(\d+)\s*秒", 1),
+    ):
+        for value in re.findall(pattern, duration):
+            total += int(value) * factor
+            matched = True
+    return total if matched else None
 
 
 def _beast_id(beast: Any) -> int:
@@ -441,9 +463,34 @@ class MiniAppBeastSeekWorker:
         if len(new_beasts) == 1:
             return await self._process_new_beast(new_beasts[0], post_beasts, now)
 
+        message = str((sought or {}).get("message") or "").strip()
+        cooldown_seconds = _seek_cooldown_seconds(message)
+        if not new_beasts and cooldown_seconds is not None:
+            wait_seconds = max(
+                MIN_COOLDOWN_RETRY_SECONDS,
+                cooldown_seconds + COOLDOWN_RETRY_GRACE_SECONDS,
+            )
+            retry_at = datetime.now() + timedelta(seconds=wait_seconds)
+            self._clear_inflight()
+            self.state.update({
+                "next_hunt_time": _now_text(retry_at),
+                "beast_seek_miniapp_seek_next_time": _now_text(retry_at),
+                "beast_seek_miniapp_next_time": _now_text(retry_at),
+                "beast_seek_miniapp_last_result": message,
+                "last_hunt_result": message,
+                "beast_seek_miniapp_last_cooldown_seconds": cooldown_seconds,
+                "beast_seek_miniapp_last_error": "",
+            })
+            self._save()
+            self.log.info(
+                "Mini App beast seek still cooling down (%ss); retrying in %ss",
+                cooldown_seconds,
+                wait_seconds,
+            )
+            return True
+
         self._mark_seek_attempt(now)
         self._clear_inflight()
-        message = str((sought or {}).get("message") or "").strip()
         if not new_beasts:
             result = message or "本次寻觅未获得新灵兽"
             self.state.update({

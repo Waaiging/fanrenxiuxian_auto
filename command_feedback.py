@@ -48,6 +48,7 @@ NO_RESPONSE_RETRY_COUNT = 1
 RETIRED_AUTO_COMMAND_PREFIXES = (
     ".闯塔",
     ".寻觅灵兽",
+    ".灵兽休息",
     ".借天门势",
     ".灵树灌溉",
     ".灵树状态",

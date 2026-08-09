@@ -37,6 +37,7 @@ from miniapp_dwelling import (
 )
 from miniapp_daily_activities import MiniAppDailyActivities
 from miniapp_fishing import MiniAppFishingAutomation
+from miniapp_inventory import MiniAppInventoryWorker
 from miniapp_journey import MiniAppTianxingJourney
 
 
@@ -122,6 +123,12 @@ class MiniAppCommandRouter:
             self.account,
             self.log,
         )
+        self.inventory = MiniAppInventoryWorker(
+            actor,
+            self.transport,
+            self.account,
+            self.log,
+        )
         self._orig_send = None
         self._orig_send_identity = None
         self._last_auth_refresh = datetime.min
@@ -191,6 +198,12 @@ class MiniAppCommandRouter:
         self._profile_task = asyncio.create_task(
             self.run_profile_sync_loop(),
             name=f"miniapp_{self.account}_profiles",
+        )
+        self._daily_activity_tasks.append(
+            asyncio.create_task(
+                self.inventory.run_loop(),
+                name=f"miniapp_{self.account}_inventory",
+            )
         )
         for identity in star_identities:
             self._star_farm_tasks.append(
@@ -585,6 +598,17 @@ class MiniAppCommandRouter:
             await pause_event.wait()
         if hasattr(self.actor, "identity_pause_seconds") and self.actor.identity_pause_seconds(identity) > 0:
             return None
+        if command == ".闭关修炼" and hasattr(
+            self.actor, "ensure_tianxing_destiny_for_action"
+        ):
+            if not await self.actor.ensure_tianxing_destiny_for_action(
+                identity, "cultivation"
+            ):
+                self._record(
+                    miniapp_route_last_error="tianxing_destiny_failed",
+                    miniapp_route_last_error_at=_now_text(),
+                )
+                return None
         await self._maybe_refresh_auth()
         try:
             response = await self.transport.command(command, identity=identity)

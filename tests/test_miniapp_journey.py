@@ -235,7 +235,7 @@ class MiniAppJourneyTests(unittest.TestCase):
         sub_actor = FakeActor("sub", avatars=["无咎子"], sects={"无咎子": "天星宗"})
         sub_runner = MiniAppTianxingJourney(sub_actor, SequenceTransport(), "sub", FakeLogger())
 
-        self.assertEqual(main_runner.identities(), ["无咎子"])
+        self.assertEqual(main_runner.identities(), ["主魂", "无咎子"])
         self.assertEqual(waaiging_runner.identities(), ["主魂"])
         self.assertEqual(sub_runner.identities(), [])
         self.assertFalse(sub_runner.enabled)
@@ -311,8 +311,12 @@ class MiniAppJourneyTests(unittest.TestCase):
         self.assertEqual(retry, 1234)
         self.assertFalse(any(call[0] in {"command", "journey"} for call in transport.calls))
 
-    def test_dashboard_only_adds_journey_to_the_two_scoped_panels(self):
+    def test_dashboard_adds_journey_to_all_three_scoped_panels(self):
         main_state = {
+            "sect_name": "天星宗",
+            "identity_sect_names": {"主魂": "天星宗", "无咎子": "天星宗"},
+            "miniapp_journey_daily_count": 0,
+            "miniapp_journey_daily_limit": 2,
             "avatars": {
                 "无咎子": {"miniapp_journey_daily_count": 1, "miniapp_journey_daily_limit": 2},
                 "缘生子": {},
@@ -325,6 +329,10 @@ class MiniAppJourneyTests(unittest.TestCase):
             "miniapp:journey-deep",
             {row["command"] for row in main_panels["无咎子"]["commands"]},
         )
+        main_commands = {row["command"] for row in main_panels["主魂"]["commands"]}
+        self.assertIn("miniapp:journey-deep", main_commands)
+        self.assertIn(".推命 闭关", main_commands)
+        self.assertIn(".观命", main_commands)
         self.assertNotIn(
             "miniapp:journey-deep",
             {row["command"] for row in main_panels["缘生子"]["commands"]},

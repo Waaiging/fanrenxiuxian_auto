@@ -4,10 +4,12 @@ import os
 import tempfile
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import intelligent_cultivator
 import dashboard_server
+import main_beast_features
 from dashboard_server import build_command_panels
 from main_beast_features import (
     ABYSS_CD_SECONDS,
@@ -79,16 +81,35 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertEqual(self.actor.state["best_beast_stamina"], 35)
 
     def test_abyss_protects_low_stamina_focus_and_uses_tier_one(self):
-        candidates = self.actor.main_beast_candidates("abyss")
-        self.assertEqual([item["full_name"] for item in candidates], ["灵狐"])
-        self.actor.main_beast_by_name("大圣")["stamina"] = 80
-        candidates = self.actor.main_beast_candidates("abyss")
-        self.assertEqual(candidates[0]["full_name"], "大圣")
+        with patch.object(
+            main_beast_features,
+            "miniapp_beast_abyss_power_in_range",
+            side_effect=lambda power, match_all_when_empty=True: bool(match_all_when_empty),
+        ):
+            candidates = self.actor.main_beast_candidates("abyss")
+            self.assertEqual([item["full_name"] for item in candidates], ["灵狐"])
+            self.actor.main_beast_by_name("大圣")["stamina"] = 80
+            candidates = self.actor.main_beast_candidates("abyss")
+            self.assertEqual(candidates[0]["full_name"], "大圣")
 
     def test_patrol_excludes_focus_and_prefers_healthy_fallback(self):
         candidates = self.actor.main_beast_candidates("patrol")
         self.assertNotIn("大圣", [item["full_name"] for item in candidates])
         self.assertEqual(candidates[0]["full_name"], "灵狐")
+
+    def test_abyss_and_patrol_follow_configured_power_range(self):
+        with patch.object(
+            main_beast_features,
+            "miniapp_beast_abyss_power_in_range",
+            side_effect=lambda power, match_all_when_empty=True: (
+                100 <= int(power) <= 900 if match_all_when_empty else 100 <= int(power) <= 900
+            ),
+        ):
+            abyss = self.actor.main_beast_candidates("abyss")
+            patrol = self.actor.main_beast_candidates("patrol")
+
+        self.assertEqual([item["full_name"] for item in abyss], ["铁甲龟"])
+        self.assertEqual([item["full_name"] for item in patrol], ["灵狐"])
 
     def test_patrol_uses_dashboard_route_and_keeps_automatic_beast_selection(self):
         self.actor.dashboard_command_option = lambda *args, **kwargs: "斥候"
@@ -106,6 +127,25 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertEqual(sent, [".灵兽巡边 灵狐 斥候"])
         self.assertEqual(self.actor.state["beast_border_patrol_name"], "灵狐")
         self.assertEqual(self.actor.state["beast_border_patrol_mode"], "斥候")
+
+    def test_rest_for_action_uses_wan_beast_valley_and_never_group_command(self):
+        beast = self.actor.main_beast_by_name("大圣")
+        beast.update({"id": 7, "status": "出战中"})
+        rested = {**beast, "status": "休息中"}
+        transport = SimpleNamespace(
+            spirit_beast_rest=AsyncMock(return_value={
+                "beasts": [rested],
+                "message": "大圣已返回灵兽袋。",
+            })
+        )
+        self.actor._miniapp_command_router = SimpleNamespace(enabled=True, transport=transport)
+        self.actor.send_and_wait_feedback = AsyncMock()
+
+        self.assertTrue(asyncio.run(self.actor.normalize_main_beast_for_action(beast, "patrol")))
+
+        transport.spirit_beast_rest.assert_awaited_once_with("主魂", 7, "大圣")
+        self.actor.send_and_wait_feedback.assert_not_awaited()
+        self.assertEqual(self.actor.main_beast_by_name("大圣")["status"], "休息中")
 
     def test_manual_responses_record_real_cooldowns(self):
         self.assertTrue(self.actor.record_manual_beast_command_response(
@@ -154,7 +194,13 @@ class MainBeastFeatureTests(unittest.TestCase):
             self.assertTrue(main_beast_feedback_candidate(command, text), command)
 
     def test_dashboard_main_panel_is_wanling_and_has_requested_entries(self):
-        state = {**main_beast_default_state(), "done": [], "avatars": {}}
+        state = {
+            **main_beast_default_state(),
+            "done": [],
+            "avatars": {},
+            "sect_name": "万灵宗",
+            "identity_sect_names": {"主魂": "万灵宗"},
+        }
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             dashboard_server, "CONFIG_DIR", tmpdir
         ):
@@ -171,11 +217,34 @@ class MainBeastFeatureTests(unittest.TestCase):
         self.assertNotIn(".登天阶", commands)
         self.assertNotIn(".引九天罡风", commands)
         self.assertNotIn(".我的灵兽", commands)
+        self.assertNotIn(".灵兽休息 <灵兽>", commands)
         miniapp = next(item for item in panel["commands"] if item["command"] == "miniapp:spirit-beast")
         self.assertEqual(miniapp["dashboard_action"], "miniapp-beast-refresh")
         patrol = next(item for item in panel["commands"] if item.get("control_key") == ".灵兽巡边 *")
         self.assertEqual(patrol["patrol_mode_options"], ["斥候", "护粮", "袭营"])
         self.assertEqual(patrol["patrol_mode_value"], "袭营")
+
+    def test_dashboard_main_panel_hides_wanling_actions_for_current_freelancer(self):
+        state = {
+            **main_beast_default_state(),
+            "avatars": {},
+            "sect_name": "散修",
+            "identity_sect_names": {"主魂": "散修"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            dashboard_server, "CONFIG_DIR", tmpdir
+        ):
+            panel = build_command_panels("main", state)[0]
+        commands = {item["command"] for item in panel["commands"]}
+        self.assertFalse({
+            "miniapp:spirit-beast",
+            "miniapp:spirit-beast-contract",
+            "miniapp:spirit-beast-abyss",
+            ".寻觅灵兽",
+            ".灵兽巡边 <灵兽> 袭营",
+            ".巡边状态",
+            ".巡边归来",
+        } & commands)
 
     def test_miniapp_sync_replaces_deprecated_roster_command(self):
         self.actor.config = {
@@ -310,7 +379,7 @@ class MainBeastFeatureTests(unittest.TestCase):
         actor.state_time_command_paused = lambda key, identity="": False
         self.assertFalse(actor.priority_due_work_summary())
 
-    def test_main_account_initializes_wanling_runtime_and_migrates_state(self):
+    def test_main_account_initializes_tianxing_and_suspends_wanling_runtime(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = os.path.join(tmpdir, "state_main.json")
             with open(state_file, "w", encoding="utf-8") as handle:
@@ -325,12 +394,13 @@ class MainBeastFeatureTests(unittest.TestCase):
             ), patch.object(intelligent_cultivator, "TelegramClient", return_value=object()):
                 actor = intelligent_cultivator.Cultivator(session_name="fixture")
 
-            self.assertEqual(actor.sect_name, "万灵宗")
-            self.assertEqual(actor.identity_sect_names["主魂"], "万灵宗")
+            self.assertEqual(actor.sect_name, "天星宗")
+            self.assertEqual(actor.identity_sect_names["主魂"], "天星宗")
             self.assertFalse(actor.lingxiao_enabled)
             self.assertFalse(actor.enable_spirit_tree)
-            self.assertTrue(actor.enable_main_beasts)
-            self.assertEqual(actor.state["sect_name"], "万灵宗")
+            self.assertFalse(actor.enable_main_beasts)
+            self.assertFalse(actor._miniapp_beast_contract.enabled)
+            self.assertEqual(actor.state["sect_name"], "天星宗")
             self.assertIn("next_abyss_time", actor.state)
             self.assertIn("next_beast_border_patrol_time", actor.state)
 
