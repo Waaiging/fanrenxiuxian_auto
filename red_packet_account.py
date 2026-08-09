@@ -106,11 +106,19 @@ async def run(account: str) -> None:
                 getattr(exc, "code", "") or type(exc).__name__.lower()
             )
             actor.save_state()
-            logger.error(
-                "[%s] Mini App scheduler failed to start; red-packet listener remains active",
-                account,
-                exc_info=True,
-            )
+            code = getattr(exc, "code", "") or type(exc).__name__.lower()
+            if code == "dwelling_token_expired":
+                logger.error(
+                    "[%s] Mini App scheduler disabled: fixed entry token expired; "
+                    "red-packet listener remains active",
+                    account,
+                )
+            else:
+                logger.error(
+                    "[%s] Mini App scheduler failed to start; red-packet listener remains active",
+                    account,
+                    exc_info=True,
+                )
         if miniapp_started:
             exchange_handlers = install_restricted_exchange_monitor(actor, logger=logger)
         world_boss_monitor = await install_world_boss_monitor(

@@ -47,6 +47,7 @@ DEFAULT_PROFILE_REFRESH_SECONDS = 30 * 60
 DEFAULT_STAR_FARM_RETRY_SECONDS = 5 * 60
 STAR_FARM_WAKE_GRACE_SECONDS = 5
 DEFAULT_STAR_FARM_TARGET = "天雷星"
+ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS = 15 * 60
 
 
 def _now_text() -> str:
@@ -132,6 +133,8 @@ class MiniAppCommandRouter:
         self._orig_send = None
         self._orig_send_identity = None
         self._last_auth_refresh = datetime.min
+        self._last_auth_refresh_failure = datetime.min
+        self._route_blocked_log_times: dict[tuple[str, str], datetime] = {}
         self._profile_task: asyncio.Task[Any] | None = None
         self._star_farm_tasks: list[asyncio.Task[Any]] = []
         self._daily_activity_tasks: list[asyncio.Task[Any]] = []
@@ -146,6 +149,21 @@ class MiniAppCommandRouter:
             self.actor.save_state()
         except Exception:
             self.log.warning("Mini App route state save failed", exc_info=True)
+
+    def _log_route_blocked(self, identity: str, command: str) -> None:
+        """Report an unavailable Mini App route without flooding the log."""
+        key = (str(identity or "主魂"), str(command or ""))
+        now = datetime.now()
+        previous = self._route_blocked_log_times.get(key, datetime.min)
+        if (now - previous).total_seconds() < ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS:
+            return
+        self._route_blocked_log_times[key] = now
+        self.log.warning(
+            "Mini App-only command blocked while route is unavailable [%s] %s; "
+            "refresh the configured Mini App entry token",
+            identity,
+            command,
+        )
 
     async def install(self) -> bool:
         self._orig_send = self.actor.send_and_wait_feedback
@@ -170,11 +188,17 @@ class MiniAppCommandRouter:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self.enabled = False
             self._record(miniapp_route_active=False, miniapp_route_last_error=code)
-            self.log.error(
-                "Mini App command routing setup failed (%s); supported commands are blocked",
-                code,
-                exc_info=True,
-            )
+            if code == "dwelling_token_expired":
+                self.log.error(
+                    "Mini App command routing setup failed: fixed entry token expired; "
+                    "supported commands are blocked until the configured entry URL is refreshed"
+                )
+            else:
+                self.log.error(
+                    "Mini App command routing setup failed (%s); supported commands are blocked",
+                    code,
+                    exc_info=True,
+                )
             return False
         known = sorted(
             name
@@ -322,7 +346,7 @@ class MiniAppCommandRouter:
     def _save_star_state(self) -> None:
         try:
             self.actor.save_state()
-        except Exception:
+        except Exception as exc:
             self.log.warning("Mini App star-farm state save failed", exc_info=True)
 
     def _record_star_snapshot(
@@ -529,10 +553,19 @@ class MiniAppCommandRouter:
         try:
             await self.transport.initialize(force=True)
             self._last_auth_refresh = datetime.now()
-        except Exception:
-            # A failed proactive refresh is not fatal: the transport retries
-            # authentication on demand when a command hits an auth error.
-            self.log.warning("Mini App routing auth refresh failed", exc_info=True)
+        except Exception as exc:
+            # Do not retry a failed refresh for every command.  In particular,
+            # a fixed entry token can expire independently of Telegram initData;
+            # reusing it cannot recover and only creates an error storm.
+            self._last_auth_refresh = datetime.now()
+            if (datetime.now() - self._last_auth_refresh_failure).total_seconds() >= ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS:
+                self._last_auth_refresh_failure = self._last_auth_refresh
+                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+                self.log.warning(
+                    "Mini App routing auth refresh failed (%s); retrying later",
+                    code,
+                    exc_info=code != "dwelling_token_expired",
+                )
 
     async def _send_main(self, message: str, *args: Any, **kwargs: Any) -> Any:
         return await self._route("主魂", message, self._orig_send, args, kwargs)
@@ -570,11 +603,7 @@ class MiniAppCommandRouter:
                 miniapp_route_last_error="route_unavailable",
                 miniapp_route_last_error_at=_now_text(),
             )
-            self.log.error(
-                "Mini App-only command blocked while route is unavailable [%s] %s",
-                identity,
-                command,
-            )
+            self._log_route_blocked(identity, command)
             return None
         if not self._identity_routable(identity):
             self._record(

@@ -205,6 +205,35 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(group_only, "group:.洞府")
         self.assertEqual(actor.group_sent, [".洞府"])
 
+    def test_router_unavailable_log_is_throttled_after_expired_entry(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {}
+                self.avatars = []
+
+            async def send_and_wait_feedback(self, command, *args, **kwargs):
+                return f"group:{command}"
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = FakeLogger()
+        router = MiniAppCommandRouter(actor, "main", logger=logger)
+        router.transport.initialize = AsyncMock(
+            side_effect=MiniAppBeastError("dwelling_token_expired")
+        )
+
+        self.assertFalse(asyncio.run(router.install()))
+        asyncio.run(actor.send_and_wait_feedback(".问道"))
+        asyncio.run(actor.send_and_wait_feedback(".问道"))
+
+        self.assertEqual(len(logger.warning_messages), 1)
+        self.assertIn("refresh the configured Mini App entry token", logger.warning_messages[0])
+        self.assertIn("fixed entry token expired", logger.error_messages[0])
+
     def test_soul_curse_chain_routes_to_group(self):
         class Actor:
             def __init__(self):
