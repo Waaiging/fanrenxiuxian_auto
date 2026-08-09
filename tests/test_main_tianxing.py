@@ -48,6 +48,24 @@ class MainTianxingTests(unittest.TestCase):
         self.assertEqual(asyncio.run(run()), "执行成功")
         self.assertEqual(sent, [".观命", ".定命 紫微", ".推命 闭关", ".闭关修炼"])
 
+    def test_route_unavailable_destiny_failure_log_is_throttled(self):
+        actor = self.actor()
+        actor.state.update(
+            {
+                "miniapp_route_active": False,
+                "miniapp_route_last_error": "dwelling_token_expired",
+            }
+        )
+        logger = Mock()
+        actor.common_command_logger = lambda: logger
+        actor.send_and_wait_feedback = AsyncMock(return_value=None)
+
+        self.assertFalse(asyncio.run(actor.observe_tianxing_destiny("主魂")))
+        self.assertFalse(asyncio.run(actor.observe_tianxing_destiny("主魂")))
+
+        self.assertEqual(logger.warning.call_count, 1)
+        self.assertIn("refresh the configured entry token", logger.warning.call_args.args[0])
+
     def test_main_meditation_continues_when_tianxing_prefix_is_pending(self):
         actor = self.actor()
         actor.state.update(

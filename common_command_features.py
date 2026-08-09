@@ -217,6 +217,7 @@ TIANXING_DESTINY_FAILURE_KEYWORDS = (
     "无法", "不能", "不可", "闭关中", "深度闭关", "正在闭关", "闭关状态",
     "冷却", "修为不足", "并非", "未开启", "错误",
 )
+TIANXING_DESTINY_FAILURE_LOG_SUPPRESS_SECONDS = 15 * 60
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
@@ -672,6 +673,29 @@ class CommonCommandMixin:
             any(keyword in text for keyword in TIANXING_DESTINY_FAILURE_KEYWORDS)
             and not already_fixed
         ):
+            route_unavailable = (
+                getattr(self, "state", {}).get("miniapp_route_active") is False
+                and str(getattr(self, "state", {}).get("miniapp_route_last_error") or "")
+                in {"route_unavailable", "dwelling_token_expired"}
+            )
+            if route_unavailable:
+                last_log = str(state.get("tianxing_destiny_failure_log_time") or "")
+                try:
+                    elapsed = (
+                        datetime.now() - datetime.strptime(last_log, TIME_FORMAT)
+                    ).total_seconds()
+                except (TypeError, ValueError):
+                    elapsed = float("inf")
+                if elapsed < TIANXING_DESTINY_FAILURE_LOG_SUPPRESS_SECONDS:
+                    return False
+                state["tianxing_destiny_failure_log_time"] = now_str()
+                self.save_state()
+                self.common_command_logger().warning(
+                    "Tianxing destiny observation deferred [%s]: Mini App route is unavailable; "
+                    "refresh the configured entry token",
+                    identity,
+                )
+                return False
             self.common_command_logger().warning(
                 "Tianxing destiny observation failed [%s]: %s",
                 identity,
