@@ -162,6 +162,7 @@ CUSTOM_COMMAND_LOCK = threading.Lock()   # 自定义指令锁
 RED_PACKET_CONTROL_LOCK = threading.Lock()  # 抢红包设置锁
 AUTOMATION_SETTINGS_LOCK = threading.Lock()  # Boss 身份与慕兰参数设置锁
 MINIAPP_INVENTORY_REQUEST_LOCK = threading.Lock()  # 储物袋主动刷新请求锁
+MINIAPP_INVENTORY_NON_TRADABLE_LOCK = threading.Lock()  # 储物袋不可交易物品持久化锁
 STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前端轮询时反复读大日志
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
@@ -187,6 +188,7 @@ BEAST_BORDER_PATROL_MODES = ("斥候", "护粮", "袭营")
 BEAST_BORDER_PATROL_DEFAULT_MODE = "袭营"
 MESSAGE_EVENTS_DB_FILE = "message_events.sqlite3"
 DEPLOY_VERSION_FILE = "deploy_version.json"
+MINIAPP_INVENTORY_NON_TRADABLE_FILE = "miniapp_inventory_non_tradable.json"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
 STATUS_CACHE_SECONDS = 10
 LOG_PAGE_CACHE_SECONDS = 5
@@ -262,8 +264,92 @@ def account_profile_usernames(account):
     }
 
 
+def miniapp_inventory_non_tradable_path(base_dir=None):
+    return os.path.join(base_dir or CONFIG_DIR, MINIAPP_INVENTORY_NON_TRADABLE_FILE)
+
+
+def load_miniapp_inventory_non_tradable_items(base_dir=None):
+    """Read the persisted set of item names excluded from trading."""
+    path = miniapp_inventory_non_tradable_path(base_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return []
+    raw_items = value.get("items") if isinstance(value, dict) else value
+    if not isinstance(raw_items, list):
+        return []
+    return sorted(
+        {str(item).strip() for item in raw_items if str(item or "").strip()},
+        key=str.casefold,
+    )
+
+
+def save_miniapp_inventory_non_tradable_items(items, base_dir=None):
+    cleaned = sorted(
+        {str(item).strip() for item in (items or []) if str(item or "").strip()},
+        key=str.casefold,
+    )
+    save_json_atomic(
+        miniapp_inventory_non_tradable_path(base_dir),
+        {
+            "version": 1,
+            "items": cleaned,
+            "updated_at": time.strftime(TIME_FORMAT),
+        },
+    )
+    return cleaned
+
+
+def aggregate_miniapp_inventory_items(caches):
+    """Merge all cached identities into one name-deduplicated item list."""
+    merged = {}
+    for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items():
+        cache = caches.get(account) if isinstance(caches, dict) else {}
+        snapshots = cache.get("snapshots") if isinstance(cache, dict) else {}
+        if not isinstance(snapshots, dict):
+            snapshots = {}
+        for identity in identities:
+            snapshot = snapshots.get(identity)
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
+                continue
+            for row in snapshot["items"]:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or row.get("item_id") or "").strip()
+                if not name:
+                    continue
+                key = name.casefold()
+                current = merged.get(key)
+                if current is None:
+                    current = {
+                        "name": name,
+                        "item_id": str(row.get("item_id") or "").strip(),
+                        "type": str(row.get("type") or "物品").strip() or "物品",
+                        "quantity": 0,
+                        "detail": str(row.get("detail") or "").strip(),
+                        "_sources": set(),
+                    }
+                    merged[key] = current
+                try:
+                    quantity = float(str(row.get("quantity") or 0).replace(",", ""))
+                except (TypeError, ValueError):
+                    quantity = 0
+                current["quantity"] += quantity
+                current["_sources"].add((account, identity))
+                if not current["detail"] and row.get("detail"):
+                    current["detail"] = str(row.get("detail")).strip()
+    rows = []
+    for row in merged.values():
+        quantity = row.pop("quantity")
+        row["quantity"] = int(quantity) if quantity.is_integer() else quantity
+        row["source_count"] = len(row.pop("_sources"))
+        rows.append(row)
+    return sorted(rows, key=lambda row: str(row.get("name") or "").casefold())
+
+
 def miniapp_inventory_dashboard_payload(query=""):
-    """Return cached inventory snapshots and cross-identity search results."""
+    """Return cached inventory snapshots, aggregate items, and search results."""
     caches = {
         account: read_inventory_cache(account, CONFIG_DIR)
         for account in INVENTORY_ACCOUNT_IDENTITIES
@@ -294,6 +380,8 @@ def miniapp_inventory_dashboard_payload(query=""):
             "last_request": cache.get("last_request") if isinstance(cache.get("last_request"), dict) else {},
             "request_progress": cache.get("request_progress") if isinstance(cache.get("request_progress"), dict) else {},
         })
+    inventory_totals = aggregate_miniapp_inventory_items(caches)
+    non_tradable_items = load_miniapp_inventory_non_tradable_items(CONFIG_DIR)
     search_results = search_inventory_caches(caches, query)
     match_quantity = 0.0
     for row in search_results:
@@ -306,11 +394,15 @@ def miniapp_inventory_dashboard_payload(query=""):
     return {
         "ok": True,
         "accounts": accounts,
+        "inventory_totals": inventory_totals,
+        "non_tradable_items": non_tradable_items,
         "search_query": str(query or "").strip(),
         "search_results": search_results,
         "summary": {
             "snapshot_count": snapshot_count,
             "item_count": item_count,
+            "total_unique_count": len(inventory_totals),
+            "non_tradable_count": len(non_tradable_items),
             "match_count": len(search_results),
             "match_quantity": match_quantity,
             "updated_at": latest_update,
@@ -4841,6 +4933,32 @@ def resource_stats(since_hours: int = 12, max_rows: int = RESOURCE_STATS_MAX_ROW
 def miniapp_inventory(query: str = "", username: str = Depends(authenticate)):
     """Read the latest per-identity Mini App inventory caches."""
     return miniapp_inventory_dashboard_payload(query=query)
+
+
+@app.post("/api/miniapp-inventory/non-tradable")
+def update_miniapp_inventory_non_tradable(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Persist item names that should be excluded from inventory trade copies."""
+    action = str(payload.get("action") or "").strip().lower()
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return {"success": False, "msg": "物品列表格式不正确"}
+    items = {str(item).strip() for item in raw_items if str(item or "").strip()}
+    if not items:
+        return {"success": False, "msg": "请选择至少一个物品"}
+    if action not in {"add", "remove"}:
+        return {"success": False, "msg": "未知操作"}
+    with MINIAPP_INVENTORY_NON_TRADABLE_LOCK:
+        current = set(load_miniapp_inventory_non_tradable_items(CONFIG_DIR))
+        if action == "add":
+            current.update(items)
+        else:
+            current.difference_update(items)
+        saved = save_miniapp_inventory_non_tradable_items(current, CONFIG_DIR)
+    return {
+        "success": True,
+        "items": saved,
+        "msg": "已移入不可交易表" if action == "add" else "已移出不可交易表",
+    }
 
 
 @app.post("/api/miniapp-inventory/refresh")

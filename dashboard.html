@@ -262,6 +262,23 @@
         .inventory-search-band[hidden] { display: none; }
         .inventory-search-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.68rem 1rem; color: var(--text-primary); font-size: 0.78rem; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.05); }
         .inventory-search-head span:last-child { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; font-weight: 500; }
+        .inventory-aggregate-band { border-top: 1px solid var(--border-color); }
+        .inventory-aggregate-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; padding: 0.7rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .inventory-aggregate-title { color: var(--text-primary); font-size: 0.8rem; font-weight: 900; }
+        .inventory-aggregate-summary { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.66rem; font-family: 'JetBrains Mono', monospace; }
+        .inventory-aggregate-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.45rem; flex-wrap: wrap; }
+        .inventory-aggregate-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+        .inventory-aggregate-panel { min-width: 0; }
+        .inventory-aggregate-panel + .inventory-aggregate-panel { border-left: 1px solid var(--border-color); }
+        .inventory-aggregate-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.55rem; padding: 0.62rem 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .inventory-aggregate-panel-head span:first-child { color: var(--text-primary); font-size: 0.74rem; font-weight: 800; }
+        .inventory-aggregate-panel-head span:last-child { color: var(--text-secondary); font-size: 0.64rem; font-family: 'JetBrains Mono', monospace; }
+        .inventory-aggregate-table-wrap { max-height: 360px; overflow: auto; }
+        .inventory-aggregate-table { min-width: 600px; }
+        .inventory-select-cell { width: 2.7rem; text-align: center; }
+        .inventory-item-checkbox { width: 0.95rem; height: 0.95rem; accent-color: #60a5fa; cursor: pointer; }
+        .inventory-non-tradable-name { color: #fcd34d; }
+        .inventory-aggregate-empty { color: var(--text-secondary); text-align: center; padding: 1.2rem; font-size: 0.76rem; }
 
         .duel-record-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
         .duel-toolbar { padding: 0.8rem 1rem; border-bottom: 1px solid var(--border-color); display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
@@ -1224,6 +1241,8 @@
             .red-packet-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .red-packet-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .automation-settings-grid { grid-template-columns: 1fr; }
+            .inventory-aggregate-grid { grid-template-columns: 1fr; }
+            .inventory-aggregate-panel + .inventory-aggregate-panel { border-top: 1px solid var(--border-color); border-left: 0; }
         }
         @media (max-width: 960px) {
             .inventory-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
@@ -1377,6 +1396,38 @@
             </div>
             <div class="inventory-table-wrap" id="inventory-content">
                 <div class="record-empty">加载中...</div>
+            </div>
+            <div class="inventory-aggregate-band">
+                <div class="inventory-aggregate-head">
+                    <div>
+                        <div class="inventory-aggregate-title">所有身份物品总表</div>
+                        <div class="inventory-aggregate-summary" id="inventory-total-summary">加载中...</div>
+                    </div>
+                    <div class="inventory-aggregate-actions">
+                        <button class="inventory-action" id="inventory-mark-non-tradable" type="button" onclick="moveSelectedInventoryItems('add')" disabled><i data-lucide="arrow-right" aria-hidden="true"></i>移入不可交易</button>
+                        <button class="inventory-action secondary" id="inventory-remove-non-tradable" type="button" onclick="moveSelectedInventoryItems('remove')" disabled><i data-lucide="arrow-left" aria-hidden="true"></i>移出不可交易</button>
+                    </div>
+                </div>
+                <div class="inventory-aggregate-grid">
+                    <div class="inventory-aggregate-panel">
+                        <div class="inventory-aggregate-panel-head">
+                            <span>可交易物品</span>
+                            <span id="inventory-tradable-summary"></span>
+                        </div>
+                        <div class="inventory-aggregate-table-wrap" id="inventory-total-content">
+                            <div class="inventory-aggregate-empty">加载中...</div>
+                        </div>
+                    </div>
+                    <div class="inventory-aggregate-panel">
+                        <div class="inventory-aggregate-panel-head">
+                            <span>不可交易表</span>
+                            <span id="inventory-non-tradable-summary"></span>
+                        </div>
+                        <div class="inventory-aggregate-table-wrap" id="inventory-non-tradable-content">
+                            <div class="inventory-aggregate-empty">加载中...</div>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="inventory-search-band" id="inventory-search-band" hidden>
                 <div class="inventory-search-head">
@@ -1694,11 +1745,14 @@
         let redPacketDashboardData = {settings: {}, accounts: []};
         let redPacketSettingsDirty = false;
         let redPacketSavePending = false;
-        let inventoryDashboardData = {accounts: [], search_results: [], summary: {}};
+        let inventoryDashboardData = {accounts: [], inventory_totals: [], non_tradable_items: [], search_results: [], summary: {}};
         let inventoryExpectedRequests = {};
         let inventoryLastActionState = '';
         let inventoryRequestStartedAt = 0;
         let inventorySearchTimer = null;
+        let inventorySelectedTotalNames = new Set();
+        let inventorySelectedNonTradableNames = new Set();
+        let inventoryNonTradablePending = false;
         let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
         let automationSettingsDirty = false;
         let automationSavePending = false;
@@ -4568,10 +4622,31 @@
             return (inventoryDashboardData.accounts || []).find(item => item.account === key) || null;
         }
 
+        function inventoryNonTradableSet() {
+            return new Set((inventoryDashboardData.non_tradable_items || [])
+                .map(item => String(item || '').trim().toLocaleLowerCase())
+                .filter(Boolean));
+        }
+
+        function inventoryItemName(row) {
+            return String(row?.name || row?.item_id || '').trim();
+        }
+
+        function inventoryItemKey(value) {
+            return String(value || '').trim().toLocaleLowerCase();
+        }
+
+        function inventoryCopyRows(rows) {
+            const blocked = inventoryNonTradableSet();
+            return (Array.isArray(rows) ? rows : []).filter(row => {
+                const name = inventoryItemName(row);
+                return name && !blocked.has(name.toLocaleLowerCase());
+            });
+        }
+
         function inventoryCopyText(rows) {
-            if (!Array.isArray(rows)) return '';
-            return rows.map(row => {
-                const name = String(row?.name || row?.item_id || '').trim();
+            return inventoryCopyRows(rows).map(row => {
+                const name = inventoryItemName(row);
                 if (!name) return '';
                 const quantity = String(row?.quantity ?? 0).trim();
                 return `${name}${quantity}`;
@@ -4604,13 +4679,13 @@
             const snapshot = inventoryAccountByKey(accountKey)?.snapshots?.[identity] || null;
             const text = inventoryCopyText(snapshot?.items);
             if (!text) {
-                inventoryLastActionState = '该身份暂无可复制的储物袋数据';
+                inventoryLastActionState = '该身份暂无可复制的可交易物品';
                 updateInventoryRequestState();
                 return;
             }
             try {
                 await copyTextToClipboard(text);
-                inventoryLastActionState = `已复制 ${snapshot.items.length} 项 · ${identity}`;
+                inventoryLastActionState = `已复制 ${inventoryCopyRows(snapshot.items).length} 项 · ${identity}`;
             } catch (error) {
                 console.error('Inventory clipboard write failed:', error);
                 inventoryLastActionState = `复制失败：${error.message || error}`;
@@ -4670,6 +4745,118 @@
                         </tr>`;
                     }).join('')}</tbody>
                 </table>`;
+        }
+
+        function inventoryAggregateRows() {
+            return Array.isArray(inventoryDashboardData.inventory_totals)
+                ? inventoryDashboardData.inventory_totals : [];
+        }
+
+        function inventoryNonTradableRows() {
+            const totals = new Map(inventoryAggregateRows().map(row => [inventoryItemKey(inventoryItemName(row)), row]));
+            return (Array.isArray(inventoryDashboardData.non_tradable_items)
+                ? inventoryDashboardData.non_tradable_items : [])
+                .map(name => {
+                    const cleanName = String(name || '').trim();
+                    const total = totals.get(inventoryItemKey(cleanName));
+                    return total ? {...total, name: cleanName} : {
+                        name: cleanName,
+                        type: '物品',
+                        quantity: null,
+                        detail: '当前身份缓存中暂无',
+                        source_count: 0,
+                        absent: true,
+                    };
+                })
+                .filter(row => inventoryItemName(row));
+        }
+
+        function inventoryAggregateTable(rows, tableType) {
+            const isNonTradable = tableType === 'non-tradable';
+            if (!Array.isArray(rows) || !rows.length) {
+                return `<div class="inventory-aggregate-empty">${isNonTradable ? '不可交易表为空。' : '暂无可交易物品。'}</div>`;
+            }
+            const selected = isNonTradable ? inventorySelectedNonTradableNames : inventorySelectedTotalNames;
+            return `
+                <table class="record-table inventory-table inventory-aggregate-table">
+                    <thead><tr><th class="inventory-select-cell">选</th><th>类型</th><th>名称</th><th>数量合计</th><th>来源身份</th><th>状态 / 说明</th></tr></thead>
+                    <tbody>${rows.map(row => {
+                        const name = inventoryItemName(row);
+                        const key = inventoryItemKey(name);
+                        const checked = selected.has(key) ? ' checked' : '';
+                        const quantity = row.quantity === null || row.quantity === undefined ? '---' : inventoryQuantity(row.quantity);
+                        const sourceText = row.source_count ? `${row.source_count} 个身份` : '未出现在当前缓存';
+                        const detail = row.absent ? '已保存 · 当前暂无' : (row.detail || '---');
+                        return `<tr>
+                            <td class="inventory-select-cell"><input class="inventory-item-checkbox" type="checkbox" data-item-name="${escapeHtml(name)}" onchange="toggleInventorySelection('${tableType}', this)"${checked} aria-label="选择 ${escapeHtml(name)}"></td>
+                            <td><span class="inventory-type ${inventoryTypeClass(row.type)}">${escapeHtml(row.type || '物品')}</span></td>
+                            <td><span class="inventory-name ${isNonTradable ? 'inventory-non-tradable-name' : ''}">${escapeHtml(name)}</span></td>
+                            <td><span class="inventory-quantity">${escapeHtml(quantity)}</span></td>
+                            <td><span class="inventory-detail">${escapeHtml(sourceText)}</span></td>
+                            <td><span class="inventory-detail">${escapeHtml(detail)}</span></td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>`;
+        }
+
+        function syncInventorySelections() {
+            const totalKeys = new Set(inventoryAggregateRows().map(row => inventoryItemKey(inventoryItemName(row))));
+            const nonTradableKeys = new Set(inventoryNonTradableRows().map(row => inventoryItemKey(inventoryItemName(row))));
+            inventorySelectedTotalNames = new Set([...inventorySelectedTotalNames].filter(key => totalKeys.has(key) && !inventoryNonTradableSet().has(key)));
+            inventorySelectedNonTradableNames = new Set([...inventorySelectedNonTradableNames].filter(key => nonTradableKeys.has(key)));
+        }
+
+        function toggleInventorySelection(tableType, checkbox) {
+            const nameKey = inventoryItemKey(checkbox?.dataset?.itemName);
+            const target = tableType === 'non-tradable' ? inventorySelectedNonTradableNames : inventorySelectedTotalNames;
+            if (!nameKey) return;
+            if (checkbox.checked) target.add(nameKey);
+            else target.delete(nameKey);
+            updateInventorySelectionActions();
+        }
+
+        function updateInventorySelectionActions() {
+            const addButton = document.getElementById('inventory-mark-non-tradable');
+            const removeButton = document.getElementById('inventory-remove-non-tradable');
+            if (addButton) addButton.disabled = inventoryNonTradablePending || !inventorySelectedTotalNames.size;
+            if (removeButton) removeButton.disabled = inventoryNonTradablePending || !inventorySelectedNonTradableNames.size;
+        }
+
+        async function moveSelectedInventoryItems(action) {
+            if (inventoryNonTradablePending) return;
+            const selected = action === 'remove' ? inventorySelectedNonTradableNames : inventorySelectedTotalNames;
+            const sourceRows = action === 'remove' ? inventoryNonTradableRows() : inventoryAggregateRows();
+            const names = sourceRows
+                .filter(row => selected.has(inventoryItemKey(inventoryItemName(row))))
+                .map(row => inventoryItemName(row));
+            if (!names.length) return;
+            inventoryNonTradablePending = true;
+            updateInventorySelectionActions();
+            try {
+                const response = await fetch(apiUrl('/api/miniapp-inventory/non-tradable'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action, items: names})
+                });
+                const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.msg || `操作失败：HTTP ${response.status}`);
+                }
+                inventoryDashboardData.non_tradable_items = Array.isArray(data.items) ? data.items : [];
+                inventorySelectedTotalNames.clear();
+                inventorySelectedNonTradableNames.clear();
+                inventoryLastActionState = action === 'remove'
+                    ? `已移出 ${names.length} 项不可交易物品`
+                    : `已移入 ${names.length} 项不可交易物品`;
+                renderInventoryDashboard();
+            } catch (error) {
+                console.error('Inventory non-tradable update failed:', error);
+                inventoryLastActionState = `保存失败：${error.message || error}`;
+                updateInventoryRequestState();
+            } finally {
+                inventoryNonTradablePending = false;
+                updateInventorySelectionActions();
+            }
         }
 
         function updateInventoryRequestState() {
@@ -4737,10 +4924,28 @@
             const rows = Array.isArray(snapshot?.items)
                 ? snapshot.items.map(row => ({...row, updated_at: snapshot.updated_at || ''}))
                 : [];
-            if (copyButton) copyButton.disabled = !rows.length;
+            if (copyButton) copyButton.disabled = !inventoryCopyRows(rows).length;
             if (content) {
                 content.innerHTML = inventoryRowsTable(rows, false);
             }
+
+            const blocked = inventoryNonTradableSet();
+            const aggregateRows = inventoryAggregateRows();
+            const tradableRows = aggregateRows.filter(row => !blocked.has(inventoryItemKey(inventoryItemName(row))));
+            const nonTradableRows = inventoryNonTradableRows();
+            syncInventorySelections();
+            const totalSummary = document.getElementById('inventory-total-summary');
+            if (totalSummary) {
+                totalSummary.innerText = `去重 ${aggregateRows.length} 项 · 不可交易 ${nonTradableRows.length} 项`;
+            }
+            const tradableSummary = document.getElementById('inventory-tradable-summary');
+            if (tradableSummary) tradableSummary.innerText = `${tradableRows.length} 项`;
+            const nonTradableSummary = document.getElementById('inventory-non-tradable-summary');
+            if (nonTradableSummary) nonTradableSummary.innerText = `${nonTradableRows.length} 项`;
+            const totalContent = document.getElementById('inventory-total-content');
+            if (totalContent) totalContent.innerHTML = inventoryAggregateTable(tradableRows, 'total');
+            const nonTradableContent = document.getElementById('inventory-non-tradable-content');
+            if (nonTradableContent) nonTradableContent.innerHTML = inventoryAggregateTable(nonTradableRows, 'non-tradable');
 
             const query = String(document.getElementById('inventory-search-input')?.value || '').trim();
             const searchBand = document.getElementById('inventory-search-band');
@@ -4753,6 +4958,7 @@
                 const matchQuantity = inventoryDashboardData.summary?.match_quantity ?? 0;
                 if (searchSummary) searchSummary.innerText = `“${query}” · ${rows.length} 条 · 数量合计 ${inventoryQuantity(matchQuantity)}`;
             }
+            updateInventorySelectionActions();
             updateInventoryRequestState();
             refreshIcons();
         }

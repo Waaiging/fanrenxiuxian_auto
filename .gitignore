@@ -39,6 +39,7 @@ miniapp_beast_session.json
 miniapp_beast_refresh_request.json
 miniapp_inventory_request_*.json
 miniapp_inventory_cache_*.json
+miniapp_inventory_non_tradable.json
 star_gazing_events.jsonl
 star_gazing_events.lock
 duel_state.json

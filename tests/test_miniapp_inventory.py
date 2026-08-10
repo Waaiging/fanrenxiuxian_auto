@@ -175,6 +175,11 @@ class MiniAppInventoryTests(unittest.TestCase):
                 "厚土",
                 payload["inventory"],
             )
+            cache["snapshots"]["缘生子"] = inventory_snapshot(
+                "sub",
+                "缘生子",
+                payload["inventory"],
+            )
             write_inventory_cache("sub", cache, tmpdir)
 
             dashboard = dashboard_server.miniapp_inventory_dashboard_payload(query="灵石")
@@ -184,10 +189,30 @@ class MiniAppInventoryTests(unittest.TestCase):
             )
 
             self.assertTrue(dashboard["ok"])
-            self.assertEqual(dashboard["summary"]["snapshot_count"], 1)
-            self.assertEqual(dashboard["summary"]["match_count"], 1)
-            self.assertEqual(dashboard["summary"]["match_quantity"], 1200)
+            self.assertEqual(dashboard["summary"]["snapshot_count"], 2)
+            self.assertEqual(dashboard["summary"]["match_count"], 2)
+            self.assertEqual(dashboard["summary"]["match_quantity"], 2400)
             self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
+            total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
+            self.assertEqual(total_lingshi["quantity"], 2400)
+            self.assertEqual(total_lingshi["source_count"], 2)
+
+            moved = dashboard_server.update_miniapp_inventory_non_tradable(
+                {"action": "add", "items": ["灵石", "灵石", "回春丹"]},
+                username="wg",
+            )
+            self.assertTrue(moved["success"])
+            self.assertEqual(moved["items"], ["回春丹", "灵石"])
+            self.assertEqual(
+                dashboard_server.miniapp_inventory_dashboard_payload()["non_tradable_items"],
+                ["回春丹", "灵石"],
+            )
+            removed = dashboard_server.update_miniapp_inventory_non_tradable(
+                {"action": "remove", "items": ["灵石"]},
+                username="wg",
+            )
+            self.assertTrue(removed["success"])
+            self.assertEqual(removed["items"], ["回春丹"])
             self.assertTrue(response["success"])
             self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "厚土")
 
