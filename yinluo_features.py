@@ -313,7 +313,12 @@ def parse_yinluo_appease(text):
     count_match = re.search(r"成功安抚(?:了)?\s*(\d+)\s*个炼化槽", clean)
     if "安抚成功" in clean or count_match:
         return {"matched": True, "status": "success", "count": int(count_match.group(1)) if count_match else 0}
-    if any(key in clean for key in ("无需安抚", "没有需要安抚", "暂无需要安抚")):
+    if any(key in clean for key in (
+        "无需安抚",
+        "没有需要安抚",
+        "暂无需要安抚",
+        "没有需要操作的炼化槽",
+    )):
         return {"matched": True, "status": "success", "count": 0}
     return {"matched": False, "status": "", "count": 0}
 

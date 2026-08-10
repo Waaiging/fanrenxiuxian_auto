@@ -5175,6 +5175,10 @@ class ParserFixtureTests(unittest.TestCase):
         appease_noop = parse_yinluo_appease("**安抚成功！**\n你消耗了 **0** 点修为，成功安抚了 0 个炼化槽。")
         self.assertEqual(appease_noop["status"], "success")
         self.assertEqual(appease_noop["count"], 0)
+        live_appease_noop = parse_yinluo_appease("没有需要操作的炼化槽。")
+        self.assertTrue(live_appease_noop["matched"])
+        self.assertEqual(live_appease_noop["status"], "success")
+        self.assertEqual(live_appease_noop["count"], 0)
 
     def test_yinluo_zero_second_refining_slot_is_resynchronized(self):
         class DummyYinluo(DummyAvatarCommon, YinluoMixin):
@@ -5236,7 +5240,7 @@ class ParserFixtureTests(unittest.TestCase):
                         ),
                     )
                 if command == YINLUO_APPEASE_COMMAND:
-                    return DummyMessage(303, text="安抚成功！成功安抚了 0 个炼化槽。")
+                    return DummyMessage(303, text="没有需要操作的炼化槽。")
                 if command == ".囚禁魂魄 1 凶兽戾魄":
                     return DummyMessage(304, text="一缕【凶兽戾魄】被强行打入1号炼化槽，在煞气的包裹下发出阵阵哀嚎，炼化已开始。")
                 raise AssertionError(f"unexpected command: {command}")
@@ -5712,7 +5716,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.sent.append((identity, command, kwargs))
                 return DummyMessage(
                     303,
-                    text="[Avatar: 缘生子]\n**安抚成功！**\n你消耗了 **0** 点修为，成功安抚了 0 个炼化槽。",
+                    text="[Avatar: 缘生子]\n没有需要操作的炼化槽。",
                 )
 
         actor = DummyYinluo()
