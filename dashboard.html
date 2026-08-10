@@ -240,12 +240,12 @@
         .reward-excerpt { color: var(--text-secondary); white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 
         .inventory-section { grid-column: 1 / -1; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
-        .inventory-toolbar { display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(9rem, 13rem) auto minmax(14rem, 1fr) auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .inventory-toolbar { display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(9rem, 13rem) auto auto minmax(14rem, 1fr) auto; gap: 0.65rem; align-items: end; padding: 0.8rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
         .inventory-action { min-height: 2.04rem; display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; border: 1px solid rgba(0,210,255,0.38); background: rgba(0,210,255,0.1); color: var(--accent-color); border-radius: 8px; padding: 0.48rem 0.72rem; font-size: 0.76rem; font-weight: 800; cursor: pointer; white-space: nowrap; }
         .inventory-action:hover { background: rgba(0,210,255,0.18); }
         .inventory-action.secondary { color: #bbf7d0; border-color: rgba(34,197,94,0.38); background: rgba(34,197,94,0.1); }
         .inventory-action.secondary:hover { background: rgba(34,197,94,0.17); }
-        .inventory-action:disabled { opacity: 0.55; cursor: wait; }
+        .inventory-action:disabled { opacity: 0.55; cursor: not-allowed; }
         .inventory-action svg { width: 0.86rem; height: 0.86rem; }
         .inventory-state-line { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap; min-height: 2.25rem; padding: 0.5rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; }
         .inventory-table-wrap { max-height: 430px; overflow: auto; }
@@ -1225,6 +1225,10 @@
             .red-packet-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .automation-settings-grid { grid-template-columns: 1fr; }
         }
+        @media (max-width: 960px) {
+            .inventory-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
+            .inventory-action { width: 100%; }
+        }
         @media (max-width: 720px) {
             header { min-height: 54px; }
             .logo { font-size: 0.94rem; }
@@ -1360,6 +1364,7 @@
                     <select id="inventory-identity-select" class="record-select" onchange="renderInventoryDashboard()"></select>
                 </label>
                 <button class="inventory-action" id="inventory-refresh-selected" type="button" onclick="refreshSelectedInventory()"><i data-lucide="refresh-cw" aria-hidden="true"></i>刷新身份</button>
+                <button class="inventory-action secondary" id="inventory-copy-selected" type="button" onclick="copySelectedInventory()" disabled><i data-lucide="copy" aria-hidden="true"></i>一键复制</button>
                 <label class="record-field">
                     搜索物品
                     <input id="inventory-search-input" class="record-input" type="search" placeholder="输入物品名称" oninput="scheduleInventorySearch()">
@@ -4563,6 +4568,56 @@
             return (inventoryDashboardData.accounts || []).find(item => item.account === key) || null;
         }
 
+        function inventoryCopyText(rows) {
+            if (!Array.isArray(rows)) return '';
+            return rows.map(row => {
+                const name = String(row?.name || row?.item_id || '').trim();
+                if (!name) return '';
+                const quantity = String(row?.quantity ?? 0).trim();
+                return `${name}${quantity}`;
+            }).filter(Boolean).join(' ');
+        }
+
+        async function copyTextToClipboard(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                const copied = document.execCommand('copy');
+                if (!copied) throw new Error('浏览器未允许写入剪贴板');
+            } finally {
+                textarea.remove();
+            }
+        }
+
+        async function copySelectedInventory() {
+            const accountKey = document.getElementById('inventory-account-select')?.value || '';
+            const identity = document.getElementById('inventory-identity-select')?.value || '';
+            const snapshot = inventoryAccountByKey(accountKey)?.snapshots?.[identity] || null;
+            const text = inventoryCopyText(snapshot?.items);
+            if (!text) {
+                inventoryLastActionState = '该身份暂无可复制的储物袋数据';
+                updateInventoryRequestState();
+                return;
+            }
+            try {
+                await copyTextToClipboard(text);
+                inventoryLastActionState = `已复制 ${snapshot.items.length} 项 · ${identity}`;
+            } catch (error) {
+                console.error('Inventory clipboard write failed:', error);
+                inventoryLastActionState = `复制失败：${error.message || error}`;
+            }
+            updateInventoryRequestState();
+        }
+
         function syncInventorySelectors() {
             const accountSelect = document.getElementById('inventory-account-select');
             const identitySelect = document.getElementById('inventory-identity-select');
@@ -4678,10 +4733,12 @@
                 }
             }
             const content = document.getElementById('inventory-content');
+            const copyButton = document.getElementById('inventory-copy-selected');
+            const rows = Array.isArray(snapshot?.items)
+                ? snapshot.items.map(row => ({...row, updated_at: snapshot.updated_at || ''}))
+                : [];
+            if (copyButton) copyButton.disabled = !rows.length;
             if (content) {
-                const rows = Array.isArray(snapshot?.items)
-                    ? snapshot.items.map(row => ({...row, updated_at: snapshot.updated_at || ''}))
-                    : [];
                 content.innerHTML = inventoryRowsTable(rows, false);
             }
 
