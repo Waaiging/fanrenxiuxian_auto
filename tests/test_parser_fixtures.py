@@ -5905,6 +5905,50 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = old_db
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
+    def test_reward_log_keeps_repeated_message_less_events_by_occurrence(self):
+        actor = SimpleNamespace(account_key="xiaohao")
+        event = {
+            "date": "2026-08-10",
+            "time": "2026-08-10 10:04:44",
+            "identity": "主魂",
+            "command": ".探渊",
+            "source": "Mini App 万兽谷探渊",
+            "clean": "【小玉】探渊归来，获得【三级妖丹】x1。",
+            "sig": "same-content-signature",
+            "final": True,
+        }
+
+        old_db = log_utils.MESSAGE_EVENTS_DB_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                log_utils.MESSAGE_EVENTS_DB_FILE = os.path.join(tmpdir, "message_events.sqlite3")
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
+                self.assertTrue(log_utils.record_daily_reward_event_log(actor, event))
+                self.assertTrue(log_utils.record_daily_reward_event_log(actor, event))
+                later_event = dict(
+                    event,
+                    date="2026-08-10",
+                    time="2026-08-10 16:04:52",
+                )
+                self.assertTrue(log_utils.record_daily_reward_event_log(actor, later_event))
+
+                conn = sqlite3.connect(log_utils.MESSAGE_EVENTS_DB_FILE)
+                try:
+                    rows = conn.execute(
+                        "SELECT event_time, event_key FROM daily_reward_events ORDER BY event_time"
+                    ).fetchall()
+                    self.assertEqual(
+                        [row[0] for row in rows],
+                        ["2026-08-10 10:04:44", "2026-08-10 16:04:52"],
+                    )
+                    self.assertEqual(len({row[1] for row in rows}), 2)
+                finally:
+                    conn.close()
+            finally:
+                log_utils.MESSAGE_EVENTS_DB_FILE = old_db
+                log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
+
     def test_clear_actor_command_history_deletes_only_old_dot_commands(self):
         old = datetime.now(timezone.utc) - timedelta(minutes=40)
         new = datetime.now(timezone.utc) - timedelta(minutes=5)

@@ -3881,10 +3881,16 @@ def record_daily_reward_event_log(actor, event, logger=None):
     clean = str(event.get("clean") or event.get("excerpt") or "")
     if not event_date or not event_time or not clean:
         return False
-    event_key = str(event.get("message_key") or event.get("sig") or "").strip()
-    if not event_key:
+    message_key = str(event.get("message_key") or "").strip()
+    if message_key:
+        event_key = message_key
+    else:
+        # Mini App events have no Telegram message ID. Their response text can be
+        # identical every cycle, so the occurrence time must be part of the key.
         event_key = hashlib.sha1(
-            f"{event_date}|{identity}|{command}|{clean[:1200]}".encode("utf-8", errors="ignore")
+            f"{event_date}|{event_time}|{identity}|{command}|{clean[:1200]}".encode(
+                "utf-8", errors="ignore"
+            )
         ).hexdigest()
     rewards = event.get("rewards") if isinstance(event.get("rewards"), dict) else {}
     try:
