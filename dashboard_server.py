@@ -74,7 +74,10 @@ from duel_features import (
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
-from miniapp_fishing import miniapp_fishing_global_snapshot
+from miniapp_fishing import (
+    miniapp_fishing_global_snapshot,
+    request_miniapp_fishing_force_retry,
+)
 from miniapp_inventory import (
     INVENTORY_ACCOUNT_IDENTITIES,
     read_inventory_cache,
@@ -1372,6 +1375,7 @@ def miniapp_fishing_command(state):
         "shop_unavailable": ("等待鱼饵商店恢复", "cooldown"),
         "waiting_resources": ("等待鱼饵材料", "cooldown"),
         "transfer_failed": ("转竿已停止", "error"),
+        "force_retry": ("强制重试中", "active"),
         "identity_paused": ("身份暂停", "paused"),
         "no_participants": ("未选身份", "paused"),
         "unavailable": ("状态不可用", "error"),
@@ -5150,6 +5154,28 @@ async def automation_settings_control(
         "success": True,
         "settings": settings,
         "updated_by": username,
+    }
+
+
+@app.post("/api/automation-settings/fishing-force-retry")
+async def automation_fishing_force_retry(username: str = Depends(authenticate)):
+    """Reset saved fishing completion/error gates and run each participant once."""
+    settings = miniapp_fishing_settings()
+    try:
+        runtime = request_miniapp_fishing_force_retry(
+            settings,
+            requested_by=username,
+        )
+    except ValueError as exc:
+        messages = {
+            "Mini App fishing is disabled": "请先启用灵溪自动垂钓并保存设置",
+            "Mini App fishing participants required": "请先选择垂钓身份并保存设置",
+        }
+        return {"success": False, "msg": messages.get(str(exc), "无法启动强制重试")}
+    return {
+        "success": True,
+        "msg": "已忽略旧状态，所选身份将各强制重试一次",
+        "runtime": runtime,
     }
 
 

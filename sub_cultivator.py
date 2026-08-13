@@ -128,7 +128,10 @@ from log_utils import (
     record_command_sent,       # 指令台账
     record_game_bot_activity,   # 记录游戏机器人的最后活动时间
     record_message_event,       # 消息事件库
-    resolve_target_chat_id,     # 将公开群用户名/链接解析为数值 ID
+    resolve_actor_target_chats, # 解析并去重所有游戏群
+    actor_message_target,       # 按事件来源选择回复群/话题
+    routed_telegram_event_handler, # 绑定事件来源群/话题上下文
+    _chat_matches_actor_target,
     record_manual_command_reply_state_if_needed, # 同步手动指令回复状态
     recent_profile_identity_for_text, # 识别无 reply 档案回复的身份
     remember_script_send_intent, # 记录脚本即将发送指令的意图
@@ -851,7 +854,12 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             return
 
         # 关键过滤：如果消息不针对本账号，直接忽略（防止其他玩家消息污染化身数据）
-        recent_identity = recent_profile_identity_for_text(self, text, msg_id=getattr(msg, "id", None))
+        recent_identity = recent_profile_identity_for_text(
+            self,
+            text,
+            msg_id=getattr(msg, "id", None),
+            chat_id=getattr(msg, "chat_id", None),
+        )
         if not self.text_targets_self(msg, text) and not recent_identity:
             return
 
@@ -1292,7 +1300,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             return None
 
         try:
-            target_reply = reply_to.id if hasattr(reply_to, "id") else (reply_to if reply_to else self.topic_id)
+            target_chat, target_reply = actor_message_target(self, reply_to=reply_to)
             # 等待机器人活跃，防止消息发送后被机器人忽略
             if not await wait_for_bot_activity_before_send(self, message, log):
                 return None
@@ -1302,7 +1310,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             # 记录发送意图（用于去重检测）
             remember_script_send_intent(self, message)
             msg = await self.client.send_message(
-                self.target_chat_id, message, reply_to=target_reply
+                target_chat, message, reply_to=target_reply
             )
             # 记录已发送消息（用于匹配回复）
             remember_script_sent_message(self, msg)
@@ -2986,7 +2994,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 self, msg, text=text, sender=sender_check, mentions_only=True
             )
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
-            _chat_id_match = (msg.chat_id == self.target_chat_id or msg.chat_id == int(f"-100{self.target_chat_id}"))
+            _chat_id_match = _chat_matches_actor_target(self, msg)
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender_check, log):
                     return
@@ -5838,7 +5846,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         5. 保持主线程存活，直到 is_running 变为 False。
         """
         await self.client.start()
-        self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
+        await resolve_actor_target_chats(self, log)
         # 热身：获取最近的对话列表，确保缓存了目标 ID
         await self.client.get_dialogs(limit=20)
         self.my_info = await self.client.get_me()
@@ -5854,12 +5862,14 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         )
 
         # 注册新消息处理器
-        @self.client.on(events.NewMessage(chats=self.target_chat_id))
+        @self.client.on(events.NewMessage(chats=self.target_chat_ids))
+        @routed_telegram_event_handler
         async def handler(event):
             await self.handle_game_response(event)
 
         # 注册编辑消息处理器（主要处理万宝楼编辑和低价告警，兼探渊虚弱期检测）
-        @self.client.on(events.MessageEdited(chats=self.target_chat_id))
+        @self.client.on(events.MessageEdited(chats=self.target_chat_ids))
+        @routed_telegram_event_handler
         async def edit_handler(event):
             await log_edited_message_if_needed(self, event)
             try:

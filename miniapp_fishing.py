@@ -175,6 +175,9 @@ def _global_default_state() -> dict[str, Any]:
         "transfer": {},
         "last_transfer": {},
         "last_round": {},
+        "force_retry": {},
+        "last_force_retry": {},
+        "force_retry_request_id": "",
         "status": "scanning",
         "detail": "等待扫描鱼竿",
         "updated_at": _now_text(),
@@ -208,6 +211,8 @@ def _load_global_state() -> dict[str, Any]:
         "transfer",
         "last_transfer",
         "last_round",
+        "force_retry",
+        "last_force_retry",
     ):
         if not isinstance(data.get(key), dict):
             data[key] = {}
@@ -448,6 +453,61 @@ def miniapp_fishing_global_snapshot(
         fishing_participant_label(item) for item in data.get("participants") or []
     ]
     return result
+
+
+def request_miniapp_fishing_force_retry(
+    settings: dict[str, Any] | None = None,
+    *,
+    requested_by: str = "dashboard",
+) -> dict[str, Any]:
+    """Reset the shared queue so every selected identity is checked again once."""
+    fishing_settings = (
+        miniapp_fishing_settings()
+        if settings is None
+        else miniapp_fishing_settings({"miniapp_fishing": dict(settings)})
+    )
+    if not fishing_settings.get("enabled"):
+        raise ValueError("Mini App fishing is disabled")
+    participants = [
+        str(item).strip()
+        for item in fishing_settings.get("participants") or []
+        if fishing_participant_parts(item) != ("", "")
+    ]
+    participants = list(dict.fromkeys(participants))
+    if not participants:
+        raise ValueError("Mini App fishing participants required")
+
+    requested_at = _now_text()
+    request_id = f"{time.time_ns()}-{os.getpid()}"
+
+    def reset(data: dict[str, Any]) -> None:
+        transfer = _mapping(data.get("transfer"))
+        active_force = _mapping(data.get("force_retry"))
+        completed_before = dict(
+            _mapping(active_force.get("completed_before"))
+            if active_force.get("pending")
+            else _mapping(data.get("completed_today"))
+        )
+        if str(transfer.get("status") or "") in FISHING_TRANSFER_FAILURE_STATUSES:
+            transfer["next_retry_at"] = ""
+            transfer["force_retry_requested_at"] = requested_at
+        data["current_key"] = participants[0]
+        data["status"] = "force_retry"
+        data["detail"] = "已忽略今日完成与错误冷却记录，正在强制重试"
+        data["force_retry_request_id"] = request_id
+        data["force_retry"] = {
+            "id": request_id,
+            "requested_at": requested_at,
+            "requested_by": str(requested_by or "dashboard")[:100],
+            "participants": participants,
+            "pending": list(participants),
+            "completed_before": completed_before,
+            "confirmed_daily_done": {},
+        }
+        data["completed_today"] = {}
+
+    _update_global_state(reset, settings=fishing_settings)
+    return miniapp_fishing_global_snapshot(fishing_settings)
 
 
 def fishing_shop(payload: Any) -> dict[str, Any]:
@@ -734,6 +794,7 @@ class MiniAppFishingAutomation:
         self._current_identity = "主魂"
         self._last_round_completed = False
         self._scan_started = False
+        self._force_retry_request_id = ""
 
     @property
     def supported(self) -> bool:
@@ -886,6 +947,37 @@ class MiniAppFishingAutomation:
             changed = True
         if changed:
             self._save()
+
+    def _apply_force_retry_request(self, settings: dict[str, Any]) -> dict[str, Any]:
+        runtime = miniapp_fishing_global_snapshot(settings)
+        force = _mapping(runtime.get("force_retry"))
+        request_id = str(force.get("id") or runtime.get("force_retry_request_id") or "")
+        if not request_id or request_id == self._force_retry_request_id:
+            return force
+        self._force_retry_request_id = request_id
+        if not force.get("pending"):
+            return force
+        self._scan_started = False
+        for identity in self._local_relevant_identities(settings):
+            self._record(
+                identity,
+                miniapp_fishing_status="force_retry",
+                miniapp_fishing_last_error="",
+                miniapp_fishing_last_error_time="",
+                miniapp_fishing_next_run_time="",
+            )
+        return force
+
+    async def _sleep_until_next_cycle(self, wait: int, settings: dict[str, Any]) -> None:
+        """Keep normal backoff while allowing a new dashboard retry to wake the loop."""
+        remaining = max(1, min(int(wait), 300))
+        while remaining > 0 and getattr(self.actor, "is_running", True):
+            interval = min(5, remaining)
+            await asyncio.sleep(interval)
+            remaining -= interval
+            request_id = str(_load_global_state().get("force_retry_request_id") or "")
+            if request_id and request_id != self._force_retry_request_id:
+                return
 
     def _journal_round_record(self, identity: str, record: dict[str, Any]) -> None:
         participant_key = automation_participant_key(self.account, identity)
@@ -1832,6 +1924,10 @@ class MiniAppFishingAutomation:
         participant_key: str,
     ) -> dict[str, Any]:
         def update(data: dict[str, Any]) -> None:
+            force = _mapping(data.get("force_retry"))
+            if force.get("pending") and participant_key in force.get("pending", []):
+                self._finish_force_retry_in_state(data, participant_key)
+                return
             participants = [str(item) for item in data.get("participants") or []]
             data["last_round"] = {
                 "participant": participant_key,
@@ -1850,12 +1946,62 @@ class MiniAppFishingAutomation:
 
         return _update_global_state(update, settings=settings)
 
+    @staticmethod
+    def _finish_force_retry_in_state(
+        data: dict[str, Any],
+        participant_key: str,
+        *,
+        daily_done: bool = False,
+    ) -> None:
+        force = _mapping(data.get("force_retry"))
+        pending = [str(item) for item in force.get("pending") or [] if str(item) != participant_key]
+        attempted = [str(item) for item in force.get("attempted") or []]
+        if participant_key not in attempted:
+            attempted.append(participant_key)
+        force["pending"] = pending
+        force["attempted"] = attempted
+        confirmed = _mapping(force.get("confirmed_daily_done"))
+        if daily_done:
+            confirmed[participant_key] = _now_text()
+        force["confirmed_daily_done"] = confirmed
+        if pending:
+            data["force_retry"] = force
+            data["current_key"] = pending[0]
+            data["status"] = "force_retry"
+            data["detail"] = (
+                f"强制重试已完成 {fishing_participant_label(participant_key)}；"
+                f"下一位 {fishing_participant_label(pending[0])}"
+            )
+            return
+        restored = dict(_mapping(force.get("completed_before")))
+        restored.update(confirmed)
+        data["completed_today"] = restored
+        finished = dict(force)
+        finished["completed_at"] = _now_text()
+        data["last_force_retry"] = finished
+        data["force_retry"] = {}
+        data["current_key"] = _next_participant(
+            [str(item) for item in data.get("participants") or []],
+            "",
+            restored,
+        )
+        data["status"] = "ready" if data["current_key"] else "daily_done"
+        data["detail"] = "强制重试已完成，所选身份均已尝试"
+
     def _mark_daily_done(
         self,
         settings: dict[str, Any],
         participant_key: str,
     ) -> dict[str, Any]:
         def update(data: dict[str, Any]) -> None:
+            force = _mapping(data.get("force_retry"))
+            if force.get("pending") and participant_key in force.get("pending", []):
+                self._finish_force_retry_in_state(
+                    data,
+                    participant_key,
+                    daily_done=True,
+                )
+                return
             completed = data.setdefault("completed_today", {})
             completed[participant_key] = _now_text()
             participants = [str(item) for item in data.get("participants") or []]
@@ -1875,6 +2021,18 @@ class MiniAppFishingAutomation:
                 data["detail"] = "所选身份今日垂钓均已完成"
 
         return _update_global_state(update, settings=settings)
+
+    def _finish_force_retry_after_error(
+        self,
+        settings: dict[str, Any],
+        participant_key: str,
+    ) -> None:
+        def update(data: dict[str, Any]) -> None:
+            force = _mapping(data.get("force_retry"))
+            if force.get("pending") and participant_key in force.get("pending", []):
+                self._finish_force_retry_in_state(data, participant_key)
+
+        _update_global_state(update, settings=settings)
 
     def _response_text(self, response: Any) -> str:
         resolver = getattr(self.actor, "fishing_response_text", None)
@@ -2297,6 +2455,11 @@ class MiniAppFishingAutomation:
                 "no_rod" if all_scanned else "scanning",
                 missing_detail if all_scanned else "正在扫描鱼竿所在身份及类型",
             )
+            force = _mapping(runtime.get("force_retry"))
+            target_key = str(runtime.get("current_key") or "")
+            if all_scanned and target_key in (force.get("pending") or []):
+                self._finish_force_retry_after_error(settings, target_key)
+                return 1
             return 300 if all_scanned else 5
 
         holder_scan = _mapping(scans.get(holder_key))
@@ -2347,6 +2510,7 @@ class MiniAppFishingAutomation:
             settings = self.settings()
             try:
                 self._clear_irrelevant_local_statuses(settings)
+                force_retry = self._apply_force_retry_request(settings)
                 if not settings.get("enabled"):
                     self._record(
                         self._status_identity(settings),
@@ -2365,6 +2529,8 @@ class MiniAppFishingAutomation:
                     if pause is not None:
                         await pause.wait()
                     start_wait, start_at = fishing_start_wait(settings.get("start_time"))
+                    if force_retry.get("pending"):
+                        start_wait, start_at = 0, ""
                     if start_wait > 0:
                         identity = self._status_identity(settings)
                         self._record(
@@ -2386,6 +2552,8 @@ class MiniAppFishingAutomation:
             except Exception as exc:
                 identity = self._status_identity(settings)
                 participant_key = automation_participant_key(self.account, identity)
+                force_state = _mapping(miniapp_fishing_global_snapshot(settings).get("force_retry"))
+                force_retry_active = participant_key in (force_state.get("pending") or [])
                 previous_status = str(
                     self._state(identity).get("miniapp_fishing_status") or ""
                 )
@@ -2479,4 +2647,7 @@ class MiniAppFishingAutomation:
                         "Mini App fishing bait materials unavailable for %s; retrying hourly.",
                         identity,
                     )
-            await asyncio.sleep(max(1, min(int(wait), 300)))
+                if force_retry_active and status not in {"daily_done"}:
+                    self._finish_force_retry_after_error(settings, participant_key)
+                    wait = 1
+            await self._sleep_until_next_cycle(wait, settings)

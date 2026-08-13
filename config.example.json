@@ -48,6 +48,7 @@
   },
   "monitor": {
     "chat_id": "fanrenxxz",
+    "chat_ids": ["fanrenxxz", "@ja_netfilter_group"],
     "topic_id": null,
     "restricted_accounts": [
       {

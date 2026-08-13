@@ -15,6 +15,7 @@ from miniapp_fishing import (
     build_fishing_proof,
     fishing_result_summary,
     fishing_start_wait,
+    request_miniapp_fishing_force_retry,
 )
 
 
@@ -1511,6 +1512,163 @@ class MiniAppFishingTests(unittest.TestCase):
         runtime = worker._mark_daily_done(settings, "main|主魂")
         self.assertEqual(runtime["current_key"], "sub|主魂")
         self.assertIn("今日竿数已尽", runtime["detail"])
+
+    def test_force_retry_ignores_completion_once_then_restores_it(self):
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "sub|主魂"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        completed_at = miniapp_fishing._now_text()
+        miniapp_fishing._update_global_state(
+            lambda data: data.update(
+                completed_today={"main|主魂": completed_at, "sub|主魂": completed_at},
+                current_key="",
+                status="daily_done",
+            ),
+            settings=settings,
+        )
+
+        runtime = request_miniapp_fishing_force_retry(settings, requested_by="test")
+
+        self.assertEqual(runtime["current_key"], "main|主魂")
+        self.assertEqual(runtime["completed_today"], {})
+        self.assertEqual(
+            runtime["force_retry"]["pending"],
+            ["main|主魂", "sub|主魂"],
+        )
+
+        worker = MiniAppFishingAutomation(
+            SimpleNamespace(config={}, state={}, save_state=lambda: None),
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        runtime = worker._complete_round(settings, "main|主魂")
+        self.assertEqual(runtime["current_key"], "sub|主魂")
+        self.assertEqual(runtime["force_retry"]["pending"], ["sub|主魂"])
+
+        runtime = worker._mark_daily_done(settings, "sub|主魂")
+        self.assertEqual(runtime["force_retry"], {})
+        self.assertEqual(runtime["current_key"], "")
+        self.assertEqual(runtime["status"], "daily_done")
+        self.assertEqual(runtime["completed_today"]["main|主魂"], completed_at)
+        self.assertIn("sub|主魂", runtime["completed_today"])
+        self.assertEqual(
+            runtime["last_force_retry"]["attempted"],
+            ["main|主魂", "sub|主魂"],
+        )
+
+    def test_force_retry_rejects_disabled_automation(self):
+        with self.assertRaisesRegex(ValueError, "Mini App fishing is disabled"):
+            request_miniapp_fishing_force_retry(
+                {
+                    "enabled": False,
+                    "participants": ["main|主魂"],
+                    "rod_owner": "auto",
+                    "rod": "auto",
+                    "pond": "qingxi",
+                    "bait": "demon_blood",
+                    "chum": "none",
+                    "start_time": "",
+                }
+            )
+
+    def test_force_retry_wakes_a_sleeping_worker(self):
+        actor = SimpleNamespace(is_running=True, config={}, state={}, save_state=lambda: None)
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        worker._force_retry_request_id = "old"
+
+        async def mark_request(_seconds):
+            miniapp_fishing._update_global_state(
+                lambda data: data.update(force_retry_request_id="new")
+            )
+
+        with patch("miniapp_fishing.asyncio.sleep", new=AsyncMock(side_effect=mark_request)) as sleep:
+            asyncio.run(worker._sleep_until_next_cycle(300, {}))
+
+        self.assertEqual(sleep.await_count, 1)
+
+    def test_force_retry_error_advances_without_normal_backoff(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.is_running = True
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "main|无咎子"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        worker._clear_irrelevant_local_statuses = Mock()
+        worker._apply_force_retry_request = Mock(
+            return_value={"pending": ["main|主魂", "main|无咎子"]}
+        )
+        worker._drive_once = AsyncMock(
+            side_effect=MiniAppBeastError("fishing_bait_unaffordable")
+        )
+        worker._force_retry_request_id = "request"
+        request_miniapp_fishing_force_retry(settings, requested_by="test")
+
+        waits = []
+
+        async def stop_after_wait(wait, _settings):
+            waits.append(wait)
+            actor.is_running = False
+
+        worker._sleep_until_next_cycle = AsyncMock(side_effect=stop_after_wait)
+        asyncio.run(worker.run_loop())
+
+        self.assertEqual(waits, [1])
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        self.assertEqual(runtime["force_retry"]["pending"], ["main|无咎子"])
+
+    def test_dashboard_force_retry_endpoint_returns_runtime(self):
+        expected = {"status": "force_retry", "force_retry": {"pending": ["main|主魂"]}}
+        with patch(
+            "dashboard_server.miniapp_fishing_settings",
+            return_value={"enabled": True, "participants": ["main|主魂"]},
+        ), patch(
+            "dashboard_server.request_miniapp_fishing_force_retry",
+            return_value=expected,
+        ) as request:
+            result = asyncio.run(
+                dashboard_server.automation_fishing_force_retry(username="tester")
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["runtime"], expected)
+        request.assert_called_once_with(
+            {"enabled": True, "participants": ["main|主魂"]},
+            requested_by="tester",
+        )
 
 
 if __name__ == "__main__":

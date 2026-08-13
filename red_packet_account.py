@@ -10,7 +10,7 @@ import logging
 from telethon import events
 
 from auto_reply_features import maybe_restricted_exchange_place
-from log_utils import resolve_target_chat_id
+from log_utils import actor_target_chat_ids, resolve_actor_target_chats, routed_telegram_event_handler
 from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 from world_boss_features import install_world_boss_monitor
@@ -45,6 +45,7 @@ def install_restricted_exchange_monitor(actor, logger=None):
     """Listen for South Long Marquis events while the account is in standby mode."""
     log = logger or logging.getLogger(f"red_packet.{actor.account_key}")
 
+    @routed_telegram_event_handler
     async def handle_event(event):
         try:
             await maybe_restricted_exchange_place(actor, event)
@@ -58,17 +59,17 @@ def install_restricted_exchange_monitor(actor, logger=None):
             )
 
     builders = (
-        events.NewMessage(chats=actor.target_chat_id),
-        events.MessageEdited(chats=actor.target_chat_id),
+        events.NewMessage(chats=actor_target_chat_ids(actor)),
+        events.MessageEdited(chats=actor_target_chat_ids(actor)),
     )
     registrations = []
     for builder in builders:
         actor.client.add_event_handler(handle_event, builder)
         registrations.append((handle_event, builder))
     log.warning(
-        "[%s] Restricted South Long Marquis Mini App monitor active for chat %s",
+        "[%s] Restricted South Long Marquis Mini App monitor active for chats %s",
         actor.account_key,
-        actor.target_chat_id,
+        actor_target_chat_ids(actor),
     )
     return registrations
 
@@ -86,11 +87,7 @@ async def run(account: str) -> None:
         if not await client.is_user_authorized():
             raise RuntimeError(f"Telegram session for {account} is not authorized")
         actor.my_info = await client.get_me()
-        actor.target_chat_id = await resolve_target_chat_id(
-            client,
-            actor.target_chat_id,
-            logger,
-        )
+        await resolve_actor_target_chats(actor, logger)
         monitor = await install_red_packet_monitor(client, account, logger=logger)
         if not monitor.topic_id:
             raise RuntimeError(f"red-packet monitor for {account} was not installed")

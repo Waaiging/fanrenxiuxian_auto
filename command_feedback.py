@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timedelta
 
 from log_utils import (
+    actor_message_target,
     actor_allows_retired_auto_command,
     command_response_family,      # 指令回复类型
     command_send_allowed,         # 指令守卫：检测发送频率
@@ -456,7 +457,7 @@ async def send_and_wait_feedback_common(
         matched_feedback = False
 
         while retries <= max_retries and getattr(actor, "is_running", True):
-            target_reply = reply_to if reply_to else actor.topic_id
+            target_chat, target_reply = actor_message_target(actor, reply_to=reply_to)
             try:
                 if pause_event is not None:
                     await pause_event.wait()
@@ -493,7 +494,7 @@ async def send_and_wait_feedback_common(
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] sending message to chat...")
-                sent_msg = await actor.client.send_message(actor.target_chat_id, message, reply_to=target_reply)
+                sent_msg = await actor.client.send_message(target_chat, message, reply_to=target_reply)
                 if not sent_msg:
                     break
                 await record_telegram_send_success(actor, logger=logger)
@@ -527,7 +528,14 @@ async def send_and_wait_feedback_common(
                     reply_to=target_reply,
                     logger=logger,
                 )
-                record_recent_profile_command(actor, msg_id, message, _identity or "主魂", source="auto")
+                record_recent_profile_command(
+                    actor,
+                    msg_id,
+                    message,
+                    _identity or "主魂",
+                    source="auto",
+                    chat_id=getattr(sent_msg, "chat_id", None) or target_chat,
+                )
             except Exception as exc:
                 logger.error(f"Send Error [{message}] reply_to={target_reply}: {exc}")
                 await _handle_telegram_send_protection(actor, message, exc, logger=logger, identity=getattr(actor, "current_identity", "主魂"))
@@ -537,6 +545,8 @@ async def send_and_wait_feedback_common(
             # 记录指令发送者的 account ID，供宽松匹配排除命令回声并保留审计线索
             actor.feedback_senders = getattr(actor, "feedback_senders", {})
             actor.feedback_senders[msg_id] = sent_msg.sender_id
+            actor.feedback_chat_ids = getattr(actor, "feedback_chat_ids", {})
+            actor.feedback_chat_ids[msg_id] = getattr(sent_msg, "chat_id", None) or target_chat
             # 注册反馈事件：handle_game_response 收到回复时会设置此事件
             evt = asyncio.Event()
             actor.feedback_events[msg_id] = evt
@@ -620,6 +630,7 @@ async def send_and_wait_feedback_common(
                 actor.feedback_commands.pop(msg_id, None)
                 actor.feedback_sent_ts.pop(msg_id, None)
                 actor.feedback_senders.pop(msg_id, None)
+                actor.feedback_chat_ids.pop(msg_id, None)
                 sent_at_by_id = getattr(actor, "_last_command_sent_at_by_id", None)
                 if isinstance(sent_at_by_id, dict) and len(sent_at_by_id) > 300:
                     for old_id in list(sent_at_by_id.keys())[:-150]:

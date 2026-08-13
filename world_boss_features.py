@@ -21,7 +21,7 @@ from typing import Any
 from telethon import events
 
 from automation_settings import world_boss_identities_for_account
-from log_utils import is_game_bot_sender, resolve_target_chat_id
+from log_utils import is_game_bot_sender, resolve_actor_target_chats
 from miniapp_beast import (
     MiniAppBeastError,
     _post_json,
@@ -247,6 +247,7 @@ def _button_url(button: Any) -> str:
 @dataclass(frozen=True, slots=True)
 class WorldBossEntry:
     message_id: int
+    chat_id: int | None
     origin: str
     bot_username: str
     fingerprint: str
@@ -309,6 +310,7 @@ def extract_world_boss_entry(
     fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return WorldBossEntry(
         message_id=message_id,
+        chat_id=getattr(message, "chat_id", None),
         origin=miniapp_origin(selected_url),
         bot_username=bot_username,
         fingerprint=fingerprint,
@@ -440,11 +442,11 @@ class WorldBossMonitor:
         settings = (getattr(actor, "config", {}) or {}).get("world_boss") or {}
         self.enabled = bool(settings.get("enabled", True))
         self.timeout = max(5, min(60, int(settings.get("timeout_seconds") or WORLD_BOSS_TIMEOUT_SECONDS)))
-        self.target_chat: Any = None
+        self.target_chats: list[Any] = []
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
-        self._inflight_messages: set[int] = set()
+        self._inflight_messages: set[tuple[Any, int]] = set()
         self._inflight_fingerprints: set[str] = set()
         self._fight_lock = asyncio.Lock()
         self._json_clients: dict[str, _PersistentWorldBossJsonClient] = {}
@@ -510,11 +512,7 @@ class WorldBossMonitor:
         if not self.enabled:
             return False
         try:
-            self.target_chat = await resolve_target_chat_id(
-                self.client,
-                getattr(self.actor, "target_chat_id", ""),
-                self.log,
-            )
+            self.target_chats = await resolve_actor_target_chats(self.actor, self.log)
 
             async def new_handler(event: Any) -> None:
                 await self.process_message(event.message, source="new")
@@ -524,8 +522,8 @@ class WorldBossMonitor:
 
             self._new_handler = new_handler
             self._edit_handler = edit_handler
-            self.client.add_event_handler(new_handler, events.NewMessage(chats=self.target_chat))
-            self.client.add_event_handler(edit_handler, events.MessageEdited(chats=self.target_chat))
+            self.client.add_event_handler(new_handler, events.NewMessage(chats=self.target_chats))
+            self.client.add_event_handler(edit_handler, events.MessageEdited(chats=self.target_chats))
         except Exception as exc:
             state = getattr(self.actor, "state", None)
             if isinstance(state, dict):
@@ -541,17 +539,25 @@ class WorldBossMonitor:
             state["world_boss_monitor_started_at"] = _now_text()
             state["world_boss_last_error"] = ""
             self._save()
-        self.log.info("[%s] Qing Yuanzi world-boss monitor ready", self.account)
+        self.log.info(
+            "[%s] Qing Yuanzi world-boss monitor ready for chats %s",
+            self.account,
+            self.target_chats,
+        )
 
-        try:
-            recent = await self.client.get_messages(self.target_chat, limit=WORLD_BOSS_SCAN_LIMIT)
-            # Telegram returns newest first. Only recover the latest eligible room so
-            # an older near-expiry notice cannot hold the per-account fight lock.
-            for message in list(recent or []):
-                if await self.process_message(message, source="startup"):
-                    break
-        except Exception as exc:
-            self.log.warning("World Boss startup recovery scan failed: %s", _error_code(exc))
+        for target_chat in self.target_chats:
+            try:
+                recent = await self.client.get_messages(target_chat, limit=WORLD_BOSS_SCAN_LIMIT)
+                # Telegram returns newest first. Recover at most one eligible room per chat.
+                for message in list(recent or []):
+                    if await self.process_message(message, source="startup"):
+                        break
+            except Exception as exc:
+                self.log.warning(
+                    "World Boss startup recovery scan failed for chat %s: %s",
+                    target_chat,
+                    _error_code(exc),
+                )
         return True
 
     async def stop(self) -> None:
@@ -602,13 +608,14 @@ class WorldBossMonitor:
             return False
         if self._event_status(entry.fingerprint) in COMPLETED_EVENT_STATUSES:
             return False
+        message_key = (entry.chat_id, entry.message_id)
         if (
-            entry.message_id in self._inflight_messages
+            message_key in self._inflight_messages
             or entry.fingerprint in self._inflight_fingerprints
         ):
             return False
 
-        self._inflight_messages.add(entry.message_id)
+        self._inflight_messages.add(message_key)
         self._inflight_fingerprints.add(entry.fingerprint)
         self._record(entry, "queued", source=source, identities=identities, error="")
         task = asyncio.create_task(
@@ -619,7 +626,7 @@ class WorldBossMonitor:
 
         def done(completed: asyncio.Task[Any]) -> None:
             self._tasks.discard(completed)
-            self._inflight_messages.discard(entry.message_id)
+            self._inflight_messages.discard(message_key)
             self._inflight_fingerprints.discard(entry.fingerprint)
             if completed.cancelled():
                 return

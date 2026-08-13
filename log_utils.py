@@ -28,6 +28,8 @@ import sqlite3
 import time
 import urllib.request
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from collections import deque  # 用于手动指令 ID 的固定大小队列
@@ -60,6 +62,9 @@ COMMAND_CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 MESSAGE_EVENTS_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "message_events.sqlite3")
 BOT_ACTIVITY_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_activity_shared.json")
 USERNAME_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{2,64})")
+
+_TELEGRAM_EVENT_CHAT_ID = ContextVar("telegram_event_chat_id", default=None)
+_TELEGRAM_EVENT_TOPIC_ID = ContextVar("telegram_event_topic_id", default=None)
 
 
 async def resolve_target_chat_id(client, configured_target, logger=None):
@@ -96,6 +101,132 @@ async def resolve_target_chat_id(client, configured_target, logger=None):
     if target is None:
         raise ValueError("Telegram target group is not configured")
     return int(target)
+
+
+def normalize_telegram_chat_id(value):
+    """Normalize Telethon's -100-prefixed channel ID for comparisons."""
+    if value is None:
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return str(value).strip().casefold() or None
+    digits = str(abs(value))
+    if value < 0 and digits.startswith("100") and len(digits) > 3:
+        digits = digits[3:]
+    try:
+        return int(digits)
+    except ValueError:
+        return value
+
+
+def telegram_chat_ids_match(left, right):
+    left_id = normalize_telegram_chat_id(left)
+    right_id = normalize_telegram_chat_id(right)
+    return left_id is not None and right_id is not None and left_id == right_id
+
+
+def telegram_message_key(message, message_id=None):
+    """Return a cache key that cannot collide between monitored chats."""
+    if message_id is None:
+        message_id = _message_id(message)
+    return (normalize_telegram_chat_id(getattr(message, "chat_id", None)), message_id)
+
+
+async def resolve_target_chat_ids(client, configured_primary, configured_targets=None, logger=None):
+    """Resolve and deduplicate the primary game group plus optional mirrors."""
+    candidates = [configured_primary]
+    if configured_targets is not None:
+        if isinstance(configured_targets, (str, int)):
+            configured_targets = [configured_targets]
+        candidates.extend(list(configured_targets or []))
+
+    resolved = []
+    normalized = set()
+    for candidate in candidates:
+        if candidate is None or (isinstance(candidate, str) and not candidate.strip()):
+            continue
+        chat_id = await resolve_target_chat_id(client, candidate, logger)
+        key = normalize_telegram_chat_id(chat_id)
+        if key in normalized:
+            continue
+        normalized.add(key)
+        resolved.append(chat_id)
+    if not resolved:
+        raise ValueError("Telegram target groups are not configured")
+    return resolved
+
+
+async def resolve_actor_target_chats(actor, logger=None):
+    """Resolve an actor's configured game groups while preserving its primary target."""
+    monitor = getattr(actor, "mc", None) or {}
+    target_ids = await resolve_target_chat_ids(
+        actor.client,
+        getattr(actor, "target_chat_id", None),
+        monitor.get("chat_ids"),
+        logger,
+    )
+    actor.target_chat_id = target_ids[0]
+    actor.target_chat_ids = target_ids
+    if logger:
+        logger.info("Game group monitoring targets: %s (primary=%s)", target_ids, target_ids[0])
+    return target_ids
+
+
+def actor_target_chat_ids(actor):
+    targets = getattr(actor, "target_chat_ids", None)
+    if not targets:
+        targets = [getattr(actor, "target_chat_id", None)]
+    return [target for target in targets if target is not None]
+
+
+def telegram_message_topic_id(message):
+    """Return a forum topic root without confusing a direct reply for the root."""
+    reply_to = getattr(message, "reply_to", None)
+    candidates = [
+        getattr(message, "reply_to_top_id", None),
+        getattr(reply_to, "reply_to_top_id", None) if reply_to is not None else None,
+    ]
+    for candidate in candidates:
+        if candidate:
+            return candidate
+    if reply_to is not None and getattr(reply_to, "forum_topic", False):
+        return getattr(reply_to, "reply_to_msg_id", None)
+    return None
+
+
+@contextmanager
+def telegram_event_message_context(message):
+    """Bind source chat/topic for event-triggered work and inherited asyncio tasks."""
+    chat_token = _TELEGRAM_EVENT_CHAT_ID.set(getattr(message, "chat_id", None))
+    topic_token = _TELEGRAM_EVENT_TOPIC_ID.set(telegram_message_topic_id(message))
+    try:
+        yield
+    finally:
+        _TELEGRAM_EVENT_TOPIC_ID.reset(topic_token)
+        _TELEGRAM_EVENT_CHAT_ID.reset(chat_token)
+
+
+def routed_telegram_event_handler(handler):
+    """Run a Telethon handler with its source chat and forum topic in context."""
+    @wraps(handler)
+    async def wrapped(event, *args, **kwargs):
+        with telegram_event_message_context(getattr(event, "message", event)):
+            return await handler(event, *args, **kwargs)
+    return wrapped
+
+
+def actor_message_target(actor, reply_to=None):
+    """Choose the triggering chat/topic, or the primary chat for scheduled work."""
+    contextual_chat = _TELEGRAM_EVENT_CHAT_ID.get()
+    target_chat = contextual_chat if contextual_chat is not None else getattr(actor, "target_chat_id", None)
+    if reply_to is not None:
+        target_reply = getattr(reply_to, "id", reply_to)
+    elif contextual_chat is not None:
+        target_reply = _TELEGRAM_EVENT_TOPIC_ID.get()
+    else:
+        target_reply = getattr(actor, "topic_id", None)
+    return target_chat, target_reply
 
 # 命令守卫参数
 COMMAND_GUARD_WINDOW_SECONDS = 30 * 60      # 监控窗口 30 分钟
@@ -1297,15 +1428,10 @@ async def send_text_alert(actor, title, text, logger=None, parse_mode=None):
 
 def _chat_matches_actor_target(actor, msg):
     chat_id = getattr(msg, "chat_id", None)
-    target_chat_id = getattr(actor, "target_chat_id", None)
-    if chat_id is None or target_chat_id is None:
-        return False
-    if chat_id == target_chat_id:
-        return True
-    try:
-        return int(chat_id) == int(f"-100{target_chat_id}")
-    except Exception:
-        return False
+    return any(
+        telegram_chat_ids_match(chat_id, target_chat_id)
+        for target_chat_id in actor_target_chat_ids(actor)
+    )
 
 
 def _message_in_topic(msg, topic_id):
@@ -1338,7 +1464,7 @@ def is_clear_history_command(actor, msg, text, sender=None):
 async def clear_actor_command_history(actor, older_than_minutes=CLEAR_HISTORY_OLDER_THAN_MINUTES, scan_limit=None, topic_only=False, logger=None):
     """Delete this account's old outgoing dot-commands from its configured game chat."""
     client = getattr(actor, "client", None)
-    chat_id = getattr(actor, "target_chat_id", None)
+    chat_id, contextual_topic = actor_message_target(actor)
     if not client or chat_id is None:
         raise RuntimeError("missing client or target chat")
 
@@ -1367,7 +1493,7 @@ async def clear_actor_command_history(actor, older_than_minutes=CLEAR_HISTORY_OL
             continue
         old_enough += 1
 
-        msg_in_topic = _message_in_topic(msg, getattr(actor, "topic_id", None))
+        msg_in_topic = _message_in_topic(msg, contextual_topic)
         if msg_in_topic:
             in_topic += 1
         if topic_only and not msg_in_topic:
@@ -1433,7 +1559,7 @@ async def handle_clear_history_command(actor, msg, text, sender=None, logger=Non
         return False
 
     client = getattr(actor, "client", None)
-    chat_id = getattr(actor, "target_chat_id", None)
+    chat_id = getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)
     if client and chat_id is not None:
         try:
             await client.delete_messages(chat_id, msg)
@@ -1641,19 +1767,27 @@ def _command_text_for_message_id(actor, msg, message_id):
     except Exception:
         return ""
 
+    message_key = telegram_message_key(msg, message_id)
+    texts_by_key = getattr(actor, "_manual_command_texts_by_key", None) or {}
+    command = str(texts_by_key.get(message_key, "") or "").strip()
     texts = getattr(actor, "_manual_command_texts", None) or {}
-    command = str(texts.get(message_id, "") or "").strip()
+    if not command and not texts_by_key:
+        command = str(texts.get(message_id, "") or "").strip()
     if is_command_message_text(command):
         return command
     feedback_commands = getattr(actor, "feedback_commands", None) or {}
-    command = str(feedback_commands.get(message_id, "") or "").strip()
+    pending_chat_id = (getattr(actor, "feedback_chat_ids", {}) or {}).get(message_id)
+    command = ""
+    if pending_chat_id is None or telegram_chat_ids_match(
+        getattr(msg, "chat_id", None), pending_chat_id
+    ):
+        command = str(feedback_commands.get(message_id, "") or "").strip()
     if is_command_message_text(command):
         return command
 
     account = actor_account_key(actor) or actor.__class__.__name__
-    chat_id = _safe_message_int(
-        getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)
-    )
+    message_chat_id = _safe_message_int(getattr(msg, "chat_id", None)) if msg is not None else None
+    chat_id = message_chat_id if message_chat_id is not None else _safe_message_int(getattr(actor, "target_chat_id", None))
     try:
         with _message_db_connect() as conn:
             row = None
@@ -1667,7 +1801,7 @@ def _command_text_for_message_id(actor, msg, message_id):
                     """,
                     (account, chat_id, message_id),
                 ).fetchone()
-            if row is None:
+            if row is None and message_chat_id is None:
                 row = conn.execute(
                     """
                     SELECT command
@@ -1692,7 +1826,7 @@ def _command_text_for_message_id(actor, msg, message_id):
                     """,
                     (account, chat_id, message_id),
                 ).fetchone()
-            if row is None:
+            if row is None and message_chat_id is None:
                 row = conn.execute(
                     """
                     SELECT COALESCE(NULLIF(command, ''), text)
@@ -2922,8 +3056,15 @@ def remember_script_sent_message(actor, msg):
         sent = set()
         setattr(actor, cache_name, sent)
     sent.add(msg_id)
+    sent_keys = getattr(actor, "_script_sent_message_keys", None)
+    if sent_keys is None:
+        sent_keys = set()
+        setattr(actor, "_script_sent_message_keys", sent_keys)
+    sent_keys.add((normalize_telegram_chat_id(getattr(msg, "chat_id", None)), msg_id))
     if len(sent) > 1000:
         setattr(actor, cache_name, set(list(sent)[-500:]))
+    if len(sent_keys) > 1000:
+        setattr(actor, "_script_sent_message_keys", set(list(sent_keys)[-500:]))
 
 
 def is_command_message_text(text):
@@ -3096,19 +3237,7 @@ def is_pause_control_text(text):
 
 
 def pause_control_chat_matches(actor, msg):
-    chat_id = getattr(msg, "chat_id", None)
-    target_chat_id = getattr(actor, "target_chat_id", None)
-    if chat_id is None or target_chat_id is None:
-        return False
-    variants = {str(target_chat_id)}
-    target_str = str(target_chat_id)
-    if target_str.startswith("-100"):
-        variants.add(target_str[4:])
-    elif target_str.startswith("-"):
-        variants.add(target_str[1:])
-    else:
-        variants.add(f"-100{target_str}")
-    return str(chat_id) in variants
+    return _chat_matches_actor_target(actor, msg)
 
 
 def notify_pause_control_changed(actor):
@@ -3268,7 +3397,10 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
         return False
     msg_id = _message_id(msg)
     sent = getattr(actor, "_script_sent_message_ids", set())
-    if msg_id in sent:
+    message_key = (normalize_telegram_chat_id(getattr(msg, "chat_id", None)), msg_id)
+    sent_keys = getattr(actor, "_script_sent_message_keys", set())
+    if message_key in sent_keys or (not sent_keys and msg_id in sent):
+        sent_keys.discard(message_key)
         sent.discard(msg_id)
         return True
     text = text if text is not None else (getattr(msg, "text", None) or "")
@@ -3312,19 +3444,41 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
         _manual_cmds = deque(maxlen=50)
         actor._manual_command_ids = _manual_cmds
     _manual_cmds.append(msg_id)
+    _manual_keys = getattr(actor, "_manual_command_keys", None)
+    if _manual_keys is None:
+        _manual_keys = deque(maxlen=50)
+        actor._manual_command_keys = _manual_keys
+    _manual_keys.append(message_key)
     _manual_texts = getattr(actor, "_manual_command_texts", None)
     if _manual_texts is None:
         _manual_texts = {}
         actor._manual_command_texts = _manual_texts
     _manual_texts[msg_id] = _stripped
+    _manual_texts_by_key = getattr(actor, "_manual_command_texts_by_key", None)
+    if _manual_texts_by_key is None:
+        _manual_texts_by_key = {}
+        actor._manual_command_texts_by_key = _manual_texts_by_key
+    _manual_texts_by_key[message_key] = _stripped
     _manual_identities = getattr(actor, "_manual_command_identities", None)
     if _manual_identities is None:
         _manual_identities = {}
         actor._manual_command_identities = _manual_identities
     _manual_identities[msg_id] = _identity
+    _manual_identities_by_key = getattr(actor, "_manual_command_identities_by_key", None)
+    if _manual_identities_by_key is None:
+        _manual_identities_by_key = {}
+        actor._manual_command_identities_by_key = _manual_identities_by_key
+    _manual_identities_by_key[message_key] = _identity
     _active_manual_ids = set(_manual_cmds)
     actor._manual_command_texts = {k: v for k, v in _manual_texts.items() if k in _active_manual_ids}
     actor._manual_command_identities = {k: v for k, v in _manual_identities.items() if k in _active_manual_ids}
+    _active_manual_keys = set(_manual_keys)
+    actor._manual_command_texts_by_key = {
+        k: v for k, v in _manual_texts_by_key.items() if k in _active_manual_keys
+    }
+    actor._manual_command_identities_by_key = {
+        k: v for k, v in _manual_identities_by_key.items() if k in _active_manual_keys
+    }
     if hasattr(actor, "command_avatar_map"):
         actor.command_avatar_map[msg_id] = _identity
     record_command_sent(
@@ -3335,7 +3489,14 @@ def log_manual_outgoing_if_needed(actor, msg, text=None):
         source="manual",
         reply_to=meaningful_reply_to_msg_id(actor, msg),
     )
-    record_recent_profile_command(actor, msg_id, _stripped, _identity, source="manual")
+    record_recent_profile_command(
+        actor,
+        msg_id,
+        _stripped,
+        _identity,
+        source="manual",
+        chat_id=getattr(msg, "chat_id", None),
+    )
     return True
 
 
@@ -3356,7 +3517,8 @@ def _manual_command_record_from_ledger(actor, msg):
         return None
 
     account = actor_account_key(actor) or actor.__class__.__name__
-    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    message_chat_id = _safe_message_int(getattr(msg, "chat_id", None)) if msg is not None else None
+    chat_id = message_chat_id if message_chat_id is not None else _safe_message_int(getattr(actor, "target_chat_id", None))
     cache = getattr(actor, "_manual_command_ledger_cache", None)
     if cache is None:
         cache = {}
@@ -3379,7 +3541,7 @@ def _manual_command_record_from_ledger(actor, msg):
                     """,
                     (account, chat_id, replied_id),
                 ).fetchone()
-            if row is None:
+            if row is None and message_chat_id is None:
                 row = conn.execute(
                     """
                     SELECT command, identity
@@ -3412,7 +3574,8 @@ def _tracked_command_record_from_ledger(actor, msg):
         return None
 
     account = actor_account_key(actor) or actor.__class__.__name__
-    chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    message_chat_id = _safe_message_int(getattr(msg, "chat_id", None)) if msg is not None else None
+    chat_id = message_chat_id if message_chat_id is not None else _safe_message_int(getattr(actor, "target_chat_id", None))
     cache = getattr(actor, "_tracked_command_ledger_cache", None)
     if cache is None:
         cache = {}
@@ -3434,7 +3597,7 @@ def _tracked_command_record_from_ledger(actor, msg):
                     """,
                     (account, chat_id, replied_id),
                 ).fetchone()
-            if row is None:
+            if row is None and message_chat_id is None:
                 row = conn.execute(
                     """
                     SELECT command, identity, source
@@ -3465,8 +3628,12 @@ def is_reply_to_manual_command(actor, msg):
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return False
+    manual_keys = getattr(actor, "_manual_command_keys", None)
+    message_key = (normalize_telegram_chat_id(getattr(msg, "chat_id", None)), replied_id)
+    if manual_keys and message_key in manual_keys:
+        return True
     manual_ids = getattr(actor, "_manual_command_ids", None)
-    if manual_ids and replied_id in manual_ids:
+    if not manual_keys and manual_ids and replied_id in manual_ids:
         return True
     return bool(_manual_command_record_from_ledger(actor, msg))
 
@@ -3476,7 +3643,14 @@ def manual_command_text_for_reply(actor, msg):
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
+    key = (normalize_telegram_chat_id(getattr(msg, "chat_id", None)), replied_id)
+    texts_by_key = getattr(actor, "_manual_command_texts_by_key", None) or {}
+    command = texts_by_key.get(key, "")
+    if command:
+        return command
     texts = getattr(actor, "_manual_command_texts", None) or {}
+    if getattr(actor, "_manual_command_keys", None):
+        texts = {}
     command = texts.get(replied_id, "")
     if command:
         return command
@@ -3489,12 +3663,22 @@ def manual_command_identity_for_reply(actor, msg):
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
+    key = (normalize_telegram_chat_id(getattr(msg, "chat_id", None)), replied_id)
+    identities_by_key = getattr(actor, "_manual_command_identities_by_key", None) or {}
+    identity = identities_by_key.get(key, "")
+    if identity:
+        return identity
     identities = getattr(actor, "_manual_command_identities", None) or {}
+    if getattr(actor, "_manual_command_keys", None):
+        identities = {}
     identity = identities.get(replied_id, "")
     if identity:
         return identity
-    command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
-    identity = command_avatar_map.get(replied_id, "")
+    command_avatar_by_key = getattr(actor, "_command_avatar_map_by_key", None) or {}
+    identity = command_avatar_by_key.get(key, "")
+    if not identity and not command_avatar_by_key:
+        command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
+        identity = command_avatar_map.get(replied_id, "")
     if identity:
         return identity
     record = _manual_command_record_from_ledger(actor, msg)
@@ -3510,7 +3694,12 @@ def tracked_command_text_for_reply(actor, msg):
     if command:
         return command
     feedback_commands = getattr(actor, "feedback_commands", None) or {}
-    command = feedback_commands.get(replied_id, "")
+    pending_chat_id = (getattr(actor, "feedback_chat_ids", {}) or {}).get(replied_id)
+    command = ""
+    if pending_chat_id is None or telegram_chat_ids_match(
+        getattr(msg, "chat_id", None), pending_chat_id
+    ):
+        command = feedback_commands.get(replied_id, "")
     if command:
         return command
     record = _tracked_command_record_from_ledger(actor, msg)
@@ -3525,12 +3714,21 @@ def tracked_command_identity_for_reply(actor, msg):
     identity = manual_command_identity_for_reply(actor, msg)
     if identity:
         return identity
-    command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
-    identity = command_avatar_map.get(replied_id, "")
+    key = (normalize_telegram_chat_id(getattr(msg, "chat_id", None)), replied_id)
+    command_avatar_by_key = getattr(actor, "_command_avatar_map_by_key", None) or {}
+    identity = command_avatar_by_key.get(key, "")
+    if not identity and not command_avatar_by_key:
+        command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
+        identity = command_avatar_map.get(replied_id, "")
     if identity:
         return identity
     feedback_identities = getattr(actor, "feedback_identities", None) or {}
-    identity = feedback_identities.get(replied_id, "")
+    pending_chat_id = (getattr(actor, "feedback_chat_ids", {}) or {}).get(replied_id)
+    identity = ""
+    if pending_chat_id is None or telegram_chat_ids_match(
+        getattr(msg, "chat_id", None), pending_chat_id
+    ):
+        identity = feedback_identities.get(replied_id, "")
     if identity:
         return identity
     record = _tracked_command_record_from_ledger(actor, msg)
@@ -3544,10 +3742,17 @@ def is_reply_to_tracked_command(actor, msg):
         return False
     if is_reply_to_manual_command(actor, msg):
         return True
-    for attr in ("feedback_commands", "feedback_events", "command_avatar_map"):
+    pending_chat_ids = getattr(actor, "feedback_chat_ids", {}) or {}
+    for attr in ("feedback_commands", "feedback_events"):
         mapping = getattr(actor, attr, None) or {}
-        if replied_id in mapping:
+        if replied_id in mapping and (
+            replied_id not in pending_chat_ids
+            or telegram_chat_ids_match(getattr(msg, "chat_id", None), pending_chat_ids[replied_id])
+        ):
             return True
+    command_avatar_map = getattr(actor, "command_avatar_map", None) or {}
+    if replied_id in command_avatar_map and not pending_chat_ids:
+        return True
     return bool(_tracked_command_record_from_ledger(actor, msg))
 
 
@@ -3964,6 +4169,15 @@ def record_command_sent(actor, msg, command, identity="", source="auto", reply_t
         return False
     account = actor_account_key(actor) or actor.__class__.__name__
     chat_id = _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None))
+    command_avatar_by_key = getattr(actor, "_command_avatar_map_by_key", None)
+    if command_avatar_by_key is None:
+        command_avatar_by_key = {}
+        actor._command_avatar_map_by_key = command_avatar_by_key
+    command_avatar_by_key[(normalize_telegram_chat_id(chat_id), msg_id)] = (
+        str(identity or "主魂").strip() or "主魂"
+    )
+    if len(command_avatar_by_key) > 1000:
+        actor._command_avatar_map_by_key = dict(list(command_avatar_by_key.items())[-500:])
     reply_to_id = _safe_message_int(reply_to)
     now = datetime.now().strftime(TIME_FORMAT)
     try:
@@ -4253,6 +4467,16 @@ def match_pending_feedback_by_id(
     evt = feedback_events.get(pending_id)
     if evt is None or evt.is_set():
         return False
+    pending_chat_id = (getattr(actor, "feedback_chat_ids", {}) or {}).get(pending_id)
+    if pending_chat_id is not None and not telegram_chat_ids_match(
+        getattr(msg, "chat_id", None), pending_chat_id
+    ):
+        if logger:
+            logger.info(
+                f"{label} Rejected pending {pending_id}: response chat "
+                f"{getattr(msg, 'chat_id', None)} != command chat {pending_chat_id}."
+            )
+        return False
     command = (getattr(actor, "feedback_commands", {}) or {}).get(pending_id, "")
     identity = (getattr(actor, "feedback_identities", {}) or {}).get(
         pending_id, getattr(actor, "current_identity", "主魂")
@@ -4339,7 +4563,13 @@ def match_pending_feedback_by_reply(actor, msg, text, candidate_fn=None, logger=
     # replies.
     pending = [
         (mid, evt) for mid, evt in (getattr(actor, "feedback_events", {}) or {}).items()
-        if evt is not None and not evt.is_set()
+        if evt is not None and not evt.is_set() and (
+            mid not in (getattr(actor, "feedback_chat_ids", {}) or {})
+            or telegram_chat_ids_match(
+                getattr(msg, "chat_id", None),
+                (getattr(actor, "feedback_chat_ids", {}) or {}).get(mid),
+            )
+        )
     ]
     if (
         len(pending) != 1
@@ -4669,7 +4899,7 @@ def profile_source_is_direct_profile_command(source):
     return "passive profile" not in lowered and "recent profile" not in lowered
 
 
-def record_recent_profile_command(actor, msg_id, command, identity, source=""):
+def record_recent_profile_command(actor, msg_id, command, identity, source="", chat_id=None):
     """Remember commands whose final profile reply may not be a direct reply_to."""
     cmd = _profile_command_key(command)
     if not cmd:
@@ -4680,6 +4910,7 @@ def record_recent_profile_command(actor, msg_id, command, identity, source=""):
         actor._recent_cultivation_profile_commands = pending
     pending.append({
         "msg_id": int(msg_id or 0),
+        "chat_id": normalize_telegram_chat_id(chat_id),
         "command": cmd,
         "identity": identity or "主魂",
         "ts": time.monotonic(),
@@ -4701,7 +4932,15 @@ def _expected_profile_commands_for_text(text):
     return []
 
 
-def recent_profile_identity_for_text(actor, text, msg_id=None, max_age_seconds=90, id_window=120, consume=True):
+def recent_profile_identity_for_text(
+    actor,
+    text,
+    msg_id=None,
+    chat_id=None,
+    max_age_seconds=90,
+    id_window=120,
+    consume=True,
+):
     """Find the identity for non-reply profile texts using recent .状态/.我的灵根 commands."""
     expected = set(_expected_profile_commands_for_text(text))
     if not expected:
@@ -4716,6 +4955,7 @@ def recent_profile_identity_for_text(actor, text, msg_id=None, max_age_seconds=9
         return ""
     now = time.monotonic()
     msg_num = int(msg_id or 0)
+    normalized_chat_id = normalize_telegram_chat_id(chat_id)
     kept = deque(maxlen=40)
     chosen = ""
     chosen_index = -1
@@ -4727,6 +4967,14 @@ def recent_profile_identity_for_text(actor, text, msg_id=None, max_age_seconds=9
         if age > max_age_seconds:
             continue
         item_msg_id = int(item.get("msg_id", 0) or 0)
+        item_chat_id = item.get("chat_id")
+        if (
+            normalized_chat_id is not None
+            and item_chat_id is not None
+            and normalize_telegram_chat_id(item_chat_id) != normalized_chat_id
+        ):
+            kept.append(item)
+            continue
         if msg_num and item_msg_id and (msg_num <= item_msg_id or msg_num - item_msg_id > id_window):
             kept.append(item)
             continue
@@ -5138,11 +5386,12 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     if cache is None:
         cache = {}
         actor._manual_reply_state_sync_cache = cache
+    message_key = telegram_message_key(msg, msg_id)
     cache_key = (replied_id, command, str(text or "").strip())
-    if msg_id is not None and cache.get(msg_id) == cache_key:
+    if msg_id is not None and cache.get(message_key) == cache_key:
         return True
     if msg_id is not None:
-        cache[msg_id] = cache_key
+        cache[message_key] = cache_key
         if len(cache) > 300:
             actor._manual_reply_state_sync_cache = dict(list(cache.items())[-150:])
 
@@ -5421,7 +5670,13 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
     if mentions_only and not mentioned_identities:
         return False
     if not mentioned_identities and sender is not None and is_game_bot_sender(actor, sender):
-        profile_identity = recent_profile_identity_for_text(actor, text, msg_id=msg_id, consume=False)
+        profile_identity = recent_profile_identity_for_text(
+            actor,
+            text,
+            msg_id=msg_id,
+            chat_id=getattr(msg, "chat_id", None),
+            consume=False,
+        )
         if profile_identity:
             profile_text = text
             if profile_identity != "主魂":
@@ -5451,7 +5706,13 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
             record_cultivation_delta_from_text(
                 actor, text, identity=profile_identity, logger=logger, source="recent profile", msg=msg
             )
-            recent_profile_identity_for_text(actor, text, msg_id=msg_id, consume=True)
+            recent_profile_identity_for_text(
+                actor,
+                text,
+                msg_id=msg_id,
+                chat_id=getattr(msg, "chat_id", None),
+                consume=True,
+            )
             return True
     if not mentioned_identities:
         return False
@@ -5474,10 +5735,11 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
         if seen_texts is None:
             seen_texts = {}
             setattr(actor, cache_name, seen_texts)
-        if msg_id is not None and seen_texts.get(msg_id) == text:
+        message_key = telegram_message_key(msg, msg_id)
+        if msg_id is not None and seen_texts.get(message_key) == text:
             return True
         if msg_id is not None:
-            seen_texts[msg_id] = text
+            seen_texts[message_key] = text
             if len(seen_texts) > 300:
                 setattr(actor, cache_name, dict(list(seen_texts.items())[-150:]))
     else:
@@ -5486,7 +5748,7 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
         if seen is None:
             seen = set()
             setattr(actor, cache_name, seen)
-        key = (label, msg_id)
+        key = (label, *telegram_message_key(msg, msg_id))
         if msg_id is not None and key in seen:
             return True
         if msg_id is not None:
@@ -5550,8 +5812,15 @@ def is_edited_message_for_current_account(actor, msg, text):
     replied_msg_id = meaningful_reply_to_msg_id(actor, msg)
     
     if replied_msg_id:
+        sent_keys = getattr(actor, "_script_sent_message_keys", set())
+        message_key = (
+            normalize_telegram_chat_id(getattr(msg, "chat_id", None)),
+            replied_msg_id,
+        )
+        if sent_keys and message_key in sent_keys:
+            return True
         sent_ids = getattr(actor, "_script_sent_message_ids", set())
-        if replied_msg_id in sent_ids:
+        if not sent_keys and replied_msg_id in sent_ids:
             return True
             
     return False
@@ -5595,6 +5864,11 @@ def match_pending_edited_feedback(
 
     for mid, evt in reversed(list(feedback_events.items())):
         if evt.is_set():
+            continue
+        pending_chat_id = (getattr(actor, "feedback_chat_ids", {}) or {}).get(mid)
+        if pending_chat_id is not None and not telegram_chat_ids_match(
+            getattr(msg, "chat_id", None), pending_chat_id
+        ):
             continue
         command = feedback_commands.get(mid, "")
         sent_ts = feedback_sent_ts.get(mid, 0)
@@ -5664,7 +5938,10 @@ def remember_manual_reply_logged_message(actor, msg, text=None):
     if cache is None:
         cache = {}
         setattr(actor, "_manual_reply_logged_message_ids", cache)
-    cache[msg_id] = {"ts": time.monotonic(), "text": text if text is not None else (getattr(msg, "text", None) or "")}
+    cache[telegram_message_key(msg, msg_id)] = {
+        "ts": time.monotonic(),
+        "text": text if text is not None else (getattr(msg, "text", None) or ""),
+    }
     if len(cache) > 300:
         items = sorted(cache.items(), key=lambda item: item[1].get("ts", 0))
         setattr(actor, "_manual_reply_logged_message_ids", dict(items[-150:]))
@@ -5676,7 +5953,10 @@ def was_manual_reply_logged_message(actor, msg):
     if msg_id is None:
         return False
     cache = getattr(actor, "_manual_reply_logged_message_ids", None) or {}
-    return msg_id in cache
+    message_key = telegram_message_key(msg, msg_id)
+    return message_key in cache or (
+        not any(isinstance(key, tuple) for key in cache) and msg_id in cache
+    )
 
 
 def remember_incoming_message_context(actor, msg, command="", identity="", text=None):
@@ -5688,7 +5968,8 @@ def remember_incoming_message_context(actor, msg, command="", identity="", text=
     if contexts is None:
         contexts = {}
         setattr(actor, "_incoming_message_contexts", contexts)
-    contexts[msg_id] = {
+    message_key = telegram_message_key(msg, msg_id)
+    contexts[message_key] = {
         "command": str(command or "").strip(),
         "identity": str(identity or "").strip() or "主魂",
         "text": text if text is not None else (getattr(msg, "text", None) or ""),
@@ -5704,7 +5985,11 @@ def incoming_message_context_for_msg(actor, msg):
     if msg_id is None:
         return {}
     contexts = getattr(actor, "_incoming_message_contexts", None) or {}
-    return contexts.get(msg_id, {}) or {}
+    message_key = telegram_message_key(msg, msg_id)
+    context = contexts.get(message_key)
+    if context is None and not any(isinstance(key, tuple) for key in contexts):
+        context = contexts.get(msg_id)
+    return context or {}
 
 
 def remember_logged_incoming_message(actor, msg, text=None):
@@ -5716,7 +6001,8 @@ def remember_logged_incoming_message(actor, msg, text=None):
     if cache is None:
         cache = {}
         setattr(actor, "_logged_incoming_message_ids", cache)
-    cache[msg_id] = {"ts": time.monotonic(), "text": text if text is not None else (getattr(msg, "text", None) or "")}
+    message_key = telegram_message_key(msg, msg_id)
+    cache[message_key] = {"ts": time.monotonic(), "text": text if text is not None else (getattr(msg, "text", None) or "")}
     if len(cache) > 500:
         items = sorted(cache.items(), key=lambda item: item[1].get("ts", 0))
         setattr(actor, "_logged_incoming_message_ids", dict(items[-250:]))
@@ -5728,7 +6014,10 @@ def was_logged_incoming_message(actor, msg):
     if msg_id is None:
         return False
     cache = getattr(actor, "_logged_incoming_message_ids", None) or {}
-    return msg_id in cache
+    message_key = telegram_message_key(msg, msg_id)
+    return message_key in cache or (
+        not any(isinstance(key, tuple) for key in cache) and msg_id in cache
+    )
 
 
 def log_edited_text_once(actor, msg, text=None, sender=None):
@@ -5758,10 +6047,11 @@ def log_edited_text_once(actor, msg, text=None, sender=None):
     if seen_texts is None:
         seen_texts = {}
         setattr(actor, cache_name, seen_texts)
-    if msg_id is not None and seen_texts.get(msg_id) == text:
+    message_key = telegram_message_key(msg, msg_id)
+    if msg_id is not None and seen_texts.get(message_key) == text:
         return True
     if msg_id is not None:
-        seen_texts[msg_id] = text
+        seen_texts[message_key] = text
         if len(seen_texts) > 300:
             setattr(actor, cache_name, dict(list(seen_texts.items())[-150:]))
     log_label = (
@@ -5806,7 +6096,12 @@ def record_edited_cultivation_state_if_needed(actor, msg, text=None, sender=None
             command = "username"
 
     if not identity:
-        identity = recent_profile_identity_for_text(actor, text, msg_id=_message_id(msg))
+        identity = recent_profile_identity_for_text(
+            actor,
+            text,
+            msg_id=_message_id(msg),
+            chat_id=getattr(msg, "chat_id", None),
+        )
         if identity and not command:
             command = "profile"
 
@@ -5844,7 +6139,13 @@ def is_relevant_game_bot_edited_message(actor, msg, text):
         return True
     if identity_from_single_username_mention(actor, text):
         return True
-    if recent_profile_identity_for_text(actor, text, msg_id=_message_id(msg), consume=False):
+    if recent_profile_identity_for_text(
+        actor,
+        text,
+        msg_id=_message_id(msg),
+        chat_id=getattr(msg, "chat_id", None),
+        consume=False,
+    ):
         return True
     return False
 

@@ -109,7 +109,10 @@ from log_utils import (
     record_command_sent,
     record_game_bot_activity, record_manual_command_reply_state_if_needed,
     record_message_event,
-    resolve_target_chat_id,
+    resolve_actor_target_chats,
+    actor_message_target,
+    routed_telegram_event_handler,
+    _chat_matches_actor_target,
     recent_profile_identity_for_text,
     remember_script_send_intent, remember_script_sent_message,
     schedule_command_auto_delete, send_text_alert, watchdog_diagnostics, is_edited_message_for_current_account, wait_for_bot_activity_before_send,
@@ -828,7 +831,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             return
         
         # 严格过滤：如果消息有明确的接收人但不是我，一律无视（防止同群串号）
-        recent_identity = recent_profile_identity_for_text(self, text, msg_id=getattr(msg, "id", None))
+        recent_identity = recent_profile_identity_for_text(
+            self,
+            text,
+            msg_id=getattr(msg, "id", None),
+            chat_id=getattr(msg, "chat_id", None),
+        )
         avatar_marker = next((name for name in self.avatars if f"[Avatar: {name}]" in text), None)
         if not self.text_targets_self(msg, text) and not recent_identity and not avatar_marker:
             return
@@ -2030,7 +2038,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 return None
 
         try:
-            target_reply = reply_to.id if hasattr(reply_to, "id") else (reply_to if reply_to else self.topic_id)
+            target_chat, target_reply = actor_message_target(self, reply_to=reply_to)
             if not await wait_for_bot_activity_before_send(self, message, log):
                 return None
             if not command_send_allowed(self, message, log):
@@ -2038,7 +2046,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             if not self.before_auto_command_send(message):
                 return None
             remember_script_send_intent(self, message)
-            msg = await self.client.send_message(self.target_chat_id, message, reply_to=target_reply)
+            msg = await self.client.send_message(target_chat, message, reply_to=target_reply)
             await record_telegram_send_success(self, logger=log)
             remember_script_sent_message(self, msg)
             # 记录 msg_id → avatar，供回复归属判断
@@ -5500,7 +5508,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             # ---- 控制指令：止/启（仅管理员可触发） ----
             # 必须在 log_manual_outgoing_if_needed 之前，否则手动发的"止"会被拦截
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
-            _chat_id_match = (msg.chat_id == self.target_chat_id or msg.chat_id == int(f"-100{self.target_chat_id}"))
+            _chat_id_match = _chat_matches_actor_target(self, msg)
             if not is_game_bot_sender(self, sender) and _chat_id_match:
                 if await handle_clear_history_command(self, msg, text, sender, log):
                     return
@@ -7520,7 +7528,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             if self._miniapp_beast_contract.transport is not None
             else None
         )
-        self.target_chat_id = await resolve_target_chat_id(self.client, self.target_chat_id, log)
+        await resolve_actor_target_chats(self, log)
         await self.client.get_dialogs(limit=10)
         self.my_info = await self.client.get_me()
         log.info(f"XiaoHao Login: {self.my_info.first_name}")
@@ -7541,9 +7549,11 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             logger=log,
             transport=miniapp_router.transport,
         )
-        @self.client.on(events.NewMessage(chats=self.target_chat_id))
+        @self.client.on(events.NewMessage(chats=self.target_chat_ids))
+        @routed_telegram_event_handler
         async def h(e): await self.handle_game_response(e)
-        @self.client.on(events.MessageEdited(chats=self.target_chat_id))
+        @self.client.on(events.MessageEdited(chats=self.target_chat_ids))
+        @routed_telegram_event_handler
         async def eh(e):
             await log_edited_message_if_needed(self, e)
             try:

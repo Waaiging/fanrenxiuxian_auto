@@ -8,6 +8,7 @@
   "files_directory": "./",
   "monitor": {
     "chat_id": "fanrenxxz",
+    "chat_ids": ["fanrenxxz", "@ja_netfilter_group"],
     "topic_id": null,
     "watch_bot": "fanrenxiuxian_bot"
   },

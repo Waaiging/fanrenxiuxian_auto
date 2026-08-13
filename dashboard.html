@@ -1109,6 +1109,7 @@
         }
         .automation-save { min-width: 5.5rem; }
         .automation-save:disabled { opacity: 0.55; cursor: wait; }
+        .automation-retry { min-width: 7.5rem; }
         .red-packet-controls {
             display: grid;
             grid-template-columns: minmax(8rem, 0.6fr) minmax(8rem, 0.7fr) minmax(8rem, 0.7fr) minmax(17rem, 1.25fr) minmax(18rem, 1.5fr) auto;
@@ -1607,6 +1608,7 @@
                         <input id="miniapp-fishing-start-time" class="record-input" type="time" onchange="markAutomationSettingsDirty()">
                     </label>
                     <div class="automation-card-hint" id="miniapp-fishing-runtime">等待运行状态...</div>
+                    <button class="red-packet-save automation-retry" id="miniapp-fishing-force-retry" type="button" onclick="forceRetryMiniappFishing()" title="忽略今日完成与错误冷却记录，每个所选身份重新尝试一次"><i data-lucide="rotate-cw" aria-hidden="true"></i>强制重试</button>
                 </div>
             </div>
             <div class="automation-actions">
@@ -1756,6 +1758,7 @@
         let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
         let automationSettingsDirty = false;
         let automationSavePending = false;
+        let miniappFishingForceRetryPending = false;
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
@@ -4309,6 +4312,14 @@
             }
             const saveButton = document.getElementById('automation-save');
             if (saveButton) saveButton.disabled = automationSavePending;
+            const fishingRetryButton = document.getElementById('miniapp-fishing-force-retry');
+            if (fishingRetryButton) {
+                const forceRetryActive = Boolean(fishingRuntime.force_retry?.pending?.length);
+                fishingRetryButton.disabled = miniappFishingForceRetryPending || forceRetryActive || !fishingEnabled;
+                fishingRetryButton.innerHTML = miniappFishingForceRetryPending || forceRetryActive
+                    ? '<i data-lucide="loader-circle" aria-hidden="true"></i>处理中'
+                    : '<i data-lucide="rotate-cw" aria-hidden="true"></i>强制重试';
+            }
             refreshIcons();
         }
 
@@ -4328,6 +4339,33 @@
                 if (summary) summary.innerText = '加载失败';
             } finally {
                 pollBusy.automation = false;
+            }
+        }
+
+        async function forceRetryMiniappFishing() {
+            if (miniappFishingForceRetryPending) return;
+            if (automationSettingsDirty) {
+                alert('请先保存灵溪垂钓设置，再执行强制重试。');
+                return;
+            }
+            miniappFishingForceRetryPending = true;
+            renderAutomationDashboard(automationDashboardData);
+            try {
+                const response = await fetch(apiUrl('/api/automation-settings/fishing-force-retry'), {
+                    method: 'POST'
+                });
+                const data = await response.json().catch(() => ({success: false, msg: `请求失败：HTTP ${response.status}`}));
+                if (!response.ok || data.success === false) {
+                    alert(data.msg || `操作失败：HTTP ${response.status}`);
+                    return;
+                }
+                await updateAutomationDashboard(true);
+            } catch (error) {
+                console.error('Mini App fishing force retry failed:', error);
+                alert('强制重试请求失败，请稍后再试。');
+            } finally {
+                miniappFishingForceRetryPending = false;
+                renderAutomationDashboard(automationDashboardData);
             }
         }
 

@@ -23,10 +23,12 @@ from datetime import datetime, timedelta
 
 from log_utils import (
     COMMAND_CONTROL_FILE,
+    actor_message_target,
     command_send_allowed,
     format_in_log,
     is_game_bot_sender,
     meaningful_reply_to_msg_id,
+    normalize_telegram_chat_id,
     record_command_response_for_command_id,
     record_command_sent,
     remember_script_send_intent,
@@ -417,6 +419,13 @@ def _response_text(response):
     return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
 
 
+def _event_message_key(message):
+    """Use chat plus message ID because Telegram IDs are chat-local."""
+    message_id = getattr(message, "id", 0) or 0
+    chat_id = normalize_telegram_chat_id(getattr(message, "chat_id", None))
+    return f"{chat_id}:{message_id}" if chat_id is not None else str(message_id)
+
+
 async def maybe_restricted_exchange_place(actor, event, text=None, sender=None, source="new"):
     """受限小号的南陇侯兜底：只经 Mini App 立即安置侍妾。"""
     account = str(getattr(actor, "account_key", "") or "").strip().lower()
@@ -437,7 +446,7 @@ async def maybe_restricted_exchange_place(actor, event, text=None, sender=None, 
     if not identity:
         return False
     identity = "主魂" if identity == "main" else identity
-    event_key = str(getattr(msg, "id", 0) or "")
+    event_key = _event_message_key(msg)
     if not event_key:
         return False
 
@@ -603,11 +612,12 @@ def _response_id(response):
 
 async def _send_direct_auto_reply_command(actor, command, reply_to=None, identity=None):
     """发送自动回复辅助指令；用于需要绕过通用自动禁用策略的短流程。"""
+    target_chat, target_reply = actor_message_target(actor, reply_to=reply_to)
     remember_script_send_intent(actor, command)
     sent = await actor.client.send_message(
-        actor.target_chat_id,
+        target_chat,
         command,
-        reply_to=reply_to,
+        reply_to=target_reply,
     )
     remember_script_sent_message(actor, sent)
     schedule_command_auto_delete(actor, sent, text=command, logger=_logger(actor))
@@ -617,7 +627,7 @@ async def _send_direct_auto_reply_command(actor, command, reply_to=None, identit
         command,
         identity=identity or getattr(actor, "current_identity", "主魂"),
         source="auto",
-        reply_to=reply_to,
+        reply_to=target_reply,
         logger=_logger(actor),
     )
     return sent
@@ -627,7 +637,8 @@ async def _live_reply_target(actor, reply_to):
     if not reply_to:
         return None
     try:
-        msg = await actor.client.get_messages(actor.target_chat_id, ids=reply_to)
+        target_chat, _ = actor_message_target(actor, reply_to=reply_to)
+        msg = await actor.client.get_messages(target_chat, ids=reply_to)
         return reply_to if msg else None
     except Exception:
         return None
@@ -654,15 +665,21 @@ async def _send_direct_and_wait_reply(actor, command, identity, deadline, reply_
     sent = await _send_direct_with_reply_fallback(
         actor, command, reply_to=reply_to, identity=identity
     )
-    waiter = {"event": asyncio.Event(), "text": "", "msg": None}
-    _exchange_step_waiters(actor)[getattr(sent, "id", 0)] = waiter
+    waiter = {
+        "event": asyncio.Event(),
+        "text": "",
+        "msg": None,
+        "chat_id": getattr(sent, "chat_id", None),
+    }
+    waiter_key = _event_message_key(sent)
+    _exchange_step_waiters(actor)[waiter_key] = waiter
     seconds_left = max(0, int((deadline - datetime.now()).total_seconds()))
     try:
         await asyncio.wait_for(waiter["event"].wait(), timeout=max(1, min(60, seconds_left)))
     except asyncio.TimeoutError:
         return sent, "", None
     finally:
-        _exchange_step_waiters(actor).pop(getattr(sent, "id", 0), None)
+        _exchange_step_waiters(actor).pop(waiter_key, None)
     return sent, waiter.get("text", ""), waiter.get("msg")
 
 
@@ -812,8 +829,15 @@ def _consume_exchange_step_reply(actor, msg, text, sender):
     if not is_game_bot_sender(actor, sender):
         return False
     replied_id = meaningful_reply_to_msg_id(actor, msg)
-    waiter = _exchange_step_waiters(actor).get(replied_id)
+    chat_id = normalize_telegram_chat_id(getattr(msg, "chat_id", None))
+    waiter = _exchange_step_waiters(actor).get(
+        f"{chat_id}:{replied_id}" if chat_id is not None else replied_id
+    )
     if not waiter:
+        return False
+    if normalize_telegram_chat_id(getattr(msg, "chat_id", None)) != normalize_telegram_chat_id(
+        waiter.get("chat_id")
+    ):
         return False
     waiter["text"] = str(text or "")
     waiter["msg"] = msg
@@ -991,7 +1015,7 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
 
     identity = _mentions_self(actor, msg, text)
     if is_exchange_teaser_text(text) and identity:
-        teaser_key = f"teaser:{getattr(msg, 'id', 0)}"
+        teaser_key = f"teaser:{_event_message_key(msg)}"
         _update_exchange_state(
             actor,
             teaser_key,
@@ -1015,9 +1039,10 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     if seen_ids is None:
         seen_ids = set()
         actor.exchange_auto_reply_seen_ids = seen_ids
-    if msg.id in seen_ids:
+    event_key = _event_message_key(msg)
+    if event_key in seen_ids:
         return True  # 已处理过，跳过
-    seen_ids.add(msg.id)
+    seen_ids.add(event_key)
     if len(seen_ids) > 300:
         actor.exchange_auto_reply_seen_ids = set(list(seen_ids)[-150:])
 
@@ -1027,7 +1052,6 @@ async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     try:
         # Persist/claim immediately because the bot may delete the offer before
         # the human-like delay finishes.
-        event_key = str(getattr(msg, "id", 0))
         now = datetime.now()
         delay = random.randint(*EXCHANGE_DELAY_RANGE_SECONDS)
         _update_exchange_state(
