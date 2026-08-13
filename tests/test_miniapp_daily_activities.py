@@ -1,10 +1,12 @@
 import asyncio
 import unittest
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
 from miniapp_daily_activities import (
     MiniAppDailyActivities,
     choose_hunt_cell,
+    solve_tianji_trial_challenge,
 )
 
 
@@ -57,6 +59,215 @@ class FakeLogger:
 
 
 class MiniAppDailyActivityTests(unittest.TestCase):
+    def test_tianji_trial_solvers_cover_all_modes(self):
+        fixtures = [
+            {
+                "challengeId": "planarity",
+                "mode": "tianjiPlanarityV1",
+                "minDurationMs": 2200,
+                "nodes": [
+                    {"id": "a", "x": 10, "y": 10},
+                    {"id": "b", "x": 90, "y": 90},
+                    {"id": "c", "x": 90, "y": 10},
+                    {"id": "d", "x": 10, "y": 90},
+                ],
+                "edges": [
+                    {"from": "a", "to": "b"},
+                    {"from": "c", "to": "d"},
+                    {"from": "a", "to": "c"},
+                    {"from": "b", "to": "d"},
+                ],
+            },
+            {
+                "challengeId": "stargaze",
+                "mode": "tianjiStargazeV1",
+                "stars": [
+                    {"id": "sun", "angle": 20, "targetAngle": 90},
+                    {"id": "moon", "angle": 180, "targetAngle": 180, "locked": True},
+                ],
+            },
+            {
+                "challengeId": "lights",
+                "mode": "tianjiLightsOutV1",
+                "gridSize": 4,
+                "targetState": 1,
+                "cells": [1] * 16,
+            },
+            {
+                "challengeId": "memory",
+                "mode": "tianjiMemoryV1",
+                "cards": [
+                    {"id": "a1", "pair": "a"},
+                    {"id": "b1", "pair": "b"},
+                    {"id": "a2", "pair": "a"},
+                    {"id": "b2", "pair": "b"},
+                ],
+            },
+            {
+                "challengeId": "meridian",
+                "mode": "tianjiMeridianV1",
+                "sequence": ["p1", "p3", "p2"],
+            },
+        ]
+
+        proofs = [solve_tianji_trial_challenge(fixture) for fixture in fixtures]
+
+        self.assertEqual([proof["mode"] for proof in proofs], [item["mode"] for item in fixtures])
+        self.assertEqual(proofs[1]["angles"], {"sun": 90.0, "moon": 180.0})
+        self.assertEqual(proofs[2]["events"], [])
+        self.assertEqual(proofs[2]["cells"], [1] * 16)
+        self.assertEqual([event["id"] for event in proofs[3]["events"]], ["a1", "a2", "b1", "b2"])
+        self.assertEqual([event["id"] for event in proofs[4]["events"]], ["p1", "p3", "p2"])
+
+    def test_lights_out_solver_handles_nontrivial_board(self):
+        size = 4
+        target = [1] * (size * size)
+        cells = list(target)
+        for index in (0, 5, 10):
+            for neighbor in (
+                [index]
+                + ([index - size] if index >= size else [])
+                + ([index + size] if index < size * (size - 1) else [])
+                + ([index - 1] if index % size else [])
+                + ([index + 1] if index % size < size - 1 else [])
+            ):
+                cells[neighbor] ^= 1
+
+        proof = solve_tianji_trial_challenge(
+            {
+                "challengeId": "lights-nontrivial",
+                "mode": "tianjiLightsOutV1",
+                "gridSize": size,
+                "targetState": 1,
+                "cells": cells,
+            }
+        )
+
+        self.assertEqual(proof["cells"], target)
+        self.assertGreater(len(proof["events"]), 0)
+
+    def test_planarity_solver_preserves_locked_node_without_crossings(self):
+        challenge = {
+            "challengeId": "locked-planarity",
+            "mode": "tianjiPlanarityV1",
+            "lockedNodeIds": ["0"],
+            "nodes": [
+                {"id": "0", "x": 20, "y": 80, "locked": True},
+                {"id": "1", "x": 12, "y": 13},
+                {"id": "2", "x": 79, "y": 11},
+                {"id": "3", "x": 58, "y": 37},
+                {"id": "4", "x": 64, "y": 13},
+            ],
+            "edges": [
+                {"from": "0", "to": "1"},
+                {"from": "0", "to": "2"},
+                {"from": "0", "to": "3"},
+                {"from": "0", "to": "4"},
+                {"from": "1", "to": "2"},
+                {"from": "1", "to": "4"},
+                {"from": "2", "to": "3"},
+                {"from": "3", "to": "4"},
+            ],
+        }
+
+        proof = solve_tianji_trial_challenge(challenge)
+
+        self.assertEqual(proof["positions"]["0"], {"x": 20.0, "y": 80.0})
+        self.assertTrue(
+            all(
+                4 <= point[axis] <= 96
+                for point in proof["positions"].values()
+                for axis in ("x", "y")
+            )
+        )
+
+    def test_tianji_trial_runs_all_three_returned_challenges(self):
+        actor = FakeActor()
+
+        class Transport:
+            identity_player_ids = {"主魂": 100}
+
+            def __init__(self):
+                self.finished = []
+
+            async def tianji_trial_start(self, identity):
+                return {
+                    "dailyProgress": {"completed": 0, "limit": 3},
+                    "challenge": {
+                        "challengeId": "trial-1",
+                        "mode": "tianjiMeridianV1",
+                        "minDurationMs": 350,
+                        "sequence": ["p1"],
+                    },
+                }
+
+            async def tianji_trial_finish(self, identity, proof):
+                self.finished.append(proof["challengeId"])
+                completed = len(self.finished)
+                payload = {
+                    "dailyProgress": {"completed": completed, "limit": 3},
+                    "result": {
+                        "grade": "甲等",
+                        "reward_trace": 5,
+                        "daily_progress": completed,
+                        "daily_limit": 3,
+                        "balance": completed * 5,
+                    },
+                }
+                if completed < 3:
+                    payload["nextChallenge"] = {
+                        "challengeId": f"trial-{completed + 1}",
+                        "mode": "tianjiMeridianV1",
+                        "minDurationMs": 350,
+                        "sequence": [f"p{completed + 1}"],
+                    }
+                return payload
+
+        transport = Transport()
+        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+
+        with patch("miniapp_daily_activities.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(
+                runner.run_tianji_trial_identity("主魂", today="2026-08-14")
+            )
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(transport.finished, ["trial-1", "trial-2", "trial-3"])
+        self.assertEqual(actor.state["miniapp_tianji_trial_last_date"], "2026-08-14")
+        self.assertEqual(actor.state["miniapp_tianji_trial_completed"], 3)
+        self.assertIn("3 关完成", actor.state["miniapp_tianji_trial_last_result"])
+        self.assertEqual(len(actor.rewards), 1)
+
+    def test_tianji_trial_honors_dashboard_identity_selection_and_switch(self):
+        actor = FakeActor(avatars=["无咎子", "缘生子", "素缘子"])
+
+        class Transport:
+            identity_player_ids = {
+                "主魂": 100,
+                "无咎子": -101,
+                "缘生子": -102,
+                "素缘子": -103,
+            }
+
+        runner = MiniAppDailyActivities(actor, Transport(), "main", FakeLogger())
+        selected = {
+            "miniapp_tianji_trial": {
+                "enabled": True,
+                "participants": ["main|无咎子", "main|素缘子", "sub|主魂"],
+            }
+        }
+        disabled = {
+            "miniapp_tianji_trial": {
+                "enabled": False,
+                "participants": ["main|主魂"],
+            }
+        }
+
+        with patch("miniapp_daily_activities.load_automation_settings", return_value=selected):
+            self.assertEqual(runner.tianji_trial_identities(), ["无咎子", "素缘子"])
+        with patch("miniapp_daily_activities.load_automation_settings", return_value=disabled):
+            self.assertEqual(runner.tianji_trial_identities(), [])
+
     def test_hunt_cell_prefers_yellow_marker_matching_direction(self):
         cells = [{"index": index, "revealed": False} for index in range(25)]
         cells[12] = {

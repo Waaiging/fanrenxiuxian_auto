@@ -75,6 +75,12 @@ MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub", "xiaohao", "waaiging")
 DEFAULT_MINIAPP_FISHING_PARTICIPANTS = ("main|主魂",)
 DEFAULT_MINIAPP_FISHING_ROD_OWNER = "auto"
 DEFAULT_MINIAPP_FISHING_START_TIME = ""
+DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED = True
+DEFAULT_MINIAPP_TIANJI_TRIAL_PARTICIPANTS = tuple(
+    f"{account}|{identity}"
+    for account, identities in ACCOUNT_IDENTITIES.items()
+    for identity in identities
+)
 DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN = 0
 DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX = 0
 DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
@@ -137,7 +143,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 9,
+        "version": 10,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -158,6 +164,10 @@ def default_automation_settings() -> dict[str, Any]:
             "bait": DEFAULT_MINIAPP_FISHING_BAIT,
             "chum": DEFAULT_MINIAPP_FISHING_CHUM,
             "start_time": DEFAULT_MINIAPP_FISHING_START_TIME,
+        },
+        "miniapp_tianji_trial": {
+            "enabled": DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED,
+            "participants": list(DEFAULT_MINIAPP_TIANJI_TRIAL_PARTICIPANTS),
         },
         "tianxing": {
             "meditation_mode": DEFAULT_TIANXING_MEDITATION_MODE,
@@ -262,6 +272,22 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             result["miniapp_fishing"]["chum"] = chum
         result["miniapp_fishing"]["start_time"] = start_time
 
+    trial = source.get("miniapp_tianji_trial")
+    if isinstance(trial, dict):
+        result["miniapp_tianji_trial"]["enabled"] = bool(
+            trial.get("enabled", DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED)
+        )
+        if isinstance(trial.get("participants"), list):
+            participants = []
+            for item in trial["participants"]:
+                normalized = _normalize_participant(item)
+                if normalized is None:
+                    continue
+                key = automation_participant_key(*normalized)
+                if key not in participants:
+                    participants.append(key)
+            result["miniapp_tianji_trial"]["participants"] = participants
+
     tianxing = source.get("tianxing")
     if isinstance(tianxing, dict):
         meditation_mode = str(tianxing.get("meditation_mode") or "").strip()
@@ -327,6 +353,8 @@ def save_automation_settings(
     miniapp_fishing_rod: Any = None,
     miniapp_fishing_rod_owner: Any = None,
     miniapp_fishing_start_time: Any = None,
+    miniapp_tianji_trial_enabled: Any = None,
+    miniapp_tianji_trial_participants: Any = None,
     miniapp_beast_abyss_power_min: Any = None,
     miniapp_beast_abyss_power_max: Any = None,
     tianxing_meditation_mode: Any = None,
@@ -424,6 +452,30 @@ def save_automation_settings(
         raise ValueError("invalid Mini App fishing bait")
     if fishing_chum not in {item[0] for item in MINIAPP_FISHING_CHUMS}:
         raise ValueError("invalid Mini App fishing chum")
+
+    current_trial = current_settings.get("miniapp_tianji_trial") or {}
+    trial_enabled = (
+        bool(current_trial.get("enabled", DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED))
+        if miniapp_tianji_trial_enabled is None
+        else bool(miniapp_tianji_trial_enabled)
+    )
+    raw_trial_participants = (
+        current_trial.get("participants")
+        if miniapp_tianji_trial_participants is None
+        else miniapp_tianji_trial_participants
+    )
+    if not isinstance(raw_trial_participants, list):
+        raise ValueError("Mini App Tianji trial participants must be a list")
+    trial_participants = []
+    for item in raw_trial_participants:
+        normalized = _normalize_participant(item)
+        if normalized is None:
+            raise ValueError("invalid Mini App Tianji trial participant")
+        key = automation_participant_key(*normalized)
+        if key not in trial_participants:
+            trial_participants.append(key)
+    if trial_enabled and not trial_participants:
+        raise ValueError("Mini App Tianji trial participants required")
     current_abyss = current_settings.get("miniapp_beast_abyss") or {}
     power_min = _parse_optional_nonnegative_int(
         current_abyss.get("power_min")
@@ -528,6 +580,10 @@ def save_automation_settings(
                 "chum": fishing_chum,
                 "start_time": fishing_start_time,
             },
+            "miniapp_tianji_trial": {
+                "enabled": trial_enabled,
+                "participants": trial_participants,
+            },
             "tianxing": {
                 "meditation_mode": meditation_mode,
                 "meditation_switch_id": meditation_switch_id,
@@ -609,6 +665,30 @@ def miniapp_beast_abyss_power_in_range(
 def miniapp_fishing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
     return dict(source.get("miniapp_fishing") or default_automation_settings()["miniapp_fishing"])
+
+
+def miniapp_tianji_trial_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(
+        source.get("miniapp_tianji_trial")
+        or default_automation_settings()["miniapp_tianji_trial"]
+    )
+
+
+def miniapp_tianji_trial_identities_for_account(
+    account: str,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    account = str(account or "").strip()
+    supported = ACCOUNT_IDENTITIES.get(account, ())
+    if not supported:
+        return []
+    selected = set(miniapp_tianji_trial_settings(settings).get("participants") or [])
+    return [
+        identity
+        for identity in supported
+        if automation_participant_key(account, identity) in selected
+    ]
 
 
 def tianxing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -712,6 +792,23 @@ def automation_dashboard_payload() -> dict[str, Any]:
             "rods": [
                 {"key": key, "name": name}
                 for key, name in MINIAPP_FISHING_RODS
+            ],
+        },
+        "miniapp_tianji_trial": {
+            **miniapp_tianji_trial_settings(settings),
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                        }
+                        for identity in identities
+                    ],
+                }
+                for account, identities in ACCOUNT_IDENTITIES.items()
             ],
         },
         "tianxing": {

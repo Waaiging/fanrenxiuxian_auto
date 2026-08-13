@@ -264,6 +264,12 @@ class MiniAppCommandRouter:
                         name=f"miniapp_{self.account}_hunt",
                     )
                 )
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.daily_activities.run_tianji_trial_loop(),
+                    name=f"miniapp_{self.account}_tianji_trial",
+                )
+            )
             if self.tianxing_journey.enabled:
                 self._daily_activity_tasks.append(
                     asyncio.create_task(

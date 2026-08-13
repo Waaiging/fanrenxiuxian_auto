@@ -851,6 +851,194 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("洞府寻宝探查", combined)
         self.assertNotIn("洞府寻宝见好就收", combined)
 
+    def test_tianji_trial_uses_identity_scoped_external_token(self):
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-trial?startapp=trial_fixture",
+                }
+            if path.endswith("/xianxia-trial/start"):
+                return {
+                    "ok": True,
+                    "dailyProgress": {"completed": 0, "limit": 3},
+                    "challenge": {
+                        "challengeId": "trial-1",
+                        "mode": "tianjiMeridianV1",
+                    },
+                }
+            if path.endswith("/xianxia-trial/finish"):
+                return {
+                    "ok": True,
+                    "dailyProgress": {"completed": 1, "limit": 3},
+                    "result": {"grade": "甲等", "daily_progress": 1, "daily_limit": 3},
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            started = asyncio.run(transport.tianji_trial_start("素心子"))
+            settled = asyncio.run(
+                transport.tianji_trial_finish(
+                    "素心子",
+                    {
+                        "mode": "tianjiMeridianV1",
+                        "challengeId": "trial-1",
+                        "durationMs": 4000,
+                        "events": [],
+                    },
+                )
+            )
+
+        self.assertEqual(started["challenge"]["challengeId"], "trial-1")
+        self.assertEqual(settled["dailyProgress"]["completed"], 1)
+        external = next(call for call in calls if call[0].endswith("/external"))
+        self.assertEqual(external[1]["action"], "tianji_trial")
+        self.assertEqual(external[1]["playerId"], -200)
+        finish = next(call for call in calls if call[0].endswith("/xianxia-trial/finish"))
+        self.assertEqual(finish[1]["token"], "trial_fixture")
+        self.assertEqual(finish[1]["trialProof"]["challengeId"], "trial-1")
+
+    def test_tianji_trial_start_refreshes_one_use_entry_token(self):
+        calls = []
+        token_index = 0
+
+        async def post_json(origin, path, payload, timeout):
+            nonlocal token_index
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                token_index += 1
+                return {
+                    "ok": True,
+                    "url": f"/miniapp/xianxia-trial?startapp=trial_{token_index}",
+                }
+            if path.endswith("/xianxia-trial/start"):
+                return {
+                    "ok": True,
+                    "dailyProgress": {"completed": 0, "limit": 3},
+                    "challenge": {
+                        "challengeId": f"challenge-{token_index}",
+                        "mode": "tianjiMeridianV1",
+                    },
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch(
+            "miniapp_dwelling.request_webview_init_data",
+            new=AsyncMock(return_value="signed"),
+        ):
+            asyncio.run(transport.tianji_trial_start("素心子"))
+            asyncio.run(transport.tianji_trial_start("素心子"))
+
+        external_calls = [call for call in calls if call[0].endswith("/external")]
+        start_calls = [call for call in calls if call[0].endswith("/xianxia-trial/start")]
+        self.assertEqual(len(external_calls), 2)
+        self.assertEqual(
+            [call[1]["token"] for call in start_calls],
+            ["trial_1", "trial_2"],
+        )
+
+    def test_tianji_trial_start_refreshes_expired_trial_session(self):
+        calls = []
+        token_index = 0
+
+        async def post_json(origin, path, payload, timeout):
+            nonlocal token_index
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                token_index += 1
+                return {
+                    "ok": True,
+                    "url": f"/miniapp/xianxia-trial?startapp=trial_{token_index}",
+                }
+            if path.endswith("/xianxia-trial/start"):
+                if payload["token"] == "trial_1":
+                    raise MiniAppBeastError("trial_token_expired")
+                return {
+                    "ok": True,
+                    "dailyProgress": {"completed": 0, "limit": 3},
+                    "challenge": {
+                        "challengeId": "trial-2",
+                        "mode": "tianjiMeridianV1",
+                    },
+                }
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch(
+            "miniapp_dwelling.request_webview_init_data",
+            new=AsyncMock(side_effect=["signed-old", "signed-new"]),
+        ):
+            result = asyncio.run(transport.tianji_trial_start("素心子"))
+
+        self.assertEqual(result["challenge"]["challengeId"], "trial-2")
+        external_calls = [call for call in calls if call[0].endswith("/external")]
+        start_calls = [call for call in calls if call[0].endswith("/xianxia-trial/start")]
+        self.assertEqual(len(external_calls), 2)
+        self.assertEqual(
+            [(call[1]["token"], call[1]["initData"]) for call in start_calls],
+            [("trial_1", "signed-old"), ("trial_2", "signed-new")],
+        )
+
+    def test_tianji_trial_finish_does_not_retry_old_proof_with_new_session(self):
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload)))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-trial?startapp=trial_fixture",
+                }
+            if path.endswith("/xianxia-trial/start"):
+                return {
+                    "ok": True,
+                    "dailyProgress": {"completed": 0, "limit": 3},
+                    "challenge": {
+                        "challengeId": "trial-1",
+                        "mode": "tianjiMeridianV1",
+                    },
+                }
+            if path.endswith("/xianxia-trial/finish"):
+                raise MiniAppBeastError("hash_mismatch")
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch(
+            "miniapp_dwelling.request_webview_init_data",
+            new=AsyncMock(return_value="signed"),
+        ):
+            asyncio.run(transport.tianji_trial_start("素心子"))
+            with self.assertRaisesRegex(MiniAppBeastError, "hash_mismatch"):
+                asyncio.run(
+                    transport.tianji_trial_finish(
+                        "素心子",
+                        {
+                            "mode": "tianjiMeridianV1",
+                            "challengeId": "trial-1",
+                            "durationMs": 4000,
+                            "events": [],
+                        },
+                    )
+                )
+
+        external_calls = [call for call in calls if call[0].endswith("/external")]
+        finish_calls = [call for call in calls if call[0].endswith("/xianxia-trial/finish")]
+        self.assertEqual(len(external_calls), 1)
+        self.assertEqual(len(finish_calls), 1)
+
     def test_external_hash_mismatch_refreshes_init_data_and_entry_token_together(self):
         logger = FakeLogger()
         calls = []

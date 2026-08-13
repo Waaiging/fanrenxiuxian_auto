@@ -5066,7 +5066,7 @@ def red_packets(username: str = Depends(authenticate)):
 
 @app.get("/api/automation-settings")
 def automation_settings_dashboard(username: str = Depends(authenticate)):
-    """Return shared Boss, Mulan, and Mini App fishing settings."""
+    """Return shared Dashboard-controlled automation settings."""
     payload = automation_dashboard_payload()
     fishing = payload.get("miniapp_fishing") if isinstance(payload.get("miniapp_fishing"), dict) else {}
     try:
@@ -5097,6 +5097,8 @@ async def automation_settings_control(
     abyss = abyss if isinstance(abyss, dict) else {}
     fishing = payload.get("miniapp_fishing")
     fishing = fishing if isinstance(fishing, dict) else {}
+    trial = payload.get("miniapp_tianji_trial")
+    trial = trial if isinstance(trial, dict) else {}
     tianxing = payload.get("tianxing")
     tianxing = tianxing if isinstance(tianxing, dict) else {}
     try:
@@ -5114,6 +5116,8 @@ async def automation_settings_control(
                 miniapp_fishing_rod=fishing.get("rod"),
                 miniapp_fishing_rod_owner=fishing.get("rod_owner"),
                 miniapp_fishing_start_time=fishing.get("start_time"),
+                miniapp_tianji_trial_enabled=trial.get("enabled"),
+                miniapp_tianji_trial_participants=trial.get("participants"),
                 tianxing_meditation_mode=tianxing.get("meditation_mode"),
                 tianxing_use_heqi_pill=tianxing.get("use_heqi_pill"),
                 tianxing_tianji_grind_enabled=tianxing.get("tianji_grind_enabled"),
@@ -5137,6 +5141,9 @@ async def automation_settings_control(
             "invalid Mini App fishing rod": "灵溪垂钓鱼竿无效",
             "invalid Mini App fishing rod owner": "手动指定的钓竿持有者无效",
             "invalid Mini App fishing start time": "灵溪垂钓开始时间必须是 HH:MM",
+            "Mini App Tianji trial participants must be a list": "天机试炼参与身份列表格式错误",
+            "invalid Mini App Tianji trial participant": "天机试炼参与身份无效",
+            "Mini App Tianji trial participants required": "启用天机试炼时至少选择一个身份",
             "Tianxing Tianji grind participants must be a list": "刷天机值参与身份列表格式错误",
             "invalid Tianxing Tianji grind participant": "刷天机值参与身份无效",
             "Tianxing Tianji grind participants required": "启用刷天机值时至少选择一个身份",

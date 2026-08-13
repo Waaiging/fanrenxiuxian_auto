@@ -7476,6 +7476,10 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                     "miniapp_hunt",
                     lambda: self._miniapp_daily_activities.run_hunt_loop(),
                 )
+            self.create_scheduler_task(
+                "miniapp_tianji_trial",
+                lambda: self._miniapp_daily_activities.run_tianji_trial_loop(),
+            )
 
     # ---- 启动 ----
 

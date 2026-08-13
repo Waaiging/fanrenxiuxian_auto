@@ -1610,6 +1610,21 @@
                     <div class="automation-card-hint" id="miniapp-fishing-runtime">等待运行状态...</div>
                     <button class="red-packet-save automation-retry" id="miniapp-fishing-force-retry" type="button" onclick="forceRetryMiniappFishing()" title="忽略今日完成与错误冷却记录，每个所选身份重新尝试一次"><i data-lucide="rotate-cw" aria-hidden="true"></i>强制重试</button>
                 </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">Mini App · 天机试炼</div>
+                    <div class="automation-card-hint">每天为所选身份自动完成全部 3 关；默认勾选所有身份。</div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="miniapp-tianji-trial-enabled" type="checkbox" onchange="syncMiniappTianjiTrialControls(); markAutomationSettingsDirty()">
+                            启用自动试炼（3 关）
+                        </label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="miniapp-tianji-trial-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <div class="automation-card-hint" id="miniapp-tianji-trial-runtime">等待运行状态...</div>
+                </div>
             </div>
             <div class="automation-actions">
                 <button class="red-packet-save automation-save" id="automation-save" type="button" onclick="saveAutomationSettings()"><i data-lucide="save" aria-hidden="true"></i>保存设置</button>
@@ -4115,16 +4130,25 @@
             });
         }
 
+        function syncMiniappTianjiTrialControls() {
+            const enabled = Boolean(document.getElementById('miniapp-tianji-trial-enabled')?.checked);
+            document.querySelectorAll('#miniapp-tianji-trial-participant-controls input[type="checkbox"]').forEach(input => {
+                input.disabled = !enabled;
+            });
+        }
+
         function renderAutomationDashboard(data) {
-            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_tianji_trial: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
             const abyss = automationDashboardData.miniapp_beast_abyss || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
+            const trial = automationDashboardData.miniapp_tianji_trial || {};
             const tianxing = automationDashboardData.tianxing || {};
             const abyssSettings = settings.miniapp_beast_abyss || {};
             const fishingSettings = settings.miniapp_fishing || {};
+            const trialSettings = settings.miniapp_tianji_trial || {};
             const tianxingSettings = settings.tianxing || {};
             const accounts = Array.isArray(worldBoss.accounts) ? worldBoss.accounts : [];
             const selected = new Set(settings.world_boss?.participants || []);
@@ -4144,6 +4168,9 @@
             const fishingStartTime = String(fishing.start_time ?? fishingSettings.start_time ?? '');
             const fishingAccounts = Array.isArray(fishing.accounts) ? fishing.accounts : [];
             const fishingRuntime = fishing.runtime || {};
+            const trialEnabled = Boolean(trial.enabled ?? trialSettings.enabled ?? true);
+            const trialParticipants = new Set(trial.participants || trialSettings.participants || []);
+            const trialAccounts = Array.isArray(trial.accounts) ? trial.accounts : [];
             const tianxingMeditationMode = String(tianxing.meditation_mode || tianxingSettings.meditation_mode || 'deep');
             const tianxingUsePill = Boolean(tianxing.use_heqi_pill ?? tianxingSettings.use_heqi_pill ?? false);
             const tianxingGrindEnabled = Boolean(tianxing.tianji_grind_enabled ?? tianxingSettings.tianji_grind_enabled ?? false);
@@ -4156,7 +4183,7 @@
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -4195,6 +4222,25 @@
                 }
                 const fishingEnabledControl = document.getElementById('miniapp-fishing-enabled');
                 if (fishingEnabledControl) fishingEnabledControl.checked = fishingEnabled;
+                const trialEnabledControl = document.getElementById('miniapp-tianji-trial-enabled');
+                if (trialEnabledControl) trialEnabledControl.checked = trialEnabled;
+                const trialParticipantControls = document.getElementById('miniapp-tianji-trial-participant-controls');
+                if (trialParticipantControls) {
+                    trialParticipantControls.innerHTML = trialAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${trialParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                syncMiniappTianjiTrialControls();
                 const tianxingModeControls = document.getElementById('tianxing-meditation-mode-controls');
                 if (tianxingModeControls) {
                     tianxingModeControls.innerHTML = (tianxing.meditation_modes || []).map(item => `
@@ -4304,6 +4350,12 @@
                     ? `${tianxingTianjiParticipants.size} 个身份分别执行 · 每个身份目标 ${tianxingGrindTarget}`
                     : '刷天机值已暂停';
             }
+            const trialRuntimeControl = document.getElementById('miniapp-tianji-trial-runtime');
+            if (trialRuntimeControl) {
+                trialRuntimeControl.innerText = trialEnabled
+                    ? `${trialParticipants.size} 个身份每日自动完成 3 关`
+                    : '天机试炼已暂停';
+            }
             const hint = document.getElementById('automation-updated-hint');
             if (hint) {
                 const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
@@ -4387,6 +4439,10 @@
             const fishingBait = document.getElementById('miniapp-fishing-bait')?.value || '';
             const fishingChum = document.getElementById('miniapp-fishing-chum')?.value || '';
             const fishingStartTime = document.getElementById('miniapp-fishing-start-time')?.value || '';
+            const trialEnabled = Boolean(document.getElementById('miniapp-tianji-trial-enabled')?.checked);
+            const trialParticipants = Array.from(document.querySelectorAll('#miniapp-tianji-trial-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
             const tianxingMeditationMode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || '';
             const tianxingUsePill = Boolean(document.getElementById('tianxing-use-heqi-pill')?.checked);
             const tianxingGrindEnabled = Boolean(document.getElementById('tianxing-tianji-grind-enabled')?.checked);
@@ -4404,6 +4460,10 @@
             }
             if (fishingEnabled && !fishingParticipants.length) {
                 alert('启用灵溪垂钓时至少选择一个参与身份。');
+                return;
+            }
+            if (trialEnabled && !trialParticipants.length) {
+                alert('启用天机试炼时至少选择一个参与身份。');
                 return;
             }
             if (!tianxingMeditationMode) {
@@ -4440,6 +4500,10 @@
                             bait: fishingBait,
                             chum: fishingChum,
                             start_time: fishingStartTime
+                        },
+                        miniapp_tianji_trial: {
+                            enabled: trialEnabled,
+                            participants: trialParticipants
                         },
                         tianxing: {
                             meditation_mode: tianxingMeditationMode,

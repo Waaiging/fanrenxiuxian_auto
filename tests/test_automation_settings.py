@@ -36,6 +36,15 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
         self.assertEqual(value["miniapp_fishing"]["start_time"], "")
+        self.assertTrue(value["miniapp_tianji_trial"]["enabled"])
+        self.assertEqual(
+            value["miniapp_tianji_trial"]["participants"],
+            [
+                f"{account}|{identity}"
+                for account, identities in settings.ACCOUNT_IDENTITIES.items()
+                for identity in identities
+            ],
+        )
         self.assertEqual(value["tianxing"]["meditation_mode"], "deep")
         self.assertEqual(value["tianxing"]["meditation_switch_id"], "")
         self.assertFalse(value["tianxing"]["use_heqi_pill"])
@@ -116,6 +125,26 @@ class AutomationSettingsTests(unittest.TestCase):
         disabled = settings.set_tianxing_heqi_pill_enabled(False, updated_by="test")
         self.assertFalse(disabled["tianxing"]["use_heqi_pill"])
         self.assertEqual(disabled["tianxing"]["tianji_grind_target"], 12)
+
+    def test_save_updates_tianji_trial_participants(self):
+        value = settings.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            miniapp_tianji_trial_enabled=True,
+            miniapp_tianji_trial_participants=["main|无咎子", "xiaohao|素心子"],
+        )
+
+        self.assertEqual(
+            value["miniapp_tianji_trial"],
+            {
+                "enabled": True,
+                "participants": ["main|无咎子", "xiaohao|素心子"],
+            },
+        )
+        self.assertEqual(
+            settings.miniapp_tianji_trial_identities_for_account("main", value),
+            ["无咎子"],
+        )
 
     def test_save_rejects_invalid_tianxing_grind_target(self):
         with self.assertRaisesRegex(ValueError, "Tianxing Tianji grind target required"):
@@ -222,6 +251,8 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(payload["miniapp_fishing"]["rod_owner"], "auto")
         self.assertEqual(payload["miniapp_fishing"]["start_time"], "")
         self.assertEqual(len(payload["miniapp_fishing"]["accounts"]), 4)
+        self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
+        self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
         self.assertEqual(len(payload["tianxing"]["tianji_accounts"]), 2)

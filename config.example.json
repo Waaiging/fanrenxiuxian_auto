@@ -31,6 +31,7 @@
     "pagoda_daily_hour": 23,
     "hunt_daily_enabled": true,
     "hunt_daily_hour": 7,
+    "tianji_trial_daily_hour": 8,
     "hunt_target_reward": "阴凝之晶",
     "journey_daily_enabled": true,
     "journey_daily_hour": 7,

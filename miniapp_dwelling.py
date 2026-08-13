@@ -38,6 +38,9 @@ AUTH_ERROR_CODES = {
     "init_data_missing",
     "invalid_init_data",
     "invalid_token",
+    "trial_token_expired",
+    "trial_token_missing",
+    "trial_token_used",
     ENTRY_URL_REFRESH_ERROR,
 }
 ENTRY_URL_HOSTS = {"t.me", "telegram.me"}
@@ -1006,6 +1009,7 @@ class MiniAppDwellingTransport:
         path: str,
         payload: dict[str, Any] | None = None,
         timeout: int | None = None,
+        retry_auth: bool = True,
     ) -> dict[str, Any]:
         token = await self._external_token_unlocked(identity, action, expected_prefix)
         body = {"token": token, "initData": self.init_data}
@@ -1019,7 +1023,10 @@ class MiniAppDwellingTransport:
                 post_json=self.post_json,
             )
         except MiniAppBeastError as exc:
-            if exc.code not in AUTH_ERROR_CODES | {"entry_token_missing", "invalid_token"}:
+            if not retry_auth or exc.code not in AUTH_ERROR_CODES | {
+                "entry_token_missing",
+                "invalid_token",
+            }:
                 raise
             self._log(
                 "warning",
@@ -1487,6 +1494,46 @@ class MiniAppDwellingTransport:
                     timeout=max(60, self.timeout),
                 ),
                 summarize=pagoda_challenge_result_text,
+            )
+
+    async def tianji_trial_start(self, identity: str) -> dict[str, Any]:
+        """Open the identity's daily Tianji trial and return its first challenge."""
+        async with self._lock:
+            # Trial entry tokens are one-use contexts; always request a fresh
+            # token before starting a new identity/day.
+            if not self.init_data or not self.start_payload:
+                await self._initialize_unlocked()
+            self._external_tokens.pop((self.player_id(identity), "tianji_trial"), None)
+            return await self._external_request_unlocked(
+                identity,
+                "tianji_trial",
+                "trial_",
+                "/api/miniapp/xianxia-trial/start",
+            )
+
+    async def tianji_trial_finish(
+        self,
+        identity: str,
+        proof: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit one solved Tianji trial challenge."""
+        if not isinstance(proof, dict) or not proof.get("challengeId"):
+            raise MiniAppBeastError("trial_proof_invalid")
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                "天机试炼自动解阵",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "tianji_trial",
+                    "trial_",
+                    "/api/miniapp/xianxia-trial/finish",
+                    payload={"trialProof": proof},
+                    # A proof is bound to the challenge returned by /start.
+                    # If authorization fails here, do not refresh the entry and
+                    # submit that old proof against a newly created session.
+                    retry_auth=False,
+                ),
             )
 
     async def hunt_snapshot(self, identity: str) -> dict[str, Any]:
