@@ -91,6 +91,7 @@ from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_daily_activities import MiniAppDailyActivities
 from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_inventory import MiniAppInventoryWorker
+from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
@@ -7524,11 +7525,21 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.my_info = await self.client.get_me()
         log.info(f"XiaoHao Login: {self.my_info.first_name}")
         await install_red_packet_monitor(self.client, self.account_key, logger=log)
-        await install_world_boss_monitor(
+        # Reuse the transport owned by the XiaoHao Mini App schedulers. The
+        # router only replaces eligible group commands; those schedulers stay
+        # owned and started by this worker.
+        miniapp_router = await install_miniapp_command_router(
             self,
             self.account_key,
             logger=log,
             transport=self._miniapp_beast_contract.transport,
+            start_background_tasks=False,
+        )
+        await install_world_boss_monitor(
+            self,
+            self.account_key,
+            logger=log,
+            transport=miniapp_router.transport,
         )
         @self.client.on(events.NewMessage(chats=self.target_chat_id))
         async def h(e): await self.handle_game_response(e)

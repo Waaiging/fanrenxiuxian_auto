@@ -369,6 +369,80 @@ class MiniAppDwellingTests(unittest.TestCase):
                 self.assertTrue(all(call.kwargs == {"identity": "缘生子"} for call in router.transport.command.await_args_list))
                 fallback.assert_not_awaited()
 
+    def test_xiaohao_and_waaiging_route_supported_commands_without_group_fallback(self):
+        commands = (
+            ("主魂", ".查看闭关"),
+            ("主魂", ".闭关修炼"),
+            ("主魂", ".深度闭关"),
+            ("主魂", ".元婴出窍"),
+            ("主魂", ".安置侍妾"),
+            ("问心子", ".登天阶"),
+        )
+
+        for account in ("xiaohao", "waaiging"):
+            with self.subTest(account=account):
+                avatars = ["问心子"] if account == "xiaohao" else []
+                actor = SimpleNamespace(
+                    client=object(),
+                    config={"miniapp_beast": {"entry_url": ENTRY}},
+                    state={"avatars": {name: {} for name in avatars}},
+                    avatars=avatars,
+                    save_state=lambda: None,
+                    identity_pause_seconds=lambda identity: 0,
+                )
+                router = MiniAppCommandRouter(actor, account, logger=FakeLogger())
+                router.transport.identity_player_ids = {"主魂": 100, "问心子": -200}
+                router.transport.command = AsyncMock(
+                    return_value=MiniAppCommandResponse(
+                        "完成", {"actionResult": {"ok": True}}
+                    )
+                )
+                router._maybe_refresh_auth = AsyncMock()
+                fallback = AsyncMock(return_value="group fallback")
+
+                for identity, command in commands:
+                    if identity != "主魂" and identity not in avatars:
+                        continue
+                    response = asyncio.run(
+                        router._route(identity, command, fallback, (), {})
+                    )
+                    self.assertEqual(response, "完成")
+
+                fallback.assert_not_awaited()
+
+    def test_router_can_reuse_transport_without_starting_duplicate_background_tasks(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {}
+                self.avatars = []
+
+            async def send_and_wait_feedback(self, command, *args, **kwargs):
+                return f"group:{command}"
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        transport = MiniAppDwellingTransport(object(), ENTRY)
+        transport.initialize = AsyncMock()
+        transport.identity_player_ids = {"主魂": 100}
+        transport.overview = AsyncMock(return_value={})
+        router = MiniAppCommandRouter(
+            actor,
+            "xiaohao",
+            logger=FakeLogger(),
+            transport=transport,
+            start_background_tasks=False,
+        )
+
+        self.assertTrue(asyncio.run(router.install()))
+        self.assertIs(router.transport, transport)
+        self.assertIsNone(router._profile_task)
+        self.assertEqual(router._star_farm_tasks, [])
+        self.assertEqual(router._daily_activity_tasks, [])
+
     def test_identity_mapping_and_command_routes(self):
         calls = []
 

@@ -57,7 +57,15 @@ def _now_text() -> str:
 class MiniAppCommandRouter:
     """Route Mini App-capable commands away from the game group."""
 
-    def __init__(self, actor: Any, account: str, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        actor: Any,
+        account: str,
+        logger: logging.Logger | None = None,
+        *,
+        transport: MiniAppDwellingTransport | None = None,
+        start_background_tasks: bool = True,
+    ) -> None:
         self.actor = actor
         self.account = str(account or "").strip()
         self.log = logger or logging.getLogger(f"miniapp_route.{self.account}")
@@ -87,7 +95,7 @@ class MiniAppCommandRouter:
         self.star_farm_target = str(
             settings.get("star_farm_target") or DEFAULT_STAR_FARM_TARGET
         ).strip()
-        self.transport = MiniAppDwellingTransport(
+        self.transport = transport or MiniAppDwellingTransport(
             actor.client,
             entry_url,
             bot_username=str(settings.get("bot_username") or "fanrenxiuxian_bot"),
@@ -96,6 +104,7 @@ class MiniAppCommandRouter:
             config_file=getattr(actor, "config_file", "") or getattr(actor, "CONFIG_FILE", ""),
             entry_chat=getattr(actor, "target_chat_id", "fanrenxxz"),
         )
+        self.start_background_tasks = bool(start_background_tasks)
         self.daily_activities = MiniAppDailyActivities(
             actor,
             self.transport,
@@ -213,73 +222,76 @@ class MiniAppCommandRouter:
             miniapp_route_identities=known,
         )
         await self.sync_all_profiles(known)
-        # Overview sync is authoritative for sect membership.  Select Star
+        # Overview sync is authoritative for sect membership. Select Star
         # Palace identities only after it has corrected stale local mappings.
-        star_identities = self.star_farm_identities(known)
-        journey_identities = self.tianxing_journey.identities(known)
+        star_identities = self.star_farm_identities(known) if self.start_background_tasks else []
+        journey_identities = (
+            self.tianxing_journey.identities(known) if self.start_background_tasks else []
+        )
         self._record(
             miniapp_star_farm_identities=star_identities,
             miniapp_journey_identities=journey_identities,
         )
-        self._profile_task = asyncio.create_task(
-            self.run_profile_sync_loop(),
-            name=f"miniapp_{self.account}_profiles",
-        )
-        self._daily_activity_tasks.append(
-            asyncio.create_task(
-                self.inventory.run_loop(),
-                name=f"miniapp_{self.account}_inventory",
+        if self.start_background_tasks:
+            self._profile_task = asyncio.create_task(
+                self.run_profile_sync_loop(),
+                name=f"miniapp_{self.account}_profiles",
             )
-        )
-        for identity in star_identities:
-            self._star_farm_tasks.append(
-                asyncio.create_task(
-                    self.run_star_farm_loop(identity),
-                    name=f"miniapp_{self.account}_star_farm_{identity}",
-                )
-            )
-        if self.daily_activities.pagoda_enabled:
             self._daily_activity_tasks.append(
                 asyncio.create_task(
-                    self.daily_activities.run_pagoda_loop(),
-                    name=f"miniapp_{self.account}_pagoda",
+                    self.inventory.run_loop(),
+                    name=f"miniapp_{self.account}_inventory",
                 )
             )
-        if self.daily_activities.hunt_enabled:
-            self._daily_activity_tasks.append(
-                asyncio.create_task(
-                    self.daily_activities.run_hunt_loop(),
-                    name=f"miniapp_{self.account}_hunt",
+            for identity in star_identities:
+                self._star_farm_tasks.append(
+                    asyncio.create_task(
+                        self.run_star_farm_loop(identity),
+                        name=f"miniapp_{self.account}_star_farm_{identity}",
+                    )
                 )
-            )
-        if self.tianxing_journey.enabled:
-            self._daily_activity_tasks.append(
-                asyncio.create_task(
-                    self.tianxing_journey.run_loop(),
-                    name=f"miniapp_{self.account}_journey",
+            if self.daily_activities.pagoda_enabled:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.daily_activities.run_pagoda_loop(),
+                        name=f"miniapp_{self.account}_pagoda",
+                    )
                 )
-            )
-        if self.beast_abyss.enabled:
-            self._daily_activity_tasks.append(
-                asyncio.create_task(
-                    self.beast_abyss.run_loop(),
-                    name=f"miniapp_{self.account}_beast_abyss",
+            if self.daily_activities.hunt_enabled:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.daily_activities.run_hunt_loop(),
+                        name=f"miniapp_{self.account}_hunt",
+                    )
                 )
-            )
-        if self.beast_seek.enabled:
-            self._daily_activity_tasks.append(
-                asyncio.create_task(
-                    self.beast_seek.run_loop(),
-                    name=f"miniapp_{self.account}_beast_seek",
+            if self.tianxing_journey.enabled:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.tianxing_journey.run_loop(),
+                        name=f"miniapp_{self.account}_journey",
+                    )
                 )
-            )
-        if self.fishing.supported:
-            self._daily_activity_tasks.append(
-                asyncio.create_task(
-                    self.fishing.run_loop(),
-                    name=f"miniapp_{self.account}_fishing",
+            if self.beast_abyss.enabled:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.beast_abyss.run_loop(),
+                        name=f"miniapp_{self.account}_beast_abyss",
+                    )
                 )
-            )
+            if self.beast_seek.enabled:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.beast_seek.run_loop(),
+                        name=f"miniapp_{self.account}_beast_seek",
+                    )
+                )
+            if self.fishing.supported:
+                self._daily_activity_tasks.append(
+                    asyncio.create_task(
+                        self.fishing.run_loop(),
+                        name=f"miniapp_{self.account}_fishing",
+                    )
+                )
         self.log.warning(
             "[%s] Mini App command routing active for identities %s; unsupported commands stay in the group",
             self.account,
@@ -674,8 +686,17 @@ async def install_miniapp_command_router(
     actor: Any,
     account: str,
     logger: logging.Logger | None = None,
+    *,
+    transport: MiniAppDwellingTransport | None = None,
+    start_background_tasks: bool = True,
 ) -> MiniAppCommandRouter:
-    router = MiniAppCommandRouter(actor, account, logger=logger)
+    router = MiniAppCommandRouter(
+        actor,
+        account,
+        logger=logger,
+        transport=transport,
+        start_background_tasks=start_background_tasks,
+    )
     await router.install()
     setattr(actor, "_miniapp_command_router", router)
     return router
