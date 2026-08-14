@@ -180,6 +180,38 @@ def tianji_trial_result_text(results: list[dict[str, Any]]) -> str:
     )
 
 
+def tianji_trial_log_text(results: list[dict[str, Any]]) -> str:
+    """Build a readable per-stage Tianji trial summary for the runtime log."""
+    completed, limit = tianji_trial_progress(results[-1]) if results else (0, 3)
+    title = f"天机试炼汇总（今日完成 {completed}/{limit} 关"
+    if len(results) != completed:
+        title += f"，本次记录 {len(results)} 关"
+    title += "）"
+
+    lines = []
+    rewards = 0
+    bonuses = 0
+    balance = 0
+    for index, payload in enumerate(results, start=1):
+        result = payload.get("result") if isinstance(payload, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        stage = int(result.get("daily_progress") or index)
+        grade = str(result.get("grade") or "已结算").strip() or "已结算"
+        reward = int(result.get("reward_trace") or 0)
+        bonus = int(result.get("bonus_trace") or 0)
+        rewards += reward
+        bonuses += bonus
+        balance = int(result.get("balance") or balance)
+        extra = f"（额外 {bonus}）" if bonus > 0 else ""
+        lines.append(
+            f"{len(lines) + 1}. 第 {stage} 关：{grade}，天机残痕 +{reward}{extra}"
+        )
+
+    total_extra = f"（额外 {bonuses}）" if bonuses > 0 else ""
+    lines.append(f"合计：天机残痕 +{rewards}{total_extra}，余额 {balance}")
+    return "\n".join([title, *lines])
+
+
 def _trial_duration_ms(challenge: dict[str, Any], event_count: int = 1) -> int:
     minimum = max(350, int(challenge.get("minDurationMs") or challenge.get("min_duration_ms") or 3200))
     return minimum + max(400, int(event_count) * 80)
@@ -1053,6 +1085,14 @@ class MiniAppDailyActivities:
         if completed < limit:
             return "retry"
         summary = tianji_trial_result_text(results)
+        operation = f"天机试炼（每日 {limit} 关）"
+        self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
+        self.log.info(
+            "IN [Mini App | %s]:\n%s ->\n%s",
+            identity,
+            operation,
+            tianji_trial_log_text(results),
+        )
         self._record(
             identity,
             miniapp_tianji_trial_last_date=today,

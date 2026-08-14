@@ -224,7 +224,8 @@ class MiniAppDailyActivityTests(unittest.TestCase):
                 return payload
 
         transport = Transport()
-        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+        logger = FakeLogger()
+        runner = MiniAppDailyActivities(actor, transport, "main", logger)
 
         with patch("miniapp_daily_activities.asyncio.sleep", new=AsyncMock()):
             result = asyncio.run(
@@ -237,6 +238,13 @@ class MiniAppDailyActivityTests(unittest.TestCase):
         self.assertEqual(actor.state["miniapp_tianji_trial_completed"], 3)
         self.assertIn("3 关完成", actor.state["miniapp_tianji_trial_last_result"])
         self.assertEqual(len(actor.rewards), 1)
+        combined = "\n".join(logger.info_messages)
+        self.assertIn("OUT [Mini App | 主魂]:\n天机试炼（每日 3 关）", combined)
+        self.assertIn("天机试炼汇总（今日完成 3/3 关）", combined)
+        self.assertIn("第 1 关：甲等，天机残痕 +5", combined)
+        self.assertIn("第 2 关：甲等，天机残痕 +5", combined)
+        self.assertIn("第 3 关：甲等，天机残痕 +5", combined)
+        self.assertIn("合计：天机残痕 +15，余额 15", combined)
 
     def test_tianji_trial_honors_dashboard_identity_selection_and_switch(self):
         actor = FakeActor(avatars=["无咎子", "缘生子", "素缘子"])
