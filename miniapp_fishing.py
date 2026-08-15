@@ -19,6 +19,7 @@ from automation_settings import (
     MINIAPP_FISHING_RODS,
     MINIAPP_FISHING_SUPPORTED_ACCOUNTS,
     automation_participant_key,
+    canonical_automation_identity,
     miniapp_fishing_settings,
 )
 from fishing_features import parse_trade_listing_response, parse_trade_purchase_response
@@ -102,6 +103,7 @@ def fishing_participant_parts(value: Any) -> tuple[str, str]:
     account, identity = (part.strip() for part in text.split("|", 1))
     if account not in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
         return "", ""
+    identity = canonical_automation_identity(account, identity)
     if identity not in ACCOUNT_IDENTITIES.get(account, ()):
         return "", ""
     return account, identity
@@ -184,6 +186,61 @@ def _global_default_state() -> dict[str, Any]:
     }
 
 
+def _canonical_fishing_key(value: Any) -> str:
+    account, identity = fishing_participant_parts(value)
+    if not account:
+        return str(value or "").strip()
+    return automation_participant_key(account, identity)
+
+
+def _migrate_global_participant_keys(data: dict[str, Any]) -> None:
+    """Migrate stable-account fishing state without reopening completed rounds."""
+    for field in ("participants",):
+        values = data.get(field)
+        if isinstance(values, list):
+            data[field] = list(dict.fromkeys(_canonical_fishing_key(item) for item in values))
+
+    for field in ("current_key", "rod_holder"):
+        if data.get(field):
+            data[field] = _canonical_fishing_key(data[field])
+
+    for field in ("scans", "completed_today", "round_records", "summary_emitted_ids"):
+        values = data.get(field)
+        if not isinstance(values, dict):
+            continue
+        migrated: dict[str, Any] = {}
+        for raw_key, value in values.items():
+            key = _canonical_fishing_key(raw_key)
+            if key not in migrated or str(raw_key) == key:
+                migrated[key] = value
+        data[field] = migrated
+
+    for field in ("transfer", "last_transfer"):
+        value = data.get(field)
+        if not isinstance(value, dict):
+            continue
+        for endpoint in ("from", "to"):
+            if value.get(endpoint):
+                value[endpoint] = _canonical_fishing_key(value[endpoint])
+
+    for field in ("force_retry", "last_force_retry"):
+        value = data.get(field)
+        if not isinstance(value, dict):
+            continue
+        for list_field in ("participants", "pending", "attempted"):
+            items = value.get(list_field)
+            if isinstance(items, list):
+                value[list_field] = list(
+                    dict.fromkeys(_canonical_fishing_key(item) for item in items)
+                )
+        for map_field in ("completed_before", "confirmed_daily_done"):
+            items = value.get(map_field)
+            if isinstance(items, dict):
+                value[map_field] = {
+                    _canonical_fishing_key(key): item for key, item in items.items()
+                }
+
+
 def _load_global_state() -> dict[str, Any]:
     try:
         with MINIAPP_FISHING_GLOBAL_FILE.open("r", encoding="utf-8") as handle:
@@ -218,6 +275,7 @@ def _load_global_state() -> dict[str, Any]:
             data[key] = {}
     if not isinstance(data.get("participants"), list):
         data["participants"] = []
+    _migrate_global_participant_keys(data)
     return data
 
 
@@ -288,6 +346,8 @@ def _next_participant(
 
 
 def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> None:
+    # Configuration reconciliation never creates a force-retry request or
+    # clears completion gates. Only request_miniapp_fishing_force_retry does.
     configured_rod = configured_fishing_rod(settings)
     previous_rod = str(data.get("configured_rod") or "").strip()
     if previous_rod and previous_rod != configured_rod:
@@ -313,21 +373,29 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
     old_participants = [str(item) for item in data.get("participants") or []]
     data["participants"] = participants
 
+    # Keep today's completion journals even when a participant is temporarily
+    # absent from a settings snapshot.  Workers can observe a partially loaded
+    # settings file during a dashboard update; filtering these maps by the
+    # instantaneous participant list would permanently reopen already-finished
+    # identities when the full list returns.  Scheduling below still considers
+    # only the currently selected ``participants`` list.
     completed = _mapping(data.get("completed_today"))
     data["completed_today"] = {
-        key: value for key, value in completed.items() if key in participant_set
+        str(key): value
+        for key, value in completed.items()
+        if fishing_participant_parts(key) != ("", "")
     }
     round_records = _mapping(data.get("round_records"))
     data["round_records"] = {
-        key: value
+        str(key): value
         for key, value in round_records.items()
-        if key in participant_set and isinstance(value, list)
+        if fishing_participant_parts(key) != ("", "") and isinstance(value, list)
     }
     emitted_ids = _mapping(data.get("summary_emitted_ids"))
     data["summary_emitted_ids"] = {
-        key: value
+        str(key): value
         for key, value in emitted_ids.items()
-        if key in participant_set and isinstance(value, list)
+        if fishing_participant_parts(key) != ("", "") and isinstance(value, list)
     }
 
     scans = {

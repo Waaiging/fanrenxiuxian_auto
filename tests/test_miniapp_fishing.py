@@ -214,7 +214,7 @@ class MiniAppFishingTests(unittest.TestCase):
             self.assertEqual(state["miniapp_fishing_last_error"], "")
             self.assertEqual(state["miniapp_fishing_next_run_time"], "")
 
-    def test_reconcile_removes_unselected_xiaohao_from_shared_state(self):
+    def test_reconcile_removes_unselected_xiaohao_scan_but_preserves_history(self):
         settings = {
             "enabled": True,
             "participants": ["main|主魂"],
@@ -266,14 +266,128 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(data["rod_holder"], "")
         self.assertEqual(data["rod_name"], "")
         self.assertNotIn("xiaohao|主魂", data["scans"])
-        self.assertNotIn("xiaohao|主魂", data["completed_today"])
-        self.assertNotIn("xiaohao|主魂", data["round_records"])
-        self.assertNotIn("xiaohao|主魂", data["summary_emitted_ids"])
+        self.assertTrue(data["completed_today"]["xiaohao|主魂"])
+        self.assertEqual(data["round_records"]["xiaohao|主魂"], [{"id": "stale-round"}])
+        self.assertEqual(data["summary_emitted_ids"]["xiaohao|主魂"], ["stale-round"])
         self.assertEqual(data["transfer"], {})
         self.assertEqual(
             data["last_transfer"]["status"],
             "cancelled_participant_removed",
         )
+
+    def test_reconcile_partial_settings_does_not_reopen_finished_identity(self):
+        settings_one = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        settings_full = {
+            **settings_one,
+            "participants": ["main|主魂", "xiaohao|主魂"],
+        }
+        data = miniapp_fishing._global_default_state()
+        data.update(
+            participants=["main|主魂", "xiaohao|主魂"],
+            completed_today={
+                "main|主魂": "2026-08-15 03:00:00",
+                "xiaohao|主魂": "2026-08-15 03:10:00",
+            },
+            current_key="",
+        )
+
+        miniapp_fishing._reconcile_global_state(data, settings_one)
+        self.assertIn("xiaohao|主魂", data["completed_today"])
+        miniapp_fishing._reconcile_global_state(data, settings_full)
+
+        self.assertEqual(data["completed_today"]["xiaohao|主魂"], "2026-08-15 03:10:00")
+        self.assertEqual(data["current_key"], "")
+        self.assertEqual(data["status"], "daily_done")
+
+    def test_sub_dao_name_migration_preserves_completion_without_force_retry(self):
+        completed_at = "2026-08-14 01:49:14"
+        data = miniapp_fishing._global_default_state()
+        data.update(
+            participants=["sub|缘生子"],
+            current_key="",
+            completed_today={"sub|缘生子": completed_at},
+            force_retry={},
+            force_retry_request_id="manual-request-already-finished",
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["sub|竹和生"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+
+        miniapp_fishing._migrate_global_participant_keys(data)
+        miniapp_fishing._reconcile_global_state(data, settings)
+
+        self.assertEqual(data["participants"], ["sub|竹和生"])
+        self.assertEqual(data["completed_today"], {"sub|竹和生": completed_at})
+        self.assertEqual(data["current_key"], "")
+        self.assertEqual(data["force_retry"], {})
+        self.assertEqual(data["force_retry_request_id"], "manual-request-already-finished")
+        self.assertEqual(
+            miniapp_fishing.fishing_participant_label("sub|缘生子"),
+            "副号｜竹和生",
+        )
+
+    def test_reconcile_changed_fishing_options_preserves_completion_without_force_retry(self):
+        completed_at = miniapp_fishing._now_text()
+        data = miniapp_fishing._global_default_state()
+        data.update(
+            participants=["main|主魂"],
+            current_key="",
+            configured_rod="银竹钓竿",
+            completed_today={"main|主魂": completed_at},
+            force_retry={},
+            force_retry_request_id="last-manual-request",
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod": "金雷竹钓竿",
+            "rod_owner": "auto",
+            "pond": "hantan",
+            "bait": "spirit_worm",
+            "chum": "grass",
+        }
+
+        miniapp_fishing._reconcile_global_state(data, settings)
+
+        self.assertEqual(data["completed_today"], {"main|主魂": completed_at})
+        self.assertEqual(data["current_key"], "")
+        self.assertEqual(data["status"], "daily_done")
+        self.assertEqual(data["force_retry"], {})
+        self.assertEqual(data["force_retry_request_id"], "last-manual-request")
+
+    def test_saving_automation_settings_does_not_request_fishing_force_retry(self):
+        with patch(
+            "dashboard_server.save_automation_settings",
+            return_value={"updated_by": "tester"},
+        ), patch(
+            "dashboard_server.request_miniapp_fishing_force_retry",
+        ) as force_retry:
+            result = asyncio.run(dashboard_server.automation_settings_control(
+                {
+                    "world_boss_participants": [],
+                    "mulan_support_mode": "护阵",
+                    "miniapp_fishing": {"enabled": True},
+                    "tianxing": {"meditation_mode": "deep"},
+                },
+                username="tester",
+            ))
+
+        self.assertTrue(result["success"])
+        force_retry.assert_not_called()
 
     def test_result_summary_contains_server_score_and_fish(self):
         summary = fishing_result_summary(
