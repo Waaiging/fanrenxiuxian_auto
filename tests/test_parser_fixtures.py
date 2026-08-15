@@ -4831,6 +4831,20 @@ class ParserFixtureTests(unittest.TestCase):
             self.assertEqual(row["patrol_mode_options"], ["斥候", "护粮", "袭营"])
             self.assertIn("灵兽按体力自动选择", row["detail"])
 
+            xiaohao_panel = build_command_panels(
+                "xiaohao",
+                {"done": [], "avatars": {}, "restricted_miniapp_active": False},
+            )[0]
+            xiaohao_row = next(
+                item for item in xiaohao_panel["commands"]
+                if item.get("control_key") == ".灵兽巡边 *"
+            )
+            self.assertEqual(xiaohao_row["command"], ".灵兽巡边 <灵兽> 袭营")
+            self.assertEqual(
+                xiaohao_row["patrol_mode_options"],
+                ["斥候", "护粮", "袭营"],
+            )
+
             asyncio.run(dashboard_server.set_command_control({
                 "account": "main",
                 "identity": "主魂",

@@ -3524,6 +3524,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 cultivation_text = self.response_text(cultivation).replace("**", "")
                 success = cultivation_succeeded(cultivation_text)
                 cooldown_text = cultivation_text
+                cycle_wait_seconds = 0
                 if success:
                     count = max(0, int(self.state.get("tianxing_fate_success_count") or 0)) + 1
                     self.state["tianxing_fate_success_count"] = count
@@ -3559,22 +3560,48 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                             self.save_state()
                         else:
                             await asyncio.sleep(3)
-                            followup = await self.send_and_wait_feedback(
-                                ".闭关修炼", timeout=90, max_retries=0
+                            post_pill_prefix = await self.send_and_wait_feedback(
+                                TIANXING_MEDITATION_PREFIX_COMMAND,
+                                timeout=60,
+                                max_retries=0,
                             )
-                            followup_text = self.response_text(followup).replace("**", "")
-                            cooldown_text = followup_text or cultivation_text
-                            if cultivation_succeeded(followup_text):
-                                self.state["tianxing_fate_success_count"] = count + 1
-                                self.state["tianxing_fate_last_time"] = now_str()
-                                self.state["tianxing_fate_last_result"] = followup_text[:240]
-                                self.save_state()
-                            else:
-                                log.warning(
-                                    "Tianxing immediate post-pill .闭关修炼 was not confirmed: %s",
-                                    followup_text[:240],
+                            post_pill_prefix_text = self.response_text(post_pill_prefix)
+                            if not self.tianxing_prefix_response_ok(
+                                TIANXING_MEDITATION_PREFIX_COMMAND,
+                                post_pill_prefix_text,
+                            ):
+                                cycle_wait_seconds = self.tianxing_prefix_wait_seconds(
+                                    post_pill_prefix_text
                                 )
-                wait_seconds = self.parse_wait_time(cooldown_text)
+                                cooldown_text = post_pill_prefix_text or cultivation_text
+                                self.state["tianxing_fate_last_result"] = (
+                                    "合气丹后推命闭关未确认："
+                                    f"{post_pill_prefix_text[:160]}"
+                                )
+                                self.save_state()
+                                log.warning(
+                                    "Tianxing post-pill .推命 闭关 was not confirmed; "
+                                    "blocking .闭关修炼: %s",
+                                    post_pill_prefix_text[:240],
+                                )
+                            else:
+                                await asyncio.sleep(3)
+                                followup = await self.send_and_wait_feedback(
+                                    ".闭关修炼", timeout=90, max_retries=0
+                                )
+                                followup_text = self.response_text(followup).replace("**", "")
+                                cooldown_text = followup_text or cultivation_text
+                                if cultivation_succeeded(followup_text):
+                                    self.state["tianxing_fate_success_count"] = count + 1
+                                    self.state["tianxing_fate_last_time"] = now_str()
+                                    self.state["tianxing_fate_last_result"] = followup_text[:240]
+                                    self.save_state()
+                                else:
+                                    log.warning(
+                                        "Tianxing immediate post-pill .闭关修炼 was not confirmed: %s",
+                                        followup_text[:240],
+                                    )
+                wait_seconds = cycle_wait_seconds or self.parse_wait_time(cooldown_text)
                 await self._sleep_while_tianxing_mode(
                     "fate", max(60, min(wait_seconds or 300, 900))
                 )

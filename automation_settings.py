@@ -75,6 +75,13 @@ MINIAPP_FISHING_SUPPORTED_ACCOUNTS = ("main", "sub", "xiaohao", "waaiging")
 DEFAULT_MINIAPP_FISHING_PARTICIPANTS = ("main|主魂",)
 DEFAULT_MINIAPP_FISHING_ROD_OWNER = "auto"
 DEFAULT_MINIAPP_FISHING_START_TIME = ""
+DEFAULT_MINIAPP_JOURNEY_ENABLED = True
+MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS = tuple(ACCOUNT_IDENTITIES)
+DEFAULT_MINIAPP_JOURNEY_PARTICIPANTS = (
+    "main|主魂",
+    "main|无咎子",
+    "waaiging|主魂",
+)
 DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED = True
 DEFAULT_MINIAPP_TIANJI_TRIAL_PARTICIPANTS = tuple(
     f"{account}|{identity}"
@@ -143,7 +150,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 10,
+        "version": 11,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -164,6 +171,10 @@ def default_automation_settings() -> dict[str, Any]:
             "bait": DEFAULT_MINIAPP_FISHING_BAIT,
             "chum": DEFAULT_MINIAPP_FISHING_CHUM,
             "start_time": DEFAULT_MINIAPP_FISHING_START_TIME,
+        },
+        "miniapp_journey": {
+            "enabled": DEFAULT_MINIAPP_JOURNEY_ENABLED,
+            "participants": list(DEFAULT_MINIAPP_JOURNEY_PARTICIPANTS),
         },
         "miniapp_tianji_trial": {
             "enabled": DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED,
@@ -272,6 +283,25 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             result["miniapp_fishing"]["chum"] = chum
         result["miniapp_fishing"]["start_time"] = start_time
 
+    journey = source.get("miniapp_journey")
+    if isinstance(journey, dict):
+        result["miniapp_journey"]["enabled"] = bool(
+            journey.get("enabled", DEFAULT_MINIAPP_JOURNEY_ENABLED)
+        )
+        if isinstance(journey.get("participants"), list):
+            participants = []
+            for item in journey["participants"]:
+                normalized = _normalize_participant(item)
+                if (
+                    normalized is None
+                    or normalized[0] not in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
+                ):
+                    continue
+                key = automation_participant_key(*normalized)
+                if key not in participants:
+                    participants.append(key)
+            result["miniapp_journey"]["participants"] = participants
+
     trial = source.get("miniapp_tianji_trial")
     if isinstance(trial, dict):
         result["miniapp_tianji_trial"]["enabled"] = bool(
@@ -353,6 +383,8 @@ def save_automation_settings(
     miniapp_fishing_rod: Any = None,
     miniapp_fishing_rod_owner: Any = None,
     miniapp_fishing_start_time: Any = None,
+    miniapp_journey_enabled: Any = None,
+    miniapp_journey_participants: Any = None,
     miniapp_tianji_trial_enabled: Any = None,
     miniapp_tianji_trial_participants: Any = None,
     miniapp_beast_abyss_power_min: Any = None,
@@ -452,6 +484,33 @@ def save_automation_settings(
         raise ValueError("invalid Mini App fishing bait")
     if fishing_chum not in {item[0] for item in MINIAPP_FISHING_CHUMS}:
         raise ValueError("invalid Mini App fishing chum")
+
+    current_journey = current_settings.get("miniapp_journey") or {}
+    journey_enabled = (
+        bool(current_journey.get("enabled", DEFAULT_MINIAPP_JOURNEY_ENABLED))
+        if miniapp_journey_enabled is None
+        else bool(miniapp_journey_enabled)
+    )
+    raw_journey_participants = (
+        current_journey.get("participants")
+        if miniapp_journey_participants is None
+        else miniapp_journey_participants
+    )
+    if not isinstance(raw_journey_participants, list):
+        raise ValueError("Mini App journey participants must be a list")
+    journey_participants = []
+    for item in raw_journey_participants:
+        normalized = _normalize_participant(item)
+        if (
+            normalized is None
+            or normalized[0] not in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
+        ):
+            raise ValueError("invalid Mini App journey participant")
+        key = automation_participant_key(*normalized)
+        if key not in journey_participants:
+            journey_participants.append(key)
+    if journey_enabled and not journey_participants:
+        raise ValueError("Mini App journey participants required")
 
     current_trial = current_settings.get("miniapp_tianji_trial") or {}
     trial_enabled = (
@@ -580,6 +639,10 @@ def save_automation_settings(
                 "chum": fishing_chum,
                 "start_time": fishing_start_time,
             },
+            "miniapp_journey": {
+                "enabled": journey_enabled,
+                "participants": journey_participants,
+            },
             "miniapp_tianji_trial": {
                 "enabled": trial_enabled,
                 "participants": trial_participants,
@@ -665,6 +728,30 @@ def miniapp_beast_abyss_power_in_range(
 def miniapp_fishing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
     return dict(source.get("miniapp_fishing") or default_automation_settings()["miniapp_fishing"])
+
+
+def miniapp_journey_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(
+        source.get("miniapp_journey")
+        or default_automation_settings()["miniapp_journey"]
+    )
+
+
+def miniapp_journey_identities_for_account(
+    account: str,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    account = str(account or "").strip()
+    supported = ACCOUNT_IDENTITIES.get(account, ())
+    if account not in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS or not supported:
+        return []
+    selected = set(miniapp_journey_settings(settings).get("participants") or [])
+    return [
+        identity
+        for identity in supported
+        if automation_participant_key(account, identity) in selected
+    ]
 
 
 def miniapp_tianji_trial_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -792,6 +879,23 @@ def automation_dashboard_payload() -> dict[str, Any]:
             "rods": [
                 {"key": key, "name": name}
                 for key, name in MINIAPP_FISHING_RODS
+            ],
+        },
+        "miniapp_journey": {
+            **miniapp_journey_settings(settings),
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                        }
+                        for identity in ACCOUNT_IDENTITIES[account]
+                    ],
+                }
+                for account in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
             ],
         },
         "miniapp_tianji_trial": {

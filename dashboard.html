@@ -1625,6 +1625,21 @@
                     </div>
                     <div class="automation-card-hint" id="miniapp-tianji-trial-runtime">等待运行状态...</div>
                 </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">Mini App · 游历·野外历练（深入）</div>
+                    <div class="automation-card-hint">每天为所选且实际宗门为天星宗的身份补齐 2 次；每次深入前先执行 `.改命 探索`。</div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="miniapp-journey-enabled" type="checkbox" onchange="syncMiniappJourneyControls(); markAutomationSettingsDirty()">
+                            启用自动深入历练
+                        </label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="miniapp-journey-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <div class="automation-card-hint" id="miniapp-journey-runtime">等待运行状态...</div>
+                </div>
             </div>
             <div class="automation-actions">
                 <button class="red-packet-save automation-save" id="automation-save" type="button" onclick="saveAutomationSettings()"><i data-lucide="save" aria-hidden="true"></i>保存设置</button>
@@ -4137,17 +4152,26 @@
             });
         }
 
+        function syncMiniappJourneyControls() {
+            const enabled = Boolean(document.getElementById('miniapp-journey-enabled')?.checked);
+            document.querySelectorAll('#miniapp-journey-participant-controls input[type="checkbox"]').forEach(input => {
+                input.disabled = !enabled;
+            });
+        }
+
         function renderAutomationDashboard(data) {
-            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_tianji_trial: {}, tianxing: {}};
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
             const abyss = automationDashboardData.miniapp_beast_abyss || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
+            const journey = automationDashboardData.miniapp_journey || {};
             const trial = automationDashboardData.miniapp_tianji_trial || {};
             const tianxing = automationDashboardData.tianxing || {};
             const abyssSettings = settings.miniapp_beast_abyss || {};
             const fishingSettings = settings.miniapp_fishing || {};
+            const journeySettings = settings.miniapp_journey || {};
             const trialSettings = settings.miniapp_tianji_trial || {};
             const tianxingSettings = settings.tianxing || {};
             const accounts = Array.isArray(worldBoss.accounts) ? worldBoss.accounts : [];
@@ -4168,6 +4192,9 @@
             const fishingStartTime = String(fishing.start_time ?? fishingSettings.start_time ?? '');
             const fishingAccounts = Array.isArray(fishing.accounts) ? fishing.accounts : [];
             const fishingRuntime = fishing.runtime || {};
+            const journeyEnabled = Boolean(journey.enabled ?? journeySettings.enabled ?? true);
+            const journeyParticipants = new Set(journey.participants || journeySettings.participants || []);
+            const journeyAccounts = Array.isArray(journey.accounts) ? journey.accounts : [];
             const trialEnabled = Boolean(trial.enabled ?? trialSettings.enabled ?? true);
             const trialParticipants = new Set(trial.participants || trialSettings.participants || []);
             const trialAccounts = Array.isArray(trial.accounts) ? trial.accounts : [];
@@ -4183,7 +4210,7 @@
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -4224,6 +4251,25 @@
                 if (fishingEnabledControl) fishingEnabledControl.checked = fishingEnabled;
                 const trialEnabledControl = document.getElementById('miniapp-tianji-trial-enabled');
                 if (trialEnabledControl) trialEnabledControl.checked = trialEnabled;
+                const journeyEnabledControl = document.getElementById('miniapp-journey-enabled');
+                if (journeyEnabledControl) journeyEnabledControl.checked = journeyEnabled;
+                const journeyParticipantControls = document.getElementById('miniapp-journey-participant-controls');
+                if (journeyParticipantControls) {
+                    journeyParticipantControls.innerHTML = journeyAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${journeyParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                syncMiniappJourneyControls();
                 const trialParticipantControls = document.getElementById('miniapp-tianji-trial-participant-controls');
                 if (trialParticipantControls) {
                     trialParticipantControls.innerHTML = trialAccounts.map(account => `
@@ -4356,6 +4402,12 @@
                     ? `${trialParticipants.size} 个身份每日自动完成 3 关`
                     : '天机试炼已暂停';
             }
+            const journeyRuntimeControl = document.getElementById('miniapp-journey-runtime');
+            if (journeyRuntimeControl) {
+                journeyRuntimeControl.innerText = journeyEnabled
+                    ? `${journeyParticipants.size} 个身份每日补齐 2 次深入历练`
+                    : '野外深入历练已暂停';
+            }
             const hint = document.getElementById('automation-updated-hint');
             if (hint) {
                 const updated = settings.updated_at ? `上次保存 ${settings.updated_at}` : '使用默认设置';
@@ -4443,6 +4495,10 @@
             const trialParticipants = Array.from(document.querySelectorAll('#miniapp-tianji-trial-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
+            const journeyEnabled = Boolean(document.getElementById('miniapp-journey-enabled')?.checked);
+            const journeyParticipants = Array.from(document.querySelectorAll('#miniapp-journey-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
             const tianxingMeditationMode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || '';
             const tianxingUsePill = Boolean(document.getElementById('tianxing-use-heqi-pill')?.checked);
             const tianxingGrindEnabled = Boolean(document.getElementById('tianxing-tianji-grind-enabled')?.checked);
@@ -4464,6 +4520,10 @@
             }
             if (trialEnabled && !trialParticipants.length) {
                 alert('启用天机试炼时至少选择一个参与身份。');
+                return;
+            }
+            if (journeyEnabled && !journeyParticipants.length) {
+                alert('启用野外深入历练时至少选择一个参与身份。');
                 return;
             }
             if (!tianxingMeditationMode) {
@@ -4504,6 +4564,10 @@
                         miniapp_tianji_trial: {
                             enabled: trialEnabled,
                             participants: trialParticipants
+                        },
+                        miniapp_journey: {
+                            enabled: journeyEnabled,
+                            participants: journeyParticipants
                         },
                         tianxing: {
                             meditation_mode: tianxingMeditationMode,

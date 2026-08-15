@@ -173,9 +173,69 @@ class MainTianxingTests(unittest.TestCase):
 
         self.assertEqual(
             sent,
-            [".推命 闭关", ".闭关修炼", ".服用 合气丹1", ".闭关修炼"],
+            [
+                ".推命 闭关",
+                ".闭关修炼",
+                ".服用 合气丹1",
+                ".推命 闭关",
+                ".闭关修炼",
+            ],
         )
         self.assertEqual(actor.state["tianxing_fate_success_count"], 3)
+
+    def test_post_pill_prefix_failure_blocks_followup_cultivation(self):
+        actor = self.actor()
+        actor.startup_done = asyncio.Event()
+        actor.startup_done.set()
+        actor.is_running = True
+        actor.state.update(
+            {
+                "last_destiny_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_destiny_choice": "紫微",
+                "last_destiny_observation_date": datetime.now().strftime("%Y-%m-%d"),
+                "tianxing_destiny_options": ["紫微", "贪狼", "太阴"],
+                "tianxing_destiny_options_date": datetime.now().strftime("%Y-%m-%d"),
+                "tianxing_fate_success_count": 1,
+                "tianxing_meditation_prepared_mode": "fate",
+                "tianxing_meditation_prepared_switch_id": "test-fate-switch",
+            }
+        )
+        actor.tianxing_meditation_mode = lambda: "fate"
+        actor._wait_for_main_identity = AsyncMock()
+        actor.ensure_tianxing_destiny_for_action = AsyncMock(return_value=True)
+        sent = []
+        prefix_count = 0
+
+        async def send(command, **kwargs):
+            nonlocal prefix_count
+            sent.append(command)
+            if command == ".推命 闭关":
+                prefix_count += 1
+                if prefix_count == 1:
+                    return "推命命中闭关，执行成功。"
+                return "推命尚在冷却，还需等待 5 分钟。"
+            if command == ".服用 合气丹1":
+                return "成功服用合气丹1"
+            return "闭关成功，获得修为，需要调息 10 分钟"
+
+        actor.send_and_wait_feedback = send
+
+        async def stop_after_sleep(*args, **kwargs):
+            actor.is_running = False
+
+        with patch("intelligent_cultivator.tianxing_settings", return_value={
+            "meditation_mode": "fate",
+            "meditation_switch_id": "test-fate-switch",
+            "use_heqi_pill": True,
+        }), patch("intelligent_cultivator.asyncio.sleep", new=stop_after_sleep):
+            asyncio.run(actor.run_tianxing_fate_meditation_loop())
+
+        self.assertEqual(
+            sent,
+            [".推命 闭关", ".闭关修炼", ".服用 合气丹1", ".推命 闭关"],
+        )
+        self.assertEqual(actor.state["tianxing_fate_success_count"], 2)
+        self.assertIn("合气丹后推命闭关未确认", actor.state["tianxing_fate_last_result"])
 
     def test_switch_to_fate_forces_exit_and_consumes_heqi_pill(self):
         actor = self.actor()

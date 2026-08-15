@@ -238,7 +238,25 @@ class MiniAppJourneyTests(unittest.TestCase):
         self.assertEqual(main_runner.identities(), ["主魂", "无咎子"])
         self.assertEqual(waaiging_runner.identities(), ["主魂"])
         self.assertEqual(sub_runner.identities(), [])
-        self.assertFalse(sub_runner.enabled)
+        self.assertTrue(sub_runner.supported)
+        self.assertTrue(sub_runner.enabled)
+
+    def test_dashboard_selection_can_enable_sub_or_xiaohao_identity(self):
+        sub_actor = FakeActor("sub", avatars=["厚土"], sects={"厚土": "天星宗"})
+        sub_transport = SequenceTransport()
+        sub_transport.identity_player_ids["厚土"] = -301
+        sub_runner = MiniAppTianxingJourney(
+            sub_actor,
+            sub_transport,
+            "sub",
+            FakeLogger(),
+        )
+
+        with patch(
+            "miniapp_journey.miniapp_journey_identities_for_account",
+            return_value=["厚土"],
+        ):
+            self.assertEqual(sub_runner.identities(), ["厚土"])
 
     def test_two_attempts_each_have_a_confirmed_destiny_prefix(self):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
@@ -344,6 +362,29 @@ class MiniAppJourneyTests(unittest.TestCase):
         )
         self.assertEqual(waaiging_row["execution_channel"], "miniapp")
         self.assertIn("每次先执行 .改命 探索", waaiging_row["detail"])
+
+    def test_dashboard_adds_journey_to_newly_selected_sub_identity(self):
+        state = {
+            "avatars": {
+                "厚土": {
+                    "miniapp_journey_daily_count": 0,
+                    "miniapp_journey_daily_limit": 2,
+                }
+            }
+        }
+        with patch(
+            "dashboard_server.miniapp_journey_identities_for_account",
+            return_value=["厚土"],
+        ):
+            panels = {
+                panel["identity"]: panel
+                for panel in build_command_panels("sub", state)
+            }
+
+        self.assertIn(
+            "miniapp:journey-deep",
+            {row["command"] for row in panels["厚土"]["commands"]},
+        )
 
     def test_restricted_waaiging_worker_starts_journey_loop(self):
         class Actor(FakeActor):

@@ -44,6 +44,7 @@ from automation_settings import (
     automation_dashboard_payload,
     miniapp_beast_abyss_settings,
     miniapp_fishing_settings,
+    miniapp_journey_identities_for_account,
     mulan_support_command,
     mulan_support_mode,
     save_automation_settings,
@@ -2381,7 +2382,6 @@ def main_soul_panel(account, state):
                     detail=f"上次定命：{state.get('last_destiny_choice') or '未记录'}",
                     group="天星宗",
                 ),
-                miniapp_tianxing_journey_command(state),
             ])
         if main_soul_sect == "万灵宗":
             rows.extend([
@@ -2396,7 +2396,7 @@ def main_soul_panel(account, state):
                     if hunt_stopped
                     else time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽")
                 ),
-                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> <斥候/护粮/袭营>", "灵兽巡边", group="灵兽"),
                 manual_command(".巡边状态", "巡边状态", group="灵兽"),
                 manual_command(".巡边归来", "巡边归来", group="灵兽"),
             ])
@@ -2460,7 +2460,7 @@ def main_soul_panel(account, state):
             for command, label in (
                 (".放生 <灵兽>", "放生灵兽"),
                 (".灵兽出战 <灵兽>", "灵兽出战"),
-                (".灵兽巡边 <灵兽> 袭营", "灵兽巡边"),
+                (".灵兽巡边 <灵兽> <斥候/护粮/袭营>", "灵兽巡边"),
                 (".巡边状态", "巡边状态"),
                 (".巡边归来", "巡边归来"),
             ):
@@ -2489,7 +2489,7 @@ def main_soul_panel(account, state):
                 time_command(state, "next_hunt_time", ".寻觅灵兽", "寻觅灵兽", group="灵兽"),
                 manual_command(".放生 <灵兽>", "放生灵兽", "流程内按需", "灵兽"),
                 manual_command(".灵兽出战 <灵兽>", "灵兽出战", group="灵兽"),
-                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> 袭营", "灵兽巡边", group="灵兽"),
+                time_command(state, "next_beast_border_patrol_time", ".灵兽巡边 <灵兽> <斥候/护粮/袭营>", "灵兽巡边", group="灵兽"),
                 manual_command(".巡边状态", "巡边状态", group="灵兽"),
                 manual_command(".巡边归来", "巡边归来", group="灵兽"),
             ])
@@ -2522,12 +2522,13 @@ def main_soul_panel(account, state):
             ),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
-            miniapp_tianxing_journey_command(state),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=False))
+    if "主魂" in miniapp_journey_identities_for_account(account):
+        rows.append(miniapp_tianxing_journey_command(state))
     rows.append(mulan_support_daily_command(state))
     return {"identity": "主魂", "role": "主魂", "commands": rows}
 
@@ -2553,7 +2554,6 @@ def lingxiao_avatar_commands(name, state, root_state=None):
                 detail=f"上次定命：{state.get('last_destiny_choice') or '未记录'}",
                 group="每日",
             ),
-            miniapp_tianxing_journey_command(state),
         ])
     if name == "缘生子":
         rows.extend([
@@ -2650,12 +2650,16 @@ def xiaohao_avatar_commands(name, state):
 
 def avatar_commands(account, name, state, root_state=None):
     if account == "main":
-        return lingxiao_avatar_commands(name, state, root_state=root_state)
-    if account == "sub":
-        return star_avatar_commands(name, state)
-    if account == "xiaohao":
-        return xiaohao_avatar_commands(name, state)
-    return global_sync_commands()
+        rows = lingxiao_avatar_commands(name, state, root_state=root_state)
+    elif account == "sub":
+        rows = star_avatar_commands(name, state)
+    elif account == "xiaohao":
+        rows = xiaohao_avatar_commands(name, state)
+    else:
+        rows = global_sync_commands()
+    if name in miniapp_journey_identities_for_account(account):
+        rows.append(miniapp_tianxing_journey_command(state))
+    return rows
 
 
 def build_command_panels(account, state):
@@ -5097,6 +5101,8 @@ async def automation_settings_control(
     abyss = abyss if isinstance(abyss, dict) else {}
     fishing = payload.get("miniapp_fishing")
     fishing = fishing if isinstance(fishing, dict) else {}
+    journey = payload.get("miniapp_journey")
+    journey = journey if isinstance(journey, dict) else {}
     trial = payload.get("miniapp_tianji_trial")
     trial = trial if isinstance(trial, dict) else {}
     tianxing = payload.get("tianxing")
@@ -5116,6 +5122,8 @@ async def automation_settings_control(
                 miniapp_fishing_rod=fishing.get("rod"),
                 miniapp_fishing_rod_owner=fishing.get("rod_owner"),
                 miniapp_fishing_start_time=fishing.get("start_time"),
+                miniapp_journey_enabled=journey.get("enabled"),
+                miniapp_journey_participants=journey.get("participants"),
                 miniapp_tianji_trial_enabled=trial.get("enabled"),
                 miniapp_tianji_trial_participants=trial.get("participants"),
                 tianxing_meditation_mode=tianxing.get("meditation_mode"),
@@ -5141,6 +5149,9 @@ async def automation_settings_control(
             "invalid Mini App fishing rod": "灵溪垂钓鱼竿无效",
             "invalid Mini App fishing rod owner": "手动指定的钓竿持有者无效",
             "invalid Mini App fishing start time": "灵溪垂钓开始时间必须是 HH:MM",
+            "Mini App journey participants must be a list": "深入历练参与身份列表格式错误",
+            "invalid Mini App journey participant": "深入历练参与身份无效",
+            "Mini App journey participants required": "启用深入历练时至少选择一个身份",
             "Mini App Tianji trial participants must be a list": "天机试炼参与身份列表格式错误",
             "invalid Mini App Tianji trial participant": "天机试炼参与身份无效",
             "Mini App Tianji trial participants required": "启用天机试炼时至少选择一个身份",

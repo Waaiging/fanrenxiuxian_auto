@@ -7,6 +7,11 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
+from automation_settings import (
+    MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS,
+    miniapp_journey_identities_for_account,
+    miniapp_journey_settings,
+)
 from miniapp_beast import MiniAppBeastError
 from miniapp_dwelling import (
     apply_dwelling_snapshot,
@@ -21,16 +26,15 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_JOURNEY_HOUR = 7
 DEFAULT_JOURNEY_RETRY_SECONDS = 15 * 60
 DEFAULT_ACTION_DELAY_SECONDS = 2
+DEFAULT_SETTINGS_RELOAD_SECONDS = 60
 TARGET_DAILY_ATTEMPTS = 2
 JOURNEY_PREFIX_COMMAND = ".改命 探索"
 JOURNEY_MODE = "deep"
 ACCOUNT_MINUTE_OFFSETS = {
     "main": 0,
+    "sub": 10,
+    "xiaohao": 20,
     "waaiging": 30,
-}
-ACCOUNT_IDENTITY_SCOPE = {
-    "main": ("主魂", "无咎子"),
-    "waaiging": ("主魂",),
 }
 
 
@@ -142,7 +146,7 @@ def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]
 
 
 class MiniAppTianxingJourney:
-    """Use both daily journey attempts for the two explicitly scoped accounts."""
+    """Use both daily journey attempts for Dashboard-selected Tianxing identities."""
 
     def __init__(self, actor: Any, transport: Any, account: str, logger: Any) -> None:
         self.actor = actor
@@ -152,8 +156,8 @@ class MiniAppTianxingJourney:
         settings = (getattr(actor, "config", {}) or {}).get("miniapp_beast") or {}
         if not isinstance(settings, dict):
             settings = {}
-        default_enabled = self.account in ACCOUNT_IDENTITY_SCOPE
-        self.enabled = default_enabled and bool(settings.get("journey_daily_enabled", True))
+        self.supported = self.account in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
+        self.enabled = self.supported and bool(settings.get("journey_daily_enabled", True))
         self.hour = _bounded_int(
             settings.get("journey_daily_hour"),
             DEFAULT_JOURNEY_HOUR,
@@ -174,6 +178,13 @@ class MiniAppTianxingJourney:
         if delay_value is None:
             delay_value = DEFAULT_ACTION_DELAY_SECONDS
         self.action_delay_seconds = max(0, int(delay_value))
+        self.settings_reload_seconds = max(
+            15,
+            int(
+                settings.get("journey_settings_reload_seconds")
+                or DEFAULT_SETTINGS_RELOAD_SECONDS
+            ),
+        )
 
     def _save(self) -> None:
         try:
@@ -213,9 +224,15 @@ class MiniAppTianxingJourney:
                 return ""
         return ""
 
+    def runtime_enabled(self) -> bool:
+        return bool(self.enabled and miniapp_journey_settings().get("enabled"))
+
+    def configured_identities(self) -> list[str]:
+        return miniapp_journey_identities_for_account(self.account)
+
     def identities(self, candidates: list[str] | None = None) -> list[str]:
-        """Return scoped identities whose authoritative sect is Tianxing."""
-        allowed = ACCOUNT_IDENTITY_SCOPE.get(self.account, ())
+        """Return selected identities whose authoritative sect is Tianxing."""
+        allowed = self.configured_identities()
         candidate_set = set(candidates) if candidates is not None else None
         ids = getattr(self.transport, "identity_player_ids", {}) or {}
         result = []
@@ -411,6 +428,8 @@ class MiniAppTianxingJourney:
         self,
         now: datetime | None = None,
     ) -> tuple[bool, int]:
+        if not self.runtime_enabled():
+            return False, self.settings_reload_seconds
         await self.transport.initialize()
         now = now or datetime.now()
         identities = self.identities()
@@ -496,13 +515,24 @@ class MiniAppTianxingJourney:
         return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     async def run_loop(self) -> None:
-        if not self.enabled:
+        if not self.supported:
             return
         startup = getattr(self.actor, "startup_done", None)
         if startup is not None:
             await startup.wait()
         while getattr(self.actor, "is_running", True):
             now = datetime.now()
+            if not self.runtime_enabled() or not self.configured_identities():
+                identities = []
+                wait = self.settings_reload_seconds
+                next_target = now + timedelta(seconds=wait)
+                self._record_root(
+                    miniapp_journey_last_error="",
+                    miniapp_journey_identities=[],
+                )
+                self._record_next_schedule(next_target, identities)
+                await asyncio.sleep(wait)
+                continue
             target = self._target_datetime(now, self.hour, self.minute)
             identities = self.identities()
             if now < target:

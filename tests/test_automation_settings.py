@@ -36,6 +36,12 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
         self.assertEqual(value["miniapp_fishing"]["start_time"], "")
+        self.assertEqual(value["version"], 11)
+        self.assertTrue(value["miniapp_journey"]["enabled"])
+        self.assertEqual(
+            value["miniapp_journey"]["participants"],
+            ["main|主魂", "main|无咎子", "waaiging|主魂"],
+        )
         self.assertTrue(value["miniapp_tianji_trial"]["enabled"])
         self.assertEqual(
             value["miniapp_tianji_trial"]["participants"],
@@ -146,6 +152,30 @@ class AutomationSettingsTests(unittest.TestCase):
             ["无咎子"],
         )
 
+    def test_save_updates_journey_participants_for_any_account(self):
+        value = settings.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            miniapp_journey_enabled=True,
+            miniapp_journey_participants=["sub|厚土", "xiaohao|素心子"],
+        )
+
+        self.assertEqual(
+            value["miniapp_journey"],
+            {
+                "enabled": True,
+                "participants": ["sub|厚土", "xiaohao|素心子"],
+            },
+        )
+        self.assertEqual(
+            settings.miniapp_journey_identities_for_account("sub", value),
+            ["厚土"],
+        )
+        self.assertEqual(
+            settings.miniapp_journey_identities_for_account("xiaohao", value),
+            ["素心子"],
+        )
+
     def test_save_rejects_invalid_tianxing_grind_target(self):
         with self.assertRaisesRegex(ValueError, "Tianxing Tianji grind target required"):
             settings.save_automation_settings(
@@ -231,6 +261,13 @@ class AutomationSettingsTests(unittest.TestCase):
                 mulan_support_mode="护阵",
                 miniapp_fishing_start_time="25:00",
             )
+        with self.assertRaisesRegex(ValueError, "Mini App journey participants required"):
+            settings.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                miniapp_journey_enabled=True,
+                miniapp_journey_participants=[],
+            )
 
     def test_dashboard_payload_exposes_all_accounts_and_modes(self):
         settings.save_automation_settings(
@@ -251,6 +288,12 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(payload["miniapp_fishing"]["rod_owner"], "auto")
         self.assertEqual(payload["miniapp_fishing"]["start_time"], "")
         self.assertEqual(len(payload["miniapp_fishing"]["accounts"]), 4)
+        self.assertTrue(payload["miniapp_journey"]["enabled"])
+        self.assertEqual(
+            payload["miniapp_journey"]["participants"],
+            ["main|主魂", "main|无咎子", "waaiging|主魂"],
+        )
+        self.assertEqual(len(payload["miniapp_journey"]["accounts"]), 4)
         self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
         self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
