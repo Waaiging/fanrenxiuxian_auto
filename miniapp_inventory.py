@@ -12,13 +12,15 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from automation_settings import canonical_automation_identity
+
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 INVENTORY_TYPES = ("法宝", "物品", "材料")
 INVENTORY_TYPE_ORDER = {name: index for index, name in enumerate(INVENTORY_TYPES)}
 INVENTORY_ACCOUNT_IDENTITIES = {
     "main": ("主魂", "无咎子", "缘生子", "素缘子"),
-    "sub": ("主魂", "厚土", "缘生子", "寻真子"),
+    "sub": ("主魂", "厚土", "竹和生", "寻真子"),
     "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
     "waaiging": ("主魂",),
 }
@@ -87,6 +89,8 @@ def write_inventory_request(
 ) -> dict[str, Any]:
     key = _account_key(account)
     target = str(identity or "").strip()
+    if target != "*":
+        target = canonical_automation_identity(key, target)
     if target != "*" and target not in INVENTORY_ACCOUNT_IDENTITIES[key]:
         raise ValueError("unknown_inventory_identity")
     request = {
@@ -127,6 +131,12 @@ def read_inventory_cache(account: Any, base_dir: str | None = None) -> dict[str,
     cache.setdefault("snapshots", {})
     if not isinstance(cache["snapshots"], dict):
         cache["snapshots"] = {}
+    if key == "sub" and "缘生子" in cache["snapshots"]:
+        cache["snapshots"].setdefault("竹和生", cache["snapshots"].pop("缘生子"))
+    for field in ("last_request", "request_progress"):
+        value = cache.get(field)
+        if isinstance(value, dict) and value.get("identity") not in {None, "*"}:
+            value["identity"] = canonical_automation_identity(key, value.get("identity"))
     return cache
 
 

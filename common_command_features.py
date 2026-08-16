@@ -405,6 +405,200 @@ class CommonCommandMixin:
                 return username.lower()
         return ""
 
+    def resolve_avatar_identity(self, identity):
+        """Resolve a stale avatar Dao name to its current name.
+
+        Long-running avatar loops retain their original function argument.  A
+        rebirth can therefore change the displayed Dao name while a loop still
+        holds the old one.  Keep a short persistent alias chain so those loops
+        route their next command to the current Dao name instead of emitting a
+        stale ``.切换`` command.
+        """
+        original = str(identity or "").strip()
+        if not original or original == "主魂":
+            return original or "主魂"
+        state = getattr(self, "state", {}) or {}
+        aliases = state.get("avatar_dao_name_aliases") if isinstance(state, dict) else None
+        if not isinstance(aliases, dict):
+            return original
+
+        current = original
+        seen = set()
+        while current not in seen:
+            seen.add(current)
+            mapped = str(aliases.get(current) or "").strip()
+            if not mapped or mapped == current:
+                break
+            current = mapped
+
+        known_avatars = set(getattr(self, "avatars", []) or [])
+        return current if current in known_avatars else original
+
+    def refresh_avatar_dao_name(self, identity, dao_name, player_id=None, persist=True):
+        """Migrate one avatar to its current Dao name using its stable player ID."""
+        dao_name = str(dao_name or "").strip()
+        if not dao_name or dao_name == "主魂":
+            return str(identity or "").strip()
+
+        player_key = str(player_id or "").strip()
+        old_name = ""
+        for mapping_name in ("_avatar_chat_ids", "avatar_identities"):
+            for mapped_player_id, mapped_name in (getattr(self, mapping_name, {}) or {}).items():
+                if player_key and str(mapped_player_id) == player_key:
+                    old_name = str(mapped_name or "").strip()
+                    break
+            if old_name:
+                break
+
+        state = getattr(self, "state", {}) or {}
+        avatar_states = state.get("avatars") if isinstance(state, dict) else {}
+        if not old_name and isinstance(avatar_states, dict) and player_key:
+            for candidate, candidate_state in avatar_states.items():
+                if str((candidate_state or {}).get("miniapp_player_id") or "") == player_key:
+                    old_name = str(candidate or "").strip()
+                    break
+
+        known_avatars = list(getattr(self, "avatars", []) or [])
+        requested = str(identity or "").strip()
+        if not old_name and requested in known_avatars:
+            old_name = requested
+        if old_name not in known_avatars:
+            return requested
+
+        if old_name == dao_name:
+            return old_name
+        if dao_name in known_avatars:
+            self.common_command_logger().warning(
+                "Ignored Dao name refresh for %s: %s is already assigned to another avatar.",
+                old_name,
+                dao_name,
+            )
+            return old_name
+
+        # ``playerId`` comes from the dwelling identity selection and remains
+        # stable through rebirth.  It is not the Telegram group/chat ID.
+        dao_names = state.setdefault("avatar_dao_names_by_player_id", {}) if isinstance(state, dict) else {}
+        if isinstance(state, dict) and not dao_names:
+            legacy_names = state.get("avatar_dao_names_by_tgid")
+            if isinstance(legacy_names, dict):
+                dao_names.update(legacy_names)
+        if player_key and isinstance(dao_names, dict):
+            dao_names[player_key] = dao_name
+
+        aliases = state.setdefault("avatar_dao_name_aliases", {}) if isinstance(state, dict) else {}
+        if isinstance(aliases, dict):
+            for legacy_name, current_name in tuple(aliases.items()):
+                if str(current_name or "").strip() == old_name:
+                    aliases[legacy_name] = dao_name
+            aliases[old_name] = dao_name
+            aliases.pop(dao_name, None)
+
+        self.avatars = [dao_name if name == old_name else name for name in known_avatars]
+        for mapping_name in ("_avatar_chat_ids", "avatar_identities", "avatar_usernames"):
+            mapping = getattr(self, mapping_name, None)
+            if isinstance(mapping, dict):
+                for key, value in tuple(mapping.items()):
+                    if value == old_name:
+                        mapping[key] = dao_name
+        for mapping_name in ("avatar_nicknames", "avatar_features"):
+            mapping = getattr(self, mapping_name, None)
+            if isinstance(mapping, dict) and old_name in mapping:
+                mapping[dao_name] = mapping.pop(old_name)
+
+        for mapping_name in ("identity_sect_names",):
+            mapping = getattr(self, mapping_name, None)
+            if isinstance(mapping, dict) and old_name in mapping:
+                mapping[dao_name] = mapping.pop(old_name)
+        for mapping_name in ("identity_sect_names",):
+            mapping = state.get(mapping_name) if isinstance(state, dict) else None
+            if isinstance(mapping, dict) and old_name in mapping:
+                mapping[dao_name] = mapping.pop(old_name)
+
+        if isinstance(avatar_states, dict) and old_name in avatar_states:
+            avatar_states[dao_name] = avatar_states.pop(old_name)
+        command_map = getattr(self, "command_avatar_map", None)
+        if isinstance(command_map, dict):
+            for key, value in tuple(command_map.items()):
+                if value == old_name:
+                    command_map[key] = dao_name
+        probe_commands = getattr(self, "actual_cooldown_probe_commands", None)
+        if isinstance(probe_commands, set):
+            self.actual_cooldown_probe_commands = {
+                (dao_name if command_identity == old_name else command_identity, command)
+                for command_identity, command in probe_commands
+            }
+
+        for attr in ("_current_identity", "_persisted_identity", "_manual_identity_label"):
+            if getattr(self, attr, None) == old_name:
+                setattr(self, attr, dao_name)
+        if isinstance(state, dict):
+            if state.get("current_identity") == old_name:
+                state["current_identity"] = dao_name
+            for key in (
+                "miniapp_route_identities",
+                "miniapp_star_farm_identities",
+                "miniapp_journey_identities",
+            ):
+                if isinstance(state.get(key), list):
+                    state[key] = [dao_name if name == old_name else name for name in state[key]]
+            if state.get("miniapp_route_last_identity") == old_name:
+                state["miniapp_route_last_identity"] = dao_name
+            history = state.setdefault("avatar_dao_name_history", [])
+            if isinstance(history, list):
+                history.append({
+                    "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "player_id": player_key,
+                    "old_name": old_name,
+                    "new_name": dao_name,
+                })
+                del history[:-50]
+
+        handler = getattr(self, "on_avatar_dao_name_changed", None)
+        if callable(handler):
+            handler(old_name, dao_name)
+        account_key = str(getattr(self, "account_key", "") or "").strip()
+        if account_key:
+            try:
+                from duel_features import refresh_duel_identity_name
+                refresh_duel_identity_name(account_key, old_name, dao_name)
+            except Exception:
+                self.common_command_logger().warning(
+                    "Failed to refresh duel identity after avatar Dao name change.",
+                    exc_info=True,
+                )
+        self.common_command_logger().warning(
+            "Avatar Dao name refreshed for player %s: %s -> %s.",
+            player_key or "unknown",
+            old_name,
+            dao_name,
+        )
+        if persist:
+            try:
+                self.save_state()
+            except Exception:
+                self.common_command_logger().warning("Failed to persist refreshed avatar Dao name.", exc_info=True)
+        return dao_name
+
+    def restore_avatar_dao_names(self):
+        """Restore Dao names persisted from prior Mini App dwelling snapshots."""
+        state = getattr(self, "state", {}) or {}
+        saved_names = state.get("avatar_dao_names_by_player_id") if isinstance(state, dict) else None
+        if not isinstance(saved_names, dict) and isinstance(state, dict):
+            saved_names = state.get("avatar_dao_names_by_tgid")
+        if not isinstance(saved_names, dict):
+            return 0
+        changed = 0
+        for player_id, dao_name in tuple(saved_names.items()):
+            before = list(getattr(self, "avatars", []) or [])
+            self.refresh_avatar_dao_name("", dao_name, player_id=player_id, persist=False)
+            changed += before != list(getattr(self, "avatars", []) or [])
+        if changed:
+            try:
+                self.save_state()
+            except Exception:
+                self.common_command_logger().warning("Failed to persist restored avatar Dao names.", exc_info=True)
+        return changed
+
     def formation_result_includes_avatar(self, text, avatar):
         username = self.avatar_username_for_identity(avatar)
         return bool(username and f"@{username}" in (text or "").lower())
@@ -1315,6 +1509,15 @@ class CommonCommandMixin:
             return False
         clean = self.clean_reward_text(text)
         if not clean:
+            return False
+        mentions = text_username_mentions(clean)
+        tracked_identity = tracked_command_identity_for_reply(self, msg) if msg is not None else ""
+        if (
+            mentions
+            and not tracked_identity
+            and not identity_from_single_username_mention(self, clean)
+            and not text_targets_current_account(self, msg, clean)
+        ):
             return False
 
         now = datetime.now()
@@ -3021,7 +3224,7 @@ class CommonCommandMixin:
 
     def avatar_timed_command_available(self, avatar, plan, action_name="", require_meditation_ready=False):
         """Shared precheck for avatar timed command loops."""
-        avatar = str(avatar or "").strip()
+        avatar = self.resolve_avatar_identity(avatar)
         log = self.common_command_logger()
         if not avatar or avatar not in getattr(self, "avatars", []):
             return False
@@ -3041,6 +3244,7 @@ class CommonCommandMixin:
 
     async def common_avatar_yuanying_out_check(self, avatar, require_meditation_ready=False):
         """Run one shared avatar .元婴出窍 check."""
+        avatar = self.resolve_avatar_identity(avatar)
         plan = self.yuanying_out_plan(avatar)
         if not self.avatar_timed_command_available(
             avatar,
@@ -3080,6 +3284,7 @@ class CommonCommandMixin:
 
     async def common_avatar_rift_search_check(self, avatar, cd_seconds, require_meditation_ready=False):
         """Run one shared avatar .探寻裂缝 check."""
+        avatar = self.resolve_avatar_identity(avatar)
         plan = self.rift_search_plan(avatar)
         if not self.avatar_timed_command_available(
             avatar,
@@ -3127,6 +3332,7 @@ class CommonCommandMixin:
 
     def avatar_yuanying_rift_wait_seconds(self, avatar):
         """Return the next wakeup for avatar yuanying/rift checks."""
+        avatar = self.resolve_avatar_identity(avatar)
         pause_left = self.identity_pause_seconds(avatar)
         if pause_left > 0:
             return max(60, min(int(pause_left), 600))
@@ -3165,6 +3371,7 @@ class CommonCommandMixin:
         log = self.common_command_logger()
         while getattr(self, "is_running", True):
             try:
+                avatar = self.resolve_avatar_identity(avatar)
                 await self.pause_event.wait()
                 if avatar not in getattr(self, "avatars", []):
                     log.warning(f"Avatar yuanying/rift loop disabled: unknown avatar [{avatar}].")

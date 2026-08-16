@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily Tianxing wild-experience automation through the Mini App journey tab."""
+"""Daily wild-experience automation through the Mini App journey tab."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]
 
 
 class MiniAppTianxingJourney:
-    """Use both daily journey attempts for Dashboard-selected Tianxing identities."""
+    """Use both daily journey attempts for Dashboard-selected identities."""
 
     def __init__(self, actor: Any, transport: Any, account: str, logger: Any) -> None:
         self.actor = actor
@@ -231,7 +231,7 @@ class MiniAppTianxingJourney:
         return miniapp_journey_identities_for_account(self.account)
 
     def identities(self, candidates: list[str] | None = None) -> list[str]:
-        """Return selected identities whose authoritative sect is Tianxing."""
+        """Return selected identities that are available in the Mini App."""
         allowed = self.configured_identities()
         candidate_set = set(candidates) if candidates is not None else None
         ids = getattr(self.transport, "identity_player_ids", {}) or {}
@@ -241,8 +241,7 @@ class MiniAppTianxingJourney:
                 continue
             if identity not in ids and identity.casefold() not in ids:
                 continue
-            if self._identity_sect(identity) == "天星宗":
-                result.append(identity)
+            result.append(identity)
         return result
 
     def _identity_pause_seconds(self, identity: str) -> int:
@@ -311,6 +310,7 @@ class MiniAppTianxingJourney:
         counter = await self._refresh_counter(identity, now)
         if not counter.get("present"):
             raise MiniAppBeastError("wild_experience_state_missing")
+        use_destiny_prefix = self._identity_sect(identity) == "天星宗"
         if counter["daily_remaining"] <= 0:
             self._record_counter(
                 identity,
@@ -345,34 +345,37 @@ class MiniAppTianxingJourney:
                 wait = max(5, remaining_seconds or self.retry_seconds)
                 return False, wait
 
-            ensure_destiny = getattr(
-                self.actor, "ensure_tianxing_destiny_for_action", None
-            )
-            if callable(ensure_destiny) and not await ensure_destiny(
-                identity, "exploration"
-            ):
-                self._record_error(identity, "tianxing_destiny_failed")
-                return False, self.retry_seconds
+            if use_destiny_prefix:
+                ensure_destiny = getattr(
+                    self.actor, "ensure_tianxing_destiny_for_action", None
+                )
+                if callable(ensure_destiny) and not await ensure_destiny(
+                    identity, "exploration"
+                ):
+                    self._record_error(identity, "tianxing_destiny_failed")
+                    return False, self.retry_seconds
 
-            combined = getattr(self.transport, "journey_with_destiny_prefix", None)
-            if callable(combined):
-                prefix, payload = await combined(
-                    identity,
-                    prefix_command=JOURNEY_PREFIX_COMMAND,
-                    mode=JOURNEY_MODE,
-                )
+                combined = getattr(self.transport, "journey_with_destiny_prefix", None)
+                if callable(combined):
+                    prefix, payload = await combined(
+                        identity,
+                        prefix_command=JOURNEY_PREFIX_COMMAND,
+                        mode=JOURNEY_MODE,
+                    )
+                else:
+                    prefix = await self.transport.command(JOURNEY_PREFIX_COMMAND, identity=identity)
+                    payload = None
+                if not command_result_ok(prefix.payload):
+                    detail = command_result_text(prefix.payload) or prefix.text or "改命探索前置失败"
+                    self._record_error(identity, "journey_destiny_prefix_failed", detail)
+                    self.log.error(
+                        "Mini App journey prefix failed for %s; deep action was blocked",
+                        identity,
+                    )
+                    return False, self.retry_seconds
+                if payload is None:
+                    payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE)
             else:
-                prefix = await self.transport.command(JOURNEY_PREFIX_COMMAND, identity=identity)
-                payload = None
-            if not command_result_ok(prefix.payload):
-                detail = command_result_text(prefix.payload) or prefix.text or "改命探索前置失败"
-                self._record_error(identity, "journey_destiny_prefix_failed", detail)
-                self.log.error(
-                    "Mini App journey prefix failed for %s; deep action was blocked",
-                    identity,
-                )
-                return False, self.retry_seconds
-            if payload is None:
                 payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE)
             if not command_result_ok(payload):
                 raise MiniAppBeastError("wild_experience_failed")
@@ -388,7 +391,7 @@ class MiniAppTianxingJourney:
                 miniapp_journey_last_time=action_time,
                 miniapp_journey_last_result=result_text,
                 miniapp_journey_last_error="",
-                miniapp_journey_last_prefix=JOURNEY_PREFIX_COMMAND,
+                miniapp_journey_last_prefix=(JOURNEY_PREFIX_COMMAND if use_destiny_prefix else ""),
                 miniapp_journey_last_mode=JOURNEY_MODE,
             )
             recorder = getattr(self.actor, "record_daily_reward_event", None)

@@ -71,7 +71,7 @@ DEFAULT_CONCUBINE_NAMES = {
     "sub": {
         "主魂": {"瑶光"},
         "厚土": {"霓裳"},
-        "缘生子": {"元瑶"},
+        "竹和生": {"元瑶"},
         "寻真子": {"若兰"},
     },
     "xiaohao": {
@@ -83,7 +83,7 @@ DEFAULT_CONCUBINE_NAMES = {
 }
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
-    "sub": {"厚土", "缘生子", "寻真子"},
+    "sub": {"厚土", "竹和生", "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
 

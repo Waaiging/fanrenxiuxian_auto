@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from miniapp_beast import MiniAppBeastError
+from common_command_features import CommonCommandMixin
 from miniapp_dwelling import (
     MiniAppCommandResponse,
     MiniAppDwellingTransport,
@@ -298,8 +299,57 @@ class MiniAppDwellingTests(unittest.TestCase):
         asyncio.run(actor.send_and_wait_feedback(".问道"))
 
         self.assertEqual(len(logger.warning_messages), 1)
-        self.assertIn("refresh the configured Mini App entry token", logger.warning_messages[0])
+        self.assertIn("automatic route recovery is pending", logger.warning_messages[0])
         self.assertIn("fixed entry token expired", logger.error_messages[0])
+
+    def test_router_recovers_after_transient_initialization_failure(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {}
+                self.avatars = []
+                self.is_running = True
+
+            async def send_and_wait_feedback(self, command, *args, **kwargs):
+                return f"group:{command}"
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = FakeLogger()
+        router = MiniAppCommandRouter(
+            actor,
+            "main",
+            logger=logger,
+            start_background_tasks=False,
+        )
+        initialize_forces = []
+
+        async def initialize(force=False):
+            initialize_forces.append(force)
+            if len(initialize_forces) == 1:
+                raise TimeoutError("temporary timeout")
+            router.transport.identity_player_ids = {"主魂": 100}
+
+        router.transport.initialize = initialize
+        router.transport.overview = AsyncMock(return_value={})
+
+        async def scenario():
+            self.assertFalse(await router.install())
+            self.assertTrue(router.enabled)
+            self.assertFalse(router._route_active)
+            with patch("miniapp_command_routing.asyncio.sleep", new=AsyncMock()):
+                await router.run_route_recovery_loop()
+
+        asyncio.run(scenario())
+
+        self.assertEqual(initialize_forces, [False, True])
+        self.assertTrue(router._route_active)
+        self.assertTrue(actor.state["miniapp_route_active"])
+        self.assertEqual(actor.state["miniapp_route_last_error"], "")
+        self.assertTrue(any("recovered" in row for row in logger.warning_messages))
 
     def test_soul_curse_chain_routes_to_group(self):
         class Actor:
@@ -349,6 +399,7 @@ class MiniAppDwellingTests(unittest.TestCase):
                     identity_pause_seconds=lambda identity: 0,
                 )
                 router = MiniAppCommandRouter(actor, account, logger=FakeLogger())
+                router._route_active = True
                 router.transport.identity_player_ids = {"主魂": 100, "缘生子": -200}
                 router.transport.command = AsyncMock(
                     return_value=MiniAppCommandResponse("完成", {"actionResult": {"ok": True}})
@@ -391,6 +442,7 @@ class MiniAppDwellingTests(unittest.TestCase):
                     identity_pause_seconds=lambda identity: 0,
                 )
                 router = MiniAppCommandRouter(actor, account, logger=FakeLogger())
+                router._route_active = True
                 router.transport.identity_player_ids = {"主魂": 100, "问心子": -200}
                 router.transport.command = AsyncMock(
                     return_value=MiniAppCommandResponse(
@@ -1193,6 +1245,103 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(actor.identity_sect_names["素心子"], "星宫")
         self.assertEqual(actor.state["identity_sect_names"]["素心子"], "星宫")
 
+    def test_snapshot_refreshes_avatar_dao_name_by_stable_player_id(self):
+        class Actor(CommonCommandMixin):
+            def __init__(self):
+                self.avatars = ["缘生子"]
+                self._avatar_chat_ids = {"-1003885521329": "缘生子"}
+                self.avatar_identities = {"-1003885521329": "缘生子"}
+                self.avatar_usernames = {"lvdoumiao": "缘生子"}
+                self.identity_sect_names = {"缘生子": "阴罗宗"}
+                self._current_identity = "缘生子"
+                self._persisted_identity = "缘生子"
+                self._manual_identity_label = "缘生子"
+                self.command_avatar_map = {101: "缘生子"}
+                self.state = {
+                    "current_identity": "缘生子",
+                    "identity_sect_names": {"缘生子": "阴罗宗"},
+                    "avatars": {
+                        "缘生子": {
+                            "marker": "keep",
+                            "miniapp_player_id": -1003885521329,
+                        }
+                    },
+                }
+                self.saved = 0
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = Actor()
+        payload = {
+            "snapshot": {"level": "overview"},
+            "account": {
+                "playerId": -1003885521329,
+                "daoName": "竹和生",
+                "profile": {"sectName": "阴罗宗"},
+            },
+        }
+
+        self.assertTrue(apply_dwelling_snapshot(actor, "缘生子", payload))
+        self.assertEqual(actor.avatars, ["竹和生"])
+        self.assertEqual(actor._avatar_chat_ids["-1003885521329"], "竹和生")
+        self.assertEqual(actor.avatar_identities["-1003885521329"], "竹和生")
+        self.assertEqual(actor.avatar_usernames["lvdoumiao"], "竹和生")
+        self.assertEqual(actor._current_identity, "竹和生")
+        self.assertEqual(actor.state["current_identity"], "竹和生")
+        self.assertEqual(actor.command_avatar_map[101], "竹和生")
+        self.assertEqual(actor.state["avatars"]["竹和生"]["marker"], "keep")
+        self.assertEqual(actor.state["avatars"]["竹和生"]["miniapp_dao_name"], "竹和生")
+        self.assertEqual(actor.identity_sect_names["竹和生"], "阴罗宗")
+        self.assertEqual(actor.state["avatar_dao_names_by_player_id"]["-1003885521329"], "竹和生")
+        self.assertEqual(actor.resolve_avatar_identity("缘生子"), "竹和生")
+        self.assertEqual(actor.state["avatar_dao_name_history"][-1]["old_name"], "缘生子")
+        self.assertGreater(actor.saved, 0)
+
+    def test_router_routes_stale_avatar_name_to_current_dao_name(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={"avatars": {"竹和生": {}}},
+            avatars=["竹和生"],
+            resolve_avatar_identity=lambda identity: "竹和生" if identity == "缘生子" else identity,
+            save_state=lambda: None,
+            identity_pause_seconds=lambda identity: 0,
+        )
+        router = MiniAppCommandRouter(actor, "sub", logger=FakeLogger())
+        router._route_active = True
+        router.transport.identity_player_ids = {"主魂": 100, "竹和生": -200}
+        router.transport.command = AsyncMock(
+            return_value=MiniAppCommandResponse("完成", {"actionResult": {"ok": True}})
+        )
+        router._maybe_refresh_auth = AsyncMock()
+
+        response = asyncio.run(router._route("缘生子", ".我的阴罗幡", AsyncMock(), (), {}))
+
+        self.assertEqual(response, "完成")
+        router.transport.command.assert_awaited_once_with(".我的阴罗幡", identity="竹和生")
+
+    def test_router_group_fallback_resolves_stale_avatar_name(self):
+        send_identity = AsyncMock(return_value="切换成功")
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["竹和生"],
+            resolve_avatar_identity=lambda identity: "竹和生" if identity == "缘生子" else identity,
+            send_and_wait_feedback_identity=send_identity,
+        )
+        router = MiniAppCommandRouter(actor, "sub", logger=FakeLogger())
+        router._orig_send_identity = send_identity
+
+        response = asyncio.run(router._send_identity("缘生子", ".切换 缘生子"))
+
+        self.assertEqual(response, "切换成功")
+        send_identity.assert_awaited_once_with("竹和生", ".切换 缘生子")
+
     def test_main_snapshot_updates_account_sect_and_parses_cultivation_text(self):
         actor = SimpleNamespace(
             state={"sect_name": "旧宗门", "identity_sect_names": {"主魂": "旧宗门"}},
@@ -1322,11 +1471,11 @@ class MiniAppDwellingTests(unittest.TestCase):
             client=object(),
             config={"miniapp_beast": {"entry_url": ENTRY}},
             state={},
-            avatars=["厚土", "缘生子", "寻真子"],
+            avatars=["厚土", "竹和生", "寻真子"],
             identity_sect_names={
                 "主魂": "元婴宗",
                 "厚土": "星宫",
-                "缘生子": "阴罗宗",
+                "竹和生": "阴罗宗",
                 "寻真子": "落云宗",
             },
         )
@@ -1334,7 +1483,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         sub_router.transport.identity_player_ids = {
             "主魂": 200,
             "厚土": -201,
-            "缘生子": -202,
+            "竹和生": -202,
             "寻真子": -203,
         }
 

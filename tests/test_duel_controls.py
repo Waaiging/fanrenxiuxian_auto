@@ -583,6 +583,26 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(actor.calls[0][0], ".切换 厚土")
         self.assertFalse(actor.calls[0][1]["delete_after"])
 
+    def test_rebirth_refreshes_duel_identity_and_pending_participant_key(self):
+        identity_item = next(
+            item for item in duel_features.DUEL_IDENTITIES["sub"]
+            if item["identity"] == "竹和生"
+        )
+        queue_item = next(
+            item for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]
+            if item["account"] == "sub" and item["identity"] == "竹和生"
+        )
+        duel_features.set_duel_participant_control(True, "sub|竹和生", "Weeguu")
+        try:
+            self.assertTrue(duel_features.refresh_duel_identity_name("sub", "竹和生", "新缘子"))
+            self.assertEqual(duel_features.duel_identity_for_username("lvdoumiao")["identity"], "新缘子")
+            state = duel_features.load_duel_state()
+            self.assertIn("sub|新缘子", state["queues"][ROTATION]["participants"])
+            self.assertNotIn("sub|竹和生", state["queues"][ROTATION]["participants"])
+        finally:
+            identity_item["identity"] = "竹和生"
+            queue_item["identity"] = "竹和生"
+
     def test_avatar_duel_replies_to_switch_message_with_plain_command(self):
         class Actor(duel_features.DuelMixin):
             is_running = True

@@ -1627,7 +1627,7 @@
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">Mini App · 游历·野外历练（深入）</div>
-                    <div class="automation-card-hint">每天为所选且实际宗门为天星宗的身份补齐 2 次；每次深入前先执行 `.改命 探索`。</div>
+                    <div class="automation-card-hint">每天为所选身份补齐 2 次；天星宗先执行推命、改命，其他宗门直接深入历练。</div>
                     <div class="automation-mode-options">
                         <label class="automation-option">
                             <input id="miniapp-journey-enabled" type="checkbox" onchange="syncMiniappJourneyControls(); markAutomationSettingsDirty()">
@@ -4316,7 +4316,7 @@
                                 `).join('')}
                             </div>
                         </div>
-                    `).join('') || '<div class="record-empty">暂无可配置的天星宗身份。</div>';
+                    `).join('') || '<div class="record-empty">暂无可配置的身份。</div>';
                 }
                 syncTianxingControls();
                 const abyssPowerMinControl = document.getElementById('miniapp-beast-abyss-power-min');

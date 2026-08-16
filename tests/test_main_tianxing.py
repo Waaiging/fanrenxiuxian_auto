@@ -155,8 +155,8 @@ class MainTianxingTests(unittest.TestCase):
             sent.append(command)
             if command == ".推命 闭关":
                 return "你已有一道关于【探索】的推命尚未应验，还需等待 5 分钟。"
-            if command == ".服用 合气丹1":
-                return "成功服用合气丹1"
+            if command == ".服用 合气丹":
+                return "成功服用合气丹"
             return "闭关成功，获得修为，需要调息 10 分钟"
 
         actor.send_and_wait_feedback = send
@@ -176,7 +176,7 @@ class MainTianxingTests(unittest.TestCase):
             [
                 ".推命 闭关",
                 ".闭关修炼",
-                ".服用 合气丹1",
+                ".服用 合气丹",
                 ".推命 闭关",
                 ".闭关修炼",
             ],
@@ -214,8 +214,8 @@ class MainTianxingTests(unittest.TestCase):
                 if prefix_count == 1:
                     return "推命命中闭关，执行成功。"
                 return "推命尚在冷却，还需等待 5 分钟。"
-            if command == ".服用 合气丹1":
-                return "成功服用合气丹1"
+            if command == ".服用 合气丹":
+                return "成功服用合气丹"
             return "闭关成功，获得修为，需要调息 10 分钟"
 
         actor.send_and_wait_feedback = send
@@ -232,7 +232,7 @@ class MainTianxingTests(unittest.TestCase):
 
         self.assertEqual(
             sent,
-            [".推命 闭关", ".闭关修炼", ".服用 合气丹1", ".推命 闭关"],
+            [".推命 闭关", ".闭关修炼", ".服用 合气丹", ".推命 闭关"],
         )
         self.assertEqual(actor.state["tianxing_fate_success_count"], 2)
         self.assertIn("合气丹后推命闭关未确认", actor.state["tianxing_fate_last_result"])
@@ -255,7 +255,7 @@ class MainTianxingTests(unittest.TestCase):
             return {
                 ".查看闭关": "你正在深度闭关，预计还需 5小时 即可功成圆满。",
                 ".强行出关": "你已强行出关，当前深度闭关已经结束。",
-                ".服用 合气丹1": "成功服用合气丹1。",
+                ".服用 合气丹": "成功服用合气丹。",
             }[command]
 
         actor.send_and_wait_feedback = send
@@ -265,7 +265,7 @@ class MainTianxingTests(unittest.TestCase):
         ), patch("intelligent_cultivator.asyncio.sleep", new=AsyncMock()):
             self.assertTrue(asyncio.run(actor._prepare_tianxing_fate_mode()))
 
-        self.assertEqual(sent, [".查看闭关", ".强行出关", ".服用 合气丹1"])
+        self.assertEqual(sent, [".查看闭关", ".强行出关", ".服用 合气丹"])
         self.assertFalse(actor.state["in_deep_meditation"])
         self.assertEqual(actor.state["deep_meditation_end_time"], "")
         self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "fate")

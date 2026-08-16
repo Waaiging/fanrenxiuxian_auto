@@ -41,7 +41,7 @@ class SubHuanglongEntryTests(unittest.TestCase):
             {
                 "主魂": "元婴宗",
                 "厚土": "星宫",
-                "缘生子": "阴罗宗",
+                "竹和生": "阴罗宗",
                 "寻真子": "落云宗",
             },
         )

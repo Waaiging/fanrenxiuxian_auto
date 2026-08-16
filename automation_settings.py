@@ -20,9 +20,11 @@ ACCOUNT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
+SUB_YINLUO_IDENTITY = "竹和生"
+LEGACY_SUB_IDENTITY_ALIASES = {"缘生子": SUB_YINLUO_IDENTITY}
 ACCOUNT_IDENTITIES = {
     "main": ("主魂", "无咎子", "缘生子", "素缘子"),
-    "sub": ("主魂", "厚土", "缘生子", "寻真子"),
+    "sub": ("主魂", "厚土", SUB_YINLUO_IDENTITY, "寻真子"),
     "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
     "waaiging": ("主魂",),
 }
@@ -95,8 +97,17 @@ DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
 )
 
 
+def canonical_automation_identity(account: Any, identity: Any) -> str:
+    account_key = str(account or "").strip()
+    identity_name = str(identity or "").strip()
+    if account_key == "sub":
+        return LEGACY_SUB_IDENTITY_ALIASES.get(identity_name, identity_name)
+    return identity_name
+
+
 def automation_participant_key(account: Any, identity: Any) -> str:
-    return f"{str(account or '').strip()}|{str(identity or '').strip()}"
+    account_key = str(account or "").strip()
+    return f"{account_key}|{canonical_automation_identity(account_key, identity)}"
 
 
 def _valid_participant(account: str, identity: str) -> bool:
@@ -112,6 +123,7 @@ def _normalize_participant(value: Any) -> tuple[str, str] | None:
         if "|" not in text:
             return None
         account, identity = (part.strip() for part in text.split("|", 1))
+    identity = canonical_automation_identity(account, identity)
     if not _valid_participant(account, identity):
         return None
     return account, identity

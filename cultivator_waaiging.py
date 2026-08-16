@@ -21,6 +21,8 @@ SECT_JOIN_UNKNOWN_RETRY_SECONDS = 60 * 60
 TIANXING_PREFIX_DELAY_SECONDS = 3
 TIANXING_DESTINY_RETRY_SECONDS = 30 * 60
 TIANXING_DESTINY_CHOICES = ("贪狼", "太阴", "紫微", "天府")
+WAAIGING_MEDITATION_MODE = "deep"
+WAAIGING_MEDITATION_SWITCH_ID = "waaiging:deep"
 
 
 class WaaigingCultivator(core.Cultivator):
@@ -62,6 +64,13 @@ class WaaigingCultivator(core.Cultivator):
         self.state.setdefault("last_destiny_time", "")
         self.state.setdefault("last_destiny_choice", "")
         self.state.setdefault("next_tianxing_destiny_retry_time", "")
+        meditation_scope_changed = False
+        if self.state.get("tianxing_meditation_prepared_mode") != WAAIGING_MEDITATION_MODE:
+            self.state["tianxing_meditation_prepared_mode"] = WAAIGING_MEDITATION_MODE
+            meditation_scope_changed = True
+        if self.state.get("tianxing_meditation_prepared_switch_id") != WAAIGING_MEDITATION_SWITCH_ID:
+            self.state["tianxing_meditation_prepared_switch_id"] = WAAIGING_MEDITATION_SWITCH_ID
+            meditation_scope_changed = True
 
         # The account is controlled by the main process when the game group is
         # private. It must not start another copy of that controller itself.
@@ -91,7 +100,7 @@ class WaaigingCultivator(core.Cultivator):
         if self.state.get("small_world_calamity_pending"):
             self.state["small_world_calamity_pending"] = False
             disabled_state_changed = True
-        if disabled_state_changed or avatars_removed:
+        if disabled_state_changed or avatars_removed or meditation_scope_changed:
             self.save_state()
 
         # Match the existing restricted xiaohao send protection exactly.
@@ -110,6 +119,13 @@ class WaaigingCultivator(core.Cultivator):
         sender_id = getattr(msg, "sender_id", None)
         my_id = getattr(getattr(self, "my_info", None), "id", None)
         return "主魂" if sender_id and my_id and int(sender_id) == int(my_id) else None
+
+    def tianxing_meditation_mode(self):
+        """Keep the @Waaiging account independent from the main-account setting."""
+        return WAAIGING_MEDITATION_MODE
+
+    def _tianxing_meditation_switch_id(self, mode):
+        return WAAIGING_MEDITATION_SWITCH_ID
 
     def account_sect_name(self):
         if not self.state.get("sect_join_confirmed"):

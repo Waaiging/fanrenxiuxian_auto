@@ -2,8 +2,8 @@
 【封魂咒 / 解咒委托自动化】
 
 主号、副号和小号主魂负责南宫婉、封魂咒推演、护持神魂和发布解咒委托；
-各自配置的阴罗宗缘生子负责接取委托并执行辨认、借幡、剥离三步。
-小号发布的委托仍由副号缘生子接取，因此副号缘生子会为本号与小号分别保存状态，
+各自配置的阴罗宗身份负责接取委托并执行辨认、借幡、剥离三步。
+小号发布的委托仍由副号竹和生接取，因此竹和生会为副号与小号分别保存状态，
 并通过共享 JSON 接收小号委托 ID。
 """
 import asyncio
@@ -15,6 +15,7 @@ import random
 import re
 from datetime import datetime, timedelta
 
+from automation_settings import SUB_YINLUO_IDENTITY
 from common_command_features import add_seconds_str, dt_to_str, is_future, now_str, seconds_until
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY
 
@@ -50,7 +51,7 @@ SOUL_CURSE_PUBLISHERS = {
         "owner_account": "sub",
         "target_username": "@Gamling33",
         "assistant_account": "sub",
-        "assistant_identity": YINLUO_IDENTITY,
+        "assistant_identity": SUB_YINLUO_IDENTITY,
         "visit_minute": 3,
         "shared": False,
     },
@@ -58,7 +59,7 @@ SOUL_CURSE_PUBLISHERS = {
         "owner_account": "xiaohao",
         "target_username": "@TitanCreeper",
         "assistant_account": "sub",
-        "assistant_identity": YINLUO_IDENTITY,
+        "assistant_identity": SUB_YINLUO_IDENTITY,
         "visit_minute": 6,
         "shared": True,
     },
@@ -73,7 +74,7 @@ SOUL_CURSE_ASSISTANTS = {
     "sub": {
         "owner_account": "sub",
         "target_username": "@Gamling33",
-        "assistant_identity": YINLUO_IDENTITY,
+        "assistant_identity": SUB_YINLUO_IDENTITY,
         "shared": False,
     },
 }
@@ -82,7 +83,7 @@ SOUL_CURSE_SHARED_ASSISTANTS = {
     "sub": ({
         "owner_account": "xiaohao",
         "target_username": "@TitanCreeper",
-        "assistant_identity": YINLUO_IDENTITY,
+        "assistant_identity": SUB_YINLUO_IDENTITY,
         "shared": True,
     },),
 }

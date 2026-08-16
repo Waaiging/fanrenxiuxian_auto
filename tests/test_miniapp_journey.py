@@ -215,7 +215,7 @@ class MiniAppJourneyTests(unittest.TestCase):
         self.assertIn("OUT [Mini App | 无咎子]:\n游历·野外历练（深入）", combined)
         self.assertIn("IN [Mini App | 无咎子]:\n游历·野外历练（深入） -> 深入历练完成", combined)
 
-    def test_only_explicit_tianxing_identities_are_selected(self):
+    def test_only_explicit_dashboard_identities_are_selected(self):
         main_actor = FakeActor(
             "main",
             avatars=["无咎子", "其他天星"],
@@ -232,7 +232,7 @@ class MiniAppJourneyTests(unittest.TestCase):
             "waaiging",
             FakeLogger(),
         )
-        sub_actor = FakeActor("sub", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        sub_actor = FakeActor("sub", avatars=["无咎子"], sects={"无咎子": "星宫"})
         sub_runner = MiniAppTianxingJourney(sub_actor, SequenceTransport(), "sub", FakeLogger())
 
         self.assertEqual(main_runner.identities(), ["主魂", "无咎子"])
@@ -241,8 +241,8 @@ class MiniAppJourneyTests(unittest.TestCase):
         self.assertTrue(sub_runner.supported)
         self.assertTrue(sub_runner.enabled)
 
-    def test_dashboard_selection_can_enable_sub_or_xiaohao_identity(self):
-        sub_actor = FakeActor("sub", avatars=["厚土"], sects={"厚土": "天星宗"})
+    def test_dashboard_selection_can_enable_non_tianxing_identity(self):
+        sub_actor = FakeActor("sub", avatars=["厚土"], sects={"厚土": "星宫"})
         sub_transport = SequenceTransport()
         sub_transport.identity_player_ids["厚土"] = -301
         sub_runner = MiniAppTianxingJourney(
@@ -258,10 +258,37 @@ class MiniAppJourneyTests(unittest.TestCase):
         ):
             self.assertEqual(sub_runner.identities(), ["厚土"])
 
+    def test_non_tianxing_identity_skips_destiny_prefix(self):
+        actor = FakeActor("sub", avatars=["厚土"], sects={"厚土": "星宫"})
+        transport = SequenceTransport(count=0)
+        transport.identity_player_ids["厚土"] = -301
+        runner = MiniAppTianxingJourney(actor, transport, "sub", FakeLogger())
+
+        with patch(
+            "miniapp_journey.miniapp_journey_identities_for_account",
+            return_value=["厚土"],
+        ):
+            complete, retry = asyncio.run(
+                runner.run_daily_once(datetime(2026, 7, 29, 7, 10, 1))
+            )
+
+        self.assertTrue(complete)
+        self.assertEqual(retry, 0)
+        self.assertEqual(
+            [call for call in transport.calls if call[0] in {"command", "journey"}],
+            [
+                ("journey", "厚土", "deep"),
+                ("journey", "厚土", "deep"),
+            ],
+        )
+        state = actor.state["avatars"]["厚土"]
+        self.assertEqual(state["miniapp_journey_last_prefix"], "")
+
     def test_two_attempts_each_have_a_confirmed_destiny_prefix(self):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
         transport = SequenceTransport(count=0)
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+        runner.configured_identities = lambda: ["无咎子"]
 
         complete, retry = asyncio.run(
             runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
@@ -288,6 +315,7 @@ class MiniAppJourneyTests(unittest.TestCase):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
         transport = SequenceTransport(count=1)
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+        runner.configured_identities = lambda: ["无咎子"]
 
         complete, _ = asyncio.run(
             runner.run_daily_once(datetime(2026, 7, 29, 8, 0, 1))
@@ -303,6 +331,7 @@ class MiniAppJourneyTests(unittest.TestCase):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
         transport = SequenceTransport(prefix_ok=False)
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+        runner.configured_identities = lambda: ["无咎子"]
 
         complete, retry = asyncio.run(
             runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
@@ -361,7 +390,7 @@ class MiniAppJourneyTests(unittest.TestCase):
             if row["command"] == "miniapp:journey-deep"
         )
         self.assertEqual(waaiging_row["execution_channel"], "miniapp")
-        self.assertIn("每次先执行 .改命 探索", waaiging_row["detail"])
+        self.assertIn("天星宗先推命/改命", waaiging_row["detail"])
 
     def test_dashboard_adds_journey_to_newly_selected_sub_identity(self):
         state = {

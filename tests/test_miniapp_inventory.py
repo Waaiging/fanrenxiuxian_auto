@@ -192,6 +192,14 @@ class MiniAppInventoryTests(unittest.TestCase):
             self.assertEqual(dashboard["summary"]["snapshot_count"], 2)
             self.assertEqual(dashboard["summary"]["match_count"], 2)
             self.assertEqual(dashboard["summary"]["match_quantity"], 2400)
+            self.assertIn(
+                "竹和生",
+                {row["identity"] for row in dashboard["search_results"]},
+            )
+            self.assertNotIn(
+                "缘生子",
+                {row["identity"] for row in dashboard["search_results"]},
+            )
             self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
             total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
             self.assertEqual(total_lingshi["quantity"], 2400)
@@ -215,6 +223,11 @@ class MiniAppInventoryTests(unittest.TestCase):
             self.assertEqual(removed["items"], ["回春丹"])
             self.assertTrue(response["success"])
             self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "厚土")
+            migrated_request = write_inventory_request(
+                "sub", "缘生子", requested_by="tester", base_dir=tmpdir
+            )
+            self.assertEqual(migrated_request["identity"], "竹和生")
+            self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "竹和生")
 
 
 if __name__ == "__main__":

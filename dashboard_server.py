@@ -41,6 +41,7 @@ from automation_settings import (
     MINIAPP_FISHING_CHUMS,
     MINIAPP_FISHING_PONDS,
     MULAN_SUPPORT_MODES,
+    SUB_YINLUO_IDENTITY,
     automation_dashboard_payload,
     miniapp_beast_abyss_settings,
     miniapp_fishing_settings,
@@ -221,10 +222,10 @@ ACCOUNT_SHORT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
-ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "寻真子"]
+ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "竹和生", "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
-    "sub": {"厚土", "缘生子", "寻真子"},
+    "sub": {"厚土", SUB_YINLUO_IDENTITY, "寻真子"},
     "xiaohao": {"素心子", "缘生子"},
 }
 SUB_STAR_PALACE_AVATARS = {"厚土"}
@@ -240,7 +241,7 @@ ACCOUNT_PROFILE_USERNAMES = {
     "sub": {
         "主魂": {"gamling33"},
         "厚土": {"crayonxxin"},
-        "缘生子": {"lvdoumiao"},
+        SUB_YINLUO_IDENTITY: {"lvdoumiao"},
         "寻真子": {"ding303"},
     },
     "xiaohao": {
@@ -1260,7 +1261,7 @@ def small_world_calamity_command(state):
 
 
 def miniapp_tianxing_journey_command(state):
-    """Display the server-backed twice-daily Tianxing journey automation."""
+    """Display the server-backed twice-daily journey automation."""
     today = datetime.now().strftime("%Y-%m-%d")
     count = max(0, int(state.get("miniapp_journey_daily_count") or 0))
     limit = max(1, int(state.get("miniapp_journey_daily_limit") or 2))
@@ -1269,7 +1270,11 @@ def miniapp_tianxing_journey_command(state):
     result = clean_custom_text(state.get("miniapp_journey_last_result") or "", 120)
     next_time = str(state.get("miniapp_journey_next_run_time") or "").strip()
     target = parse_state_time(next_time)
-    detail_parts = [f"今日 {count}/{limit}", "每次先执行 .改命 探索", "固定选择深入"]
+    detail_parts = [
+        f"今日 {count}/{limit}",
+        "天星宗先推命/改命，其他宗门直接历练",
+        "固定选择深入",
+    ]
     if result:
         detail_parts.append(result)
     if error:
@@ -2460,9 +2465,6 @@ def main_soul_panel(account, state):
             for command, label in (
                 (".放生 <灵兽>", "放生灵兽"),
                 (".灵兽出战 <灵兽>", "灵兽出战"),
-                (".灵兽巡边 <灵兽> <斥候/护粮/袭营>", "灵兽巡边"),
-                (".巡边状态", "巡边状态"),
-                (".巡边归来", "巡边归来"),
             ):
                 rows.append(command_row(
                     command,
@@ -2473,6 +2475,17 @@ def main_soul_panel(account, state):
                     group="灵兽",
                     actionable=False,
                 ))
+            rows.extend([
+                time_command(
+                    state,
+                    "next_beast_border_patrol_time",
+                    ".灵兽巡边 <灵兽> <斥候/护粮/袭营>",
+                    "灵兽巡边",
+                    group="灵兽",
+                ),
+                manual_command(".巡边状态", "巡边状态", group="灵兽"),
+                manual_command(".巡边归来", "巡边归来", group="灵兽"),
+            ])
         else:
             rows.extend([
                 command_row(
@@ -2595,15 +2608,15 @@ def lingxiao_avatar_commands(name, state, root_state=None):
 def star_avatar_commands(name, state):
     rows = []
     rows.extend(global_sync_commands())
-    if name == YINLUO_IDENTITY:
+    if name == SUB_YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state))
-    if name == "缘生子":
+    if name == SUB_YINLUO_IDENTITY:
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
-    rows.extend(meditation_commands(state, include_force_exit=(name != "缘生子")))
+    rows.extend(meditation_commands(state, include_force_exit=(name != SUB_YINLUO_IDENTITY)))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([

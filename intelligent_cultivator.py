@@ -57,7 +57,7 @@ STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
 STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 miniapp，脚本不再发送
 FORMATION_TARGET_INITIATORS = {
     "crayonxxin": "副号-厚土",
-    "lvdoumiao": "副号-缘生子",
+    "lvdoumiao": "副号-竹和生",
     "ding303": "副号-寻真子",
 }
 FORMATION_ASSIST_AVATARS = ["素缘子"]
@@ -632,6 +632,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         # ------ 6. 状态持久化 ------
         self.state_file = STATE_FILE
         self.state = self.load_state()             # 从文件加载持久化状态
+        self.restore_avatar_dao_names()
         self.initialize_main_beast_runtime()
         sect_state_changed = False
         if self.state.get("sect_name") != self.sect_name:
@@ -3373,7 +3374,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             await asyncio.sleep(3)
 
             pill = await self.send_and_wait_feedback(
-                ".服用 合气丹1", timeout=90, max_retries=0
+                ".服用 合气丹", timeout=90, max_retries=0
             )
             pill_text = self.response_text(pill).replace("**", "")
             shortage = any(
@@ -3397,7 +3398,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 )
             elif not pill_success:
                 log.warning(
-                    "Tianxing fate mode: .服用 合气丹1 was not confirmed: %s",
+                    "Tianxing fate mode: .服用 合气丹 was not confirmed: %s",
                     pill_text[:240],
                 )
                 return False
@@ -3534,7 +3535,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     config = tianxing_settings()
                     if config.get("use_heqi_pill") and count % 2 == 0:
                         pill = await self.send_and_wait_feedback(
-                            ".服用 合气丹1", timeout=90, max_retries=0
+                            ".服用 合气丹", timeout=90, max_retries=0
                         )
                         pill_text = self.response_text(pill).replace("**", "")
                         shortage = any(
@@ -3973,16 +3974,19 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             self.save_state()
 
     def get_avatar_state(self, avatar):
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         return self.state["avatars"].get(avatar, {})
 
     def set_avatar_state(self, avatar, key, value):
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar][key] = value
             self.save_state()
 
     def update_avatar_states(self, avatar, values):
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar not in self.state["avatars"]:
             return
@@ -4892,20 +4896,20 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         attribution_reliable = bool(recent_identity)
         # Explicit bot-side avatar markers are reliable even when the message does not @ the account.
         if not avatar:
-            if "[Avatar: 无咎子]" in text: avatar = "无咎子"; attribution_reliable = True
-            elif "[Avatar: 缘生子]" in text: avatar = "缘生子"; attribution_reliable = True
-            elif "[Avatar: 素缘子]" in text: avatar = "素缘子"; attribution_reliable = True
-            elif "神念重归主魂肉身" in text or "当前操控：主魂" in text: avatar = "主魂"; attribution_reliable = True
+            avatar = next((name for name in self.avatars if f"[Avatar: {name}]" in text), None)
+            if avatar:
+                attribution_reliable = True
+            elif "神念重归主魂肉身" in text or "当前操控：主魂" in text:
+                avatar = "主魂"
+                attribution_reliable = True
         if not self.text_targets_self(msg, text) and not recent_identity and not attribution_reliable:
             return
         # 优先根据 sender_id 判断发送者（化身有独立 chat_id）
         sender_id = str(getattr(msg, "sender_id", ""))
-        if not avatar and sender_id == "-1004240160265":
-            avatar = "无咎子"; attribution_reliable = True
-        elif not avatar and sender_id == "-1003809391782":
-            avatar = "缘生子"; attribution_reliable = True
-        elif not avatar and sender_id == "-1003999815554":
-            avatar = "素缘子"; attribution_reliable = True
+        avatar_chat_ids = getattr(self, "_avatar_chat_ids", {}) or {}
+        if not avatar and sender_id in avatar_chat_ids:
+            avatar = avatar_chat_ids[sender_id]
+            attribution_reliable = True
 
         # 机器人被动结算经常只写 @用户名，不一定带 [Avatar: ...] 或 reply_to。
         if not avatar:
@@ -5087,6 +5091,23 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             return None
         return self.avatar_identities.get(str(msg.sender_id))
 
+    def on_avatar_dao_name_changed(self, old_name, new_name):
+        global DESTINY_AVATAR, SPIRIT_TREE_AVATAR
+        for configured in (
+            STAR_GAZING_ROTATING_AVATARS,
+            FORMATION_ASSIST_AVATARS,
+        ):
+            configured[:] = [new_name if name == old_name else name for name in configured]
+        if old_name in STAR_ATTRACTION_AVATARS:
+            STAR_ATTRACTION_AVATARS.remove(old_name)
+            STAR_ATTRACTION_AVATARS.add(new_name)
+        if DESTINY_AVATAR == old_name:
+            DESTINY_AVATAR = new_name
+        if SPIRIT_TREE_AVATAR == old_name:
+            SPIRIT_TREE_AVATAR = new_name
+        if getattr(self, "spirit_tree_avatar", "") == old_name:
+            self.spirit_tree_avatar = new_name
+
     def _state_impending_command_wait(self, state, identity=""):
         """Return seconds until the next command-worthy timestamp for an identity, or -1."""
         if not isinstance(state, dict):
@@ -5207,6 +5228,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
 
     async def send_and_wait_feedback_identity(self, identity, message, timeout=45, max_retries=2, **kwargs):
         """带身份感知的指令发送：先切换到目标化身，再发送指令"""
+        identity = self.resolve_avatar_identity(identity)
         if is_retired_auto_command(message, actor=self, identity=identity):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None

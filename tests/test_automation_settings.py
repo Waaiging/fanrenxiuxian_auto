@@ -81,7 +81,7 @@ class AutomationSettingsTests(unittest.TestCase):
             miniapp_fishing_pond="hantan",
             miniapp_fishing_bait="spirit_worm",
             miniapp_fishing_chum="grass",
-            miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土", "xiaohao|缘生子", "waaiging|主魂"],
+            miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土", "sub|竹和生", "xiaohao|缘生子", "waaiging|主魂"],
             miniapp_fishing_rod="金雷竹钓竿",
             miniapp_fishing_rod_owner="xiaohao|缘生子",
             miniapp_fishing_start_time="06:30",
@@ -91,7 +91,7 @@ class AutomationSettingsTests(unittest.TestCase):
             value["miniapp_fishing"],
             {
                 "enabled": False,
-                "participants": ["main|无咎子", "sub|主魂", "sub|厚土", "xiaohao|缘生子", "waaiging|主魂"],
+                "participants": ["main|无咎子", "sub|主魂", "sub|厚土", "sub|竹和生", "xiaohao|缘生子", "waaiging|主魂"],
                 "rod": "金雷竹钓竿",
                 "rod_owner": "xiaohao|缘生子",
                 "pond": "hantan",
@@ -99,6 +99,42 @@ class AutomationSettingsTests(unittest.TestCase):
                 "chum": "grass",
                 "start_time": "06:30",
             },
+        )
+
+    def test_legacy_sub_dao_name_is_migrated_without_changing_other_accounts(self):
+        value = settings.normalize_automation_settings({
+            "world_boss": {"participants": ["main|缘生子", "sub|缘生子"]},
+            "miniapp_fishing": {
+                "enabled": True,
+                "participants": ["sub|缘生子", "xiaohao|缘生子"],
+                "rod_owner": "sub|缘生子",
+            },
+            "miniapp_tianji_trial": {
+                "enabled": True,
+                "participants": ["sub|缘生子", "main|缘生子"],
+            },
+            "miniapp_journey": {
+                "enabled": True,
+                "participants": ["sub|缘生子", "main|无咎子"],
+            },
+        })
+
+        self.assertEqual(
+            value["world_boss"]["participants"],
+            ["main|缘生子", "sub|竹和生"],
+        )
+        self.assertEqual(
+            value["miniapp_fishing"]["participants"],
+            ["sub|竹和生", "xiaohao|缘生子"],
+        )
+        self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|竹和生")
+        self.assertEqual(
+            value["miniapp_tianji_trial"]["participants"],
+            ["sub|竹和生", "main|缘生子"],
+        )
+        self.assertEqual(
+            value["miniapp_journey"]["participants"],
+            ["sub|竹和生", "main|无咎子"],
         )
 
     def test_save_updates_tianxing_round_settings(self):
@@ -288,14 +324,20 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(payload["miniapp_fishing"]["rod_owner"], "auto")
         self.assertEqual(payload["miniapp_fishing"]["start_time"], "")
         self.assertEqual(len(payload["miniapp_fishing"]["accounts"]), 4)
+        sub_fishing = next(
+            item for item in payload["miniapp_fishing"]["accounts"] if item["key"] == "sub"
+        )
+        sub_names = [item["name"] for item in sub_fishing["identities"]]
+        self.assertIn("竹和生", sub_names)
+        self.assertNotIn("缘生子", sub_names)
+        self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
+        self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
         self.assertTrue(payload["miniapp_journey"]["enabled"])
         self.assertEqual(
             payload["miniapp_journey"]["participants"],
             ["main|主魂", "main|无咎子", "waaiging|主魂"],
         )
         self.assertEqual(len(payload["miniapp_journey"]["accounts"]), 4)
-        self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
-        self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
         self.assertEqual(len(payload["tianxing"]["tianji_accounts"]), 2)

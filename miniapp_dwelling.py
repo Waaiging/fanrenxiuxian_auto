@@ -1668,9 +1668,14 @@ def _sync_identity_sect(actor: Any, identity: str, sect_name: str) -> None:
 
 def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) -> bool:
     """Copy authoritative Mini App meditation/identity state into legacy state."""
-    container = identity_state(actor, identity)
     payload = _snapshot_mapping(payload)
     account = _snapshot_mapping(payload.get("account"))
+    player_id = _snapshot_int(account.get("playerId"))
+    dao_name = _snapshot_authoritative_text(account.get("daoName"))
+    refresh_dao_name = getattr(actor, "refresh_avatar_dao_name", None)
+    if identity != "主魂" and dao_name and callable(refresh_dao_name):
+        identity = refresh_dao_name(identity, dao_name, player_id=player_id) or identity
+    container = identity_state(actor, identity)
     profile = _snapshot_mapping(account.get("profile"))
     cultivation = _snapshot_mapping(profile.get("cultivation"))
     dwelling = _snapshot_mapping(payload.get("dwelling"))
@@ -1682,10 +1687,8 @@ def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) 
     container["miniapp_last_sync_time"] = now_text
     container["miniapp_last_error"] = ""
 
-    player_id = _snapshot_int(account.get("playerId"))
     if player_id:
         container["miniapp_player_id"] = player_id
-    dao_name = _snapshot_text(account.get("daoName"))
     if dao_name:
         container["miniapp_dao_name"] = dao_name
 

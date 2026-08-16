@@ -44,6 +44,7 @@ from miniapp_journey import MiniAppTianxingJourney
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_AUTH_REFRESH_SECONDS = 6 * 3600
 DEFAULT_PROFILE_REFRESH_SECONDS = 30 * 60
+DEFAULT_ROUTE_RECOVERY_SECONDS = 60
 DEFAULT_STAR_FARM_RETRY_SECONDS = 5 * 60
 STAR_FARM_WAKE_GRACE_SECONDS = 5
 DEFAULT_STAR_FARM_TARGET = "天雷星"
@@ -86,6 +87,10 @@ class MiniAppCommandRouter:
         self.profile_refresh_seconds = max(
             300,
             int(settings.get("profile_refresh_seconds") or DEFAULT_PROFILE_REFRESH_SECONDS),
+        )
+        self.route_recovery_seconds = max(
+            15,
+            int(settings.get("route_recovery_seconds") or DEFAULT_ROUTE_RECOVERY_SECONDS),
         )
         self.star_farm_enabled = bool(settings.get("star_farm_enabled", True))
         self.star_farm_retry_seconds = max(
@@ -146,6 +151,9 @@ class MiniAppCommandRouter:
         self._last_auth_refresh = datetime.min
         self._last_auth_refresh_failure = datetime.min
         self._route_blocked_log_times: dict[tuple[str, str], datetime] = {}
+        self._route_active = False
+        self._background_tasks_started = False
+        self._recovery_task: asyncio.Task[Any] | None = None
         self._profile_task: asyncio.Task[Any] | None = None
         self._star_farm_tasks: list[asyncio.Task[Any]] = []
         self._daily_activity_tasks: list[asyncio.Task[Any]] = []
@@ -171,7 +179,7 @@ class MiniAppCommandRouter:
         self._route_blocked_log_times[key] = now
         self.log.warning(
             "Mini App-only command blocked while route is unavailable [%s] %s; "
-            "refresh the configured Mini App entry token",
+            "automatic route recovery is pending",
             identity,
             command,
         )
@@ -192,25 +200,40 @@ class MiniAppCommandRouter:
                 self.account,
             )
             return False
+        if await self._initialize_route():
+            return True
+        self._start_recovery_task()
+        return False
+
+    async def _initialize_route(self, *, recovery: bool = False) -> bool:
         try:
-            await self.transport.initialize()
+            await self.transport.initialize(force=recovery)
             self._last_auth_refresh = datetime.now()
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
-            self.enabled = False
+            self._route_active = False
             self._record(miniapp_route_active=False, miniapp_route_last_error=code)
             if code == "dwelling_token_expired":
                 self.log.error(
                     "Mini App command routing setup failed: fixed entry token expired; "
-                    "supported commands are blocked until the configured entry URL is refreshed"
+                    "supported commands are blocked while automatic recovery retries"
                 )
             else:
-                self.log.error(
-                    "Mini App command routing setup failed (%s); supported commands are blocked",
+                log_method = self.log.warning if recovery else self.log.error
+                log_method(
+                    "Mini App command routing %s failed (%s); retrying in %ss",
+                    "recovery" if recovery else "setup",
                     code,
-                    exc_info=True,
+                    self.route_recovery_seconds,
+                    exc_info=not recovery,
                 )
             return False
+        await self._activate_route()
+        return True
+
+    async def _activate_route(self) -> None:
+        self._route_active = True
+        self._sync_avatar_dao_names_from_transport()
         known = sorted(
             name
             for name in ["主魂", *(getattr(self.actor, "avatars", []) or [])]
@@ -232,7 +255,8 @@ class MiniAppCommandRouter:
             miniapp_star_farm_identities=star_identities,
             miniapp_journey_identities=journey_identities,
         )
-        if self.start_background_tasks:
+        if self.start_background_tasks and not self._background_tasks_started:
+            self._background_tasks_started = True
             self._profile_task = asyncio.create_task(
                 self.run_profile_sync_loop(),
                 name=f"miniapp_{self.account}_profiles",
@@ -303,7 +327,28 @@ class MiniAppCommandRouter:
             self.account,
             known,
         )
-        return True
+
+    def _start_recovery_task(self) -> None:
+        if not self.start_background_tasks or not self.enabled:
+            return
+        if self._recovery_task is not None and not self._recovery_task.done():
+            return
+        self._recovery_task = asyncio.create_task(
+            self.run_route_recovery_loop(),
+            name=f"miniapp_{self.account}_route_recovery",
+        )
+
+    async def run_route_recovery_loop(self) -> None:
+        while getattr(self.actor, "is_running", True) and not self._route_active:
+            await asyncio.sleep(self.route_recovery_seconds)
+            if not getattr(self.actor, "is_running", True):
+                return
+            if await self._initialize_route(recovery=True):
+                self.log.warning(
+                    "[%s] Mini App command routing recovered after an earlier setup failure",
+                    self.account,
+                )
+                return
 
     def routable_identities(self) -> list[str]:
         return [
@@ -312,7 +357,26 @@ class MiniAppCommandRouter:
             if self._identity_routable(name)
         ]
 
+    def _sync_avatar_dao_names_from_transport(self) -> int:
+        """Use dwelling player IDs to refresh avatar Dao names after rebirth."""
+        refresh = getattr(self.actor, "refresh_avatar_dao_name", None)
+        if not callable(refresh):
+            return 0
+        changed = 0
+        for choice in getattr(self.transport, "identity_choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            dao_name = str(choice.get("daoName") or "").strip()
+            player_id = choice.get("playerId")
+            if not dao_name or player_id is None:
+                continue
+            before = list(getattr(self.actor, "avatars", []) or [])
+            refresh("", dao_name, player_id=player_id)
+            changed += before != list(getattr(self.actor, "avatars", []) or [])
+        return changed
+
     async def sync_all_profiles(self, identities: list[str] | None = None) -> int:
+        self._sync_avatar_dao_names_from_transport()
         synced = 0
         for identity in identities if identities is not None else self.routable_identities():
             try:
@@ -563,34 +627,50 @@ class MiniAppCommandRouter:
             await asyncio.sleep(max(60, int(wait)))
 
     def _identity_routable(self, identity: str) -> bool:
-        key = str(identity or "主魂").strip() or "主魂"
+        key = self._resolve_identity(identity)
         ids = self.transport.identity_player_ids
         return key in ids or key.casefold() in ids
+
+    def _resolve_identity(self, identity: str) -> str:
+        resolver = getattr(self.actor, "resolve_avatar_identity", None)
+        if callable(resolver):
+            return str(resolver(identity) or identity or "主魂").strip() or "主魂"
+        return str(identity or "主魂").strip() or "主魂"
 
     async def _maybe_refresh_auth(self) -> None:
         if (datetime.now() - self._last_auth_refresh).total_seconds() < self.auth_refresh_seconds:
             return
         try:
             await self.transport.initialize(force=True)
+            self._sync_avatar_dao_names_from_transport()
             self._last_auth_refresh = datetime.now()
         except Exception as exc:
             # Do not retry a failed refresh for every command.  In particular,
             # a fixed entry token can expire independently of Telegram initData;
             # reusing it cannot recover and only creates an error storm.
             self._last_auth_refresh = datetime.now()
+            code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             if (datetime.now() - self._last_auth_refresh_failure).total_seconds() >= ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS:
                 self._last_auth_refresh_failure = self._last_auth_refresh
-                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 self.log.warning(
                     "Mini App routing auth refresh failed (%s); retrying later",
                     code,
                     exc_info=code != "dwelling_token_expired",
                 )
+            if code == "dwelling_token_expired":
+                self._route_active = False
+                self._record(
+                    miniapp_route_active=False,
+                    miniapp_route_last_error=code,
+                )
+                self._start_recovery_task()
 
     async def _send_main(self, message: str, *args: Any, **kwargs: Any) -> Any:
         return await self._route("主魂", message, self._orig_send, args, kwargs)
 
     async def _send_identity(self, identity: str, message: str, *args: Any, **kwargs: Any) -> Any:
+        identity = self._resolve_identity(identity)
+
         async def fallback(msg: str, *a: Any, **kw: Any) -> Any:
             return await self._orig_send_identity(identity, msg, *a, **kw)
 
@@ -604,6 +684,7 @@ class MiniAppCommandRouter:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
+        identity = self._resolve_identity(identity)
         command = normalize_miniapp_command(message)
         if not miniapp_command_allowed(command):
             return await fallback(message, *args, **kwargs)
@@ -618,7 +699,7 @@ class MiniAppCommandRouter:
                 command,
             )
             return None
-        if not self.enabled:
+        if not self.enabled or not self._route_active:
             self._record(
                 miniapp_route_last_error="route_unavailable",
                 miniapp_route_last_error_at=_now_text(),
@@ -659,6 +740,9 @@ class MiniAppCommandRouter:
                 )
                 return None
         await self._maybe_refresh_auth()
+        if not self._route_active:
+            self._log_route_blocked(identity, command)
+            return None
         try:
             response = await self.transport.command(command, identity=identity)
             apply_dwelling_snapshot(self.actor, identity, response.payload)
@@ -682,6 +766,10 @@ class MiniAppCommandRouter:
                 command,
                 code,
             )
+            if code == "dwelling_token_expired":
+                self._route_active = False
+                self._record(miniapp_route_active=False)
+                self._start_recovery_task()
             return None
         if kwargs.get("return_response_msg") or kwargs.get("return_msg"):
             return response

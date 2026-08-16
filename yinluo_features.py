@@ -1,7 +1,7 @@
 """
-【阴罗宗功能模块 —— 缘生子的阴罗幡自动化】
+【阴罗宗功能模块 —— 阴罗宗化身的阴罗幡自动化】
 
-主号和副号都有名为“缘生子”的阴罗宗身份，相关指令集中放在这里，
+主号缘生子和副号竹和生共用这套阴罗宗指令，相关逻辑集中放在这里，
 避免两个脚本改漏。主要流程：
   1. `.我的阴罗幡` 同步槽位、幡灵、煞气等状态。
   2. `.化功为煞 10000` 失败/冷却时必须解析回复时间，不能盲目重试。
@@ -324,6 +324,9 @@ def parse_yinluo_appease(text):
 
 
 class YinluoMixin:
+    def yinluo_identity_name(self):
+        return str(getattr(self, "yinluo_identity", "") or YINLUO_IDENTITY).strip()
+
     def get_yinluo_state(self, identity=YINLUO_IDENTITY):
         target = self.state if identity == "主魂" else self.get_avatar_state(identity)
         state = target.get("yinluo")
@@ -905,8 +908,10 @@ class YinluoMixin:
                 state["post_summon_stage"] = "sync"
                 self.save_state()
 
-    async def yinluo_tick(self, identity=YINLUO_IDENTITY):
-        if identity != YINLUO_IDENTITY:
+    async def yinluo_tick(self, identity=None):
+        expected_identity = self.yinluo_identity_name()
+        identity = str(identity or expected_identity).strip()
+        if identity != expected_identity:
             return 3600
         if self.identity_pause_seconds(identity) > 0:
             return 60
@@ -979,7 +984,8 @@ class YinluoMixin:
         wait = scheduled_wait if scheduled_wait is not None else self.yinluo_wait_from_state(identity, YINLUO_SYNC_SECONDS)
         return max(30, min(int(wait), 3600))
 
-    async def run_yinluo_loop(self, identity=YINLUO_IDENTITY, initial_delay=0):
+    async def run_yinluo_loop(self, identity=None, initial_delay=0):
+        identity = str(identity or self.yinluo_identity_name()).strip()
         await self.startup_done.wait()
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)

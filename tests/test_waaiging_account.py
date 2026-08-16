@@ -17,6 +17,7 @@ class WaaigingAccountTests(unittest.TestCase):
             actor.mc = {}
             actor.state = {}
             actor.xiaohao_visibility_control_enabled = True
+            actor.save_state = lambda: None
 
         with patch.object(intelligent_cultivator, "configure_runtime_files"), patch.object(
             intelligent_cultivator.Cultivator,
@@ -38,6 +39,14 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertFalse(actor.enable_small_world)
         self.assertTrue(actor.telegram_write_restriction_retry_enabled)
         self.assertEqual(actor.account_sect_name(), "")
+        with patch(
+            "intelligent_cultivator.tianxing_settings",
+            return_value={"meditation_mode": "fate", "meditation_switch_id": "main-switch"},
+        ):
+            self.assertEqual(actor.tianxing_meditation_mode(), "deep")
+            self.assertEqual(actor._tianxing_meditation_switch_id("deep"), "waaiging:deep")
+        self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "deep")
+        self.assertEqual(actor.state["tianxing_meditation_prepared_switch_id"], "waaiging:deep")
 
     def test_stale_avatars_are_removed_and_persisted(self):
         saved = []

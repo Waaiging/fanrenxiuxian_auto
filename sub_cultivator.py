@@ -94,7 +94,10 @@ from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_d
 
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
-from yinluo_features import YinluoMixin, YINLUO_IDENTITY
+from automation_settings import SUB_YINLUO_IDENTITY
+from yinluo_features import YinluoMixin
+
+YINLUO_IDENTITY = SUB_YINLUO_IDENTITY
 
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 
@@ -245,7 +248,7 @@ YUANYING_RETREAT_COMMAND = ".元婴闭关"              # 副号主魂改用元�
 
 # -- 探寻裂缝 --
 RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小时
-AVATAR_YUANYING_RIFT_AVATARS = {"缘生子"}           # 启用化身元婴出窍/探寻裂缝
+AVATAR_YUANYING_RIFT_AVATARS = {SUB_YINLUO_IDENTITY}  # 启用化身元婴出窍/探寻裂缝
 
 # -- 抚摸法宝 --
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"      # 抚摸本命法宝指令
@@ -464,9 +467,10 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         self.identity_sect_names = {
             "主魂": "元婴宗",
             "厚土": "星宫",
-            "缘生子": "阴罗宗",
+            SUB_YINLUO_IDENTITY: "阴罗宗",
             "寻真子": "落云宗",
         }
+        self.yinluo_identity = SUB_YINLUO_IDENTITY
         self.main_star_palace_enabled = False
         self.main_formation_enabled = False
         self.main_concubine_enabled = True
@@ -483,7 +487,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         self.pause_event.set()    # 默认运行中
         self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # 止/启管理员名单（只有这些人发"止"才生效）
-        self.pause_admins = set(self.mc.get("pause_admins", [8615886738, -1004237793558, -1003885521329, -1003340352216]))  # 主魂(Gamling33)+厚土+缘生子+寻真子
+        self.pause_admins = set(self.mc.get("pause_admins", [8615886738, -1004237793558, -1003885521329, -1003340352216]))  # 主魂(Gamling33)+厚土+竹和生+寻真子
         self.pause_notify_user_id = 8219248252
         self.my_info = None       # 自身账号信息（启动后填充）
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]  # 要监控的用户
@@ -525,10 +529,10 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             self.pause_event.clear()
             log.info("Startup: is_paused=True, entering paused state.")
         # ---- 身外化身系统（炼气境，只做闭关修炼） ----
-        self.avatars = ["厚土", "缘生子", "寻真子"]
+        self.avatars = ["厚土", SUB_YINLUO_IDENTITY, "寻真子"]
         self.avatar_usernames = {
             "crayonxxin": "厚土",
-            "lvdoumiao": "缘生子",
+            "lvdoumiao": SUB_YINLUO_IDENTITY,
             "ding303": "寻真子",
         }
         self.identity_usernames = {
@@ -537,15 +541,16 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         self.avatar_identities = {
             # sender_id → 化身名称映射（Telegram 频道 ID）
             "-1004237793558": "厚土",
-            "-1003885521329": "缘生子",
+            "-1003885521329": SUB_YINLUO_IDENTITY,
             "-1003340352216": "寻真子",
         }
         # 化身 chat_id 映射（供 log_utils.log_manual_outgoing_if_needed 使用）
         self._avatar_chat_ids = {
             "-1004237793558": "厚土",
-            "-1003885521329": "缘生子",
+            "-1003885521329": SUB_YINLUO_IDENTITY,
             "-1003340352216": "寻真子",
         }
+        self.restore_avatar_dao_names()
         self.avatar_send_lock = asyncio.Lock()     # 化身操作串行锁
         # A persisted identity can be stale when the Telegram session survives
         # a process restart.  Require a fresh switch confirmation first.
@@ -701,7 +706,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         # 昵称默认值（首次创建或昵称为空时写入）
         nicknames = {
             "厚土": "新之助",
-            "缘生子": "南绿豆",
+            SUB_YINLUO_IDENTITY: "南绿豆",
             "寻真子": "定定",
         }
         changed = False
@@ -724,11 +729,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
 
     def get_avatar_state(self, avatar):
         """获取指定化身的状态字典"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         return self.state["avatars"].get(avatar, {})
 
     def set_avatar_state(self, avatar, key, value):
         """设置指定化身的状态并保存"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar][key] = value
@@ -736,6 +743,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
 
     def update_avatar_states(self, avatar, values):
         """批量更新化身状态，避免连续写入 state 文件。"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar].update(values)
@@ -868,15 +876,13 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         # 优先根据 sender_id 判断发送者（化身有独立 chat_id）
         sender_id = str(getattr(msg, "sender_id", ""))
         target_str = str(self.target_chat_id).replace("-100", "")
+        avatar_chat_ids = getattr(self, "_avatar_chat_ids", {}) or {}
         if not avatar and target_str in sender_id:
             avatar = "主魂"
             attribution_reliable = True
-        elif not avatar and "4237793558" in sender_id:
-            avatar = "厚土"; attribution_reliable = True
-        elif not avatar and "3885521329" in sender_id:
-            avatar = "缘生子"; attribution_reliable = True
-        elif not avatar and "3340352216" in sender_id:
-            avatar = "寻真子"; attribution_reliable = True
+        elif not avatar and sender_id in avatar_chat_ids:
+            avatar = avatar_chat_ids[sender_id]
+            attribution_reliable = True
 
         # 退化到 reply_to 查找
         if not avatar:
@@ -888,10 +894,12 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                     attribution_reliable = True
         # 退化到文本特征
         if not avatar:
-            if "[Avatar: 厚土]" in text: avatar = "厚土"; attribution_reliable = True
-            elif "[Avatar: 缘生子]" in text: avatar = "缘生子"; attribution_reliable = True
-            elif "[Avatar: 寻真子]" in text: avatar = "寻真子"; attribution_reliable = True
-            elif "神念重归主魂肉身" in text or "当前操控：主魂" in text: avatar = "主魂"; attribution_reliable = True
+            avatar = next((name for name in self.avatars if f"[Avatar: {name}]" in text), None)
+            if avatar:
+                attribution_reliable = True
+            elif "神念重归主魂肉身" in text or "当前操控：主魂" in text:
+                avatar = "主魂"
+                attribution_reliable = True
         # 最后 fallback: current_identity（不可靠）
         if not avatar:
             avatar = self.current_identity
@@ -1042,6 +1050,22 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             return None  # 不返回 "主魂"，让调用方 fallback 到 current_identity
         sid = str(msg.sender_id)
         return self.avatar_identities.get(sid)
+
+    def on_avatar_dao_name_changed(self, old_name, new_name):
+        global YINLUO_IDENTITY
+        for configured in (STAR_GAZING_ROTATING_AVATARS,):
+            configured[:] = [new_name if name == old_name else name for name in configured]
+        for configured in (
+            STAR_ATTRACTION_AVATARS,
+            AVATAR_FORMATION_AVATARS,
+            AVATAR_YUANYING_RIFT_AVATARS,
+        ):
+            if old_name in configured:
+                configured.remove(old_name)
+                configured.add(new_name)
+        if YINLUO_IDENTITY == old_name:
+            YINLUO_IDENTITY = new_name
+            self.yinluo_identity = new_name
 
     def _state_impending_command_wait(self, state, identity=""):
         """Return seconds until the next command-worthy timestamp for an identity, or -1."""
@@ -1576,6 +1600,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         带身份感知的指令发送：先切换到目标化身，再发送指令。
         使用 avatar_send_lock 确保同一时间只有一个化身在操作。
         """
+        identity = self.resolve_avatar_identity(identity)
         if is_retired_auto_command(message, actor=self, identity=identity):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
@@ -3997,6 +4022,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             await asyncio.sleep(initial_delay)
 
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 await self.maybe_run_avatar_star_cycle(avatar)
                 wait_sec = self.next_avatar_star_wait_seconds(avatar)

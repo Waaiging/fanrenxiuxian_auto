@@ -156,11 +156,12 @@ STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
 STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 miniapp，脚本不再发送
 FORMATION_TARGET_INITIATORS = {
     "crayonxxin": "副号-厚土",
-    "lvdoumiao": "副号-缘生子",
+    "lvdoumiao": "副号-竹和生",
     "ding303": "副号-寻真子",
 }
 FORMATION_ASSIST_AVATARS = ["素心子"]
 TAIYI_GUIDE_AVATAR = "缘生子"
+CLOUD_STAIRS_AVATAR = "问心子"
 TAIYI_GUIDE_COMMAND = ".引道 水"
 TAIYI_GUIDE_CD_SECONDS = 12 * 3600
 TAIYI_GUIDE_RETRY_SECONDS = 10 * 60
@@ -437,6 +438,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
         self.state_file = STATE_FILE
         self.state = self.load_state()
+        self.restore_avatar_dao_names()
         # startup: restore paused state
         if self.state.get("is_paused", False):
             self.pause_event.clear()
@@ -462,10 +464,26 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if target_str in sender_id:
             return "主魂"
         elif "4240160265" in sender_id: return "无咎子"
-        elif "3996748766" in sender_id: return "缘生子"
-        elif "3843934428" in sender_id: return "素心子"
-        elif "3658665113" in sender_id: return "问心子"
+        elif "3996748766" in sender_id: return self._avatar_chat_ids.get("-1003996748766")
+        elif "3843934428" in sender_id: return self._avatar_chat_ids.get("-1003843934428")
+        elif "3658665113" in sender_id: return self._avatar_chat_ids.get("-1003658665113")
         return None
+
+    def on_avatar_dao_name_changed(self, old_name, new_name):
+        global TAIYI_GUIDE_AVATAR, CLOUD_STAIRS_AVATAR
+        for configured in (
+            STAR_GAZING_ROTATING_AVATARS,
+            FORMATION_ASSIST_AVATARS,
+        ):
+            configured[:] = [new_name if name == old_name else name for name in configured]
+        for configured in (STAR_ATTRACTION_AVATARS, AVATAR_YUANYING_RIFT_AVATARS):
+            if old_name in configured:
+                configured.remove(old_name)
+                configured.add(new_name)
+        if TAIYI_GUIDE_AVATAR == old_name:
+            TAIYI_GUIDE_AVATAR = new_name
+        if CLOUD_STAIRS_AVATAR == old_name:
+            CLOUD_STAIRS_AVATAR = new_name
 
     @property
     def current_identity(self):
@@ -726,11 +744,13 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     def get_avatar_state(self, avatar):
         """获取指定分身的状态字典"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         return self.state["avatars"].get(avatar, {})
 
     def set_avatar_state(self, avatar, key, value):
         """设置指定分身的状态并保存"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar][key] = value
@@ -738,6 +758,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     def update_avatar_states(self, avatar, values):
         """批量更新分身状态，避免连续写入 state 文件。"""
+        avatar = self.resolve_avatar_identity(avatar)
         self.ensure_avatar_states()
         if avatar in self.state["avatars"]:
             self.state["avatars"][avatar].update(values)
@@ -847,15 +868,13 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         chat_id = str(msg.chat_id)
         sender_id = str(getattr(msg, "sender_id", ""))
         target_str = str(self.target_chat_id).replace("-100", "")
+        avatar_chat_ids = getattr(self, "_avatar_chat_ids", {}) or {}
         if not avatar and target_str in sender_id:
             avatar = "主魂"
             attribution_reliable = True
-        elif not avatar and "3996748766" in sender_id:
-            avatar = "缘生子"; attribution_reliable = True
-        elif not avatar and "3843934428" in sender_id:
-            avatar = "素心子"; attribution_reliable = True
-        elif not avatar and "3658665113" in sender_id:
-            avatar = "问心子"; attribution_reliable = True
+        elif not avatar and sender_id in avatar_chat_ids:
+            avatar = avatar_chat_ids[sender_id]
+            attribution_reliable = True
         elif not avatar and "4240160265" in sender_id:
             avatar = "无咎子"; attribution_reliable = True
         
@@ -1727,6 +1746,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         """
         带身份感知的物理串行发送管线。
         """
+        identity = self.resolve_avatar_identity(identity)
         if is_retired_auto_command(message, actor=self, identity=identity):
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
@@ -6732,6 +6752,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             await asyncio.sleep(initial_delay)
 
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 pause_left = self.identity_pause_seconds(avatar)
                 if pause_left > 0:
@@ -7683,7 +7704,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
             if avatar == TAIYI_GUIDE_AVATAR:
                 self.create_scheduler_task(f"avatar_taiyi_guide_{avatar}", lambda avatar=avatar: self.run_avatar_taiyi_guide_loop(avatar, initial_delay=0))
-            if avatar == "问心子":
+            if avatar == CLOUD_STAIRS_AVATAR:
                 self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")
 

@@ -161,6 +161,23 @@ class RestrictedMiniAppWorker:
     def identities(self) -> list[str]:
         return ["主魂", *(getattr(self.actor, "avatars", []) or [])]
 
+    def _sync_avatar_dao_names_from_transport(self) -> int:
+        refresh = getattr(self.actor, "refresh_avatar_dao_name", None)
+        if not callable(refresh):
+            return 0
+        changed = 0
+        for choice in getattr(self.transport, "identity_choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            dao_name = str(choice.get("daoName") or "").strip()
+            player_id = choice.get("playerId")
+            if not dao_name or player_id is None:
+                continue
+            before = list(getattr(self.actor, "avatars", []) or [])
+            refresh("", dao_name, player_id=player_id)
+            changed += before != list(getattr(self.actor, "avatars", []) or [])
+        return changed
+
     def _save(self) -> None:
         self.actor.save_state()
 
@@ -203,6 +220,7 @@ class RestrictedMiniAppWorker:
             )
             return
         await self.transport.initialize()
+        self._sync_avatar_dao_names_from_transport()
         self._last_auth_refresh = datetime.now()
         missing = [name for name in self.identities() if name not in self.transport.identity_player_ids]
         if missing:
@@ -296,6 +314,9 @@ class RestrictedMiniAppWorker:
         return await self._send(identity, message, **kwargs)
 
     async def _send(self, identity: str, message: str, **kwargs: Any) -> Any:
+        resolver = getattr(self.actor, "resolve_avatar_identity", None)
+        if callable(resolver):
+            identity = str(resolver(identity) or identity or "主魂").strip() or "主魂"
         command = normalize_miniapp_command(message)
         if not miniapp_command_allowed(command):
             self.log.warning(
@@ -410,6 +431,7 @@ class RestrictedMiniAppWorker:
         return True
 
     async def sync_all_details(self) -> None:
+        self._sync_avatar_dao_names_from_transport()
         synced = 0
         for identity in self.identities():
             try:
@@ -434,6 +456,7 @@ class RestrictedMiniAppWorker:
                 continue
             try:
                 await self.transport.initialize(force=True)
+                self._sync_avatar_dao_names_from_transport()
                 self._last_auth_refresh = datetime.now()
                 self._record_worker_state(
                     restricted_miniapp_last_auth_refresh=now_str(),

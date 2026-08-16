@@ -69,7 +69,7 @@ DUEL_IDENTITIES = {
     "sub": (
         {"identity": "主魂", "username": "Gamling33"},
         {"identity": "厚土", "username": "crayonxxin"},
-        {"identity": "缘生子", "username": "Lvdoumiao"},
+        {"identity": "竹和生", "username": "Lvdoumiao"},
         {"identity": "寻真子", "username": "ding303"},
     ),
     "xiaohao": (
@@ -178,6 +178,63 @@ def duel_identity_options():
                 "label": f"{config['account_name']} · {config['identity']} · @{config['username']}",
             })
     return rows
+
+
+def refresh_duel_identity_name(account, old_identity, new_identity):
+    """Update a reborn avatar's Dao name in duel routing and pending plans."""
+    account = str(account or "").strip().lower()
+    old_identity = str(old_identity or "").strip()
+    new_identity = str(new_identity or "").strip()
+    if not account or not old_identity or not new_identity or old_identity == new_identity:
+        return False
+
+    changed = False
+    for item in DUEL_IDENTITIES.get(account, ()):
+        if item.get("identity") == old_identity:
+            item["identity"] = new_identity
+            changed = True
+    for queue in DUEL_QUEUES.values():
+        for participant in queue.get("participants", ()):
+            if participant.get("account") == account and participant.get("identity") == old_identity:
+                participant["identity"] = new_identity
+                changed = True
+    if not changed:
+        return False
+
+    old_key = duel_participant_key(account, old_identity)
+    new_key = duel_participant_key(account, new_identity)
+
+    def update_plan_references(value):
+        if isinstance(value, list):
+            for item in value:
+                update_plan_references(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("account") == account and value.get("identity") == old_identity:
+            value["identity"] = new_identity
+        if value.get("target_account") == account and value.get("target_identity") == old_identity:
+            value["target_identity"] = new_identity
+        if value.get("initiator_account") == account and value.get("initiator_identity") == old_identity:
+            value["initiator_identity"] = new_identity
+        if value.get("owner") == account and value.get("target_identity") == old_identity:
+            value["target_identity"] = new_identity
+        if value.get("participant_key") == old_key:
+            value["participant_key"] = new_key
+        for key, child in tuple(value.items()):
+            if key == old_key:
+                value[new_key] = value.pop(key)
+                child = value[new_key]
+            update_plan_references(child)
+
+    with duel_state_lock():
+        data = _read_duel_state_unlocked()
+        if isinstance(data, dict):
+            update_plan_references(data)
+            data = _ensure_duel_state_shape(data)
+            data["updated_at"] = duel_time()
+            _atomic_write_json(DUEL_STATE_FILE, data)
+    return True
 
 
 def normalize_duel_target(value, fallback=""):

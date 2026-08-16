@@ -76,7 +76,7 @@ RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY = {
         ".安置侍妾",
         ".我的侍妾",
     ),
-    ("sub", "缘生子"): (
+    ("sub", "竹和生"): (
         ".强行出关",
     ),
     ("sub", "寻真子"): (
