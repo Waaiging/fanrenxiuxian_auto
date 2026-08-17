@@ -12,10 +12,14 @@ class AutomationSettingsTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.path = Path(self.tempdir.name) / "automation_settings.json"
+        self.sub_state_path = Path(self.tempdir.name) / "state_sub.json"
         self.file_patch = patch.object(settings, "AUTOMATION_SETTINGS_FILE", self.path)
+        self.sub_state_patch = patch.object(settings, "SUB_STATE_FILE", self.sub_state_path)
         self.file_patch.start()
+        self.sub_state_patch.start()
 
     def tearDown(self):
+        self.sub_state_patch.stop()
         self.file_patch.stop()
         self.tempdir.cleanup()
 
@@ -136,6 +140,38 @@ class AutomationSettingsTests(unittest.TestCase):
             value["miniapp_journey"]["participants"],
             ["sub|竹和生", "main|无咎子"],
         )
+
+    def test_reborn_sub_dao_name_migrates_saved_participants_and_dashboard_options(self):
+        self.sub_state_path.write_text(json.dumps({
+            "avatar_dao_names_by_player_id": {"-1003885521329": "锋脉子"},
+            "avatar_dao_name_aliases": {"缘生子": "锋脉子", "竹和生": "锋脉子"},
+            "identity_sect_names": {"锋脉子": "阴罗宗"},
+        }, ensure_ascii=False), encoding="utf-8")
+
+        value = settings.normalize_automation_settings({
+            "world_boss": {"participants": ["sub|竹和生"]},
+            "miniapp_fishing": {
+                "enabled": True,
+                "participants": ["sub|竹和生"],
+                "rod_owner": "sub|竹和生",
+            },
+            "miniapp_tianji_trial": {
+                "enabled": True,
+                "participants": ["sub|竹和生"],
+            },
+        })
+        payload = settings.automation_dashboard_payload()
+        sub_account = next(
+            item for item in payload["miniapp_fishing"]["accounts"]
+            if item["key"] == "sub"
+        )
+
+        self.assertEqual(value["world_boss"]["participants"], ["sub|锋脉子"])
+        self.assertEqual(value["miniapp_fishing"]["participants"], ["sub|锋脉子"])
+        self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|锋脉子")
+        self.assertEqual(value["miniapp_tianji_trial"]["participants"], ["sub|锋脉子"])
+        self.assertIn("锋脉子", [item["name"] for item in sub_account["identities"]])
+        self.assertNotIn("竹和生", [item["name"] for item in sub_account["identities"]])
 
     def test_save_updates_tianxing_round_settings(self):
         value = settings.save_automation_settings(

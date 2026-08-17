@@ -12,6 +12,7 @@ from typing import Any
 
 CONFIG_DIR = Path(__file__).resolve().parent
 AUTOMATION_SETTINGS_FILE = CONFIG_DIR / "automation_settings.json"
+SUB_STATE_FILE = CONFIG_DIR / "state_sub.json"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 ACCOUNT_NAMES = {
@@ -20,8 +21,50 @@ ACCOUNT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
-SUB_YINLUO_IDENTITY = "竹和生"
-LEGACY_SUB_IDENTITY_ALIASES = {"缘生子": SUB_YINLUO_IDENTITY}
+DEFAULT_SUB_YINLUO_IDENTITY = "竹和生"
+SUB_YINLUO_PLAYER_ID = "-1003885521329"
+
+
+def _load_sub_identity_state() -> dict[str, Any]:
+    try:
+        with SUB_STATE_FILE.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def current_sub_yinluo_identity(state: Any = None) -> str:
+    """Return the current Dao name for the stable sub-account Yinluo avatar."""
+    source = state if isinstance(state, dict) else _load_sub_identity_state()
+    player_names = source.get("avatar_dao_names_by_player_id")
+    if not isinstance(player_names, dict):
+        player_names = source.get("avatar_dao_names_by_tgid")
+    if isinstance(player_names, dict):
+        current = str(player_names.get(SUB_YINLUO_PLAYER_ID) or "").strip()
+        if current and current != "一缕残魂":
+            return current
+
+    aliases = source.get("avatar_dao_name_aliases")
+    current = DEFAULT_SUB_YINLUO_IDENTITY
+    seen = set()
+    while isinstance(aliases, dict) and current not in seen:
+        seen.add(current)
+        mapped = str(aliases.get(current) or "").strip()
+        if not mapped or mapped == current or mapped == "一缕残魂":
+            break
+        current = mapped
+    if current != DEFAULT_SUB_YINLUO_IDENTITY:
+        return current
+
+    return DEFAULT_SUB_YINLUO_IDENTITY
+
+
+SUB_YINLUO_IDENTITY = current_sub_yinluo_identity()
+LEGACY_SUB_IDENTITY_ALIASES = {
+    "缘生子": SUB_YINLUO_IDENTITY,
+    DEFAULT_SUB_YINLUO_IDENTITY: SUB_YINLUO_IDENTITY,
+}
 ACCOUNT_IDENTITIES = {
     "main": ("主魂", "无咎子", "缘生子", "素缘子"),
     "sub": ("主魂", "厚土", SUB_YINLUO_IDENTITY, "寻真子"),
@@ -101,8 +144,30 @@ def canonical_automation_identity(account: Any, identity: Any) -> str:
     account_key = str(account or "").strip()
     identity_name = str(identity or "").strip()
     if account_key == "sub":
-        return LEGACY_SUB_IDENTITY_ALIASES.get(identity_name, identity_name)
+        current = current_sub_yinluo_identity()
+        if identity_name in {"缘生子", DEFAULT_SUB_YINLUO_IDENTITY, SUB_YINLUO_IDENTITY}:
+            return current
+        aliases = _load_sub_identity_state().get("avatar_dao_name_aliases")
+        seen = set()
+        while isinstance(aliases, dict) and identity_name not in seen:
+            seen.add(identity_name)
+            mapped = str(aliases.get(identity_name) or "").strip()
+            if not mapped or mapped == identity_name:
+                break
+            identity_name = mapped
+        if identity_name == "一缕残魂":
+            return current
     return identity_name
+
+
+def automation_account_identities() -> dict[str, tuple[str, ...]]:
+    identities = dict(ACCOUNT_IDENTITIES)
+    current = current_sub_yinluo_identity()
+    identities["sub"] = tuple(
+        current if identity == SUB_YINLUO_IDENTITY else identity
+        for identity in ACCOUNT_IDENTITIES["sub"]
+    )
+    return identities
 
 
 def automation_participant_key(account: Any, identity: Any) -> str:
@@ -111,7 +176,8 @@ def automation_participant_key(account: Any, identity: Any) -> str:
 
 
 def _valid_participant(account: str, identity: str) -> bool:
-    return account in ACCOUNT_IDENTITIES and identity in ACCOUNT_IDENTITIES[account]
+    identities = automation_account_identities()
+    return account in identities and identity in identities[account]
 
 
 def _normalize_participant(value: Any) -> tuple[str, str] | None:
@@ -190,7 +256,11 @@ def default_automation_settings() -> dict[str, Any]:
         },
         "miniapp_tianji_trial": {
             "enabled": DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED,
-            "participants": list(DEFAULT_MINIAPP_TIANJI_TRIAL_PARTICIPANTS),
+            "participants": [
+                automation_participant_key(account, identity)
+                for account, identities in automation_account_identities().items()
+                for identity in identities
+            ],
         },
         "tianxing": {
             "meditation_mode": DEFAULT_TIANXING_MEDITATION_MODE,
@@ -221,7 +291,7 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             selected_by_account.setdefault(account, identity)
         result["world_boss"]["participants"] = [
             automation_participant_key(account, identity)
-            for account, identities in ACCOUNT_IDENTITIES.items()
+            for account, identities in automation_account_identities().items()
             for identity in identities
             if selected_by_account.get(account) == identity
         ]
@@ -687,13 +757,14 @@ def world_boss_identities_for_account(
     settings: dict[str, Any] | None = None,
 ) -> list[str]:
     account = str(account or "").strip()
-    if account not in ACCOUNT_IDENTITIES:
+    identities = automation_account_identities()
+    if account not in identities:
         return []
     source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
     selected = set((source.get("world_boss") or {}).get("participants") or [])
     return [
         identity
-        for identity in ACCOUNT_IDENTITIES[account]
+        for identity in identities[account]
         if automation_participant_key(account, identity) in selected
     ]
 
@@ -755,7 +826,7 @@ def miniapp_journey_identities_for_account(
     settings: dict[str, Any] | None = None,
 ) -> list[str]:
     account = str(account or "").strip()
-    supported = ACCOUNT_IDENTITIES.get(account, ())
+    supported = automation_account_identities().get(account, ())
     if account not in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS or not supported:
         return []
     selected = set(miniapp_journey_settings(settings).get("participants") or [])
@@ -779,7 +850,7 @@ def miniapp_tianji_trial_identities_for_account(
     settings: dict[str, Any] | None = None,
 ) -> list[str]:
     account = str(account or "").strip()
-    supported = ACCOUNT_IDENTITIES.get(account, ())
+    supported = automation_account_identities().get(account, ())
     if not supported:
         return []
     selected = set(miniapp_tianji_trial_settings(settings).get("participants") or [])
@@ -832,6 +903,7 @@ def set_tianxing_heqi_pill_enabled(
 def automation_dashboard_payload() -> dict[str, Any]:
     settings = load_automation_settings()
     selected = set((settings.get("world_boss") or {}).get("participants") or [])
+    account_identities = automation_account_identities()
     return {
         "settings": settings,
         "world_boss": {
@@ -849,7 +921,7 @@ def automation_dashboard_payload() -> dict[str, Any]:
                         for identity in identities
                     ],
                 }
-                for account, identities in ACCOUNT_IDENTITIES.items()
+                for account, identities in account_identities.items()
             ],
         },
         "mulan_support": {
@@ -871,7 +943,7 @@ def automation_dashboard_payload() -> dict[str, Any]:
                             "key": automation_participant_key(account, identity),
                             "name": identity,
                         }
-                        for identity in ACCOUNT_IDENTITIES[account]
+                        for identity in account_identities[account]
                     ],
                 }
                 for account in MINIAPP_FISHING_SUPPORTED_ACCOUNTS
@@ -904,7 +976,7 @@ def automation_dashboard_payload() -> dict[str, Any]:
                             "key": automation_participant_key(account, identity),
                             "name": identity,
                         }
-                        for identity in ACCOUNT_IDENTITIES[account]
+                        for identity in account_identities[account]
                     ],
                 }
                 for account in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
@@ -924,7 +996,7 @@ def automation_dashboard_payload() -> dict[str, Any]:
                         for identity in identities
                     ],
                 }
-                for account, identities in ACCOUNT_IDENTITIES.items()
+                for account, identities in account_identities.items()
             ],
         },
         "tianxing": {

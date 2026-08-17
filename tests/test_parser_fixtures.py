@@ -61,7 +61,7 @@ from yinluo_features import (
 from common_command_features import CommonCommandMixin, add_seconds_str, dt_to_str, now_str, seconds_until as common_seconds_until
 from concubine_features import ConcubineMixin, concubine_default_state, parse_duration_seconds, seconds_until
 from cultivator_xiaohao import CultivatorXiaoHao
-from dashboard_server import build_command_panels, outgoing_log_command_full, parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
+from dashboard_server import account_profile_usernames, build_command_panels, outgoing_log_command_full, parse_inventory_items_from_text, parse_resource_changes_from_text, resource_text_matches_identity
 from intelligent_cultivator import Cultivator
 from log_utils import parse_cultivation_delta_text, parse_cultivation_profile_text
 from soul_curse_features import (
@@ -13793,6 +13793,22 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertNotIn(".观星", commands)
         self.assertNotIn(".改换星移 @Gamling33", commands)
         self.assertFalse(any(str(command or "").startswith(".牵引星辰") for command in commands))
+
+    def test_dashboard_reborn_sub_identity_keeps_yinluo_rift_and_username_controls(self):
+        state = {
+            "avatar_dao_names_by_player_id": {"-1003885521329": "锋脉子"},
+            "identity_sect_names": {"锋脉子": "阴罗宗"},
+            "avatars": {"锋脉子": {"yinluo": {}}},
+        }
+        panels = build_command_panels("sub", state)
+        panel = next(item for item in panels if item.get("identity") == "锋脉子")
+        commands = {row.get("command") for row in panel.get("commands", [])}
+
+        self.assertIn(".我的阴罗幡", commands)
+        self.assertIn(".接取解咒委托 <ID>", commands)
+        self.assertIn(".元婴出窍", commands)
+        self.assertIn(".探寻裂缝", commands)
+        self.assertEqual(account_profile_usernames("sub", state)["锋脉子"], ["@lvdoumiao"])
 
     def test_dashboard_shows_xiaohao_yuanshengzi_yuanying_and_rift(self):
         panels = build_command_panels("xiaohao", {"avatars": {"缘生子": {}}})

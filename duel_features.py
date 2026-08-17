@@ -13,6 +13,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+from automation_settings import current_sub_yinluo_identity
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows test fallback
@@ -70,7 +72,7 @@ DUEL_IDENTITIES = {
     "sub": (
         {"identity": "主魂", "username": "Gamling33"},
         {"identity": "厚土", "username": "crayonxxin"},
-        {"identity": "竹和生", "username": "Lvdoumiao"},
+        {"identity": current_sub_yinluo_identity(), "username": "Lvdoumiao"},
         {"identity": "寻真子", "username": "ding303"},
     ),
     "xiaohao": (

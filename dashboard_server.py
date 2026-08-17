@@ -43,6 +43,7 @@ from automation_settings import (
     MULAN_SUPPORT_MODES,
     SUB_YINLUO_IDENTITY,
     automation_dashboard_payload,
+    current_sub_yinluo_identity,
     miniapp_beast_abyss_settings,
     miniapp_fishing_settings,
     miniapp_journey_identities_for_account,
@@ -222,7 +223,7 @@ ACCOUNT_SHORT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
-ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "竹和生", "寻真子"]
+ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "竹和生", SUB_YINLUO_IDENTITY, "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
     "sub": {"厚土", SUB_YINLUO_IDENTITY, "寻真子"},
@@ -256,9 +257,13 @@ ACCOUNT_PROFILE_USERNAMES = {
 }
 MULAN_SUPPORT_COMMANDS = tuple(f".支援慕兰 {mode}" for mode in MULAN_SUPPORT_MODES)
 
-def account_profile_usernames(account):
+def account_profile_usernames(account, state=None):
     """Return dashboard-safe username mapping for every identity in an account."""
-    mapping = ACCOUNT_PROFILE_USERNAMES.get(account) or {}
+    mapping = dict(ACCOUNT_PROFILE_USERNAMES.get(account) or {})
+    if account == "sub":
+        current_identity = current_sub_yinluo_identity(state)
+        usernames = mapping.pop(SUB_YINLUO_IDENTITY, {"lvdoumiao"})
+        mapping[current_identity] = usernames
     return {
         identity: sorted(
             f"@{normalize_profile_username(name)}"
@@ -2605,18 +2610,24 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     return rows
 
 
-def star_avatar_commands(name, state):
+def star_avatar_commands(name, state, root_state=None):
     rows = []
     rows.extend(global_sync_commands())
-    if name == SUB_YINLUO_IDENTITY:
+    root_state = root_state if isinstance(root_state, dict) else {}
+    sect_names = root_state.get("identity_sect_names") or {}
+    is_yinluo = (
+        name == current_sub_yinluo_identity(root_state)
+        or str(sect_names.get(name) or "").strip() == "阴罗宗"
+    )
+    if is_yinluo:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state))
-    if name == SUB_YINLUO_IDENTITY:
+    if is_yinluo:
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
         ])
-    rows.extend(meditation_commands(state, include_force_exit=(name != SUB_YINLUO_IDENTITY)))
+    rows.extend(meditation_commands(state, include_force_exit=not is_yinluo))
     if name in SUB_STAR_PALACE_AVATARS:
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
@@ -2665,7 +2676,7 @@ def avatar_commands(account, name, state, root_state=None):
     if account == "main":
         rows = lingxiao_avatar_commands(name, state, root_state=root_state)
     elif account == "sub":
-        rows = star_avatar_commands(name, state)
+        rows = star_avatar_commands(name, state, root_state=root_state)
     elif account == "xiaohao":
         rows = xiaohao_avatar_commands(name, state)
     else:
@@ -4913,7 +4924,7 @@ def status(username: str = Depends(authenticate)):
                     "process": process_info,
                     "cultivation": get_cultivation_summary(key),
                     "command_panels": build_command_panels(key, state),
-                    "profile_usernames": account_profile_usernames(key),
+                    "profile_usernames": account_profile_usernames(key, state),
                 }
             payload = {
                 "accounts": result,
