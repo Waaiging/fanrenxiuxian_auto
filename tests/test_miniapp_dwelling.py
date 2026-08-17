@@ -1342,6 +1342,79 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("一缕残魂", actor.state.get("avatar_dao_names_by_player_id", {}).values())
         self.assertEqual(actor.state["avatars"]["竹和生"]["marker"], "keep")
 
+    def test_rebirth_announcement_immediately_refreshes_avatar_dao_name(self):
+        player_id = -1003885521329
+
+        class Actor(CommonCommandMixin):
+            def __init__(self):
+                self.account_key = ""
+                self.avatars = ["竹和生"]
+                self._avatar_chat_ids = {str(player_id): "竹和生"}
+                self.avatar_identities = {str(player_id): "竹和生"}
+                self.avatar_usernames = {"lvdoumiao": "竹和生"}
+                self.identity_sect_names = {"竹和生": "阴罗宗"}
+                self._miniapp_command_router = SimpleNamespace(
+                    transport=SimpleNamespace(identity_player_ids={"竹和生": player_id})
+                )
+                self.state = {
+                    "avatar_dao_names_by_player_id": {str(player_id): "竹和生"},
+                    "avatar_dao_name_aliases": {"缘生子": "竹和生"},
+                    "identity_pauses": {
+                        "竹和生": {
+                            "until": "",
+                            "reason": "肉体破碎/元婴虚弱，等待重生",
+                            "wait_for_rebirth": True,
+                        },
+                        "一缕残魂": {
+                            "until": "2099-01-01 00:00:00",
+                            "reason": "元婴虚弱/待夺舍重生",
+                        },
+                    },
+                    "avatars": {
+                        "竹和生": {
+                            "miniapp_player_id": player_id,
+                            "next_field_training_time": "2099-01-01 00:00:00",
+                        }
+                    },
+                }
+                self.saved = 0
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def set_avatar_state(self, identity, key, value):
+                self.state["avatars"][identity][key] = value
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = Actor()
+        text = (
+            "先前肉身陨落的 @Lvdoumiao (原道号：竹和生)，其元婴已成功夺舍重生！\n"
+            "从今日起，他将以【锋脉子】为名，身负【伪灵根(木火土金)】的全新肉身。"
+        )
+
+        self.assertTrue(actor.record_identity_yuanying_recovery_from_text(
+            "竹和生", text, source="mention"
+        ))
+        self.assertEqual(actor.avatars, ["锋脉子"])
+        self.assertEqual(actor._avatar_chat_ids[str(player_id)], "锋脉子")
+        self.assertEqual(actor.avatar_identities[str(player_id)], "锋脉子")
+        self.assertEqual(actor.avatar_usernames["lvdoumiao"], "锋脉子")
+        self.assertEqual(actor.identity_sect_names["锋脉子"], "阴罗宗")
+        self.assertEqual(actor.state["avatar_dao_names_by_player_id"][str(player_id)], "锋脉子")
+        self.assertEqual(actor.resolve_avatar_identity("竹和生"), "锋脉子")
+        self.assertEqual(actor.resolve_avatar_identity("缘生子"), "锋脉子")
+        self.assertIn("锋脉子", actor.state["avatars"])
+        self.assertNotIn("竹和生", actor.state["avatars"])
+        self.assertNotIn("竹和生", actor.state["identity_pauses"])
+        self.assertNotIn("一缕残魂", actor.state["identity_pauses"])
+        self.assertEqual(
+            actor._miniapp_command_router.transport.identity_player_ids["锋脉子"],
+            player_id,
+        )
+        self.assertGreater(actor.saved, 0)
+
     def test_restore_migrates_persisted_dead_avatar_placeholder(self):
         class Actor(CommonCommandMixin):
             def __init__(self):

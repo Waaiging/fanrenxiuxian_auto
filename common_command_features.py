@@ -466,6 +466,15 @@ class CommonCommandMixin:
         if old_name not in known_avatars:
             return requested
 
+        if not player_key:
+            for mapping_name in ("_avatar_chat_ids", "avatar_identities"):
+                for mapped_player_id, mapped_name in (getattr(self, mapping_name, {}) or {}).items():
+                    if str(mapped_name or "").strip() == old_name:
+                        player_key = str(mapped_player_id or "").strip()
+                        break
+                if player_key:
+                    break
+
         if old_name == dao_name:
             return old_name
         if dao_name in known_avatars:
@@ -501,6 +510,16 @@ class CommonCommandMixin:
                 for key, value in tuple(mapping.items()):
                     if value == old_name:
                         mapping[key] = dao_name
+        miniapp_router = getattr(self, "_miniapp_command_router", None)
+        miniapp_transport = getattr(miniapp_router, "transport", None)
+        miniapp_player_ids = getattr(miniapp_transport, "identity_player_ids", None)
+        if player_key and isinstance(miniapp_player_ids, dict):
+            try:
+                numeric_player_id = int(player_key)
+            except (TypeError, ValueError):
+                numeric_player_id = player_key
+            miniapp_player_ids[dao_name] = numeric_player_id
+            miniapp_player_ids[dao_name.casefold()] = numeric_player_id
         for mapping_name in ("avatar_nicknames", "avatar_features"):
             mapping = getattr(self, mapping_name, None)
             if isinstance(mapping, dict) and old_name in mapping:
@@ -2114,6 +2133,30 @@ class CommonCommandMixin:
         identity = str(identity or "主魂").strip() or "主魂"
         log = self.common_command_logger()
         if is_yuanying_rebirth_success_response(text):
+            clean = str(text or "").replace("**", "").replace("`", "")
+            old_match = re.search(r"原道号\s*[：:]\s*([^）)\s，,]+)", clean)
+            new_match = re.search(r"将以\s*【([^】]+)】\s*为名", clean)
+            old_name = old_match.group(1).strip() if old_match else ""
+            new_name = new_match.group(1).strip() if new_match else ""
+            rename_from = old_name if old_name in getattr(self, "avatars", []) else identity
+            if new_name and rename_from in getattr(self, "avatars", []):
+                refreshed = self.refresh_avatar_dao_name(rename_from, new_name)
+                if refreshed in getattr(self, "avatars", []):
+                    identity = refreshed
+
+                pauses = self.ensure_identity_pause_state()
+                removed_transient_pause = False
+                for transient_name in TRANSIENT_AVATAR_DAO_NAMES:
+                    if transient_name in pauses:
+                        pauses.pop(transient_name, None)
+                        removed_transient_pause = True
+                    self.clear_identity_command_guard(
+                        transient_name,
+                        reason="yuanying rebirth Dao name refresh",
+                    )
+                if removed_transient_pause:
+                    self.save_state()
+
             self.clear_identity_pause(identity, reason=f"{source or command or 'rebirth success'}")
             self.clear_identity_command_guard(identity, reason="yuanying rebirth success")
             if identity == "主魂":
