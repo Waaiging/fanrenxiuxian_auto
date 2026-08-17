@@ -112,6 +112,7 @@ HUANGLONG_REPORT_SEARCH_LIMIT = 12
 TRANSIENT_SECT_NAMES = {
     "读取中", "加载中", "同步中", "查询中", "未知", "未知宗门", "暂无数据", "-", "--",
 }
+TRANSIENT_AVATAR_DAO_NAMES = {"一缕残魂"}
 # .支援慕兰 <参数> is an independent daily command for each identity.
 # Keep the exported constant as the default for legacy imports; the runtime
 # helper below reads Dashboard settings on every due check.
@@ -437,7 +438,7 @@ class CommonCommandMixin:
     def refresh_avatar_dao_name(self, identity, dao_name, player_id=None, persist=True):
         """Migrate one avatar to its current Dao name using its stable player ID."""
         dao_name = str(dao_name or "").strip()
-        if not dao_name or dao_name == "主魂":
+        if not dao_name or dao_name == "主魂" or dao_name in TRANSIENT_AVATAR_DAO_NAMES:
             return str(identity or "").strip()
 
         player_key = str(player_id or "").strip()
@@ -516,6 +517,12 @@ class CommonCommandMixin:
 
         if isinstance(avatar_states, dict) and old_name in avatar_states:
             avatar_states[dao_name] = avatar_states.pop(old_name)
+        pauses = state.get("identity_pauses") if isinstance(state, dict) else None
+        if isinstance(pauses, dict) and old_name in pauses:
+            old_pause = pauses.pop(old_name)
+            current_pause = pauses.get(dao_name)
+            if not isinstance(current_pause, dict) or old_pause.get("wait_for_rebirth"):
+                pauses[dao_name] = old_pause
         command_map = getattr(self, "command_avatar_map", None)
         if isinstance(command_map, dict):
             for key, value in tuple(command_map.items()):
@@ -589,6 +596,48 @@ class CommonCommandMixin:
             return 0
         changed = 0
         for player_id, dao_name in tuple(saved_names.items()):
+            dao_name = str(dao_name or "").strip()
+            if dao_name in TRANSIENT_AVATAR_DAO_NAMES:
+                player_key = str(player_id or "").strip()
+                configured_name = ""
+                for mapping_name in ("_avatar_chat_ids", "avatar_identities"):
+                    mapping = getattr(self, mapping_name, {}) or {}
+                    configured_name = str(mapping.get(player_key) or "").strip()
+                    if configured_name:
+                        break
+                if not configured_name:
+                    continue
+
+                saved_names[player_id] = configured_name
+                aliases = state.get("avatar_dao_name_aliases")
+                if isinstance(aliases, dict):
+                    for legacy_name, current_name in tuple(aliases.items()):
+                        if str(current_name or "").strip() != dao_name:
+                            continue
+                        if legacy_name == configured_name:
+                            aliases.pop(legacy_name, None)
+                        else:
+                            aliases[legacy_name] = configured_name
+                avatar_states = state.get("avatars")
+                if isinstance(avatar_states, dict) and dao_name in avatar_states:
+                    stale_state = avatar_states.pop(dao_name)
+                    current_state = avatar_states.setdefault(configured_name, {})
+                    if isinstance(current_state, dict) and isinstance(stale_state, dict):
+                        current_state.update(stale_state)
+                        current_state["miniapp_dao_name"] = configured_name
+                for mapping_name in ("identity_sect_names",):
+                    mapping = state.get(mapping_name)
+                    if isinstance(mapping, dict) and dao_name in mapping:
+                        mapping[configured_name] = mapping.pop(dao_name)
+                pauses = state.get("identity_pauses")
+                if isinstance(pauses, dict) and dao_name in pauses:
+                    stale_pause = pauses.pop(dao_name)
+                    if configured_name not in pauses or stale_pause.get("wait_for_rebirth"):
+                        pauses[configured_name] = stale_pause
+                if state.get("current_identity") == dao_name:
+                    state["current_identity"] = configured_name
+                changed += 1
+                continue
             before = list(getattr(self, "avatars", []) or [])
             self.refresh_avatar_dao_name("", dao_name, player_id=player_id, persist=False)
             changed += before != list(getattr(self, "avatars", []) or [])
@@ -1901,7 +1950,7 @@ class CommonCommandMixin:
         return pauses
 
     def identity_pause_entry(self, identity):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
         pauses = self.ensure_identity_pause_state()
         entry = pauses.get(identity)
         if not isinstance(entry, dict):
@@ -1940,7 +1989,7 @@ class CommonCommandMixin:
         return 0
 
     def set_identity_pause(self, identity, seconds, reason):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
         seconds = max(0, int(seconds or 0))
         pause_until = add_seconds_str(now_str(), seconds)
         pauses = self.ensure_identity_pause_state()
@@ -1955,7 +2004,7 @@ class CommonCommandMixin:
         return pause_until
 
     def set_identity_pause_until(self, identity, pause_until, reason):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
         pause_until = str(pause_until or "").strip()
         pauses = self.ensure_identity_pause_state()
         pauses[identity] = {
@@ -1969,7 +2018,7 @@ class CommonCommandMixin:
         return pause_until
 
     def set_identity_rebirth_pending_pause(self, identity, reason="肉体破碎/元婴虚弱，等待 .重生"):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
         reason = str(reason or "").strip() or "肉体破碎/元婴虚弱，等待 .重生"
         pauses = self.ensure_identity_pause_state()
         pauses[identity] = {
@@ -1985,7 +2034,7 @@ class CommonCommandMixin:
         return "等待 .重生 1 / .重生 2 / .重生 3 任一成功"
 
     def clear_identity_pause(self, identity="主魂", reason=""):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
         pauses = self.ensure_identity_pause_state()
         old_entry = pauses.pop(identity, None)
         changed = old_entry is not None

@@ -583,6 +583,61 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(actor.calls[0][0], ".切换 厚土")
         self.assertFalse(actor.calls[0][1]["delete_after"])
 
+    def test_target_preparation_skips_paused_identity(self):
+        class Actor(duel_features.DuelMixin):
+            account_key = "sub"
+            avatars = ["竹和生"]
+
+            def __init__(self):
+                self.calls = []
+
+            def identity_pause_seconds(self, identity):
+                return 365 * 24 * 3600
+
+            async def prepare_identity_for_time_critical_command(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return True, 9001
+
+        actor = Actor()
+        success, detail, message_id = asyncio.run(actor.prepare_duel_target_identity({
+            "owner": "sub",
+            "target_identity": "竹和生",
+            "target_username": "Lvdoumiao",
+        }))
+
+        self.assertFalse(success)
+        self.assertIn("身份已暂停", detail)
+        self.assertIsNone(message_id)
+        self.assertEqual(actor.calls, [])
+
+    def test_execute_duel_skips_paused_identity_without_sending(self):
+        class Actor(duel_features.DuelMixin):
+            async def send_and_wait_feedback_identity(self, *args, **kwargs):
+                raise AssertionError("paused identity must not send duel")
+
+            def identity_pause_seconds(self, identity):
+                return 3600
+
+        reservation = {
+            "queue_key": ROTATION,
+            "run_id": "paused-run",
+            "participant_key": "sub|竹和生",
+            "account": "sub",
+            "identity": "竹和生",
+            "challenger_username": "Lvdoumiao",
+            "target_username": "Weeguu",
+            "command": ".斗法 @Weeguu",
+        }
+        actor = Actor()
+        with (
+            patch.object(duel_features, "record_duel_event"),
+            patch.object(duel_features, "finish_duel_reservation"),
+        ):
+            result = asyncio.run(actor.execute_duel_reservation(reservation))
+
+        self.assertEqual(result["status"], "identity_paused")
+        self.assertEqual(result["outcome"], "身份暂停")
+
     def test_rebirth_refreshes_duel_identity_and_pending_participant_key(self):
         identity_item = next(
             item for item in duel_features.DUEL_IDENTITIES["sub"]

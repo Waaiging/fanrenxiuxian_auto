@@ -1260,6 +1260,13 @@ class MiniAppDwellingTests(unittest.TestCase):
                 self.state = {
                     "current_identity": "缘生子",
                     "identity_sect_names": {"缘生子": "阴罗宗"},
+                    "identity_pauses": {
+                        "缘生子": {
+                            "until": "",
+                            "reason": "肉体破碎/元婴虚弱，等待重生",
+                            "wait_for_rebirth": True,
+                        }
+                    },
                     "avatars": {
                         "缘生子": {
                             "marker": "keep",
@@ -1297,9 +1304,79 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(actor.state["avatars"]["竹和生"]["miniapp_dao_name"], "竹和生")
         self.assertEqual(actor.identity_sect_names["竹和生"], "阴罗宗")
         self.assertEqual(actor.state["avatar_dao_names_by_player_id"]["-1003885521329"], "竹和生")
+        self.assertIn("竹和生", actor.state["identity_pauses"])
+        self.assertNotIn("缘生子", actor.state["identity_pauses"])
         self.assertEqual(actor.resolve_avatar_identity("缘生子"), "竹和生")
         self.assertEqual(actor.state["avatar_dao_name_history"][-1]["old_name"], "缘生子")
         self.assertGreater(actor.saved, 0)
+
+    def test_snapshot_ignores_dead_avatar_placeholder_dao_name(self):
+        class Actor(CommonCommandMixin):
+            def __init__(self):
+                self.avatars = ["竹和生"]
+                self._avatar_chat_ids = {"-1003885521329": "竹和生"}
+                self.avatar_identities = {"-1003885521329": "竹和生"}
+                self.state = {
+                    "avatars": {"竹和生": {"marker": "keep"}},
+                    "avatar_dao_name_aliases": {"竹和生": "竹和生"},
+                }
+                self.saved = 0
+
+            def get_avatar_state(self, identity):
+                return self.state["avatars"][identity]
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = Actor()
+        payload = {
+            "account": {
+                "playerId": -1003885521329,
+                "daoName": "一缕残魂",
+                "profile": {"sectName": "阴罗宗"},
+            }
+        }
+
+        self.assertTrue(apply_dwelling_snapshot(actor, "竹和生", payload))
+        self.assertEqual(actor.avatars, ["竹和生"])
+        self.assertNotIn("一缕残魂", actor.state.get("avatar_dao_names_by_player_id", {}).values())
+        self.assertEqual(actor.state["avatars"]["竹和生"]["marker"], "keep")
+
+    def test_restore_migrates_persisted_dead_avatar_placeholder(self):
+        class Actor(CommonCommandMixin):
+            def __init__(self):
+                self.avatars = ["竹和生"]
+                self._avatar_chat_ids = {"-1003885521329": "竹和生"}
+                self.avatar_identities = {"-1003885521329": "竹和生"}
+                self.state = {
+                    "current_identity": "一缕残魂",
+                    "avatar_dao_names_by_player_id": {"-1003885521329": "一缕残魂"},
+                    "avatar_dao_name_aliases": {
+                        "缘生子": "一缕残魂",
+                        "竹和生": "一缕残魂",
+                    },
+                    "identity_pauses": {
+                        "一缕残魂": {
+                            "until": "",
+                            "reason": "肉体破碎/元婴虚弱，等待重生",
+                            "wait_for_rebirth": True,
+                        }
+                    },
+                    "avatars": {"一缕残魂": {"marker": "keep"}},
+                }
+                self.saved = 0
+
+            def save_state(self):
+                self.saved += 1
+
+        actor = Actor()
+        self.assertEqual(actor.restore_avatar_dao_names(), 1)
+        self.assertEqual(actor.state["current_identity"], "竹和生")
+        self.assertEqual(actor.state["avatars"]["竹和生"]["marker"], "keep")
+        self.assertIn("竹和生", actor.state["identity_pauses"])
+        self.assertNotIn("一缕残魂", actor.state["identity_pauses"])
+        self.assertEqual(actor.state["avatar_dao_names_by_player_id"]["-1003885521329"], "竹和生")
+        self.assertEqual(actor.resolve_avatar_identity("缘生子"), "竹和生")
 
     def test_router_routes_stale_avatar_name_to_current_dao_name(self):
         actor = SimpleNamespace(

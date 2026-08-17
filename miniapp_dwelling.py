@@ -101,6 +101,7 @@ TRANSIENT_PROFILE_TEXTS = {
     "暂无数据",
     "-",
     "--",
+    "一缕残魂",
 }
 EXACT_COMMANDS = {
     ".查看闭关",

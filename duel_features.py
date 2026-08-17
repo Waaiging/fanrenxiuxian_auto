@@ -36,6 +36,7 @@ DUEL_POLL_SECONDS = 3
 DUEL_RETENTION_DAYS = 30
 DUEL_RESTRICTED_ACCOUNT_RETRY_SECONDS = 60
 DUEL_BUSY_RETRY_SECONDS = 60
+DUEL_IDENTITY_PAUSE_RETRY_SECONDS = 5 * 60
 DUEL_ROLLING_TARGET_COOLDOWN_SECONDS = 24 * 3600
 DUEL_MULTI_MAX_TARGETS = 20
 DUEL_MULTI_MAX_COUNT = 999
@@ -1916,7 +1917,10 @@ def finish_duel_reservation(reservation, result):
         elif status == "exhausted":
             pstate["remaining"] = 0
             pstate["attempts"] = DUEL_DAILY_LIMIT
-        pstate["status"] = "exhausted" if int(pstate.get("remaining", 0) or 0) <= 0 else "ready"
+        if status == "identity_paused":
+            pstate["status"] = "identity_paused"
+        else:
+            pstate["status"] = "exhausted" if int(pstate.get("remaining", 0) or 0) <= 0 else "ready"
         pstate["last_result"] = outcome
         queue["last_result"] = f"{reservation['identity']} · {outcome}"
         queue["in_flight"] = {}
@@ -1924,7 +1928,10 @@ def finish_duel_reservation(reservation, result):
         if target_preparation.get("run_id") == reservation.get("preparation_run_id"):
             queue["target_preparation"] = {}
         rolling_target_ready = None
-        retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else interval_seconds
+        if status == "identity_paused":
+            retry_seconds = DUEL_IDENTITY_PAUSE_RETRY_SECONDS
+        else:
+            retry_seconds = DUEL_BUSY_RETRY_SECONDS if status == "busy" else interval_seconds
         if status == "cooldown" and _is_rolling_target_cooldown(result):
             rolling_target_ready = _rolling_target_ready_at(reservation, now)
         elif status == "cooldown":
@@ -2536,6 +2543,17 @@ class DuelMixin:
         if str(claim.get("owner") or "") != account:
             return False, "目标身份准备账号不匹配", None
         identity = str(claim.get("target_identity") or "").strip()
+        resolver = getattr(self, "resolve_avatar_identity", None)
+        if callable(resolver):
+            identity = str(resolver(identity) or identity).strip()
+        pause_seconds = getattr(self, "identity_pause_seconds", None)
+        if callable(pause_seconds):
+            try:
+                remaining = int(pause_seconds(identity) or 0)
+            except (TypeError, ValueError):
+                remaining = 0
+            if remaining > 0:
+                return False, f"{identity} 身份已暂停，跳过斗法目标切换", None
         username = str(claim.get("target_username") or "").strip()
         known_identities = {"主魂", *getattr(self, "avatars", [])}
         if not identity or identity not in known_identities:
@@ -2696,6 +2714,24 @@ class DuelMixin:
         response_msg_id = None
         result = {"status": "error", "outcome": "执行异常", "text": ""}
         try:
+            identity = str(reservation.get("identity") or "主魂").strip() or "主魂"
+            resolver = getattr(self, "resolve_avatar_identity", None)
+            if callable(resolver):
+                identity = str(resolver(identity) or identity).strip() or "主魂"
+            pause_seconds = getattr(self, "identity_pause_seconds", None)
+            if callable(pause_seconds):
+                try:
+                    remaining = int(pause_seconds(identity) or 0)
+                except (TypeError, ValueError):
+                    remaining = 0
+                if remaining > 0:
+                    result = {
+                        "status": "identity_paused",
+                        "outcome": "身份暂停",
+                        "text": f"{identity} 身份暂停，跳过斗法",
+                    }
+                    logger.info("Duel skipped for paused identity [%s] (%ss remaining)", identity, remaining)
+                    return result
             logger.info(
                 "Duel turn [%s]: %s/%s -> @%s reply_to=%s",
                 reservation["queue_key"], reservation["account"], reservation["identity"],
@@ -2733,12 +2769,13 @@ class DuelMixin:
             logger.exception("Duel turn crashed: %s", reservation)
         finally:
             try:
-                record_duel_event(
-                    reservation,
-                    result,
-                    command_msg_id=command_msg_id,
-                    response_msg_id=response_msg_id,
-                )
+                if result.get("status") != "identity_paused":
+                    record_duel_event(
+                        reservation,
+                        result,
+                        command_msg_id=command_msg_id,
+                        response_msg_id=response_msg_id,
+                    )
             finally:
                 finish_duel_reservation(reservation, result)
         return result
