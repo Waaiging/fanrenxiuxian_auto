@@ -1369,6 +1369,10 @@ class MiniAppDwellingTests(unittest.TestCase):
                             "until": "2099-01-01 00:00:00",
                             "reason": "元婴虚弱/待夺舍重生",
                         },
+                        str(player_id): {
+                            "until": "2099-01-01 00:00:00",
+                            "reason": "元婴虚弱/待夺舍重生",
+                        },
                     },
                     "avatars": {
                         "竹和生": {
@@ -1409,6 +1413,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertNotIn("竹和生", actor.state["avatars"])
         self.assertNotIn("竹和生", actor.state["identity_pauses"])
         self.assertNotIn("一缕残魂", actor.state["identity_pauses"])
+        self.assertNotIn(str(player_id), actor.state["identity_pauses"])
         self.assertEqual(
             actor._miniapp_command_router.transport.identity_player_ids["锋脉子"],
             player_id,

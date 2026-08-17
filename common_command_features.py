@@ -492,6 +492,7 @@ class CommonCommandMixin:
             legacy_names = state.get("avatar_dao_names_by_tgid")
             if isinstance(legacy_names, dict):
                 dao_names.update(legacy_names)
+        previous_player_dao_name = str(dao_names.get(player_key) or "").strip() if player_key else ""
         if player_key and isinstance(dao_names, dict):
             dao_names[player_key] = dao_name
 
@@ -542,6 +543,22 @@ class CommonCommandMixin:
             current_pause = pauses.get(dao_name)
             if not isinstance(current_pause, dict) or old_pause.get("wait_for_rebirth"):
                 pauses[dao_name] = old_pause
+        confirmed_rebirth_rename = bool(
+            previous_player_dao_name
+            and previous_player_dao_name not in TRANSIENT_AVATAR_DAO_NAMES
+            and previous_player_dao_name != dao_name
+        )
+        if confirmed_rebirth_rename and isinstance(pauses, dict):
+            pause_keys = {old_name, dao_name, player_key, *TRANSIENT_AVATAR_DAO_NAMES}
+            for pause_key in pause_keys:
+                entry = pauses.get(pause_key)
+                if not isinstance(entry, dict):
+                    continue
+                reason = str(entry.get("reason") or "")
+                if entry.get("wait_for_rebirth") or any(
+                    keyword in reason for keyword in ("元婴", "肉身", "夺舍", "重生")
+                ):
+                    pauses.pop(pause_key, None)
         command_map = getattr(self, "command_avatar_map", None)
         if isinstance(command_map, dict):
             for key, value in tuple(command_map.items()):
@@ -2144,18 +2161,11 @@ class CommonCommandMixin:
                 if refreshed in getattr(self, "avatars", []):
                     identity = refreshed
 
-                pauses = self.ensure_identity_pause_state()
-                removed_transient_pause = False
                 for transient_name in TRANSIENT_AVATAR_DAO_NAMES:
-                    if transient_name in pauses:
-                        pauses.pop(transient_name, None)
-                        removed_transient_pause = True
                     self.clear_identity_command_guard(
                         transient_name,
                         reason="yuanying rebirth Dao name refresh",
                     )
-                if removed_transient_pause:
-                    self.save_state()
 
             self.clear_identity_pause(identity, reason=f"{source or command or 'rebirth success'}")
             self.clear_identity_command_guard(identity, reason="yuanying rebirth success")
