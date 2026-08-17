@@ -1438,7 +1438,11 @@ class MiniAppDwellingTests(unittest.TestCase):
                             "until": "",
                             "reason": "肉体破碎/元婴虚弱，等待重生",
                             "wait_for_rebirth": True,
-                        }
+                        },
+                        "-1003885521329": {
+                            "until": "2020-01-01 00:00:00",
+                            "reason": "元婴虚弱/待夺舍重生",
+                        },
                     },
                     "avatars": {"一缕残魂": {"marker": "keep"}},
                 }
@@ -1453,6 +1457,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(actor.state["avatars"]["竹和生"]["marker"], "keep")
         self.assertIn("竹和生", actor.state["identity_pauses"])
         self.assertNotIn("一缕残魂", actor.state["identity_pauses"])
+        self.assertNotIn("-1003885521329", actor.state["identity_pauses"])
         self.assertEqual(actor.state["avatar_dao_names_by_player_id"]["-1003885521329"], "竹和生")
         self.assertEqual(actor.resolve_avatar_identity("缘生子"), "竹和生")
 

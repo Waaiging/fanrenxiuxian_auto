@@ -625,10 +625,28 @@ class CommonCommandMixin:
     def restore_avatar_dao_names(self):
         """Restore Dao names persisted from prior Mini App dwelling snapshots."""
         state = getattr(self, "state", {}) or {}
+        state_changed = False
+        pauses = state.get("identity_pauses") if isinstance(state, dict) else None
+        if isinstance(pauses, dict):
+            for pause_identity, entry in tuple(pauses.items()):
+                if not isinstance(entry, dict) or entry.get("wait_for_rebirth"):
+                    continue
+                pause_until = str(entry.get("until") or "").strip()
+                if not pause_until:
+                    continue
+                try:
+                    expired = str_to_dt(pause_until) <= datetime.now()
+                except Exception:
+                    expired = False
+                if expired:
+                    pauses.pop(pause_identity, None)
+                    state_changed = True
         saved_names = state.get("avatar_dao_names_by_player_id") if isinstance(state, dict) else None
         if not isinstance(saved_names, dict) and isinstance(state, dict):
             saved_names = state.get("avatar_dao_names_by_tgid")
         if not isinstance(saved_names, dict):
+            if state_changed:
+                self.save_state()
             return 0
         changed = 0
         for player_id, dao_name in tuple(saved_names.items()):
@@ -677,7 +695,7 @@ class CommonCommandMixin:
             before = list(getattr(self, "avatars", []) or [])
             self.refresh_avatar_dao_name("", dao_name, player_id=player_id, persist=False)
             changed += before != list(getattr(self, "avatars", []) or [])
-        if changed:
+        if changed or state_changed:
             try:
                 self.save_state()
             except Exception:
