@@ -51,7 +51,7 @@ class AutomationSettingsTests(unittest.TestCase):
             value["miniapp_tianji_trial"]["participants"],
             [
                 f"{account}|{identity}"
-                for account, identities in settings.ACCOUNT_IDENTITIES.items()
+                for account, identities in settings.automation_account_identities().items()
                 for identity in identities
             ],
         )
