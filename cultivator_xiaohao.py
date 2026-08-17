@@ -7461,6 +7461,14 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     def start_miniapp_scheduler_tasks(self):
         """Register Mini App-backed background loops used by the XiaoHao account."""
+        miniapp_router = getattr(self, "_miniapp_command_router", None)
+        if miniapp_router is not None:
+            star_identities = miniapp_router.star_farm_identities()
+            for identity in star_identities:
+                self.create_scheduler_task(
+                    f"miniapp_star_farm_{identity}",
+                    lambda identity=identity: miniapp_router.run_star_farm_loop(identity),
+                )
         if getattr(self, "_miniapp_inventory", None) is not None:
             self.create_scheduler_task(
                 "miniapp_inventory",
