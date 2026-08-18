@@ -3,16 +3,28 @@ import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
+from miniapp_beast import MiniAppBeastError
 from miniapp_daily_activities import (
     MiniAppDailyActivities,
     choose_hunt_cell,
+    fate_cards_wait_seconds,
     solve_tianji_trial_challenge,
 )
+from miniapp_dwelling import MiniAppCommandResponse
 
 
 class FirstChoice:
     def choice(self, values):
         return list(values)[0]
+
+
+class FixedChoice:
+    def __init__(self, value):
+        self.value = value
+
+    def choice(self, values):
+        self.assertion_values = tuple(values)
+        return self.value
 
 
 class FakeActor:
@@ -275,6 +287,193 @@ class MiniAppDailyActivityTests(unittest.TestCase):
             self.assertEqual(runner.tianji_trial_identities(), ["无咎子", "素缘子"])
         with patch("miniapp_daily_activities.load_automation_settings", return_value=disabled):
             self.assertEqual(runner.tianji_trial_identities(), [])
+
+    def test_fate_cards_hide_waits_then_settles_and_logs_final_result(self):
+        actor = FakeActor()
+
+        class Transport:
+            identity_player_ids = {"主魂": 100}
+
+            def __init__(self):
+                self.calls = []
+                self.record = {}
+
+            async def fate_cards_start(self, identity):
+                self.calls.append(("start", identity))
+                if self.record and self.record.get("choiceKey") == "hide":
+                    self.record["quest"]["canSettle"] = True
+                return {"record": self.record} if self.record else {"hasDrawn": False}
+
+            async def fate_cards_draw(self, identity, question_key):
+                self.calls.append(("draw", identity, question_key))
+                self.record = {
+                    "questionKey": question_key,
+                    "question": {"name": "机缘"},
+                    "cards": [
+                        {"positionName": "前因", "title": "掌天瓶", "orientation": "正位"},
+                        {"positionName": "今时", "title": "天机阁", "orientation": "逆位"},
+                        {"positionName": "后果", "title": "韩立", "orientation": "正位"},
+                    ],
+                }
+                return {"record": self.record, "reward": {"tianjiTrace": 1}}
+
+            async def fate_cards_interpret(self, identity):
+                self.calls.append(("interpret", identity))
+                self.record["aiReading"] = {"source": "ai", "overview": "守中见机"}
+                return {"record": self.record}
+
+            async def fate_cards_choose(self, identity, choice_key):
+                self.calls.append(("choose", identity, choice_key))
+                self.record["choiceKey"] = choice_key
+                self.record["quest"] = {
+                    "title": "避劫·藏锋",
+                    "status": "active",
+                    "metric": "wait_seconds",
+                    "target": 180,
+                    "progress": 180,
+                    "unit": "秒",
+                    "canSettle": False,
+                }
+                return {"record": self.record}
+
+            async def fate_cards_settle(self, identity):
+                self.calls.append(("settle", identity))
+                self.record["quest"].update(status="settled", canSettle=False)
+                return {
+                    "record": self.record,
+                    "reward": {"tianjiTrace": 1, "kunwuPass": 1, "balance": 22},
+                }
+
+        transport = Transport()
+        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+        runner.rng = FixedChoice("hide")
+
+        with patch("miniapp_daily_activities.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(runner.run_fate_cards_identity("主魂", today="2026-08-18"))
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(
+            transport.calls,
+            [
+                ("start", "主魂"),
+                ("draw", "主魂", "opportunity"),
+                ("interpret", "主魂"),
+                ("choose", "主魂", "hide"),
+                ("start", "主魂"),
+                ("settle", "主魂"),
+            ],
+        )
+        state = actor.state
+        self.assertEqual(state["miniapp_fate_cards_last_date"], "2026-08-18")
+        self.assertEqual(state["miniapp_fate_cards_last_choice"], "hide")
+        self.assertIn("昆吾通行令 +1", state["miniapp_fate_cards_last_result"])
+        self.assertEqual(actor.rewards[0][1], ".天机命脉")
+        combined = "\n".join(runner.log.info_messages)
+        self.assertIn("OUT [Mini App | 主魂]:\n天机命脉（问天·机缘）", combined)
+        self.assertIn("命择：藏锋避劫", combined)
+
+    def test_fate_cards_accept_forces_exit_restarts_retreat_then_settles(self):
+        actor = FakeActor()
+
+        class Transport:
+            identity_player_ids = {"主魂": 100}
+
+            def __init__(self):
+                self.calls = []
+                self.record = {
+                    "question": {"name": "机缘"},
+                    "cards": [{"positionName": "前因", "title": "掌天瓶"}],
+                    "aiReading": {"overview": "顺势而为"},
+                }
+
+            async def fate_cards_start(self, identity):
+                self.calls.append(("start", identity))
+                return {"record": self.record}
+
+            async def fate_cards_choose(self, identity, choice_key):
+                self.calls.append(("choose", identity, choice_key))
+                self.record["choiceKey"] = choice_key
+                self.record["quest"] = {
+                    "title": "承命·积修为",
+                    "status": "active",
+                    "target": 30,
+                    "progress": 0,
+                    "unit": "修为",
+                    "canSettle": False,
+                }
+                return {"record": self.record}
+
+            async def deep_seclusion_action(self, identity, action, log_operation=True):
+                self.calls.append(("deep", identity, action, log_operation))
+                if action == "start":
+                    self.record["quest"].update(progress=30, canSettle=True)
+                return {"actionResult": {"ok": True}}
+
+            async def fate_cards_settle(self, identity):
+                self.calls.append(("settle", identity))
+                self.record["quest"].update(status="settled", canSettle=False)
+                return {"record": self.record, "reward": {"tianjiTrace": 2}}
+
+        transport = Transport()
+        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+        runner.rng = FixedChoice("accept")
+
+        with patch("miniapp_daily_activities.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(runner.run_fate_cards_identity("主魂", today="2026-08-18"))
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(
+            [call for call in transport.calls if call[0] == "deep"],
+            [
+                ("deep", "主魂", "force", False),
+                ("deep", "主魂", "start", False),
+            ],
+        )
+        self.assertEqual(actor.state["miniapp_fate_cards_accept_prepared_date"], "2026-08-18")
+        self.assertEqual(actor.state["miniapp_fate_cards_last_choice"], "accept")
+        self.assertIn("命择：顺势承命", actor.state["miniapp_fate_cards_last_result"])
+
+    def test_fate_cards_wait_uses_server_progress_and_started_time(self):
+        now = datetime.fromisoformat("2026-08-18T10:02:00+08:00")
+        quest = {
+            "target": 180,
+            "progress": 10,
+            "startedAt": "2026-08-18T10:00:00+08:00",
+            "canSettle": False,
+        }
+
+        self.assertEqual(fate_cards_wait_seconds(quest, now=now), 60)
+        self.assertEqual(fate_cards_wait_seconds({**quest, "canSettle": True}, now=now), 0)
+
+    def test_fate_cards_accept_preserves_non_deep_meditation_mode(self):
+        actor = FakeActor()
+
+        class Transport:
+            identity_player_ids = {"主魂": 100}
+
+            def __init__(self):
+                self.calls = []
+
+            async def deep_seclusion_action(self, identity, action, log_operation=True):
+                self.calls.append(("deep", action))
+                raise MiniAppBeastError("deep_not_active")
+
+            async def command(self, command, identity="主魂", log_operation=True):
+                self.calls.append(("command", command))
+                payload = {"actionResult": {"ok": True, "rawMessage": "修为增加 100"}}
+                return MiniAppCommandResponse("修为增加 100", payload)
+
+        transport = Transport()
+        runner = MiniAppDailyActivities(actor, transport, "main", FakeLogger())
+
+        result = asyncio.run(runner._prepare_fate_cards_accept("主魂", "2026-08-18"))
+
+        self.assertTrue(result)
+        self.assertEqual(
+            transport.calls,
+            [("deep", "force"), ("command", ".闭关修炼")],
+        )
+        self.assertEqual(actor.state["miniapp_fate_cards_stage"], "accept_cultivated")
 
     def test_hunt_cell_prefers_yellow_marker_matching_direction(self):
         cells = [{"index": index, "revealed": False} for index in range(25)]

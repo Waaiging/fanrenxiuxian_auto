@@ -998,6 +998,67 @@ class MiniAppDwellingTests(unittest.TestCase):
             ["trial_1", "trial_2"],
         )
 
+    def test_fate_cards_uses_real_external_action_and_page_endpoints(self):
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, dict(payload), timeout))
+            if path.endswith("/xianxia-dwelling/start"):
+                return START
+            if path.endswith("/xianxia-dwelling/external"):
+                return {
+                    "ok": True,
+                    "url": "/miniapp/xianxia-fate-cards?startapp=fate_fixture",
+                }
+            if path.endswith("/xianxia-fate-cards/start"):
+                return {"ok": True, "hasDrawn": False}
+            if path.endswith("/xianxia-fate-cards/draw"):
+                return {"ok": True, "record": {"questionKey": payload["questionKey"]}}
+            if path.endswith("/xianxia-fate-cards/interpret"):
+                return {"ok": True, "record": {"aiReading": {"overview": "命解"}}}
+            if path.endswith("/xianxia-fate-cards/choose"):
+                return {"ok": True, "record": {"choiceKey": payload["choiceKey"]}}
+            if path.endswith("/xianxia-fate-cards/settle"):
+                return {"ok": True, "record": {"quest": {"status": "settled"}}}
+            if path.endswith("/xianxia-dwelling/deep-seclusion"):
+                return {"ok": True, "actionResult": {"ok": True, "rawMessage": "已处理"}}
+            self.fail(path)
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch(
+            "miniapp_dwelling.request_webview_init_data",
+            new=AsyncMock(return_value="signed"),
+        ):
+            asyncio.run(transport.fate_cards_start("素心子"))
+            asyncio.run(transport.fate_cards_draw("素心子", "opportunity"))
+            asyncio.run(transport.fate_cards_interpret("素心子"))
+            asyncio.run(transport.fate_cards_choose("素心子", "hide"))
+            asyncio.run(transport.fate_cards_settle("素心子"))
+            asyncio.run(transport.deep_seclusion_action("素心子", "force", log_operation=False))
+            response = asyncio.run(transport.command(".强行出关", identity="素心子"))
+
+        external = next(call for call in calls if call[0].endswith("/external"))
+        self.assertEqual(external[1]["action"], "fate_cards")
+        self.assertEqual(external[1]["playerId"], -200)
+        fate_calls = [call for call in calls if "/xianxia-fate-cards/" in call[0]]
+        self.assertTrue(all(call[1]["token"] == "fate_fixture" for call in fate_calls))
+        draw = next(call for call in fate_calls if call[0].endswith("/draw"))
+        choose = next(call for call in fate_calls if call[0].endswith("/choose"))
+        interpret = next(call for call in fate_calls if call[0].endswith("/interpret"))
+        self.assertEqual(draw[1]["questionKey"], "opportunity")
+        self.assertEqual(choose[1]["choiceKey"], "hide")
+        self.assertGreaterEqual(interpret[2], 60)
+        deep_actions = [
+            call[1]["action"]
+            for call in calls
+            if call[0].endswith("/deep-seclusion")
+        ]
+        self.assertEqual(deep_actions, ["force", "force"])
+        self.assertEqual(response.text, "已处理")
+
+        with self.assertRaisesRegex(MiniAppBeastError, "fate_cards_choice_invalid"):
+            asyncio.run(transport.fate_cards_choose("素心子", "defy"))
+
     def test_tianji_trial_start_refreshes_expired_trial_session(self):
         calls = []
         token_index = 0

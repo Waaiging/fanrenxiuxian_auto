@@ -34,6 +34,8 @@ AUTH_ERROR_CODES = {
     "challenge_token_missing",
     "challenge_token_scope",
     "challenge_token_used",
+    "fate_token_expired",
+    "fate_token_missing",
     "hash_mismatch",
     "init_data_missing",
     "invalid_init_data",
@@ -107,6 +109,7 @@ EXACT_COMMANDS = {
     ".查看闭关",
     ".闭关修炼",
     ".深度闭关",
+    ".强行出关",
     ".元婴出窍",
     ".我的侍妾",
     ".安置侍妾",
@@ -936,9 +939,11 @@ class MiniAppDwellingTransport:
             if command == ".闭关修炼":
                 path = "/api/miniapp/xianxia-dwelling/cultivation"
                 payload: dict[str, Any] = {}
-            elif command == ".深度闭关":
+            elif command in {".深度闭关", ".强行出关"}:
                 path = "/api/miniapp/xianxia-dwelling/deep-seclusion"
-                payload = {"action": "start"}
+                payload = {
+                    "action": "force" if command == ".强行出关" else "start"
+                }
             elif command == ".查看闭关":
                 path = "/api/miniapp/xianxia-dwelling/deep-seclusion"
                 payload = {"action": "status"}
@@ -1535,6 +1540,102 @@ class MiniAppDwellingTransport:
                     # submit that old proof against a newly created session.
                     retry_auth=False,
                 ),
+            )
+
+    async def fate_cards_start(self, identity: str) -> dict[str, Any]:
+        """Open today's Fate Cards session for one identity."""
+        async with self._lock:
+            if not self.init_data or not self.start_payload:
+                await self._initialize_unlocked()
+            self._external_tokens.pop((self.player_id(identity), "fate_cards"), None)
+            return await self._external_request_unlocked(
+                identity,
+                "fate_cards",
+                "fate_",
+                "/api/miniapp/xianxia-fate-cards/start",
+            )
+
+    async def fate_cards_draw(
+        self,
+        identity: str,
+        question_key: str = "opportunity",
+    ) -> dict[str, Any]:
+        """Draw today's three cards for the selected question."""
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "fate_cards",
+                "fate_",
+                "/api/miniapp/xianxia-fate-cards/draw",
+                payload={"questionKey": str(question_key or "opportunity")},
+            )
+
+    async def fate_cards_interpret(self, identity: str) -> dict[str, Any]:
+        """Wait for the AI or fixed fallback interpretation."""
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "fate_cards",
+                "fate_",
+                "/api/miniapp/xianxia-fate-cards/interpret",
+                timeout=max(60, self.timeout),
+            )
+
+    async def fate_cards_choose(
+        self,
+        identity: str,
+        choice_key: str,
+    ) -> dict[str, Any]:
+        """Accept one of the server-supported Fate Cards quests."""
+        choice = str(choice_key or "").strip()
+        if choice not in {"accept", "hide"}:
+            raise MiniAppBeastError("fate_cards_choice_invalid")
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "fate_cards",
+                "fate_",
+                "/api/miniapp/xianxia-fate-cards/choose",
+                payload={"choiceKey": choice},
+            )
+
+    async def fate_cards_settle(self, identity: str) -> dict[str, Any]:
+        """Verify and settle today's completed Fate Cards quest."""
+        async with self._lock:
+            return await self._external_request_unlocked(
+                identity,
+                "fate_cards",
+                "fate_",
+                "/api/miniapp/xianxia-fate-cards/settle",
+            )
+
+    async def deep_seclusion_action(
+        self,
+        identity: str,
+        action: str,
+        *,
+        log_operation: bool = True,
+    ) -> dict[str, Any]:
+        """Run a page-native deep-seclusion action for background workflows."""
+        action = str(action or "").strip()
+        if action not in {"start", "status", "force", "settle"}:
+            raise MiniAppBeastError("deep_action_invalid")
+        labels = {
+            "start": "深度闭关",
+            "status": "查看闭关",
+            "force": "强行出关",
+            "settle": "出关结算",
+        }
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                labels[action],
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/deep-seclusion",
+                    {"action": action},
+                    identity=identity,
+                ),
+                log_operation=log_operation,
             )
 
     async def hunt_snapshot(self, identity: str) -> dict[str, Any]:

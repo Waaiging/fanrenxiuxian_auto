@@ -254,6 +254,7 @@ class RestrictedMiniAppWorker:
         if self.daily_activities.hunt_enabled:
             self._spawn("hunt", self.daily_activities.run_hunt_loop())
         self._spawn("tianji_trial", self.daily_activities.run_tianji_trial_loop())
+        self._spawn("fate_cards", self.daily_activities.run_fate_cards_loop())
         if self.tianxing_journey.enabled:
             self._spawn("journey", self.tianxing_journey.run_loop())
         if self.beast_abyss.enabled:

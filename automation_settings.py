@@ -133,6 +133,12 @@ DEFAULT_MINIAPP_TIANJI_TRIAL_PARTICIPANTS = tuple(
     for account, identities in ACCOUNT_IDENTITIES.items()
     for identity in identities
 )
+DEFAULT_MINIAPP_FATE_CARDS_ENABLED = True
+DEFAULT_MINIAPP_FATE_CARDS_PARTICIPANTS = tuple(
+    f"{account}|{identity}"
+    for account, identities in ACCOUNT_IDENTITIES.items()
+    for identity in identities
+)
 DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN = 0
 DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX = 0
 DEFAULT_WORLD_BOSS_PARTICIPANTS = tuple(
@@ -228,7 +234,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 11,
+        "version": 12,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -256,6 +262,14 @@ def default_automation_settings() -> dict[str, Any]:
         },
         "miniapp_tianji_trial": {
             "enabled": DEFAULT_MINIAPP_TIANJI_TRIAL_ENABLED,
+            "participants": [
+                automation_participant_key(account, identity)
+                for account, identities in automation_account_identities().items()
+                for identity in identities
+            ],
+        },
+        "miniapp_fate_cards": {
+            "enabled": DEFAULT_MINIAPP_FATE_CARDS_ENABLED,
             "participants": [
                 automation_participant_key(account, identity)
                 for account, identities in automation_account_identities().items()
@@ -400,6 +414,22 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
                     participants.append(key)
             result["miniapp_tianji_trial"]["participants"] = participants
 
+    fate_cards = source.get("miniapp_fate_cards")
+    if isinstance(fate_cards, dict):
+        result["miniapp_fate_cards"]["enabled"] = bool(
+            fate_cards.get("enabled", DEFAULT_MINIAPP_FATE_CARDS_ENABLED)
+        )
+        if isinstance(fate_cards.get("participants"), list):
+            participants = []
+            for item in fate_cards["participants"]:
+                normalized = _normalize_participant(item)
+                if normalized is None:
+                    continue
+                key = automation_participant_key(*normalized)
+                if key not in participants:
+                    participants.append(key)
+            result["miniapp_fate_cards"]["participants"] = participants
+
     tianxing = source.get("tianxing")
     if isinstance(tianxing, dict):
         meditation_mode = str(tianxing.get("meditation_mode") or "").strip()
@@ -469,6 +499,8 @@ def save_automation_settings(
     miniapp_journey_participants: Any = None,
     miniapp_tianji_trial_enabled: Any = None,
     miniapp_tianji_trial_participants: Any = None,
+    miniapp_fate_cards_enabled: Any = None,
+    miniapp_fate_cards_participants: Any = None,
     miniapp_beast_abyss_power_min: Any = None,
     miniapp_beast_abyss_power_max: Any = None,
     tianxing_meditation_mode: Any = None,
@@ -617,6 +649,30 @@ def save_automation_settings(
             trial_participants.append(key)
     if trial_enabled and not trial_participants:
         raise ValueError("Mini App Tianji trial participants required")
+
+    current_fate_cards = current_settings.get("miniapp_fate_cards") or {}
+    fate_cards_enabled = (
+        bool(current_fate_cards.get("enabled", DEFAULT_MINIAPP_FATE_CARDS_ENABLED))
+        if miniapp_fate_cards_enabled is None
+        else bool(miniapp_fate_cards_enabled)
+    )
+    raw_fate_cards_participants = (
+        current_fate_cards.get("participants")
+        if miniapp_fate_cards_participants is None
+        else miniapp_fate_cards_participants
+    )
+    if not isinstance(raw_fate_cards_participants, list):
+        raise ValueError("Mini App Fate Cards participants must be a list")
+    fate_cards_participants = []
+    for item in raw_fate_cards_participants:
+        normalized = _normalize_participant(item)
+        if normalized is None:
+            raise ValueError("invalid Mini App Fate Cards participant")
+        key = automation_participant_key(*normalized)
+        if key not in fate_cards_participants:
+            fate_cards_participants.append(key)
+    if fate_cards_enabled and not fate_cards_participants:
+        raise ValueError("Mini App Fate Cards participants required")
     current_abyss = current_settings.get("miniapp_beast_abyss") or {}
     power_min = _parse_optional_nonnegative_int(
         current_abyss.get("power_min")
@@ -728,6 +784,10 @@ def save_automation_settings(
             "miniapp_tianji_trial": {
                 "enabled": trial_enabled,
                 "participants": trial_participants,
+            },
+            "miniapp_fate_cards": {
+                "enabled": fate_cards_enabled,
+                "participants": fate_cards_participants,
             },
             "tianxing": {
                 "meditation_mode": meditation_mode,
@@ -861,6 +921,30 @@ def miniapp_tianji_trial_identities_for_account(
     ]
 
 
+def miniapp_fate_cards_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(
+        source.get("miniapp_fate_cards")
+        or default_automation_settings()["miniapp_fate_cards"]
+    )
+
+
+def miniapp_fate_cards_identities_for_account(
+    account: str,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    account = str(account or "").strip()
+    supported = automation_account_identities().get(account, ())
+    if not supported:
+        return []
+    selected = set(miniapp_fate_cards_settings(settings).get("participants") or [])
+    return [
+        identity
+        for identity in supported
+        if automation_participant_key(account, identity) in selected
+    ]
+
+
 def tianxing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
     return dict(source.get("tianxing") or default_automation_settings()["tianxing"])
@@ -984,6 +1068,23 @@ def automation_dashboard_payload() -> dict[str, Any]:
         },
         "miniapp_tianji_trial": {
             **miniapp_tianji_trial_settings(settings),
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                        }
+                        for identity in identities
+                    ],
+                }
+                for account, identities in account_identities.items()
+            ],
+        },
+        "miniapp_fate_cards": {
+            **miniapp_fate_cards_settings(settings),
             "accounts": [
                 {
                     "key": account,

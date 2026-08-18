@@ -5133,6 +5133,8 @@ async def automation_settings_control(
     journey = journey if isinstance(journey, dict) else {}
     trial = payload.get("miniapp_tianji_trial")
     trial = trial if isinstance(trial, dict) else {}
+    fate_cards = payload.get("miniapp_fate_cards")
+    fate_cards = fate_cards if isinstance(fate_cards, dict) else {}
     tianxing = payload.get("tianxing")
     tianxing = tianxing if isinstance(tianxing, dict) else {}
     try:
@@ -5154,6 +5156,8 @@ async def automation_settings_control(
                 miniapp_journey_participants=journey.get("participants"),
                 miniapp_tianji_trial_enabled=trial.get("enabled"),
                 miniapp_tianji_trial_participants=trial.get("participants"),
+                miniapp_fate_cards_enabled=fate_cards.get("enabled"),
+                miniapp_fate_cards_participants=fate_cards.get("participants"),
                 tianxing_meditation_mode=tianxing.get("meditation_mode"),
                 tianxing_use_heqi_pill=tianxing.get("use_heqi_pill"),
                 tianxing_tianji_grind_enabled=tianxing.get("tianji_grind_enabled"),
@@ -5183,6 +5187,9 @@ async def automation_settings_control(
             "Mini App Tianji trial participants must be a list": "天机试炼参与身份列表格式错误",
             "invalid Mini App Tianji trial participant": "天机试炼参与身份无效",
             "Mini App Tianji trial participants required": "启用天机试炼时至少选择一个身份",
+            "Mini App Fate Cards participants must be a list": "天机命脉参与身份列表格式错误",
+            "invalid Mini App Fate Cards participant": "天机命脉参与身份无效",
+            "Mini App Fate Cards participants required": "启用天机命脉时至少选择一个身份",
             "Tianxing Tianji grind participants must be a list": "刷天机值参与身份列表格式错误",
             "invalid Tianxing Tianji grind participant": "刷天机值参与身份无效",
             "Tianxing Tianji grind participants required": "启用刷天机值时至少选择一个身份",

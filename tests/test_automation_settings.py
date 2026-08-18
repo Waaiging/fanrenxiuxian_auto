@@ -40,7 +40,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
         self.assertEqual(value["miniapp_fishing"]["start_time"], "")
-        self.assertEqual(value["version"], 11)
+        self.assertEqual(value["version"], 12)
         self.assertTrue(value["miniapp_journey"]["enabled"])
         self.assertEqual(
             value["miniapp_journey"]["participants"],
@@ -49,6 +49,15 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertTrue(value["miniapp_tianji_trial"]["enabled"])
         self.assertEqual(
             value["miniapp_tianji_trial"]["participants"],
+            [
+                f"{account}|{identity}"
+                for account, identities in settings.automation_account_identities().items()
+                for identity in identities
+            ],
+        )
+        self.assertTrue(value["miniapp_fate_cards"]["enabled"])
+        self.assertEqual(
+            value["miniapp_fate_cards"]["participants"],
             [
                 f"{account}|{identity}"
                 for account, identities in settings.automation_account_identities().items()
@@ -117,6 +126,10 @@ class AutomationSettingsTests(unittest.TestCase):
                 "enabled": True,
                 "participants": ["sub|缘生子", "main|缘生子"],
             },
+            "miniapp_fate_cards": {
+                "enabled": True,
+                "participants": ["sub|缘生子", "main|缘生子"],
+            },
             "miniapp_journey": {
                 "enabled": True,
                 "participants": ["sub|缘生子", "main|无咎子"],
@@ -134,6 +147,10 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|竹和生")
         self.assertEqual(
             value["miniapp_tianji_trial"]["participants"],
+            ["sub|竹和生", "main|缘生子"],
+        )
+        self.assertEqual(
+            value["miniapp_fate_cards"]["participants"],
             ["sub|竹和生", "main|缘生子"],
         )
         self.assertEqual(
@@ -159,6 +176,10 @@ class AutomationSettingsTests(unittest.TestCase):
                 "enabled": True,
                 "participants": ["sub|竹和生"],
             },
+            "miniapp_fate_cards": {
+                "enabled": True,
+                "participants": ["sub|竹和生"],
+            },
         })
         payload = settings.automation_dashboard_payload()
         sub_account = next(
@@ -170,6 +191,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["participants"], ["sub|锋脉子"])
         self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|锋脉子")
         self.assertEqual(value["miniapp_tianji_trial"]["participants"], ["sub|锋脉子"])
+        self.assertEqual(value["miniapp_fate_cards"]["participants"], ["sub|锋脉子"])
         self.assertIn("锋脉子", [item["name"] for item in sub_account["identities"]])
         self.assertNotIn("竹和生", [item["name"] for item in sub_account["identities"]])
 
@@ -221,6 +243,26 @@ class AutomationSettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             settings.miniapp_tianji_trial_identities_for_account("main", value),
+            ["无咎子"],
+        )
+
+    def test_save_updates_fate_cards_participants(self):
+        value = settings.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            miniapp_fate_cards_enabled=True,
+            miniapp_fate_cards_participants=["main|无咎子", "xiaohao|素心子"],
+        )
+
+        self.assertEqual(
+            value["miniapp_fate_cards"],
+            {
+                "enabled": True,
+                "participants": ["main|无咎子", "xiaohao|素心子"],
+            },
+        )
+        self.assertEqual(
+            settings.miniapp_fate_cards_identities_for_account("main", value),
             ["无咎子"],
         )
 
@@ -368,6 +410,8 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertNotIn("缘生子", sub_names)
         self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
         self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
+        self.assertTrue(payload["miniapp_fate_cards"]["enabled"])
+        self.assertEqual(len(payload["miniapp_fate_cards"]["accounts"]), 4)
         self.assertTrue(payload["miniapp_journey"]["enabled"])
         self.assertEqual(
             payload["miniapp_journey"]["participants"],

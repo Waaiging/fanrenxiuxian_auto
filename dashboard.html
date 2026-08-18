@@ -1626,6 +1626,21 @@
                     <div class="automation-card-hint" id="miniapp-tianji-trial-runtime">等待运行状态...</div>
                 </div>
                 <div class="automation-card">
+                    <div class="automation-card-title">Mini App · 天机命脉</div>
+                    <div class="automation-card-hint">每天问天“机缘”，随机选择顺势承命或藏锋避劫，完成任务后自动验命。</div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="miniapp-fate-cards-enabled" type="checkbox" onchange="syncMiniappFateCardsControls(); markAutomationSettingsDirty()">
+                            启用天机命脉
+                        </label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="miniapp-fate-cards-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <div class="automation-card-hint" id="miniapp-fate-cards-runtime">等待运行状态...</div>
+                </div>
+                <div class="automation-card">
                     <div class="automation-card-title">Mini App · 游历·野外历练（深入）</div>
                     <div class="automation-card-hint">每天为所选身份补齐 2 次；天星宗先执行推命、改命，其他宗门直接深入历练。</div>
                     <div class="automation-mode-options">
@@ -4152,6 +4167,13 @@
             });
         }
 
+        function syncMiniappFateCardsControls() {
+            const enabled = Boolean(document.getElementById('miniapp-fate-cards-enabled')?.checked);
+            document.querySelectorAll('#miniapp-fate-cards-participant-controls input[type="checkbox"]').forEach(input => {
+                input.disabled = !enabled;
+            });
+        }
+
         function syncMiniappJourneyControls() {
             const enabled = Boolean(document.getElementById('miniapp-journey-enabled')?.checked);
             document.querySelectorAll('#miniapp-journey-participant-controls input[type="checkbox"]').forEach(input => {
@@ -4160,7 +4182,7 @@
         }
 
         function renderAutomationDashboard(data) {
-            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, tianxing: {}};
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
@@ -4168,11 +4190,13 @@
             const fishing = automationDashboardData.miniapp_fishing || {};
             const journey = automationDashboardData.miniapp_journey || {};
             const trial = automationDashboardData.miniapp_tianji_trial || {};
+            const fateCards = automationDashboardData.miniapp_fate_cards || {};
             const tianxing = automationDashboardData.tianxing || {};
             const abyssSettings = settings.miniapp_beast_abyss || {};
             const fishingSettings = settings.miniapp_fishing || {};
             const journeySettings = settings.miniapp_journey || {};
             const trialSettings = settings.miniapp_tianji_trial || {};
+            const fateCardsSettings = settings.miniapp_fate_cards || {};
             const tianxingSettings = settings.tianxing || {};
             const accounts = Array.isArray(worldBoss.accounts) ? worldBoss.accounts : [];
             const selected = new Set(settings.world_boss?.participants || []);
@@ -4198,6 +4222,9 @@
             const trialEnabled = Boolean(trial.enabled ?? trialSettings.enabled ?? true);
             const trialParticipants = new Set(trial.participants || trialSettings.participants || []);
             const trialAccounts = Array.isArray(trial.accounts) ? trial.accounts : [];
+            const fateCardsEnabled = Boolean(fateCards.enabled ?? fateCardsSettings.enabled ?? true);
+            const fateCardsParticipants = new Set(fateCards.participants || fateCardsSettings.participants || []);
+            const fateCardsAccounts = Array.isArray(fateCards.accounts) ? fateCards.accounts : [];
             const tianxingMeditationMode = String(tianxing.meditation_mode || tianxingSettings.meditation_mode || 'deep');
             const tianxingUsePill = Boolean(tianxing.use_heqi_pill ?? tianxingSettings.use_heqi_pill ?? false);
             const tianxingGrindEnabled = Boolean(tianxing.tianji_grind_enabled ?? tianxingSettings.tianji_grind_enabled ?? false);
@@ -4210,7 +4237,7 @@
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'} · 命脉 ${fateCardsEnabled ? `${fateCardsParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -4251,6 +4278,8 @@
                 if (fishingEnabledControl) fishingEnabledControl.checked = fishingEnabled;
                 const trialEnabledControl = document.getElementById('miniapp-tianji-trial-enabled');
                 if (trialEnabledControl) trialEnabledControl.checked = trialEnabled;
+                const fateCardsEnabledControl = document.getElementById('miniapp-fate-cards-enabled');
+                if (fateCardsEnabledControl) fateCardsEnabledControl.checked = fateCardsEnabled;
                 const journeyEnabledControl = document.getElementById('miniapp-journey-enabled');
                 if (journeyEnabledControl) journeyEnabledControl.checked = journeyEnabled;
                 const journeyParticipantControls = document.getElementById('miniapp-journey-participant-controls');
@@ -4287,6 +4316,23 @@
                     `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
                 }
                 syncMiniappTianjiTrialControls();
+                const fateCardsParticipantControls = document.getElementById('miniapp-fate-cards-participant-controls');
+                if (fateCardsParticipantControls) {
+                    fateCardsParticipantControls.innerHTML = fateCardsAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${fateCardsParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                syncMiniappFateCardsControls();
                 const tianxingModeControls = document.getElementById('tianxing-meditation-mode-controls');
                 if (tianxingModeControls) {
                     tianxingModeControls.innerHTML = (tianxing.meditation_modes || []).map(item => `
@@ -4402,6 +4448,12 @@
                     ? `${trialParticipants.size} 个身份每日自动完成 3 关`
                     : '天机试炼已暂停';
             }
+            const fateCardsRuntimeControl = document.getElementById('miniapp-fate-cards-runtime');
+            if (fateCardsRuntimeControl) {
+                fateCardsRuntimeControl.innerText = fateCardsEnabled
+                    ? `${fateCardsParticipants.size} 个身份每日自动问天并验命`
+                    : '天机命脉已暂停';
+            }
             const journeyRuntimeControl = document.getElementById('miniapp-journey-runtime');
             if (journeyRuntimeControl) {
                 journeyRuntimeControl.innerText = journeyEnabled
@@ -4495,6 +4547,10 @@
             const trialParticipants = Array.from(document.querySelectorAll('#miniapp-tianji-trial-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
+            const fateCardsEnabled = Boolean(document.getElementById('miniapp-fate-cards-enabled')?.checked);
+            const fateCardsParticipants = Array.from(document.querySelectorAll('#miniapp-fate-cards-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
             const journeyEnabled = Boolean(document.getElementById('miniapp-journey-enabled')?.checked);
             const journeyParticipants = Array.from(document.querySelectorAll('#miniapp-journey-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
@@ -4520,6 +4576,10 @@
             }
             if (trialEnabled && !trialParticipants.length) {
                 alert('启用天机试炼时至少选择一个参与身份。');
+                return;
+            }
+            if (fateCardsEnabled && !fateCardsParticipants.length) {
+                alert('启用天机命脉时至少选择一个参与身份。');
                 return;
             }
             if (journeyEnabled && !journeyParticipants.length) {
@@ -4564,6 +4624,10 @@
                         miniapp_tianji_trial: {
                             enabled: trialEnabled,
                             participants: trialParticipants
+                        },
+                        miniapp_fate_cards: {
+                            enabled: fateCardsEnabled,
+                            participants: fateCardsParticipants
                         },
                         miniapp_journey: {
                             enabled: journeyEnabled,

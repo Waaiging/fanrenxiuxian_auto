@@ -14,17 +14,20 @@ import networkx as nx
 
 from automation_settings import (
     load_automation_settings,
+    miniapp_fate_cards_identities_for_account,
+    miniapp_fate_cards_settings,
     miniapp_tianji_trial_identities_for_account,
     miniapp_tianji_trial_settings,
 )
 from miniapp_beast import MiniAppBeastError
-from miniapp_dwelling import identity_state
+from miniapp_dwelling import apply_dwelling_snapshot, command_result_ok, identity_state
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_HUNT_HOUR = 7
 DEFAULT_PAGODA_HOUR = 23
 DEFAULT_TIANJI_TRIAL_HOUR = 8
+DEFAULT_FATE_CARDS_HOUR = 9
 DEFAULT_DAILY_RETRY_SECONDS = 15 * 60
 DEFAULT_TARGET_REWARD = "阴凝之晶"
 ACCOUNT_MINUTE_OFFSETS = {
@@ -210,6 +213,95 @@ def tianji_trial_log_text(results: list[dict[str, Any]]) -> str:
     total_extra = f"（额外 {bonuses}）" if bonuses > 0 else ""
     lines.append(f"合计：天机残痕 +{rewards}{total_extra}，余额 {balance}")
     return "\n".join([title, *lines])
+
+
+FATE_CARD_CHOICE_NAMES = {
+    "accept": "顺势承命",
+    "hide": "藏锋避劫",
+}
+
+
+def fate_cards_record(payload: Any) -> dict[str, Any]:
+    record = payload.get("record") if isinstance(payload, dict) else None
+    return record if isinstance(record, dict) else {}
+
+
+def fate_cards_quest(record: Any) -> dict[str, Any]:
+    quest = record.get("quest") if isinstance(record, dict) else None
+    return quest if isinstance(quest, dict) else {}
+
+
+def fate_cards_ai_ready(record: Any) -> bool:
+    reading = record.get("aiReading") if isinstance(record, dict) else None
+    return bool(isinstance(reading, dict) and str(reading.get("overview") or "").strip())
+
+
+def fate_cards_wait_seconds(quest: Any, now: datetime | None = None) -> int:
+    if not isinstance(quest, dict) or quest.get("canSettle"):
+        return 0
+    try:
+        target = max(0, int(quest.get("target") or 0))
+        progress = max(0, int(quest.get("progress") or 0))
+    except (TypeError, ValueError):
+        return 0
+    remaining = max(0, target - progress)
+    started_text = str(quest.get("startedAt") or "").strip()
+    if not started_text or target <= 0:
+        return remaining
+    try:
+        started = datetime.fromisoformat(started_text.replace("Z", "+00:00"))
+        current = now or datetime.now(started.tzinfo)
+        if started.tzinfo is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=started.tzinfo)
+        elapsed = max(0, int((current - started).total_seconds()))
+        remaining = min(remaining, max(0, target - elapsed))
+    except (TypeError, ValueError):
+        pass
+    return remaining
+
+
+def fate_cards_result_text(payload: Any, record: Any = None) -> str:
+    source = payload if isinstance(payload, dict) else {}
+    record = record if isinstance(record, dict) else fate_cards_record(source)
+    question = record.get("question") if isinstance(record.get("question"), dict) else {}
+    question_name = str(question.get("name") or "机缘").strip() or "机缘"
+    cards = []
+    for card in record.get("cards") or []:
+        if not isinstance(card, dict):
+            continue
+        position = str(card.get("positionName") or "命牌").strip() or "命牌"
+        title = str(card.get("title") or "无名命牌").strip() or "无名命牌"
+        orientation = str(card.get("orientation") or "").strip()
+        cards.append(f"{position}：{title}{f'（{orientation}）' if orientation else ''}")
+    choice = str(record.get("choiceKey") or "").strip()
+    quest = fate_cards_quest(record)
+    reading = record.get("aiReading") if isinstance(record.get("aiReading"), dict) else {}
+    overview = re.sub(r"\s+", " ", str(reading.get("overview") or "").strip())[:180]
+    reward = source.get("reward") if isinstance(source.get("reward"), dict) else {}
+    trace = max(0, int(reward.get("tianjiTrace") or 0))
+    pass_count = max(0, int(reward.get("kunwuPass") or 0))
+    balance = reward.get("balance")
+    reward_parts = [f"天机残痕 +{trace}"]
+    if pass_count:
+        reward_parts.append(f"昆吾通行令 +{pass_count}")
+    if balance is not None:
+        reward_parts.append(f"余额 {int(balance or 0)}")
+    card_text = "；".join(cards) or "命牌已取回"
+    quest_title = str(quest.get("title") or "命脉任务").strip() or "命脉任务"
+    settled = str(quest.get("status") or "") == "settled" or bool(source.get("alreadySettled"))
+    settlement = (
+        "今日已结算"
+        if source.get("alreadySettled") or (settled and not reward)
+        else "、".join(reward_parts)
+    )
+    if not settled and not reward:
+        settlement = "等待验命"
+    return (
+        f"问天：{question_name}；命牌：{card_text}；"
+        f"命解：{overview or '已完成'}；"
+        f"命择：{FATE_CARD_CHOICE_NAMES.get(choice, choice or '未选择')}；"
+        f"任务：{quest_title}；验命：{settlement}"
+    )[:1200]
 
 
 def _trial_duration_ms(challenge: dict[str, Any], event_count: int = 1) -> int:
@@ -810,6 +902,12 @@ class MiniAppDailyActivities:
         self.tianji_trial_minute = _bounded_int(
             settings.get("tianji_trial_daily_minute"), default_minute, 0, 59
         )
+        self.fate_cards_hour = _bounded_int(
+            settings.get("fate_cards_daily_hour"), DEFAULT_FATE_CARDS_HOUR, 0, 23
+        )
+        self.fate_cards_minute = _bounded_int(
+            settings.get("fate_cards_daily_minute"), default_minute, 0, 59
+        )
         self.pagoda_hour = _bounded_int(
             settings.get("pagoda_daily_hour"), DEFAULT_PAGODA_HOUR, 0, 23
         )
@@ -848,9 +946,21 @@ class MiniAppDailyActivities:
         selected = set(miniapp_tianji_trial_identities_for_account(self.account, settings))
         return [identity for identity in self.identities() if identity in selected]
 
+    def fate_cards_identities(self) -> list[str]:
+        settings = load_automation_settings()
+        fate = miniapp_fate_cards_settings(settings)
+        if not bool(fate.get("enabled", True)):
+            return []
+        selected = set(miniapp_fate_cards_identities_for_account(self.account, settings))
+        return [identity for identity in self.identities() if identity in selected]
+
     @property
     def tianji_trial_enabled(self) -> bool:
         return bool(miniapp_tianji_trial_settings().get("enabled", True))
+
+    @property
+    def fate_cards_enabled(self) -> bool:
+        return bool(miniapp_fate_cards_settings().get("enabled", True))
 
     def _save(self) -> None:
         try:
@@ -1131,6 +1241,250 @@ class MiniAppDailyActivities:
             await asyncio.sleep(1)
         return complete
 
+    async def _prepare_fate_cards_accept(self, identity: str, today: str) -> bool:
+        state = self._state(identity)
+        if state.get("miniapp_fate_cards_accept_prepared_date") == today:
+            return True
+        force_completed = False
+        try:
+            forced = await self.transport.deep_seclusion_action(
+                identity,
+                "force",
+                log_operation=False,
+            )
+            apply_dwelling_snapshot(self.actor, identity, forced)
+            action_result = (
+                forced.get("actionResult")
+                if isinstance(forced, dict) and isinstance(forced.get("actionResult"), dict)
+                else {}
+            )
+            force_completed = action_result.get("ok") is not False
+        except MiniAppBeastError as exc:
+            if exc.code != "deep_not_active":
+                raise
+        if not force_completed:
+            cultivated = await self.transport.command(
+                ".闭关修炼",
+                identity=identity,
+                log_operation=False,
+            )
+            apply_dwelling_snapshot(self.actor, identity, cultivated.payload)
+            if not command_result_ok(cultivated.payload):
+                return False
+            self._record(
+                identity,
+                miniapp_fate_cards_accept_prepared_date=today,
+                miniapp_fate_cards_stage="accept_cultivated",
+            )
+            return True
+        try:
+            started = await self.transport.deep_seclusion_action(
+                identity,
+                "start",
+                log_operation=False,
+            )
+            apply_dwelling_snapshot(self.actor, identity, started)
+        except Exception:
+            if force_completed:
+                self._record(
+                    identity,
+                    miniapp_fate_cards_accept_prepared_date=today,
+                    miniapp_fate_cards_stage="accept_restart_pending",
+                )
+            raise
+        self._record(
+            identity,
+            miniapp_fate_cards_accept_prepared_date=today,
+            miniapp_fate_cards_stage="accept_prepared",
+        )
+        return True
+
+    def _finish_fate_cards(
+        self,
+        identity: str,
+        today: str,
+        payload: dict[str, Any],
+        record: dict[str, Any],
+        *,
+        result: str,
+    ) -> str:
+        summary = fate_cards_result_text(payload, record)
+        choice = str(record.get("choiceKey") or "").strip()
+        operation = "天机命脉（问天·机缘）"
+        self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
+        self.log.info(
+            "IN [Mini App | %s]:\n%s ->\n%s",
+            identity,
+            operation,
+            summary,
+        )
+        self._record(
+            identity,
+            miniapp_fate_cards_last_date=today,
+            miniapp_fate_cards_last_time=datetime.now().strftime(TIME_FORMAT),
+            miniapp_fate_cards_last_choice=choice,
+            miniapp_fate_cards_last_result=summary,
+            miniapp_fate_cards_last_error="",
+            miniapp_fate_cards_stage="settled",
+            miniapp_fate_cards_next_run_time="",
+        )
+        recorder = getattr(self.actor, "record_daily_reward_event", None)
+        if callable(recorder):
+            recorder(
+                identity,
+                ".天机命脉",
+                summary,
+                source="Mini App 天机命脉",
+                final=True,
+            )
+        return result
+
+    async def run_fate_cards_identity(
+        self,
+        identity: str,
+        today: str | None = None,
+    ) -> str:
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        state = self._state(identity)
+        if state.get("miniapp_fate_cards_last_date") == today:
+            return "done"
+        if self._identity_pause_seconds(identity) > 0:
+            return "paused"
+
+        payload = await self.transport.fate_cards_start(identity)
+        record = fate_cards_record(payload)
+        quest = fate_cards_quest(record)
+        if record and str(quest.get("status") or "") == "settled":
+            return self._finish_fate_cards(
+                identity,
+                today,
+                payload,
+                record,
+                result="already",
+            )
+
+        if not record:
+            payload = await self.transport.fate_cards_draw(identity, "opportunity")
+            record = fate_cards_record(payload)
+            if not record:
+                raise MiniAppBeastError("fate_cards_record_missing")
+            self._record(
+                identity,
+                miniapp_fate_cards_stage="drawn",
+                miniapp_fate_cards_last_time=datetime.now().strftime(TIME_FORMAT),
+                miniapp_fate_cards_last_error="",
+            )
+            for _ in record.get("cards") or range(3):
+                await asyncio.sleep(0.38)
+
+        if not fate_cards_ai_ready(record):
+            payload = await self.transport.fate_cards_interpret(identity)
+            record = fate_cards_record(payload)
+            if not fate_cards_ai_ready(record):
+                raise MiniAppBeastError("fate_cards_interpretation_missing")
+            self._record(
+                identity,
+                miniapp_fate_cards_stage="interpreted",
+                miniapp_fate_cards_last_time=datetime.now().strftime(TIME_FORMAT),
+                miniapp_fate_cards_last_error="",
+            )
+
+        choice = str(record.get("choiceKey") or "").strip()
+        if not choice:
+            choice = str(self.rng.choice(("accept", "hide")))
+            payload = await self.transport.fate_cards_choose(identity, choice)
+            record = fate_cards_record(payload)
+            if str(record.get("choiceKey") or "").strip() != choice:
+                raise MiniAppBeastError("fate_cards_choice_missing")
+            self._record(
+                identity,
+                miniapp_fate_cards_stage="chosen",
+                miniapp_fate_cards_last_choice=choice,
+                miniapp_fate_cards_last_time=datetime.now().strftime(TIME_FORMAT),
+                miniapp_fate_cards_last_error="",
+            )
+        if choice not in FATE_CARD_CHOICE_NAMES:
+            raise MiniAppBeastError("fate_cards_existing_choice_unsupported")
+
+        quest = fate_cards_quest(record)
+        if choice == "hide" and not quest.get("canSettle"):
+            wait = fate_cards_wait_seconds(quest)
+            if wait > 0:
+                self._record(
+                    identity,
+                    miniapp_fate_cards_stage="waiting_hide",
+                    miniapp_fate_cards_next_run_time=(
+                        datetime.now() + timedelta(seconds=wait + 1)
+                    ).strftime(TIME_FORMAT),
+                )
+                await asyncio.sleep(wait + 1)
+            payload = await self.transport.fate_cards_start(identity)
+            record = fate_cards_record(payload)
+            quest = fate_cards_quest(record)
+        elif choice == "accept" and not quest.get("canSettle"):
+            await self._prepare_fate_cards_accept(identity, today)
+            await asyncio.sleep(1)
+            payload = await self.transport.fate_cards_start(identity)
+            record = fate_cards_record(payload)
+            quest = fate_cards_quest(record)
+
+        if str(quest.get("status") or "") == "settled":
+            return self._finish_fate_cards(
+                identity,
+                today,
+                payload,
+                record,
+                result="already",
+            )
+        if not quest.get("canSettle"):
+            self._record(
+                identity,
+                miniapp_fate_cards_stage="quest_pending",
+                miniapp_fate_cards_last_result=(
+                    f"{FATE_CARD_CHOICE_NAMES[choice]}："
+                    f"{int(quest.get('progress') or 0)} / {int(quest.get('target') or 0)} "
+                    f"{str(quest.get('unit') or '').strip()}"
+                ).strip(),
+                miniapp_fate_cards_next_run_time=(
+                    datetime.now() + timedelta(seconds=self.retry_seconds)
+                ).strftime(TIME_FORMAT),
+            )
+            return "retry"
+
+        settled = await self.transport.fate_cards_settle(identity)
+        settled_record = fate_cards_record(settled)
+        settled_quest = fate_cards_quest(settled_record)
+        if (
+            str(settled_quest.get("status") or "") != "settled"
+            and not settled.get("alreadySettled")
+        ):
+            raise MiniAppBeastError("fate_cards_settlement_missing")
+        return self._finish_fate_cards(
+            identity,
+            today,
+            settled,
+            settled_record,
+            result="completed",
+        )
+
+    async def run_fate_cards_daily_once(self, now: datetime | None = None) -> bool:
+        await self.transport.initialize()
+        now = now or datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        complete = True
+        for identity in self.fate_cards_identities():
+            try:
+                result = await self.run_fate_cards_identity(identity, today=today)
+                if result in {"paused", "retry"}:
+                    complete = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                complete = False
+                self._record_error(identity, "fate_cards", exc)
+            await asyncio.sleep(1)
+        return complete
+
     async def play_hunt_session(
         self,
         identity: str,
@@ -1349,4 +1703,12 @@ class MiniAppDailyActivities:
             self.tianji_trial_hour,
             self.tianji_trial_minute,
             self.run_tianji_trial_daily_once,
+        )
+
+    async def run_fate_cards_loop(self) -> None:
+        await self._run_daily_loop(
+            "fate_cards",
+            self.fate_cards_hour,
+            self.fate_cards_minute,
+            self.run_fate_cards_daily_once,
         )

@@ -294,6 +294,12 @@ class MiniAppCommandRouter:
                     name=f"miniapp_{self.account}_tianji_trial",
                 )
             )
+            self._daily_activity_tasks.append(
+                asyncio.create_task(
+                    self.daily_activities.run_fate_cards_loop(),
+                    name=f"miniapp_{self.account}_fate_cards",
+                )
+            )
             if self.tianxing_journey.enabled:
                 self._daily_activity_tasks.append(
                     asyncio.create_task(
