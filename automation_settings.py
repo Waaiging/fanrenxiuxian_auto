@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,11 @@ CONFIG_DIR = Path(__file__).resolve().parent
 AUTOMATION_SETTINGS_FILE = CONFIG_DIR / "automation_settings.json"
 SUB_STATE_FILE = CONFIG_DIR / "state_sub.json"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_SUB_IDENTITY_STATE_CACHE: dict[str, Any] = {
+    "signature": None,
+    "state": {},
+}
+_SUB_IDENTITY_STATE_LOCK = threading.Lock()
 
 ACCOUNT_NAMES = {
     "main": "主号",
@@ -26,12 +32,30 @@ SUB_YINLUO_PLAYER_ID = "-1003885521329"
 
 
 def _load_sub_identity_state() -> dict[str, Any]:
-    try:
-        with SUB_STATE_FILE.open("r", encoding="utf-8") as handle:
-            state = json.load(handle)
-    except (OSError, ValueError, TypeError):
-        return {}
-    return state if isinstance(state, dict) else {}
+    with _SUB_IDENTITY_STATE_LOCK:
+        try:
+            stat = SUB_STATE_FILE.stat()
+            signature = (
+                str(SUB_STATE_FILE),
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(stat.st_size),
+            )
+        except OSError:
+            signature = (str(SUB_STATE_FILE), None, None)
+
+        if _SUB_IDENTITY_STATE_CACHE.get("signature") == signature:
+            cached = _SUB_IDENTITY_STATE_CACHE.get("state")
+            return cached if isinstance(cached, dict) else {}
+
+        try:
+            with SUB_STATE_FILE.open("r", encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return {}
+        state = state if isinstance(state, dict) else {}
+        _SUB_IDENTITY_STATE_CACHE["signature"] = signature
+        _SUB_IDENTITY_STATE_CACHE["state"] = state
+        return state
 
 
 def current_sub_yinluo_identity(state: Any = None) -> str:

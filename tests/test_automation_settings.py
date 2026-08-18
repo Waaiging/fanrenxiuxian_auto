@@ -23,6 +23,40 @@ class AutomationSettingsTests(unittest.TestCase):
         self.file_patch.stop()
         self.tempdir.cleanup()
 
+    def test_sub_identity_state_is_parsed_once_per_file_version(self):
+        self.sub_state_path.write_text(json.dumps({
+            "avatar_dao_names_by_player_id": {"-1003885521329": "锋脉子"},
+            "avatar_dao_name_aliases": {"竹和生": "锋脉子"},
+        }, ensure_ascii=False), encoding="utf-8")
+        settings._SUB_IDENTITY_STATE_CACHE["signature"] = None
+        settings._SUB_IDENTITY_STATE_CACHE["state"] = {}
+
+        real_json_load = json.load
+        with patch.object(settings.json, "load", wraps=real_json_load) as load_mock:
+            value = settings.normalize_automation_settings({
+                "world_boss": {"participants": ["sub|竹和生"]},
+                "miniapp_fishing": {
+                    "enabled": True,
+                    "participants": ["sub|竹和生"],
+                    "rod_owner": "sub|竹和生",
+                },
+                "miniapp_journey": {
+                    "enabled": True,
+                    "participants": ["sub|竹和生"],
+                },
+                "miniapp_tianji_trial": {
+                    "enabled": True,
+                    "participants": ["sub|竹和生"],
+                },
+                "miniapp_fate_cards": {
+                    "enabled": True,
+                    "participants": ["sub|竹和生"],
+                },
+            })
+
+        self.assertEqual(load_mock.call_count, 1)
+        self.assertEqual(value["miniapp_fate_cards"]["participants"], ["sub|锋脉子"])
+
     def test_missing_file_uses_four_main_souls_and_huzhen(self):
         value = settings.load_automation_settings()
         self.assertEqual(
