@@ -496,7 +496,134 @@ class RestrictedMiniAppWorker:
                     if seconds > 0
                     else add_seconds_str(now_str(), 30 * 60)
                 )
+        task = CONCUBINE_TASKS["heart_trial"]
+        match = re.search(rf"{re.escape(task['status_label'])}\s*[：:]\s*([^\n]+)", clean)
+        if match:
+            value = match.group(1).strip()
+            if any(marker in value for marker in ("可用", "可施展", "已就绪", "无")):
+                state[task["state_key"]] = ""
+            else:
+                seconds = parse_duration_seconds(value)
+                state[task["state_key"]] = (
+                    add_seconds_str(now_str(), seconds + CONCUBINE_GRACE_SECONDS)
+                    if seconds > 0
+                    else add_seconds_str(now_str(), 30 * 60)
+                )
         state["last_concubine_status_time"] = now_str()
+
+    def _set_heart_trial_backoff(self, identity: str, seconds: int) -> None:
+        state = identity_state(self.actor, identity)
+        state[CONCUBINE_TASKS["heart_trial"]["state_key"]] = add_seconds_str(
+            now_str(), max(0, int(seconds))
+        )
+
+    def _ensure_heart_trial_backoff(self, identity: str, seconds: int) -> None:
+        state = identity_state(self.actor, identity)
+        value = str(state.get(CONCUBINE_TASKS["heart_trial"]["state_key"]) or "")
+        if not value or not is_future(value):
+            self._set_heart_trial_backoff(identity, seconds)
+
+    async def _run_miniapp_heart_trial(self, identity: str) -> bool:
+        """Run the heart-trial protocol through Mini App command-center responses."""
+        task = CONCUBINE_TASKS["heart_trial"]
+        if self.actor.dashboard_command_paused(task["command"], identity):
+            return True
+        if self.actor.dashboard_command_paused(".稳", identity):
+            self.log.info("[%s] Mini App heart trial skipped because .稳 is paused", identity)
+            return True
+        state = identity_state(self.actor, identity)
+        next_time = str(state.get(task["state_key"]) or "")
+        if next_time and is_future(next_time):
+            return True
+
+        status_response = await self._send(identity, ".我的侍妾", return_response_msg=True)
+        status_text = getattr(status_response, "text", "") if status_response else ""
+        if not status_text:
+            self._set_heart_trial_backoff(identity, 600)
+            return False
+        self._sync_concubine_response(identity, ".我的侍妾", status_text)
+        if any(marker in status_text for marker in ("还没有侍妾", "尚无侍妾", "没有侍妾")):
+            self._set_heart_trial_backoff(identity, 24 * 3600)
+            return False
+        if "远航状态" in status_text and any(marker in status_text for marker in ("进行中", "远航中", "剩余")):
+            cooldown = parse_duration_seconds(status_text)
+            self._set_heart_trial_backoff(identity, cooldown + CONCUBINE_GRACE_SECONDS if cooldown else 1800)
+            return False
+        next_time = str(identity_state(self.actor, identity).get(task["state_key"]) or "")
+        if next_time and is_future(next_time):
+            return True
+
+        forced_exit = False
+        try:
+            trial_response = await self._send(identity, task["command"], return_response_msg=True)
+            trial_text = getattr(trial_response, "text", "") if trial_response else ""
+            if "修为不足" in trial_text:
+                forced_exit = True
+                await self._send(identity, ".强行出关")
+                await asyncio.sleep(2)
+                trial_response = await self._send(identity, task["command"], return_response_msg=True)
+                trial_text = getattr(trial_response, "text", "") if trial_response else ""
+            if not trial_text:
+                self._set_heart_trial_backoff(identity, 600)
+                return False
+            if any(marker in trial_text for marker in ("冷却", "后再", "尚未")):
+                cooldown = parse_duration_seconds(trial_text)
+                self._set_heart_trial_backoff(identity, cooldown if cooldown > 0 else 1800)
+                return False
+            if getattr(self.actor, "heart_trial_terminal_failure", lambda text: False)(trial_text):
+                await self._send(identity, ".我的侍妾", return_response_msg=True)
+                self._ensure_heart_trial_backoff(identity, 600)
+                return False
+            if getattr(self.actor, "heart_trial_requires_reply_target", lambda text: False)(trial_text):
+                trial_response = await self._send(identity, task["command"], return_response_msg=True)
+                trial_text = getattr(trial_response, "text", "") if trial_response else ""
+            if not getattr(self.actor, "heart_trial_round_prompt", lambda text, idx: "第一轮" in text)(trial_text, 1):
+                self._set_heart_trial_backoff(identity, 600)
+                return False
+
+            current_text = trial_text
+            for round_num in range(1, 4):
+                confirmed = False
+                for attempt in range(1, 4):
+                    response = await self._send(identity, ".稳", return_response_msg=True)
+                    current_text = getattr(response, "text", "") if response else ""
+                    self.log.info(
+                        "IN [Mini App | %s]: .稳 (%d/3, try %d/3) -> %s",
+                        identity,
+                        round_num,
+                        attempt,
+                        current_text[:240],
+                    )
+                    if getattr(self.actor, "heart_trial_settled", lambda text: False)(current_text):
+                        confirmed = True
+                        break
+                    if getattr(self.actor, "heart_trial_terminal_failure", lambda text: False)(current_text):
+                        await self._send(identity, ".我的侍妾", return_response_msg=True)
+                        self._ensure_heart_trial_backoff(identity, 600)
+                        return False
+                    if getattr(self.actor, "heart_trial_round_confirmed", lambda text, idx: False)(current_text, round_num):
+                        confirmed = True
+                        break
+                    if attempt < 3:
+                        await asyncio.sleep(3)
+                if not confirmed:
+                    self._set_heart_trial_backoff(identity, 600)
+                    return False
+
+            self._set_heart_trial_backoff(identity, task["cooldown"])
+            self.log.info(
+                "RESULT [Mini App | %s]: .共历心劫 completed, next cooldown %s",
+                identity,
+                state.get(task["state_key"]),
+            )
+            return True
+        finally:
+            if forced_exit:
+                try:
+                    await asyncio.sleep(3)
+                    await self._send(identity, ".深度闭关")
+                except Exception:
+                    self.log.warning("[%s] Mini App heart trial failed to restore deep meditation", identity, exc_info=True)
 
     def _concubine_status_due(self, identity: str) -> bool:
         state = identity_state(self.actor, identity)
@@ -526,6 +653,8 @@ class RestrictedMiniAppWorker:
                         else:
                             await self.actor.execute_avatar_concubine_direct(identity, task_key)
                         await asyncio.sleep(2)
+                    await self._run_miniapp_heart_trial(identity)
+                    await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
             except Exception:

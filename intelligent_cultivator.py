@@ -610,9 +610,9 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             "主魂": ["Weeguu"],
         }
         self.avatar_features = {
-            "无咎子": {"meditation_prefix": ".推命", "dream_map": True, "destiny": True, "yuanying_out": True, "rift_search": True, "treasure_touch_command": WUJIU_TREASURE_TOUCH_COMMAND},
-            "缘生子": {"meditation_prefix": "", "dream_map": True, "yuanying_out": True, "rift_search": True},
-            "素缘子": {"meditation_prefix": "", "dream_map": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True},
+            "无咎子": {"meditation_prefix": ".推命", "dream_map": True, "heart_trial": True, "destiny": True, "yuanying_out": True, "rift_search": True, "treasure_touch_command": WUJIU_TREASURE_TOUCH_COMMAND},
+            "缘生子": {"meditation_prefix": "", "dream_map": True, "heart_trial": True, "yuanying_out": True, "rift_search": True},
+            "素缘子": {"meditation_prefix": "", "dream_map": True, "heart_trial": True, "formation": False, "formation_assist": True, "star_gazing": True, "star_attraction": True},
         }
         self.actual_cooldown_probe_commands = {
             ("主魂", ".探寻裂缝"),
@@ -3930,7 +3930,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             "last_mulan_support_date": "", "last_mulan_support_time": "",
             "next_mulan_support_time": "", "last_mulan_support_response": "",
             "last_mulan_support_error": "",
-            "next_dream_map_time": "", "next_divination_time": "",
+            "next_dream_map_time": "", "next_heart_trial_time": "", "next_divination_time": "",
             "next_concubine_voyage_time": "", "last_concubine_voyage_time": "",
             "concubine_voyage_active": False,
             "last_yuanying_out_time": "", "last_yuanying_return_time": "",
@@ -5542,8 +5542,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                         if features.get("formation"): await self.execute_avatar_formation(avatar)
                         elif features.get("formation_assist") and self.pending_formation_invite_msg and not self.formation_assist_in_progress:
                             await self._avatar_assist_formation(avatar)
-                        # 3. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 侍妾远航
-                        if features.get("dream_map"):
+                        # 3. 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航
+                        if features.get("dream_map") or features.get("heart_trial"):
                             await self.execute_avatar_concubine_chain(avatar)
                         # 4. 每日一次性任务优先级最低，放在本轮最后。
                         await self._avatar_mulan_support(avatar)
@@ -6035,7 +6035,7 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 if value and is_future(value):
                     min_cd = min(min_cd, seconds_until(value))
             # 侍妾批次CD
-            if features.get("dream_map"):
+            if features.get("dream_map") or features.get("heart_trial"):
                 if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 冒险", avatar):
                     bound_time = self.latest_concubine_chain_time(avatar)
                     if bound_time and is_future(bound_time):
@@ -6044,6 +6044,10 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     dm = a_state.get("next_dream_map_time", "")
                     if dm and is_future(dm):
                         min_cd = min(min_cd, seconds_until(dm))
+            if features.get("heart_trial"):
+                heart_time = a_state.get("next_heart_trial_time", "")
+                if heart_time and is_future(heart_time):
+                    min_cd = min(min_cd, seconds_until(heart_time))
             # 侍妾远航CD（非绑定路径兜底）
             if (
                 self.concubine_voyage_enabled(avatar)

@@ -1568,6 +1568,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             "next_formation_retry_time",
             "next_force_exit_time",
             "next_dream_map_time",
+            "next_heart_trial_time",
             "next_divination_time",
             "next_concubine_voyage_time",
             "next_stairs_time",
@@ -7438,7 +7439,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 # --- 周天星斗大阵 ---
                 # 小号星宫分身不再主动启阵，只实时助阵副号三分身的邀请。
 
-                # --- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 侍妾远航 ---
+                # --- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ---
                 await self.execute_avatar_concubine_chain(
                     avatar,
                     send_with_cultivation_check=send_with_cultivation_check,

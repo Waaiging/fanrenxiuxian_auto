@@ -5782,7 +5782,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                             self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
                             med_wait = 600
 
-                # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 侍妾远航 ----
+                # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ----
                 await self.execute_avatar_concubine_chain(avatar)
 
                 await self._avatar_mulan_support(avatar)
@@ -5795,6 +5795,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 retry_time2 = a_state.get("next_meditation_retry_time", "")
                 next_form = self.avatar_formation_block_until(avatar, a_state) if avatar in AVATAR_FORMATION_AVATARS else ""
                 next_force_exit = a_state.get("next_force_exit_time", "")
+                next_heart2 = a_state.get("next_heart_trial_time", "")
                 next_dream2 = a_state.get("next_dream_map_time", "")
                 next_voyage = a_state.get("next_concubine_voyage_time", "")
 
@@ -5818,6 +5819,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 add_due_or_future(retry_time2)
                 add_due_or_future(next_form, due_when_missing=(avatar in AVATAR_FORMATION_AVATARS))
                 add_due_or_future(next_force_exit)
+                add_due_or_future(next_heart2)
                 if self.concubine_voyage_auto_start_enabled(avatar) and not self.dashboard_command_paused(".侍妾远航 冒险", avatar):
                     bound_time = self.latest_concubine_chain_time(avatar)
                     add_due_or_future(bound_time)

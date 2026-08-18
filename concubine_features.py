@@ -3,7 +3,8 @@
 
 提供 ConcubineMixin 混入类，封装所有与侍妾（道侣）相关的操作：
   1. 入梦寻图 —— 虚天残图/苍坤残图线索收集
-  2. 天机代卜 —— 侍妾代卜避劫，提升闭关收益
+  2. 共历心劫 —— 三轮抉择（稳/狠/骗），侍妾连携
+  3. 天机代卜 —— 侍妾代卜避劫，提升闭关收益
 
 被 intelligent_cultivator.py、sub_cultivator.py、cultivator_xiaohao.py 继承使用。
 """
@@ -38,8 +39,8 @@ CONCUBINE_VOYAGE_RETURN_COMMAND = ".远航归来"
 CONCUBINE_VOYAGE_CD_SECONDS = 12 * 3600
 MAIN_SOUL_CONCUBINE_VOYAGE_CD_SECONDS = 6 * 3600
 CONCUBINE_VOYAGE_AUTO_START_ENABLED = True
-CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "voyage")
-CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream")
+CONCUBINE_CHAIN_TASK_KEYS = ("divination", "dream", "heart_trial", "voyage")
+CONCUBINE_PRE_VOYAGE_TASK_KEYS = ("divination", "dream", "heart_trial")
 TARGET_CONCUBINE_NAME = "南宫婉"
 CONCUBINE_SEARCH_COMMAND = ".红尘寻缘"
 CONCUBINE_DISMISS_COMMAND = ".遣散侍妾"
@@ -1684,6 +1685,72 @@ class ConcubineMixin:
             await self.send_and_wait_feedback_identity(avatar, ".拼图", timeout=60)
         return ok
 
+    async def execute_avatar_heart_trial_via_status(
+        self,
+        avatar,
+        send_with_cultivation_check=None,
+    ):
+        """Query the avatar's concubine status, then run its three-round heart trial."""
+        task = CONCUBINE_TASKS["heart_trial"]
+        if self._concubine_command_paused(task["command"], avatar):
+            return True
+        if self._concubine_command_paused(".稳", avatar):
+            log.info(f"Concubine chain [{avatar}]: .稳 paused; skipping heart trial.")
+            return True
+        if self.concubine_voyage_block_until(avatar):
+            self.defer_concubine_task_until_voyage("heart_trial", avatar)
+            return False
+        if not self._concubine_task_due("heart_trial", avatar):
+            return True
+        status_msg = await self.send_and_wait_feedback_identity(
+            avatar,
+            ".我的侍妾",
+            timeout=60,
+            return_response_msg=True,
+            delete_after=False,
+        )
+        status_text = self._concubine_response_text(status_msg)
+        if not status_text:
+            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+            return False
+        if not self.concubine_status_matches_identity(status_text, avatar):
+            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 30))
+            return False
+        if any(k in status_text for k in ["还没有侍妾", "尚无侍妾", "没有侍妾"]):
+            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 24 * 3600))
+            return False
+        voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+        if voyage_block_until:
+            self.set_avatar_state(avatar, task["state_key"], voyage_block_until)
+            return False
+        clean_status = status_text.replace("**", "")
+        heart_match = re.search(r"(?:共历)?心劫冷却\s*[：:]\s*([^\s\n|]+)", clean_status)
+        if heart_match:
+            value = heart_match.group(1).strip()
+            if not any(k in value for k in ["无", "可用", "可施展", "已就绪"]):
+                cooldown = (
+                    self.parse_wait_time(value)
+                    if hasattr(self, "parse_wait_time")
+                    else parse_duration_seconds(value)
+                )
+                self.set_avatar_state(
+                    avatar,
+                    task["state_key"],
+                    add_seconds_str(
+                        now_str(),
+                        (cooldown if cooldown > 0 else 1800) + CONCUBINE_GRACE_SECONDS,
+                    ),
+                )
+                return False
+        if not (status_msg and hasattr(status_msg, "id")):
+            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+            return False
+        return await self.execute_avatar_heart_trial(
+            avatar,
+            status_msg,
+            send_with_cultivation_check=send_with_cultivation_check,
+        )
+
     async def execute_concubine_chain(self):
         """Main-soul bound flow; only main/main ends with the 月殿寻痕 voyage."""
         self.ensure_concubine_state()
@@ -1713,6 +1780,20 @@ class ConcubineMixin:
                     log.info(f"Concubine chain [主魂]: {task['label']} not completed; continuing to voyage check.")
                     continue
                 await asyncio.sleep(3)
+            if (
+                self._concubine_task_due("heart_trial", "主魂")
+                and not self._concubine_command_paused(CONCUBINE_TASKS["heart_trial"]["command"], "主魂")
+                and not self._concubine_command_paused(".稳", "主魂")
+            ):
+                if self._concubine_command_paused(".我的侍妾", "主魂"):
+                    log.info("Concubine chain [主魂]: .我的侍妾 paused; deferring heart trial status check.")
+                    self.defer_concubine_task("heart_trial", 6 * 3600)
+                    return True
+                await self.execute_heart_trial()
+                if not self._concubine_task_ready_for_voyage("heart_trial", "主魂"):
+                    log.info("Concubine chain [主魂]: heart trial not completed; continuing to voyage check.")
+                else:
+                    await asyncio.sleep(3)
             await self.execute_concubine_voyage_start("主魂")
             return True
 
@@ -1740,6 +1821,15 @@ class ConcubineMixin:
                     log.info(f"Concubine chain [{avatar}]: {CONCUBINE_TASKS[task_key]['label']} not completed; continuing to voyage check.")
                     continue
                 await asyncio.sleep(3)
+            if self._concubine_task_due("heart_trial", avatar):
+                heart_ok = await self.execute_avatar_heart_trial_via_status(
+                    avatar,
+                    send_with_cultivation_check=send_with_cultivation_check,
+                )
+                if not heart_ok:
+                    log.info(f"Concubine chain [{avatar}]: heart trial not completed; continuing to voyage check.")
+                else:
+                    await asyncio.sleep(3)
             await self.execute_concubine_voyage_start(
                 avatar,
                 send_with_cultivation_check=send_with_cultivation_check,
@@ -1787,6 +1877,177 @@ class ConcubineMixin:
             return True
         log.warning(f"Concubine 共历心劫: still no cooldown after uncertain {context}.")
         return False
+
+    async def execute_heart_trial(self):
+        """Run the main-soul three-round ``.共历心劫`` flow."""
+        task = CONCUBINE_TASKS["heart_trial"]
+        log.info("Concubine: starting .共历心劫 flow via .我的侍妾")
+        if self._concubine_command_paused(".我的侍妾", "主魂"):
+            self.defer_concubine_task("heart_trial", 6 * 3600)
+            return False
+        if self._concubine_command_paused(task["command"], "主魂") or self._concubine_command_paused(".稳", "主魂"):
+            self.defer_concubine_task("heart_trial", 6 * 3600)
+            return False
+        if hasattr(self, "switch_back_to_main"):
+            await self.switch_back_to_main()
+        status_msg = await self.send_and_wait_feedback(
+            ".我的侍妾",
+            timeout=60,
+            return_response_msg=True,
+            delete_after=False,
+        )
+        if not status_msg:
+            self.defer_concubine_task("heart_trial")
+            return False
+        if hasattr(status_msg, "id"):
+            self.state["last_concubine_status_msg_id"] = status_msg.id
+        status_text = self._concubine_response_text(status_msg)
+        if status_text and not self.concubine_status_matches_identity(status_text, "主魂"):
+            self.defer_concubine_task("heart_trial", 30)
+            return False
+        if status_text and not self.parse_concubine_status(status_text):
+            notify_unrecognized_response(self, ".我的侍妾", status_text, log, "共历心劫前状态")
+            self.defer_concubine_task("heart_trial")
+            return False
+        if self.state.get(task["state_key"]) and is_future(self.state[task["state_key"]]):
+            return False
+        if self.concubine_voyage_block_until("主魂"):
+            self.defer_concubine_task_until_voyage("heart_trial", "主魂")
+            return False
+
+        trial_msg = None
+        trial_text = ""
+        for attempt in range(1, 4):
+            if hasattr(self, "switch_back_to_main"):
+                await self.switch_back_to_main()
+            trial_msg = await self.send_and_wait_feedback(
+                task["command"],
+                reply_to=getattr(status_msg, "id", None),
+                timeout=90,
+                return_response_msg=True,
+                delete_after=False,
+            )
+            trial_text = self._concubine_response_text(trial_msg)
+            if not self.heart_trial_requires_reply_target(trial_text):
+                break
+            if attempt < 3:
+                status_msg = await self.send_and_wait_feedback(
+                    ".我的侍妾",
+                    timeout=60,
+                    return_response_msg=True,
+                    delete_after=False,
+                )
+                if not status_msg:
+                    break
+                await asyncio.sleep(3)
+
+        if not trial_msg:
+            self.defer_concubine_task("heart_trial")
+            return False
+        if any(k in trial_text for k in ["冷却", "后再", "尚未"]):
+            self.record_concubine_cd("heart_trial", trial_text)
+            return False
+        if self.concubine_response_indicates_active_voyage(trial_text):
+            self.defer_concubine_task_until_voyage("heart_trial", "主魂")
+            return False
+        if self.heart_trial_terminal_failure(trial_text):
+            if not await self.refresh_heart_trial_cooldown_after_uncertain("共历心劫终止返回"):
+                self.defer_concubine_task("heart_trial", 600)
+            return False
+        if self.heart_trial_requires_reply_target(trial_text):
+            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫回复目标")
+            self.defer_concubine_task("heart_trial", 600)
+            return False
+        if not self.heart_trial_round_prompt(trial_text, 1):
+            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫开局")
+            self.defer_concubine_task("heart_trial", 600)
+            return False
+        if not self.is_known_concubine_response("heart_trial", trial_text):
+            notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫")
+            self.defer_concubine_task("heart_trial")
+            return False
+
+        current_msg = trial_msg
+        if hasattr(self, "switch_back_to_main"):
+            await self.switch_back_to_main()
+        async with _ConcubineAtomicTask(self, "HeartTrial-主魂"):
+            async with self.cmd_lock:
+                for idx in range(1, 4):
+                    confirmed = False
+                    current_text = ""
+                    for round_attempt in range(1, 4):
+                        pause_event = getattr(self, "pause_event", None)
+                        if pause_event is not None:
+                            await pause_event.wait()
+                        if self._concubine_command_paused(".稳", "主魂"):
+                            self.defer_concubine_task("heart_trial", 600)
+                            return False
+                        if not await wait_for_bot_activity_before_send(self, ".稳", log):
+                            return False
+                        if not command_send_allowed(self, ".稳", log):
+                            return False
+                        try:
+                            remember_script_send_intent(self, ".稳")
+                            sent = await self.client.send_message(
+                                self.target_chat_id,
+                                ".稳",
+                                reply_to=current_msg.id,
+                            )
+                            remember_script_sent_message(self, sent)
+                            record_command_sent(
+                                self,
+                                sent,
+                                ".稳",
+                                identity=getattr(self, "current_identity", "主魂"),
+                                source="auto",
+                                reply_to=current_msg.id,
+                                logger=log,
+                            )
+                            schedule_command_auto_delete(self, sent, text=".稳", logger=log)
+                            log.info(f"OUT [主魂]: .稳 ({idx}/3, try {round_attempt}/3)")
+                        except Exception as exc:
+                            log.error(f"Concubine 共历心劫: failed to send .稳 ({idx}/3): {exc}", exc_info=True)
+                            self.defer_concubine_task("heart_trial", 600)
+                            return False
+
+                        result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
+                            current_msg,
+                            sent,
+                            idx,
+                            timeout_sec=90,
+                            poll_sec=3,
+                        )
+                        if result_msg:
+                            current_msg = result_msg
+                            await log_incoming_message(
+                                self,
+                                f".稳 {idx}/3 try {round_attempt}/3",
+                                current_text,
+                                msg=result_msg,
+                                logger=log,
+                            )
+                        if self.heart_trial_settled(current_text):
+                            self.record_concubine_cd("heart_trial")
+                            return True
+                        if confirmed:
+                            break
+                        if self.heart_trial_terminal_failure(current_text):
+                            if not await self.refresh_heart_trial_cooldown_after_uncertain(
+                                f".稳 第{idx}轮终止返回"
+                            ):
+                                self.defer_concubine_task("heart_trial", 600)
+                            return False
+                        if self.heart_trial_round_prompt(current_text, idx) and round_attempt < 3:
+                            await asyncio.sleep(3)
+                            continue
+                        if round_attempt < 3:
+                            await asyncio.sleep(3)
+                    if not confirmed:
+                        notify_unrecognized_response(self, ".稳", current_text, log, f"共历心劫第{idx}轮")
+                        self.defer_concubine_task("heart_trial", 600)
+                        return False
+        self.record_concubine_cd("heart_trial")
+        return True
 
     # ---- 执行神通 ----
 
@@ -2096,6 +2357,270 @@ class ConcubineMixin:
         )
         return cd > 0
 
+    async def execute_avatar_heart_trial(
+        self,
+        avatar,
+        status_msg,
+        send_with_cultivation_check=None,
+    ):
+        """Run an avatar heart trial from its status anchor through three ``.稳`` rounds."""
+        task = CONCUBINE_TASKS["heart_trial"]
+        forced_exit = False
+        async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
+            try:
+                status_text = self._concubine_response_text(status_msg)
+                if status_text and not self.concubine_status_matches_identity(status_text, avatar):
+                    log.warning(f"Avatar [{avatar}] heart trial: mismatched status anchor; retry soon.")
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 30))
+                    return False
+                voyage_block_until = self.parse_concubine_voyage_status_line(status_text, avatar)
+                if voyage_block_until:
+                    self.set_avatar_state(avatar, task["state_key"], voyage_block_until)
+                    return False
+
+                trial_resp = None
+                trial_text = ""
+                for start_attempt in range(1, 3):
+                    log.info(
+                        f"Avatar [{avatar}] heart trial: replying .共历心劫 to status "
+                        f"({start_attempt}/2)."
+                    )
+                    trial_resp, trial_text, step_forced_exit = await self._send_concubine_identity_command(
+                        avatar,
+                        task["command"],
+                        send_with_cultivation_check=send_with_cultivation_check,
+                        reply_to=status_msg.id,
+                        timeout=90,
+                        max_retries=1,
+                        return_response_msg=True,
+                        delete_after=False,
+                    )
+                    forced_exit = forced_exit or step_forced_exit
+                    if not self.heart_trial_requires_reply_target(trial_text):
+                        break
+                    if start_attempt >= 2:
+                        break
+                    status_msg = await self.send_and_wait_feedback_identity(
+                        avatar,
+                        ".我的侍妾",
+                        timeout=60,
+                        return_response_msg=True,
+                        delete_after=False,
+                    )
+                    if not status_msg or not hasattr(status_msg, "id"):
+                        break
+                    await asyncio.sleep(3)
+
+                if trial_text == "PAUSE_1H":
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 3600))
+                    return False
+                if "修为不足" in trial_text and hasattr(self, "handle_修为不足"):
+                    retry_holder = {"response": None}
+
+                    async def retry_heart_trial():
+                        fresh_status = await self.send_and_wait_feedback_identity(
+                            avatar,
+                            ".我的侍妾",
+                            timeout=60,
+                            return_response_msg=True,
+                            delete_after=False,
+                        )
+                        if not fresh_status or not hasattr(fresh_status, "id"):
+                            return None
+                        retry_holder["response"] = await self.send_and_wait_feedback_identity(
+                            avatar,
+                            task["command"],
+                            reply_to=fresh_status.id,
+                            timeout=90,
+                            max_retries=1,
+                            return_response_msg=True,
+                            delete_after=False,
+                        )
+                        return retry_holder["response"]
+
+                    forced_exit = True
+                    success, retry_text = await self.handle_修为不足(
+                        avatar,
+                        retry_heart_trial,
+                        cooldown_key=task["state_key"],
+                    )
+                    if not success:
+                        forced_exit = False  # The account helper already restored deep meditation.
+                        return False
+                    trial_resp = retry_holder["response"]
+                    trial_text = self._concubine_response_text(retry_text)
+
+                if not trial_text:
+                    log.warning(f"Avatar [{avatar}] heart trial: empty .共历心劫 response.")
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                    return False
+                if any(k in trial_text for k in ["冷却", "后再", "尚未"]):
+                    cooldown = (
+                        self.parse_wait_time(trial_text)
+                        if hasattr(self, "parse_wait_time")
+                        else parse_duration_seconds(trial_text)
+                    )
+                    self.set_avatar_state(
+                        avatar,
+                        task["state_key"],
+                        add_seconds_str(now_str(), cooldown if cooldown > 0 else 1800),
+                    )
+                    return False
+                if self.concubine_response_indicates_active_voyage(trial_text):
+                    block_until = self.concubine_voyage_block_until(avatar) or add_seconds_str(now_str(), 1800)
+                    self.set_avatar_state(avatar, task["state_key"], block_until)
+                    return False
+                if self.heart_trial_terminal_failure(trial_text):
+                    await self.sync_avatar_heart_trial_cooldown_after_failure(
+                        avatar,
+                        f"start terminal response: {trial_text[:80]}",
+                    )
+                    return False
+                if self.heart_trial_requires_reply_target(trial_text):
+                    log.warning(f"Avatar [{avatar}] heart trial: reply target rejected twice.")
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                    return False
+                if not trial_resp or not hasattr(trial_resp, "id"):
+                    log.warning(f"Avatar [{avatar}] heart trial: missing round-one reply anchor.")
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                    return False
+                if not self.heart_trial_round_prompt(trial_text, 1):
+                    log.warning(
+                        f"Avatar [{avatar}] heart trial: response did not start round 1: "
+                        f"{trial_text[:120]}"
+                    )
+                    self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                    return False
+
+                current_msg = trial_resp
+                current_text = trial_text
+                for round_num in range(1, 4):
+                    confirmed = False
+                    for attempt in range(1, 4):
+                        if not current_msg or not hasattr(current_msg, "id"):
+                            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                            return False
+                        if self._concubine_command_paused(".稳", avatar):
+                            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                            return False
+                        current_identity = getattr(self, "current_identity", avatar)
+                        if current_identity != avatar and hasattr(self, "send_and_wait_feedback"):
+                            log.warning(
+                                f"Avatar [{avatar}] heart trial: identity drifted to "
+                                f"{current_identity}; switching back."
+                            )
+                            await self.send_and_wait_feedback(f".切换 {avatar}", timeout=30)
+                            try:
+                                self.current_identity = avatar
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2)
+                        pause_event = getattr(self, "pause_event", None)
+                        if pause_event is not None:
+                            await pause_event.wait()
+                        if not await wait_for_bot_activity_before_send(self, ".稳", log):
+                            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                            return False
+                        if not command_send_allowed(self, ".稳", log):
+                            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                            return False
+                        try:
+                            remember_script_send_intent(self, ".稳")
+                            sent = await self.client.send_message(
+                                self.target_chat_id,
+                                ".稳",
+                                reply_to=current_msg.id,
+                            )
+                            remember_script_sent_message(self, sent)
+                            record_command_sent(
+                                self,
+                                sent,
+                                ".稳",
+                                identity=avatar,
+                                source="auto",
+                                reply_to=current_msg.id,
+                                logger=log,
+                            )
+                            schedule_command_auto_delete(self, sent, text=".稳", logger=log)
+                            log.info(f"OUT [{avatar}]: .稳 ({round_num}/3, try {attempt}/3)")
+                        except Exception as exc:
+                            log.error(
+                                f"Avatar [{avatar}] heart trial: failed to send .稳 "
+                                f"({round_num}/3): {exc}",
+                                exc_info=True,
+                            )
+                            self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                            return False
+
+                        result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
+                            current_msg,
+                            sent,
+                            round_num,
+                            timeout_sec=90,
+                            poll_sec=3,
+                        )
+                        if result_msg:
+                            current_msg = result_msg
+                            await log_incoming_message(
+                                self,
+                                f".稳 {round_num}/3 try {attempt}/3 ({avatar})",
+                                current_text,
+                                msg=result_msg,
+                                logger=log,
+                            )
+                        if self.heart_trial_settled(current_text):
+                            self.set_avatar_state(
+                                avatar,
+                                task["state_key"],
+                                add_seconds_str(now_str(), task["cooldown"]),
+                            )
+                            log.info(f"Avatar [{avatar}] heart trial settled after round {round_num}.")
+                            return True
+                        if confirmed:
+                            break
+                        if self.heart_trial_terminal_failure(current_text):
+                            await self.sync_avatar_heart_trial_cooldown_after_failure(
+                                avatar,
+                                f"round {round_num} terminal response: {current_text[:80]}",
+                            )
+                            return False
+                        if self.heart_trial_round_prompt(current_text, round_num) and attempt < 3:
+                            await asyncio.sleep(3)
+                            continue
+                        if attempt < 3:
+                            await asyncio.sleep(3)
+                    if not confirmed:
+                        log.warning(f"Avatar [{avatar}] heart trial: round {round_num} failed after 3 attempts.")
+                        self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
+                        return False
+
+                self.set_avatar_state(
+                    avatar,
+                    task["state_key"],
+                    add_seconds_str(now_str(), task["cooldown"]),
+                )
+                log.info(f"Avatar [{avatar}] heart trial completed all three rounds.")
+                return True
+            finally:
+                if forced_exit:
+                    try:
+                        deep_response = await self.send_and_wait_feedback_identity(
+                            avatar,
+                            ".深度闭关",
+                            timeout=60,
+                            return_response_msg=False,
+                        )
+                        if hasattr(self, "record_avatar_deep_meditation_start"):
+                            await self.record_avatar_deep_meditation_start(
+                                avatar,
+                                self._concubine_response_text(deep_response),
+                            )
+                    except Exception as exc:
+                        log.warning(
+                            f"Avatar [{avatar}] heart trial: failed to restore deep meditation: {exc}",
+                            exc_info=True,
+                        )
+
     async def run_target_concubine_loop(self, initial_delay=0):
         """主号主魂/无咎子寻找指定侍妾；找到前不跑普通侍妾链。"""
         await self.startup_done.wait()
@@ -2137,7 +2662,7 @@ class ConcubineMixin:
     async def run_concubine_loop(self):
         """
         侍妾功能主循环。
-        固定批次：远航归来 → 天机代卜 → 入梦寻图 → 主号主魂月殿寻痕。
+        固定批次：远航归来 → 天机代卜 → 入梦寻图 → 共历心劫 → 主号主魂月殿寻痕。
         全部有冷却时等待最短的冷却时间。
         """
         await self.startup_done.wait()

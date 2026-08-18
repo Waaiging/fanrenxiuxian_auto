@@ -18,6 +18,8 @@ import dashboard_server
 import fishing_features
 import intelligent_cultivator
 import log_utils
+import miniapp_dwelling
+import restricted_miniapp_worker
 import star_gazing_collector
 import sub_cultivator
 from command_modules import (
@@ -11523,10 +11525,154 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["concubine_voyage_active"])
         self.assertEqual(actor.state["next_concubine_voyage_time"], due)
 
-    def test_main_heart_trial_sender_is_removed(self):
-        self.assertFalse(hasattr(ConcubineMixin, "execute_heart_trial"))
-        self.assertTrue(command_feedback.is_retired_auto_command(".共历心劫"))
-        self.assertTrue(command_feedback.is_retired_auto_command(".稳"))
+    def test_heart_trial_senders_are_restored(self):
+        self.assertTrue(hasattr(ConcubineMixin, "execute_heart_trial"))
+        self.assertTrue(hasattr(ConcubineMixin, "execute_avatar_heart_trial"))
+        self.assertFalse(command_feedback.is_retired_auto_command(".共历心劫"))
+        self.assertFalse(command_feedback.is_retired_auto_command(".稳"))
+        self.assertTrue(miniapp_dwelling.miniapp_command_allowed(".共历心劫"))
+        self.assertTrue(miniapp_dwelling.miniapp_command_allowed(".稳"))
+
+    def test_main_heart_trial_anchor_lost_syncs_cooldown_without_unknown_alert(self):
+        actor = DummyConcubine()
+        ready_status = """
+【道心侍妾】
+侍妾：慕沛灵
+入梦寻图冷却：1小时
+共历心劫冷却：无
+天机代卜冷却：1小时
+侍妾远航冷却：无
+"""
+        cooldown_status = """
+【道心侍妾】
+侍妾：慕沛灵
+入梦寻图冷却：1小时
+共历心劫冷却：1小时10分钟
+天机代卜冷却：1小时
+侍妾远航冷却：无
+"""
+        sent = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            if len(sent) == 1:
+                return DummyMessage(2001, text=ready_status)
+            if command == ".共历心劫":
+                return DummyMessage(2002, text="心劫锚点已散，需重新引动天劫。")
+            return DummyMessage(2003, text=cooldown_status)
+
+        actor.send_and_wait_feedback = fake_send
+        alerts = []
+        old_notify = concubine_features.notify_unrecognized_response
+        concubine_features.notify_unrecognized_response = lambda *args, **kwargs: alerts.append(args)
+        try:
+            self.assertFalse(asyncio.run(actor.execute_heart_trial()))
+        finally:
+            concubine_features.notify_unrecognized_response = old_notify
+
+        self.assertEqual(sent, [".我的侍妾", ".共历心劫", ".我的侍妾"])
+        self.assertEqual(alerts, [])
+        self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 60 * 60)
+
+    def test_shared_avatar_heart_trial_completes_three_rounds(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {"缘生子": ""}
+        actor.avatar_usernames = {}
+        actor.state = {"avatars": {"缘生子": {}}}
+        actor.save_state = lambda: None
+        actor._current_identity = "缘生子"
+        actor.pause_event = asyncio.Event()
+        actor.pause_event.set()
+        direct_commands = []
+
+        async def fake_identity_send(identity, command, **kwargs):
+            self.assertEqual(identity, "缘生子")
+            self.assertEqual(command, ".共历心劫")
+            return DummyMessage(2200, text="【坠魔心劫·第一轮】请选择应对之法")
+
+        class FakeClient:
+            async def send_message(self, chat_id, command, reply_to=None):
+                direct_commands.append((command, reply_to))
+                return DummyMessage(2300 + len(direct_commands), text=command, out=True)
+
+        round_texts = {
+            1: "【第1轮已定】【坠魔心劫·第二轮】",
+            2: "【第2轮已定】【坠魔心劫·第三轮】",
+            3: "【坠魔心劫·结算】共历心劫完成。",
+        }
+
+        async def fake_wait(current_msg, sent_msg, idx, **kwargs):
+            text = round_texts[idx]
+            return DummyMessage(2400 + idx, text=text), text, True
+
+        actor.send_and_wait_feedback_identity = fake_identity_send
+        actor.wait_for_heart_trial_round_result_safe = fake_wait
+        actor.client = FakeClient()
+        actor.target_chat_id = -100123456
+        status = DummyMessage(2100, text="[Avatar: 缘生子]\n你的道心侍妾：瑶光\n共历心劫冷却：无")
+
+        with (
+            patch.object(concubine_features, "wait_for_bot_activity_before_send", new=AsyncMock(return_value=True)),
+            patch.object(concubine_features, "command_send_allowed", return_value=True),
+            patch.object(concubine_features, "record_command_sent", return_value=True),
+            patch.object(concubine_features, "schedule_command_auto_delete", return_value=None),
+            patch.object(concubine_features, "log_incoming_message", new=AsyncMock(return_value=True)),
+        ):
+            self.assertTrue(asyncio.run(actor.execute_avatar_heart_trial("缘生子", status)))
+
+        self.assertEqual(direct_commands, [
+            (".稳", 2200),
+            (".稳", 2401),
+            (".稳", 2402),
+        ])
+        self.assertGreater(
+            common_seconds_until(actor.state["avatars"]["缘生子"]["next_heart_trial_time"]),
+            9 * 3600,
+        )
+
+    def test_restricted_miniapp_heart_trial_runs_three_rounds(self):
+        actor = DummyConcubine()
+        actor.dashboard_command_paused = lambda command, identity="主魂": False
+        worker = restricted_miniapp_worker.RestrictedMiniAppWorker.__new__(
+            restricted_miniapp_worker.RestrictedMiniAppWorker
+        )
+        worker.actor = actor
+        worker.log = Mock()
+        responses = {
+            ".我的侍妾": [
+                "你的道心侍妾：慕沛灵\n共历心劫冷却：无",
+            ],
+            ".共历心劫": ["【坠魔心劫·第一轮】请选择应对之法"],
+            ".稳": [
+                "【第1轮已定】【坠魔心劫·第二轮】",
+                "【第2轮已定】【坠魔心劫·第三轮】",
+                "【坠魔心劫·结算】共历心劫完成。",
+            ],
+        }
+        sent = []
+
+        async def fake_send(identity, command, **kwargs):
+            sent.append((identity, command))
+            text = responses[command].pop(0)
+            return SimpleNamespace(text=text) if kwargs.get("return_response_msg") else text
+
+        worker._send = fake_send
+
+        async def fake_sleep(seconds):
+            return None
+
+        with patch.object(restricted_miniapp_worker.asyncio, "sleep", new=fake_sleep):
+            self.assertTrue(asyncio.run(worker._run_miniapp_heart_trial("主魂")))
+
+        self.assertEqual(sent, [
+            ("主魂", ".我的侍妾"),
+            ("主魂", ".共历心劫"),
+            ("主魂", ".稳"),
+            ("主魂", ".稳"),
+            ("主魂", ".稳"),
+        ])
+        self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 9 * 3600)
 
     def test_main_avatar_heart_trial_anchor_lost_syncs_identity_cooldown(self):
         actor = Cultivator.__new__(Cultivator)
@@ -13240,13 +13386,14 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(actor.state["avatars"]["厚土"]["next_rift_search_time"])
 
     def test_sub_zhu_hesheng_yuanying_rift_checks_send_avatar_commands(self):
+        identity = sub_cultivator.SUB_YINLUO_IDENTITY
         actor = SubCultivator.__new__(SubCultivator)
-        actor.avatars = ["竹和生"]
-        actor.avatar_nicknames = {"竹和生": ""}
+        actor.avatars = [identity]
+        actor.avatar_nicknames = {identity: ""}
         actor.state = {
             "next_yuanying_out_time": "2099-01-01 00:00:00",
             "next_rift_search_time": "2099-01-02 00:00:00",
-            "avatars": {"竹和生": {"deep_meditation_end_time": "2099-01-03 00:00:00"}},
+            "avatars": {identity: {"deep_meditation_end_time": "2099-01-03 00:00:00"}},
         }
         actor.save_state = lambda: None
         actor.dashboard_command_paused = lambda command, identity="": False
@@ -13263,15 +13410,15 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.send_and_wait_feedback_identity = fake_send
 
-        asyncio.run(actor._avatar_yuanying_out_check("竹和生"))
-        asyncio.run(actor._avatar_rift_search_check("竹和生"))
+        asyncio.run(actor._avatar_yuanying_out_check(identity))
+        asyncio.run(actor._avatar_rift_search_check(identity))
 
-        self.assertIn("竹和生", sub_cultivator.AVATAR_YUANYING_RIFT_AVATARS)
-        self.assertEqual(sent, [("竹和生", ".元婴出窍"), ("竹和生", ".探寻裂缝")])
+        self.assertIn(identity, sub_cultivator.AVATAR_YUANYING_RIFT_AVATARS)
+        self.assertEqual(sent, [(identity, ".元婴出窍"), (identity, ".探寻裂缝")])
         self.assertEqual(actor.state["next_yuanying_out_time"], "2099-01-01 00:00:00")
         self.assertEqual(actor.state["next_rift_search_time"], "2099-01-02 00:00:00")
-        self.assertTrue(actor.state["avatars"]["竹和生"]["yuanying_out_active"])
-        self.assertGreater(common_seconds_until(actor.state["avatars"]["竹和生"]["next_rift_search_time"]), 11 * 3600)
+        self.assertTrue(actor.state["avatars"][identity]["yuanying_out_active"])
+        self.assertGreater(common_seconds_until(actor.state["avatars"][identity]["next_rift_search_time"]), 11 * 3600)
 
     def test_manual_miniapp_star_reply_is_ignored(self):
         actor = SubCultivator.__new__(SubCultivator)

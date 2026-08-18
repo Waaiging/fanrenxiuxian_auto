@@ -59,8 +59,6 @@ RETIRED_AUTO_COMMAND_PREFIXES = (
     ".改命 探索",
     ".宗门点卯",
     ".野外历练",
-    ".共历心劫",
-    ".稳",
 )
 RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY = {
     ("main", "主魂"): (
