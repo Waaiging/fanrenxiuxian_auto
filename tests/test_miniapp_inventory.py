@@ -170,71 +170,81 @@ class MiniAppInventoryTests(unittest.TestCase):
         self.assertTrue(all(call[1]["playerId"] == 200 for call in calls))
 
     def test_dashboard_payload_and_refresh_endpoint_use_inventory_cache_files(self):
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(dashboard_server, "CONFIG_DIR", tmpdir):
-            cache = read_inventory_cache("sub", tmpdir)
-            payload = section_payload()
-            cache["snapshots"]["厚土"] = inventory_snapshot(
-                "sub",
-                "厚土",
-                payload["inventory"],
-            )
-            cache["snapshots"]["缘生子"] = inventory_snapshot(
-                "sub",
-                "缘生子",
-                payload["inventory"],
-            )
-            write_inventory_cache("sub", cache, tmpdir)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state_sub.json"
+            state_path.write_text(json.dumps({
+                "avatar_dao_names_by_player_id": {
+                    automation_settings.SUB_YINLUO_PLAYER_ID: "竹和生",
+                },
+            }), encoding="utf-8")
+            with (
+                patch.object(automation_settings, "SUB_STATE_FILE", state_path),
+                patch.object(dashboard_server, "CONFIG_DIR", tmpdir),
+            ):
+                cache = read_inventory_cache("sub", tmpdir)
+                payload = section_payload()
+                cache["snapshots"]["厚土"] = inventory_snapshot(
+                    "sub",
+                    "厚土",
+                    payload["inventory"],
+                )
+                cache["snapshots"]["缘生子"] = inventory_snapshot(
+                    "sub",
+                    "缘生子",
+                    payload["inventory"],
+                )
+                write_inventory_cache("sub", cache, tmpdir)
 
-            dashboard = dashboard_server.miniapp_inventory_dashboard_payload(query="灵石")
-            response = dashboard_server.refresh_miniapp_inventory(
-                {"account": "sub", "identity": "厚土"},
-                username="wg",
-            )
+                dashboard = dashboard_server.miniapp_inventory_dashboard_payload(query="灵石")
+                response = dashboard_server.refresh_miniapp_inventory(
+                    {"account": "sub", "identity": "厚土"},
+                    username="wg",
+                )
 
-            self.assertTrue(dashboard["ok"])
-            self.assertEqual(dashboard["summary"]["snapshot_count"], 2)
-            self.assertEqual(dashboard["summary"]["match_count"], 2)
-            self.assertEqual(dashboard["summary"]["match_quantity"], 2400)
-            self.assertIn(
-                "竹和生",
-                {row["identity"] for row in dashboard["search_results"]},
-            )
-            self.assertNotIn(
-                "缘生子",
-                {row["identity"] for row in dashboard["search_results"]},
-            )
-            self.assertEqual(
-                dashboard["accounts"][1]["snapshots"]["竹和生"]["identity"],
-                "竹和生",
-            )
-            self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
-            total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
-            self.assertEqual(total_lingshi["quantity"], 2400)
-            self.assertEqual(total_lingshi["source_count"], 2)
+                self.assertTrue(dashboard["ok"])
+                self.assertEqual(dashboard["summary"]["snapshot_count"], 2)
+                self.assertEqual(dashboard["summary"]["match_count"], 2)
+                self.assertEqual(dashboard["summary"]["match_quantity"], 2400)
+                self.assertIn(
+                    "竹和生",
+                    {row["identity"] for row in dashboard["search_results"]},
+                )
+                self.assertNotIn(
+                    "缘生子",
+                    {row["identity"] for row in dashboard["search_results"]},
+                )
+                self.assertEqual(
+                    dashboard["accounts"][1]["snapshots"]["竹和生"]["identity"],
+                    "竹和生",
+                )
+                self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
+                total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
+                self.assertEqual(total_lingshi["quantity"], 2400)
+                self.assertEqual(total_lingshi["source_count"], 2)
 
-            moved = dashboard_server.update_miniapp_inventory_non_tradable(
-                {"action": "add", "items": ["灵石", "灵石", "回春丹"]},
-                username="wg",
-            )
-            self.assertTrue(moved["success"])
-            self.assertEqual(moved["items"], ["回春丹", "灵石"])
-            self.assertEqual(
-                dashboard_server.miniapp_inventory_dashboard_payload()["non_tradable_items"],
-                ["回春丹", "灵石"],
-            )
-            removed = dashboard_server.update_miniapp_inventory_non_tradable(
-                {"action": "remove", "items": ["灵石"]},
-                username="wg",
-            )
-            self.assertTrue(removed["success"])
-            self.assertEqual(removed["items"], ["回春丹"])
-            self.assertTrue(response["success"])
-            self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "厚土")
-            migrated_request = write_inventory_request(
-                "sub", "缘生子", requested_by="tester", base_dir=tmpdir
-            )
-            self.assertEqual(migrated_request["identity"], "竹和生")
-            self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "竹和生")
+                moved = dashboard_server.update_miniapp_inventory_non_tradable(
+                    {"action": "add", "items": ["灵石", "灵石", "回春丹"]},
+                    username="wg",
+                )
+                self.assertTrue(moved["success"])
+                self.assertEqual(moved["items"], ["回春丹", "灵石"])
+                self.assertEqual(
+                    dashboard_server.miniapp_inventory_dashboard_payload()["non_tradable_items"],
+                    ["回春丹", "灵石"],
+                )
+                removed = dashboard_server.update_miniapp_inventory_non_tradable(
+                    {"action": "remove", "items": ["灵石"]},
+                    username="wg",
+                )
+                self.assertTrue(removed["success"])
+                self.assertEqual(removed["items"], ["回春丹"])
+                self.assertTrue(response["success"])
+                self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "厚土")
+                migrated_request = write_inventory_request(
+                    "sub", "缘生子", requested_by="tester", base_dir=tmpdir
+                )
+                self.assertEqual(migrated_request["identity"], "竹和生")
+                self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "竹和生")
 
     def test_sub_inventory_follows_dao_name_change_without_module_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
