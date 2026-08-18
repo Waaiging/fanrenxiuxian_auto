@@ -447,6 +447,10 @@ class MiniAppDailyActivityTests(unittest.TestCase):
 
     def test_fate_cards_accept_preserves_non_deep_meditation_mode(self):
         actor = FakeActor()
+        actor.state.update({
+            "miniapp_fate_cards_accept_prepared_date": "2026-08-18",
+            "miniapp_fate_cards_stage": "quest_pending",
+        })
 
         class Transport:
             identity_player_ids = {"主魂": 100}

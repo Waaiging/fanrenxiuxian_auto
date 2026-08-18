@@ -1242,9 +1242,6 @@ class MiniAppDailyActivities:
         return complete
 
     async def _prepare_fate_cards_accept(self, identity: str, today: str) -> bool:
-        state = self._state(identity)
-        if state.get("miniapp_fate_cards_accept_prepared_date") == today:
-            return True
         force_completed = False
         try:
             forced = await self.transport.deep_seclusion_action(
