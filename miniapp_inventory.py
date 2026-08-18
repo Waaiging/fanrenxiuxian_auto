@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from automation_settings import canonical_automation_identity
+from automation_settings import automation_account_identities, canonical_automation_identity
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -26,6 +26,13 @@ INVENTORY_ACCOUNT_IDENTITIES = {
 }
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _REQUEST_WRITE_LOCK = threading.Lock()
+
+
+def inventory_account_identities() -> dict[str, tuple[str, ...]]:
+    """Return inventory identities with the sub avatar's current Dao name."""
+    identities = dict(INVENTORY_ACCOUNT_IDENTITIES)
+    identities["sub"] = automation_account_identities()["sub"]
+    return identities
 
 
 def _now_text() -> str:
@@ -91,7 +98,7 @@ def write_inventory_request(
     target = str(identity or "").strip()
     if target != "*":
         target = canonical_automation_identity(key, target)
-    if target != "*" and target not in INVENTORY_ACCOUNT_IDENTITIES[key]:
+    if target != "*" and target not in inventory_account_identities()[key]:
         raise ValueError("unknown_inventory_identity")
     request = {
         "request_id": str(request_id or uuid.uuid4().hex),
@@ -131,12 +138,32 @@ def read_inventory_cache(account: Any, base_dir: str | None = None) -> dict[str,
     cache.setdefault("snapshots", {})
     if not isinstance(cache["snapshots"], dict):
         cache["snapshots"] = {}
-    if key == "sub" and "缘生子" in cache["snapshots"]:
-        cache["snapshots"].setdefault("竹和生", cache["snapshots"].pop("缘生子"))
+    normalized_snapshots: dict[str, Any] = {}
+    snapshot_ranks: dict[str, tuple[str, bool]] = {}
+    for stored_identity, stored_snapshot in cache["snapshots"].items():
+        identity = canonical_automation_identity(key, stored_identity)
+        if not identity:
+            identity = str(stored_identity or "").strip()
+        snapshot = dict(stored_snapshot) if isinstance(stored_snapshot, dict) else stored_snapshot
+        if isinstance(snapshot, dict):
+            snapshot["account"] = key
+            snapshot["identity"] = identity
+            updated_at = str(snapshot.get("updated_at") or "")
+        else:
+            updated_at = ""
+        rank = (updated_at, str(stored_identity or "").strip() == identity)
+        if identity not in normalized_snapshots or rank > snapshot_ranks[identity]:
+            normalized_snapshots[identity] = snapshot
+            snapshot_ranks[identity] = rank
+    cache["snapshots"] = normalized_snapshots
     for field in ("last_request", "request_progress"):
         value = cache.get(field)
         if isinstance(value, dict) and value.get("identity") not in {None, "*"}:
             value["identity"] = canonical_automation_identity(key, value.get("identity"))
+        if isinstance(value, dict) and value.get("current_identity"):
+            value["current_identity"] = canonical_automation_identity(
+                key, value.get("current_identity")
+            )
     return cache
 
 
@@ -253,6 +280,7 @@ def inventory_snapshot(
     identity: str,
     inventory_payload: Any,
 ) -> dict[str, Any]:
+    identity = canonical_automation_identity(account, identity)
     items = normalize_inventory_sections(inventory_payload)
     counts = {category: 0 for category in INVENTORY_TYPES}
     for row in items:
@@ -270,12 +298,14 @@ def inventory_snapshot(
 def search_inventory_caches(
     caches: dict[str, dict[str, Any]],
     query: Any,
+    account_identities: dict[str, tuple[str, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     needle = str(query or "").strip().casefold()
     if not needle:
         return []
+    account_identities = account_identities or inventory_account_identities()
     results: list[dict[str, Any]] = []
-    for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items():
+    for account, identities in account_identities.items():
         snapshots = _mapping(_mapping(caches.get(account)).get("snapshots"))
         for identity in identities:
             snapshot = _mapping(snapshots.get(identity))
@@ -292,10 +322,10 @@ def search_inventory_caches(
                     "updated_at": str(snapshot.get("updated_at") or ""),
                 })
                 results.append(result)
-    account_order = {name: index for index, name in enumerate(INVENTORY_ACCOUNT_IDENTITIES)}
+    account_order = {name: index for index, name in enumerate(account_identities)}
     identity_order = {
         (account, identity): index
-        for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items()
+        for account, identities in account_identities.items()
         for index, identity in enumerate(identities)
     }
     return sorted(
@@ -332,7 +362,7 @@ class MiniAppInventoryWorker:
         self.inter_identity_delay = max(0.0, float(inter_identity_delay))
 
     def identities(self) -> list[str]:
-        configured = INVENTORY_ACCOUNT_IDENTITIES[self.account]
+        configured = inventory_account_identities()[self.account]
         actor_identities = ["主魂", *(getattr(self.actor, "avatars", []) or [])]
         mapped = getattr(self.transport, "identity_player_ids", {}) or {}
         return [
@@ -347,6 +377,8 @@ class MiniAppInventoryWorker:
     async def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
         request_id = str(request.get("request_id") or "").strip()
         target = str(request.get("identity") or "").strip()
+        if target != "*":
+            target = canonical_automation_identity(self.account, target)
         cache = read_inventory_cache(self.account, self.base_dir)
         available = self.identities()
         targets = available if target == "*" else [target]

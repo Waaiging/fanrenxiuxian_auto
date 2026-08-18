@@ -1,8 +1,11 @@
 import asyncio
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import automation_settings
 import dashboard_server
 from miniapp_dwelling import MiniAppDwellingTransport
 from miniapp_inventory import (
@@ -200,6 +203,10 @@ class MiniAppInventoryTests(unittest.TestCase):
                 "缘生子",
                 {row["identity"] for row in dashboard["search_results"]},
             )
+            self.assertEqual(
+                dashboard["accounts"][1]["snapshots"]["竹和生"]["identity"],
+                "竹和生",
+            )
             self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
             total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
             self.assertEqual(total_lingshi["quantity"], 2400)
@@ -228,6 +235,69 @@ class MiniAppInventoryTests(unittest.TestCase):
             )
             self.assertEqual(migrated_request["identity"], "竹和生")
             self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "竹和生")
+
+    def test_sub_inventory_follows_dao_name_change_without_module_reload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state_sub.json"
+            state_path.write_text(json.dumps({
+                "avatar_dao_names_by_player_id": {
+                    automation_settings.SUB_YINLUO_PLAYER_ID: "竹和生",
+                },
+            }), encoding="utf-8")
+            with (
+                patch.object(automation_settings, "SUB_STATE_FILE", state_path),
+                patch.object(dashboard_server, "CONFIG_DIR", tmpdir),
+            ):
+                cache = read_inventory_cache("sub", tmpdir)
+                cache["snapshots"]["竹和生"] = inventory_snapshot(
+                    "sub",
+                    "竹和生",
+                    section_payload()["inventory"],
+                )
+                write_inventory_cache("sub", cache, tmpdir)
+
+                state_path.write_text(json.dumps({
+                    "avatar_dao_names_by_player_id": {
+                        automation_settings.SUB_YINLUO_PLAYER_ID: "松风子",
+                    },
+                    "avatar_dao_name_aliases": {
+                        "缘生子": "松风子",
+                        "竹和生": "松风子",
+                    },
+                }), encoding="utf-8")
+
+                dashboard = dashboard_server.miniapp_inventory_dashboard_payload(query="灵石")
+                sub_account = next(
+                    row for row in dashboard["accounts"] if row["account"] == "sub"
+                )
+                self.assertIn("松风子", sub_account["identities"])
+                self.assertNotIn("竹和生", sub_account["identities"])
+                self.assertEqual(sub_account["snapshots"]["松风子"]["identity"], "松风子")
+                self.assertEqual(dashboard["search_results"][0]["identity"], "松风子")
+
+                transport = FakeTransport(["主魂", "松风子"])
+                worker = MiniAppInventoryWorker(
+                    FakeActor(["松风子"]),
+                    transport,
+                    "sub",
+                    base_dir=tmpdir,
+                    inter_identity_delay=0,
+                )
+                result = asyncio.run(worker.process_request({
+                    "request_id": "renamed-selected",
+                    "identity": "竹和生",
+                    "requested_by": "tester",
+                }))
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(transport.calls, ["松风子"])
+
+                response = dashboard_server.refresh_miniapp_inventory(
+                    {"account": "sub", "identity": "竹和生"},
+                    username="wg",
+                )
+                self.assertTrue(response["success"])
+                self.assertEqual(response["request"]["identity"], "松风子")
+                self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "松风子")
 
 
 if __name__ == "__main__":

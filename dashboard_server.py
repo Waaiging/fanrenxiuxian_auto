@@ -82,7 +82,7 @@ from miniapp_fishing import (
     request_miniapp_fishing_force_retry,
 )
 from miniapp_inventory import (
-    INVENTORY_ACCOUNT_IDENTITIES,
+    inventory_account_identities,
     read_inventory_cache,
     search_inventory_caches,
     write_inventory_request,
@@ -311,10 +311,11 @@ def save_miniapp_inventory_non_tradable_items(items, base_dir=None):
     return cleaned
 
 
-def aggregate_miniapp_inventory_items(caches):
+def aggregate_miniapp_inventory_items(caches, account_identities=None):
     """Merge all cached identities into one name-deduplicated item list."""
+    account_identities = account_identities or inventory_account_identities()
     merged = {}
-    for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items():
+    for account, identities in account_identities.items():
         cache = caches.get(account) if isinstance(caches, dict) else {}
         snapshots = cache.get("snapshots") if isinstance(cache, dict) else {}
         if not isinstance(snapshots, dict):
@@ -360,15 +361,16 @@ def aggregate_miniapp_inventory_items(caches):
 
 def miniapp_inventory_dashboard_payload(query=""):
     """Return cached inventory snapshots, aggregate items, and search results."""
+    account_identities = inventory_account_identities()
     caches = {
         account: read_inventory_cache(account, CONFIG_DIR)
-        for account in INVENTORY_ACCOUNT_IDENTITIES
+        for account in account_identities
     }
     accounts = []
     snapshot_count = 0
     item_count = 0
     latest_update = ""
-    for account, identities in INVENTORY_ACCOUNT_IDENTITIES.items():
+    for account, identities in account_identities.items():
         cache = caches[account]
         snapshots = cache.get("snapshots") if isinstance(cache.get("snapshots"), dict) else {}
         clean_snapshots = {}
@@ -390,9 +392,9 @@ def miniapp_inventory_dashboard_payload(query=""):
             "last_request": cache.get("last_request") if isinstance(cache.get("last_request"), dict) else {},
             "request_progress": cache.get("request_progress") if isinstance(cache.get("request_progress"), dict) else {},
         })
-    inventory_totals = aggregate_miniapp_inventory_items(caches)
+    inventory_totals = aggregate_miniapp_inventory_items(caches, account_identities)
     non_tradable_items = load_miniapp_inventory_non_tradable_items(CONFIG_DIR)
-    search_results = search_inventory_caches(caches, query)
+    search_results = search_inventory_caches(caches, query, account_identities)
     match_quantity = 0.0
     for row in search_results:
         try:
@@ -4998,6 +5000,7 @@ def refresh_miniapp_inventory(payload: dict = Body(...), username: str = Depends
     """Ask one or all account processes to refresh inventory through their live session."""
     account = str(payload.get("account") or "").strip()
     identity = str(payload.get("identity") or "").strip()
+    account_identities = inventory_account_identities()
     if account == "all":
         if identity not in ("", "*"):
             return {"success": False, "msg": "全部账号刷新只支持全部身份"}
@@ -5009,24 +5012,25 @@ def refresh_miniapp_inventory(payload: dict = Body(...), username: str = Depends
                     requested_by=username,
                     base_dir=CONFIG_DIR,
                 )
-                for target_account in INVENTORY_ACCOUNT_IDENTITIES
+                for target_account in account_identities
             ]
         return {"success": True, "requests": requests, "msg": "已请求刷新全部身份"}
-    if account not in INVENTORY_ACCOUNT_IDENTITIES:
+    if account not in account_identities:
         return {"success": False, "msg": "未知账号"}
-    if identity not in INVENTORY_ACCOUNT_IDENTITIES[account] and identity != "*":
-        return {"success": False, "msg": "未知身份"}
     with MINIAPP_INVENTORY_REQUEST_LOCK:
-        request = write_inventory_request(
-            account,
-            identity,
-            requested_by=username,
-            base_dir=CONFIG_DIR,
-        )
+        try:
+            request = write_inventory_request(
+                account,
+                identity,
+                requested_by=username,
+                base_dir=CONFIG_DIR,
+            )
+        except ValueError:
+            return {"success": False, "msg": "未知身份"}
     return {
         "success": True,
         "request": request,
-        "msg": "已请求刷新全部身份" if identity == "*" else f"已请求刷新 {identity}",
+        "msg": "已请求刷新全部身份" if identity == "*" else f"已请求刷新 {request['identity']}",
     }
 
 @app.get("/api/command-records")
