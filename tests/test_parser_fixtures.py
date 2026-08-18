@@ -11631,6 +11631,61 @@ class ParserFixtureTests(unittest.TestCase):
             9 * 3600,
         )
 
+    def test_shared_avatar_heart_trial_uses_miniapp_for_all_rounds(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.avatars = ["缘生子"]
+        actor.avatar_nicknames = {"缘生子": ""}
+        actor.avatar_usernames = {}
+        actor.state = {"avatars": {"缘生子": {}}}
+        actor.save_state = lambda: None
+        actor._current_identity = "缘生子"
+        sent = []
+        responses = [
+            miniapp_dwelling.MiniAppCommandResponse(
+                "【坠魔心劫·第一轮】请选择应对之法",
+                {"actionResult": {"ok": True}},
+            ),
+            miniapp_dwelling.MiniAppCommandResponse(
+                "【第1轮已定】【坠魔心劫·第二轮】",
+                {"actionResult": {"ok": True}},
+            ),
+            miniapp_dwelling.MiniAppCommandResponse(
+                "【第2轮已定】【坠魔心劫·第三轮】",
+                {"actionResult": {"ok": True}},
+            ),
+            miniapp_dwelling.MiniAppCommandResponse(
+                "【坠魔心劫·结算】共历心劫完成。",
+                {"actionResult": {"ok": True}},
+            ),
+        ]
+
+        async def fake_identity_send(identity, command, **kwargs):
+            sent.append((identity, command, kwargs.get("reply_to")))
+            return responses.pop(0)
+
+        class FailClient:
+            async def send_message(self, *args, **kwargs):
+                raise AssertionError("Mini App heart trial must not send .稳 to Telegram")
+
+        actor.send_and_wait_feedback_identity = fake_identity_send
+        actor.client = FailClient()
+        status = DummyMessage(
+            2500,
+            text="[Avatar: 缘生子]\n你的道心侍妾：瑶光\n共历心劫冷却：无",
+        )
+
+        self.assertTrue(asyncio.run(actor.execute_avatar_heart_trial("缘生子", status)))
+        self.assertEqual(sent, [
+            ("缘生子", ".共历心劫", 2500),
+            ("缘生子", ".稳", None),
+            ("缘生子", ".稳", None),
+            ("缘生子", ".稳", None),
+        ])
+        self.assertGreater(
+            common_seconds_until(actor.state["avatars"]["缘生子"]["next_heart_trial_time"]),
+            9 * 3600,
+        )
+
     def test_restricted_miniapp_heart_trial_runs_three_rounds(self):
         actor = DummyConcubine()
         actor.dashboard_command_paused = lambda command, identity="主魂": False

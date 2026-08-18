@@ -380,6 +380,39 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(response, "group fallback")
         fallback.assert_awaited_once_with(".借幡镇魂 @Weeguu")
 
+    def test_router_ignores_telegram_reply_target_for_miniapp_heart_trial(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={"avatars": {"缘生子": {}}},
+            avatars=["缘生子"],
+            save_state=lambda: None,
+            identity_pause_seconds=lambda identity: 0,
+            dashboard_command_paused=lambda command, identity: False,
+        )
+        router = MiniAppCommandRouter(actor, "main", logger=FakeLogger())
+        router._route_active = True
+        router.transport.identity_player_ids = {"主魂": 100, "缘生子": -200}
+        expected = MiniAppCommandResponse(
+            "【坠魔心劫·第一轮】请选择应对之法",
+            {"actionResult": {"ok": True}},
+        )
+        router.transport.command = AsyncMock(return_value=expected)
+        router._maybe_refresh_auth = AsyncMock()
+        fallback = AsyncMock(return_value="group fallback")
+
+        response = asyncio.run(router._route(
+            "缘生子",
+            ".共历心劫",
+            fallback,
+            (),
+            {"reply_to": 2500, "return_response_msg": True},
+        ))
+
+        self.assertIs(response, expected)
+        router.transport.command.assert_awaited_once_with(".共历心劫", identity="缘生子")
+        fallback.assert_not_awaited()
+
     def test_main_and_sub_yuanshengzi_yinluo_commands_route_to_miniapp(self):
         commands = (
             ".我的阴罗幡",
