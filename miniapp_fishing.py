@@ -39,6 +39,8 @@ FISHING_TRANSFER_RETRY_SECONDS = 60
 FISHING_TRANSFER_FAILURE_RETRY_SECONDS = 3600
 FISHING_SHOP_RETRY_SECONDS = 3600
 FISHING_MATERIAL_NOTICE_RETRY_SECONDS = 3600
+FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS = 8.0
+FISHING_GLOBAL_LOCK_STALE_SECONDS = 30.0
 FISHING_TRANSFER_FAILURE_STATUSES = {
     "listing_failed",
     "listing_unknown",
@@ -141,11 +143,11 @@ def fishing_rod_name_in_text(value: Any) -> str:
 
 def fishing_scan_keys(settings: dict[str, Any]) -> list[str]:
     """Identities the automation is allowed to inspect or use for the shared rod."""
-    keys = [
-        str(item).strip()
-        for item in settings.get("participants") or []
-        if fishing_participant_parts(item) != ("", "")
-    ]
+    keys = []
+    for item in settings.get("participants") or []:
+        account, identity = fishing_participant_parts(item)
+        if account and identity:
+            keys.append(automation_participant_key(account, identity))
     owner = str(settings.get("rod_owner") or "auto").strip()
     owner_account, owner_identity = fishing_participant_parts(owner)
     if owner != "auto" and owner_account and owner_identity:
@@ -291,7 +293,35 @@ def _save_global_state(data: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _acquire_global_lock(timeout: float = 5.0) -> tuple[int | None, Path]:
+def _global_lock_is_stale(lock_path: Path) -> bool:
+    """Only reclaim an old lock when its recorded owner is no longer alive."""
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return False
+    if age <= FISHING_GLOBAL_LOCK_STALE_SECONDS:
+        return False
+    try:
+        owner_text = lock_path.read_text(encoding="ascii").strip().split()[0]
+        owner_pid = int(owner_text)
+    except (OSError, IndexError, TypeError, ValueError):
+        return True
+    if owner_pid <= 0:
+        return True
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _acquire_global_lock(
+    timeout: float = FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS,
+) -> tuple[int | None, Path]:
     lock_path = MINIAPP_FISHING_GLOBAL_FILE.with_name(
         f"{MINIAPP_FISHING_GLOBAL_FILE.name}.lock"
     )
@@ -299,13 +329,23 @@ def _acquire_global_lock(timeout: float = 5.0) -> tuple[int | None, Path]:
     while True:
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(descriptor, str(os.getpid()).encode("ascii", errors="ignore"))
+            try:
+                os.write(descriptor, str(os.getpid()).encode("ascii", errors="ignore"))
+            except OSError:
+                os.close(descriptor)
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                raise
             return descriptor, lock_path
         except FileExistsError:
             try:
-                if time.time() - lock_path.stat().st_mtime > 30:
+                if _global_lock_is_stale(lock_path):
                     lock_path.unlink()
                     continue
+            except FileNotFoundError:
+                continue
             except OSError:
                 pass
             if time.monotonic() >= deadline:
@@ -361,11 +401,11 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
         data["detail"] = "鱼竿设置已变更，等待重新扫描"
     data["configured_rod"] = configured_rod
 
-    participants = [
-        str(item).strip()
-        for item in settings.get("participants") or []
-        if fishing_participant_parts(item) != ("", "")
-    ]
+    participants = []
+    for item in settings.get("participants") or []:
+        account, identity = fishing_participant_parts(item)
+        if account and identity:
+            participants.append(automation_participant_key(account, identity))
     participants = list(dict.fromkeys(participants))
     scan_keys = fishing_scan_keys(settings)
     scan_key_set = set(scan_keys)
@@ -486,7 +526,7 @@ def _update_global_state(
     updater: Any = None,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    lock = _acquire_global_lock()
+    lock = _acquire_global_lock(FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS)
     if lock[0] is None:
         raise RuntimeError("miniapp_fishing_global_lock_timeout")
     try:
@@ -2619,13 +2659,41 @@ class MiniAppFishingAutomation:
                 raise
             except Exception as exc:
                 identity = self._status_identity(settings)
+                code = (
+                    exc.code
+                    if isinstance(exc, MiniAppBeastError)
+                    else type(exc).__name__.lower()
+                )
+                if (
+                    code == "runtimeerror"
+                    and str(exc) == "miniapp_fishing_global_lock_timeout"
+                ):
+                    previous_status = str(
+                        self._state(identity).get("miniapp_fishing_status") or ""
+                    )
+                    wait = self.retry_seconds
+                    self._record(
+                        identity,
+                        miniapp_fishing_status="waiting",
+                        miniapp_fishing_last_error="miniapp_fishing_global_lock_timeout",
+                        miniapp_fishing_last_error_time=_now_text(),
+                        miniapp_fishing_next_run_time=(
+                            datetime.now() + timedelta(seconds=wait)
+                        ).strftime(TIME_FORMAT),
+                    )
+                    if previous_status != "waiting":
+                        self.log.warning(
+                            "Mini App fishing global state is busy for %s; retrying.",
+                            identity,
+                        )
+                    await self._sleep_until_next_cycle(wait, settings)
+                    continue
                 participant_key = automation_participant_key(self.account, identity)
                 force_state = _mapping(miniapp_fishing_global_snapshot(settings).get("force_retry"))
                 force_retry_active = participant_key in (force_state.get("pending") or [])
                 previous_status = str(
                     self._state(identity).get("miniapp_fishing_status") or ""
                 )
-                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 summary_emitted = False
                 if code == "fishing_daily_limit_reached":
                     status = "daily_done"

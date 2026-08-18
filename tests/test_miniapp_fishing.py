@@ -1,5 +1,7 @@
 import asyncio
+import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -155,6 +157,65 @@ class MiniAppFishingTests(unittest.TestCase):
             actor.state["miniapp_fishing_next_run_time"],
             "2026-08-01 23:59:00",
         )
+
+    def test_stale_global_lock_owned_by_dead_process_is_reclaimed(self):
+        lock_path = miniapp_fishing.MINIAPP_FISHING_GLOBAL_FILE.with_name(
+            "miniapp_fishing_global.json.lock"
+        )
+        lock_path.write_text("999999999", encoding="ascii")
+        old = time.time() - miniapp_fishing.FISHING_GLOBAL_LOCK_STALE_SECONDS - 1
+        os.utime(lock_path, (old, old))
+
+        descriptor, acquired_path = miniapp_fishing._acquire_global_lock(timeout=0.5)
+        try:
+            self.assertIsNotNone(descriptor)
+            self.assertEqual(acquired_path, lock_path)
+        finally:
+            miniapp_fishing._release_global_lock((descriptor, acquired_path))
+
+    def test_global_lock_timeout_keeps_scheduler_alive(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.is_running = True
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(actor, SimpleNamespace(), "main", logger)
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        worker._clear_irrelevant_local_statuses = Mock()
+        worker._apply_force_retry_request = Mock(return_value={})
+        worker._drive_once = AsyncMock(
+            side_effect=RuntimeError("miniapp_fishing_global_lock_timeout")
+        )
+
+        async def stop_after_retry(_wait, _settings):
+            actor.is_running = False
+
+        worker._sleep_until_next_cycle = AsyncMock(side_effect=stop_after_retry)
+        asyncio.run(worker.run_loop())
+
+        self.assertEqual(actor.state["miniapp_fishing_status"], "waiting")
+        self.assertEqual(
+            actor.state["miniapp_fishing_last_error"],
+            "miniapp_fishing_global_lock_timeout",
+        )
+        logger.error.assert_not_called()
+        logger.warning.assert_called_once()
 
     def test_unselected_xiaohao_clears_stale_status_without_driving(self):
         class Actor:
@@ -330,14 +391,19 @@ class MiniAppFishingTests(unittest.TestCase):
         miniapp_fishing._migrate_global_participant_keys(data)
         miniapp_fishing._reconcile_global_state(data, settings)
 
-        self.assertEqual(data["participants"], ["sub|竹和生"])
-        self.assertEqual(data["completed_today"], {"sub|竹和生": completed_at})
+        current_identity = miniapp_fishing.canonical_automation_identity(
+            "sub", "竹和生"
+        )
+        self.assertEqual(data["participants"], [f"sub|{current_identity}"])
+        self.assertEqual(
+            data["completed_today"], {f"sub|{current_identity}": completed_at}
+        )
         self.assertEqual(data["current_key"], "")
         self.assertEqual(data["force_retry"], {})
         self.assertEqual(data["force_retry_request_id"], "manual-request-already-finished")
         self.assertEqual(
             miniapp_fishing.fishing_participant_label("sub|缘生子"),
-            "副号｜竹和生",
+            f"副号｜{current_identity}",
         )
 
     def test_reconcile_changed_fishing_options_preserves_completion_without_force_retry(self):
