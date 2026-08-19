@@ -638,6 +638,76 @@ class MiniAppFishingTests(unittest.TestCase):
             log_operation=False,
         )
 
+    def test_locked_configured_pond_falls_back_to_unlocked_pond(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        shop = shop_payload(bait_count=1)
+        shop["shop"]["ponds"] = [
+            {
+                "key": "hantan",
+                "name": "灵眼寒潭",
+                "unlocked": False,
+                "requiredExp": 1000,
+                "currentExp": 0,
+            },
+            {
+                "key": "qingxi",
+                "name": "青溪浅滩",
+                "unlocked": True,
+                "requiredExp": 0,
+                "currentExp": 408,
+            },
+        ]
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(
+                return_value=(
+                    "fish_lobby",
+                    {
+                        "session": {
+                            "phase": "lobby",
+                            "rod": {"itemId": "item_fishing_rod_basic", "name": "青竹钓竿"},
+                        }
+                    },
+                )
+            ),
+            fishing_shop=AsyncMock(return_value=shop),
+            fishing_next_cast=AsyncMock(return_value=("fish_cast", {"token": "fish_cast"})),
+            fishing_start=AsyncMock(
+                return_value=(
+                    "fish_cast",
+                    {"session": {"phase": "waiting", "serverNow": 1000, "biteAt": 31000}},
+                )
+            ),
+        )
+        worker = MiniAppFishingAutomation(
+            Actor(),
+            transport,
+            "xiaohao",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+
+        wait = asyncio.run(
+            worker.run_cycle(
+                {"enabled": True, "pond": "hantan", "bait": "demon_blood", "chum": "none"}
+            )
+        )
+
+        self.assertEqual(wait, 31)
+        transport.fishing_next_cast.assert_awaited_once_with(
+            "主魂",
+            "fish_lobby",
+            "qingxi",
+            "item_fishing_bait_demon_blood",
+            log_operation=False,
+        )
+        self.assertEqual(worker.actor.state["miniapp_fishing_pond_fallback_to"], "qingxi")
+
     def test_lobby_purchase_is_limited_by_available_cost_materials(self):
         class Actor:
             def __init__(self):

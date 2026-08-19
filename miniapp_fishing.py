@@ -1511,6 +1511,55 @@ class MiniAppFishingAutomation:
                 )
         return shop
 
+    def _resolve_pond(
+        self,
+        identity: str,
+        shop: dict[str, Any],
+        configured_key: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Use the configured pond when available, otherwise a safe unlocked pond."""
+        pond = fishing_option(shop.get("ponds"), configured_key)
+        if not pond:
+            raise MiniAppBeastError("fishing_pond_invalid")
+        if pond.get("unlocked"):
+            return pond, configured_key
+
+        fallback = next(
+            (
+                item
+                for item in _items(shop.get("ponds"))
+                if isinstance(item, dict) and item.get("unlocked") and item.get("key")
+            ),
+            None,
+        )
+        if fallback is None:
+            raise MiniAppBeastError("fishing_pond_locked")
+
+        fallback_key = str(fallback.get("key") or "")
+        state = self._state(identity)
+        today = _today_text()
+        already_recorded = (
+            str(state.get("miniapp_fishing_pond_fallback_date") or "") == today
+            and str(state.get("miniapp_fishing_pond_fallback_key") or "") == configured_key
+            and str(state.get("miniapp_fishing_pond_fallback_to") or "") == fallback_key
+        )
+        self._record(
+            identity,
+            miniapp_fishing_pond_fallback_date=today,
+            miniapp_fishing_pond_fallback_key=configured_key,
+            miniapp_fishing_pond_fallback_to=fallback_key,
+            miniapp_fishing_pond_fallback_name=str(fallback.get("name") or fallback_key),
+            miniapp_fishing_pond_fallback_reason="locked",
+        )
+        if not already_recorded:
+            self.log.warning(
+                "Mini App fishing pond %s is locked for %s; falling back to %s.",
+                configured_key,
+                identity,
+                fallback_key,
+            )
+        return fallback, fallback_key
+
     @staticmethod
     def _wait_for_bite(session: dict[str, Any]) -> int:
         bite_at = _integer(session.get("biteAt"), 0)
@@ -1531,11 +1580,7 @@ class MiniAppFishingAutomation:
         pond_key = str(settings.get("pond") or "qingxi")
         bait_key = str(settings.get("bait") or "demon_blood")
         chum_key = str(settings.get("chum") or "none")
-        pond = fishing_option(shop.get("ponds"), pond_key)
-        if not pond:
-            raise MiniAppBeastError("fishing_pond_invalid")
-        if not pond.get("unlocked"):
-            raise MiniAppBeastError("fishing_pond_locked")
+        pond, pond_key = self._resolve_pond(identity, shop, pond_key)
         self._record(identity, miniapp_fishing_pending_purchases=[])
         shop = await self._ensure_chum(identity, token, shop, chum_key)
         shop, bait = await self._ensure_bait(identity, token, shop, bait_key)
@@ -2770,6 +2815,14 @@ class MiniAppFishingAutomation:
                         status,
                         "鱼饵材料不足，1小时后自动重试",
                     )
+                elif code == "fishing_pond_locked":
+                    status = "waiting_pond"
+                    wait = FISHING_SHOP_RETRY_SECONDS
+                    self._set_global_status(
+                        settings,
+                        status,
+                        "配置鱼塘暂未解锁，1小时后自动重试",
+                    )
                 else:
                     status = "error"
                     wait = self.retry_seconds
@@ -2805,6 +2858,11 @@ class MiniAppFishingAutomation:
                 elif status == "waiting_resources" and previous_status != status:
                     self.log.warning(
                         "Mini App fishing bait materials unavailable for %s; retrying hourly.",
+                        identity,
+                    )
+                elif status == "waiting_pond" and previous_status != status:
+                    self.log.warning(
+                        "Mini App fishing configured pond is locked for %s; retrying hourly.",
                         identity,
                     )
                 if force_retry_active and status not in {"daily_done"}:
