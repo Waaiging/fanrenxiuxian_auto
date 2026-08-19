@@ -507,6 +507,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             "last_beast_interaction_time": "", "next_beast_interaction_time": "",
             "last_beast_cruise_time": "", "next_beast_cruise_time": "",
             "last_beast_border_patrol_time": "", "next_beast_border_patrol_time": "",
+            "last_beast_border_patrol_return_attempt_time": "",
             "beast_border_patrol_name": "", "beast_border_patrol_mode": BEAST_BORDER_PATROL_DEFAULT_MODE,
             "deep_meditation_end_time": "", "deep_meditation_guard_until": "", "in_deep_meditation": False,
             "concubine_recalled_for_meditation": False, "concubine_recalled_time": "",
@@ -3273,7 +3274,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
 
     # ---- 灵兽：巡边 ----
 
-    def repair_overdue_beast_border_patrol_schedule(self):
+    def repair_overdue_beast_border_patrol_schedule(self, wake=True):
         """巡边已到归来时间时，清掉旧唤醒时间并立刻推动归来检查。"""
         name = str(self.state.get("beast_border_patrol_name") or "").strip()
         last_patrol = self.state.get("last_beast_border_patrol_time", "")
@@ -3283,10 +3284,22 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         due_at = str_to_dt(last_patrol) + timedelta(seconds=BEAST_BORDER_PATROL_CD_SECONDS)
         if due_at > datetime.now():
             return False
+        last_return_attempt = str(
+            self.state.get("last_beast_border_patrol_return_attempt_time") or ""
+        ).strip()
+        try:
+            attempted_at = datetime.strptime(last_return_attempt, TIME_FORMAT)
+        except (TypeError, ValueError):
+            attempted_at = None
+        if next_patrol and is_future(next_patrol) and attempted_at and attempted_at >= due_at:
+            # A return/status attempt already ran after this patrol became due and
+            # deliberately scheduled a retry.  Preserve that retry instead of
+            # clearing it on every timer pass during a bot/server outage.
+            return False
         self.state["next_beast_border_patrol_time"] = ""
         self.save_state()
         wakeup = getattr(self, "beast_wakeup", None)
-        if wakeup:
+        if wake and wakeup:
             wakeup.set()
         delayed_note = (
             f" but next patrol had been delayed until {next_patrol}"
@@ -3367,6 +3380,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if self.is_border_patrol_status_clear_response(resp):
             self.state["beast_border_patrol_name"] = ""
             self.state["next_beast_border_patrol_time"] = ""
+            self.state["last_beast_border_patrol_return_attempt_time"] = ""
             self.save_state()
             return True
         cd = self.parse_wait_time(resp)
@@ -3439,6 +3453,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             now = now_str()
             self.state["last_beast_border_patrol_time"] = now
             self.state["next_beast_border_patrol_time"] = add_seconds_str(now, cd)
+            self.state["last_beast_border_patrol_return_attempt_time"] = ""
             if beast_name:
                 self.state["beast_border_patrol_name"] = beast_name
                 self.set_best_beast_status(beast_name, "巡边中")
@@ -3476,6 +3491,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             now = now_str()
             self.state["last_beast_border_patrol_time"] = now
             self.state["next_beast_border_patrol_time"] = add_seconds_str(now, BEAST_BORDER_PATROL_CD_SECONDS)
+            self.state["last_beast_border_patrol_return_attempt_time"] = ""
             self.state["beast_border_patrol_name"] = beast_name
             self.state["beast_border_patrol_mode"] = mode
             if beast_name:
@@ -3502,6 +3518,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         if any(k in resp for k in ["巡边归来", "归来", "召回", "返回", "带回", "收获", "获得", "已结束"]):
             self.state["next_beast_border_patrol_time"] = ""
             self.state["beast_border_patrol_name"] = ""
+            self.state["last_beast_border_patrol_return_attempt_time"] = ""
             self.clear_border_patrol_cache_statuses()
             if name:
                 self.set_best_beast_status(name, "休息中")
@@ -3509,6 +3526,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             return True
         if self.is_border_patrol_status_clear_response(resp):
             self.state["beast_border_patrol_name"] = ""
+            self.state["last_beast_border_patrol_return_attempt_time"] = ""
             self.clear_border_patrol_cache_statuses()
             self.save_state()
             return True
@@ -3518,11 +3536,23 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         name = str(self.state.get("beast_border_patrol_name") or "").strip()
         if not name:
             return False
+        self.state["last_beast_border_patrol_return_attempt_time"] = now_str()
+        self.save_state()
         log.info(f"Beast border patrol: {name} is active; sending .巡边归来 before starting another patrol.")
         resp = await self.send_and_wait_feedback(".巡边归来", timeout=60, max_retries=1)
+        if not resp:
+            self.schedule_beast_action_retry(
+                "next_beast_border_patrol_time", BEAST_ACTION_RETRY_SECONDS
+            )
+            return False
         if self.record_beast_border_patrol_return_response(resp):
             return True
         status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
+        if not status_resp:
+            self.schedule_beast_action_retry(
+                "next_beast_border_patrol_time", BEAST_ACTION_RETRY_SECONDS
+            )
+            return False
         if self.record_beast_border_patrol_status_response(status_resp):
             return True
         self.schedule_beast_action_retry("next_beast_border_patrol_time", BEAST_BORDER_PATROL_CD_SECONDS)
@@ -7121,7 +7151,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 continue
             sleep_for = 600
             async with self.beast_lock:
-                self.repair_overdue_beast_border_patrol_schedule()
+                self.repair_overdue_beast_border_patrol_schedule(wake=False)
                 last_patrol = self.state.get("last_beast_border_patrol_time", "")
                 next_patrol = self.state.get("next_beast_border_patrol_time", "")
                 need_patrol = not next_patrol or not is_future(next_patrol)
@@ -7133,7 +7163,14 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                         log.info(f"Beast border patrol due: sending configured mode {patrol_mode}.")
                         await self.run_beast_border_patrol(patrol_mode)
                         self.save_state()
-                    sleep_for = 30
+                    next_patrol = self.state.get("next_beast_border_patrol_time", "")
+                    if next_patrol and is_future(next_patrol):
+                        sleep_for = max(
+                            30,
+                            seconds_until(next_patrol) + random.randint(10, 30),
+                        )
+                    else:
+                        sleep_for = 30
                 elif next_patrol and is_future(next_patrol):
                     sleep_for = max(30, seconds_until(next_patrol) + random.randint(10, 30))
             await self.sleep_beast_action(sleep_for)

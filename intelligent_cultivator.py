@@ -2994,7 +2994,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             if not await self.ensure_tianxing_destiny_for_action(
                 "主魂", "cultivation"
             ):
-                log.error("Tianxing meditation blocked: cultivation destiny was not confirmed.")
+                if not self.tianxing_miniapp_route_unavailable():
+                    log.error("Tianxing meditation blocked: cultivation destiny was not confirmed.")
                 return None
             log.info("Tianxing meditation prefix: sending %s.", TIANXING_MEDITATION_PREFIX_COMMAND)
             prefix = await self.send_and_wait_feedback(
@@ -3152,7 +3153,11 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             return False
         if not await self.ensure_tianxing_destiny_for_action(identity, "crafting"):
             state["tianxing_tianji_error"] = "命星未确认"
-            state["tianxing_tianji_retry_time"] = add_seconds_str(now_str(), 300)
+            retry_seconds = max(
+                300,
+                self.tianxing_destiny_retry_wait_seconds(identity),
+            )
+            state["tianxing_tianji_retry_time"] = add_seconds_str(now_str(), retry_seconds)
             self.save_state()
             return True
 
@@ -3549,7 +3554,10 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     continue
 
                 if not await self.ensure_tianxing_destiny_for_action("主魂", "cultivation"):
-                    await self._sleep_while_tianxing_mode("fate", 300)
+                    await self._sleep_while_tianxing_mode(
+                        "fate",
+                        max(300, self.tianxing_destiny_retry_wait_seconds("主魂")),
+                    )
                     continue
                 prefix = await self.send_and_wait_feedback(
                     TIANXING_MEDITATION_PREFIX_COMMAND,

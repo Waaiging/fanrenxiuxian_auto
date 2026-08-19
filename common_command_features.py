@@ -219,6 +219,7 @@ TIANXING_DESTINY_FAILURE_KEYWORDS = (
     "冷却", "修为不足", "并非", "未开启", "错误",
 )
 TIANXING_DESTINY_FAILURE_LOG_SUPPRESS_SECONDS = 15 * 60
+TIANXING_DESTINY_ROUTE_RETRY_SECONDS = 15 * 60
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
@@ -312,6 +313,9 @@ def common_command_default_state():
         "last_destiny_observation_time": "",
         "tianxing_destiny_options": [],
         "tianxing_destiny_options_date": "",
+        "next_tianxing_destiny_retry_time": "",
+        "tianxing_destiny_retry_reason": "",
+        "tianxing_destiny_failure_log_time": "",
     }
 
 
@@ -932,6 +936,58 @@ class CommonCommandMixin:
             return await self.send_and_wait_feedback_identity(identity, command, **kwargs)
         return await self.send_and_wait_feedback(command, **kwargs)
 
+    def tianxing_miniapp_route_unavailable(self):
+        state = getattr(self, "state", {})
+        return isinstance(state, dict) and state.get("miniapp_route_active") is False
+
+    def tianxing_destiny_retry_wait_seconds(self, identity="主魂"):
+        state = self.tianxing_identity_state(identity)
+        retry_at = str(state.get("next_tianxing_destiny_retry_time") or "").strip()
+        if not retry_at or not is_future(retry_at):
+            return 0
+        return max(1, int(seconds_until(retry_at)) + 1)
+
+    def defer_tianxing_destiny_for_miniapp_route(self, identity="主魂", action=""):
+        """Pause Tianxing destiny work while its Mini App route is unavailable."""
+        if not self.tianxing_miniapp_route_unavailable():
+            state = self.tianxing_identity_state(identity)
+            if state.get("tianxing_destiny_retry_reason") == "miniapp_route_unavailable":
+                state["next_tianxing_destiny_retry_time"] = ""
+                state["tianxing_destiny_retry_reason"] = ""
+                self.save_state()
+            return 0
+
+        identity = str(identity or "主魂").strip() or "主魂"
+        state = self.tianxing_identity_state(identity)
+        existing_wait = self.tianxing_destiny_retry_wait_seconds(identity)
+        if existing_wait > 0 and state.get("tianxing_destiny_retry_reason") == "miniapp_route_unavailable":
+            return existing_wait
+
+        route_retry_at = str(
+            getattr(self, "state", {}).get("miniapp_route_retry_at") or ""
+        ).strip()
+        route_wait = int(seconds_until(route_retry_at)) + 5 if is_future(route_retry_at) else 0
+        wait = max(TIANXING_DESTINY_ROUTE_RETRY_SECONDS, route_wait)
+        state["next_tianxing_destiny_retry_time"] = add_seconds_str(now_str(), wait)
+        state["tianxing_destiny_retry_reason"] = "miniapp_route_unavailable"
+
+        last_log = str(state.get("tianxing_destiny_failure_log_time") or "")
+        try:
+            elapsed = (datetime.now() - datetime.strptime(last_log, TIME_FORMAT)).total_seconds()
+        except (TypeError, ValueError):
+            elapsed = float("inf")
+        if elapsed >= TIANXING_DESTINY_FAILURE_LOG_SUPPRESS_SECONDS:
+            state["tianxing_destiny_failure_log_time"] = now_str()
+            self.common_command_logger().warning(
+                "Tianxing destiny deferred [%s/%s]: Mini App route is unavailable; "
+                "retrying no earlier than %s",
+                identity,
+                str(action or "action").strip() or "action",
+                state["next_tianxing_destiny_retry_time"],
+            )
+        self.save_state()
+        return wait
+
     def record_tianxing_destiny_observation(self, identity, options, today=None):
         today = today or datetime.now().strftime("%Y-%m-%d")
         state = self.tianxing_identity_state(identity)
@@ -947,6 +1003,8 @@ class CommonCommandMixin:
             return True
         today = datetime.now().strftime("%Y-%m-%d")
         state = self.tianxing_identity_state(identity)
+        if self.defer_tianxing_destiny_for_miniapp_route(identity, "observation") > 0:
+            return False
         if not force and state.get("last_destiny_observation_date") == today:
             return bool(state.get("tianxing_destiny_options"))
         if hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(
@@ -970,28 +1028,7 @@ class CommonCommandMixin:
             any(keyword in text for keyword in TIANXING_DESTINY_FAILURE_KEYWORDS)
             and not already_fixed
         ):
-            route_unavailable = (
-                getattr(self, "state", {}).get("miniapp_route_active") is False
-                and str(getattr(self, "state", {}).get("miniapp_route_last_error") or "")
-                in {"route_unavailable", "dwelling_token_expired"}
-            )
-            if route_unavailable:
-                last_log = str(state.get("tianxing_destiny_failure_log_time") or "")
-                try:
-                    elapsed = (
-                        datetime.now() - datetime.strptime(last_log, TIME_FORMAT)
-                    ).total_seconds()
-                except (TypeError, ValueError):
-                    elapsed = float("inf")
-                if elapsed < TIANXING_DESTINY_FAILURE_LOG_SUPPRESS_SECONDS:
-                    return False
-                state["tianxing_destiny_failure_log_time"] = now_str()
-                self.save_state()
-                self.common_command_logger().warning(
-                    "Tianxing destiny observation deferred [%s]: Mini App route is unavailable; "
-                    "refresh the configured entry token",
-                    identity,
-                )
+            if self.defer_tianxing_destiny_for_miniapp_route(identity, "observation") > 0:
                 return False
             self.common_command_logger().warning(
                 "Tianxing destiny observation failed [%s]: %s",
@@ -1035,6 +1072,8 @@ class CommonCommandMixin:
         preferences = TIANXING_DESTINY_ACTION_PREFERENCES.get(action)
         if not preferences or not self.tianxing_identity_enabled(identity):
             return True
+        if self.defer_tianxing_destiny_for_miniapp_route(identity, action) > 0:
+            return False
 
         today = datetime.now().strftime("%Y-%m-%d")
         state = self.tianxing_identity_state(identity)
@@ -1089,6 +1128,8 @@ class CommonCommandMixin:
             and not any(keyword in text for keyword in TIANXING_DESTINY_FAILURE_KEYWORDS)
         )
         if not success:
+            if self.defer_tianxing_destiny_for_miniapp_route(identity, action) > 0:
+                return False
             self.common_command_logger().error(
                 "Tianxing destiny was not confirmed [%s/%s]: %s",
                 identity,
@@ -1174,7 +1215,11 @@ class CommonCommandMixin:
 
             await asyncio.sleep(3)
             if not await self.ensure_tianxing_destiny_for_action(avatar, "cultivation"):
-                return {"status": "destiny_failed", "wait": 600, "text": ""}
+                return {
+                    "status": "destiny_failed",
+                    "wait": max(600, self.tianxing_destiny_retry_wait_seconds(avatar)),
+                    "text": "",
+                }
             prefix = str(prefix or "").strip()
             if prefix:
                 await self.send_and_wait_feedback_identity(avatar, f"{prefix} 闭关")
@@ -3316,8 +3361,12 @@ class CommonCommandMixin:
         async with self.common_atomic_task(f"Tianxing-rift-{identity}"):
             if not await self.ensure_tianxing_destiny_for_action(identity, "exploration"):
                 state = self.tianxing_identity_state(identity)
+                wait_seconds = max(
+                    TIANXING_RIFT_PREFIX_RETRY_SECONDS,
+                    self.tianxing_destiny_retry_wait_seconds(identity),
+                )
                 state[plan.next_key] = add_seconds_str(
-                    now_str(), TIANXING_RIFT_PREFIX_RETRY_SECONDS
+                    now_str(), wait_seconds
                 )
                 self.save_state()
                 return None

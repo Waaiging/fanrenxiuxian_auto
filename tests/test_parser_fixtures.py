@@ -9407,6 +9407,87 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["next_beast_border_patrol_time"], "")
         self.assertTrue(actor.beast_wakeup.is_set())
 
+    def test_repair_overdue_border_patrol_preserves_recent_return_retry(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        due_at = datetime.now() - timedelta(minutes=5)
+        retry_at = datetime.now() + timedelta(minutes=10)
+        actor.state = {
+            "beast_border_patrol_name": "谛听",
+            "last_beast_border_patrol_time": (
+                due_at - timedelta(seconds=cultivator_xiaohao.BEAST_BORDER_PATROL_CD_SECONDS)
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": retry_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "last_beast_border_patrol_return_attempt_time": (
+                datetime.now() - timedelta(minutes=1)
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        actor.save_state = Mock()
+        actor.beast_wakeup = asyncio.Event()
+
+        self.assertFalse(actor.repair_overdue_beast_border_patrol_schedule())
+        self.assertEqual(
+            actor.state["next_beast_border_patrol_time"],
+            retry_at.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        actor.save_state.assert_not_called()
+        self.assertFalse(actor.beast_wakeup.is_set())
+
+    def test_beast_action_timer_defers_empty_patrol_return_without_tight_loop(self):
+        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
+        actor.state = {
+            "beast_border_patrol_name": "谛听",
+            "last_beast_border_patrol_time": (
+                datetime.now() - timedelta(minutes=80)
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            "next_beast_border_patrol_time": "",
+            "beast_border_patrol_mode": "袭营",
+            "beasts_cache": [
+                {
+                    "full_name": "谛听",
+                    "species": "二阶噬魂兽",
+                    "status": "巡边中",
+                    "power": 304,
+                    "exp": 2166,
+                    "stamina": 61,
+                },
+            ],
+        }
+        actor.active_atomic_task = None
+        actor.save_state = Mock()
+        sent = []
+        sleeps = []
+
+        async def fake_send(command, *args, **kwargs):
+            sent.append(command)
+            return None
+
+        async def false_pause(*args, **kwargs):
+            return False
+
+        async def stop_after_sleep(sleep_for):
+            sleeps.append(sleep_for)
+            actor.is_running = False
+
+        async def run_once():
+            actor.startup_done = asyncio.Event()
+            actor.startup_done.set()
+            actor.avatar_send_lock = asyncio.Lock()
+            actor.beast_lock = asyncio.Lock()
+            actor.beast_wakeup = asyncio.Event()
+            actor.is_running = True
+            actor.sleep_if_main_soul_paused = false_pause
+            actor.send_and_wait_feedback = fake_send
+            actor.sleep_beast_action = stop_after_sleep
+            await actor.run_beast_action_timer()
+
+        asyncio.run(run_once())
+
+        self.assertEqual(sent, [".巡边归来"])
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreater(sleeps[0], 9 * 60)
+        self.assertTrue(cultivator_xiaohao.is_future(actor.state["next_beast_border_patrol_time"]))
+        self.assertFalse(actor.beast_wakeup.is_set())
+
     def test_xiaohao_watchdog_ignores_stale_fishing_due_when_disabled(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         due_at = (datetime.now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")

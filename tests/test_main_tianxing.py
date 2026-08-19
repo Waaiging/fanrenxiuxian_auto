@@ -65,7 +65,44 @@ class MainTianxingTests(unittest.TestCase):
         self.assertFalse(asyncio.run(actor.observe_tianxing_destiny("主魂")))
 
         self.assertEqual(logger.warning.call_count, 1)
-        self.assertIn("refresh the configured entry token", logger.warning.call_args.args[0])
+        self.assertIn("Mini App route is unavailable", logger.warning.call_args.args[0])
+        actor.send_and_wait_feedback.assert_not_awaited()
+        self.assertGreater(actor.tianxing_destiny_retry_wait_seconds("主魂"), 14 * 60)
+
+    def test_route_unavailable_cached_destiny_defers_rift_until_route_retry(self):
+        actor = self.actor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        route_retry_at = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        actor.state.update(
+            {
+                "miniapp_route_active": False,
+                "miniapp_route_last_error": "route_unavailable",
+                "miniapp_route_retry_at": route_retry_at,
+                "last_destiny_observation_date": today,
+                "tianxing_destiny_options": ["贪狼", "紫微", "太阴"],
+                "tianxing_destiny_options_date": today,
+                "next_rift_search_time": "2026-08-09 00:46:54",
+            }
+        )
+        logger = Mock()
+        actor.common_command_logger = lambda: logger
+        actor.send_and_wait_feedback = AsyncMock(return_value=None)
+        plan = Mock(
+            command=".探寻裂缝",
+            timeout=120,
+            max_retries=0,
+            force_identity_check=False,
+            return_response_msg=False,
+            next_key="next_rift_search_time",
+        )
+
+        result = asyncio.run(actor.send_rift_search_plan(plan, "主魂"))
+        retry_at = datetime.strptime(actor.state["next_rift_search_time"], "%Y-%m-%d %H:%M:%S")
+
+        self.assertIsNone(result)
+        actor.send_and_wait_feedback.assert_not_awaited()
+        logger.error.assert_not_called()
+        self.assertGreaterEqual(retry_at, datetime.now() + timedelta(minutes=59, seconds=45))
 
     def test_small_world_circuit_records_pause_without_traceback(self):
         actor = Cultivator.__new__(Cultivator)
