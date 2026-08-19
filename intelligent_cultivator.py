@@ -89,7 +89,11 @@ def star_gazing_shift_dt(target_dt, now=None, fate_type="", logger=None):
 
 from telethon import TelegramClient, events  # Telegram 客户端框架，消息事件
 from red_packet_features import install_red_packet_monitor
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
 from miniapp_dwelling import (
@@ -2332,6 +2336,19 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
 
     def record_small_world_calamity_error(self, exc):
         code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+        if isinstance(exc, MiniAppCircuitOpenError):
+            wait = miniapp_circuit_wait_seconds(exc, SMALL_WORLD_CALAMITY_RETRY_SECONDS)
+            self.defer_small_world_calamity(
+                wait,
+                "paused_upstream",
+                response=f"Mini App 上游熔断，等待至 {exc.retry_at or '下一次探测'}",
+                error=code,
+            )
+            log.info(
+                "Mini App small-world calamity paused by upstream circuit until %s",
+                exc.retry_at or f"in {wait}s",
+            )
+            return
         self.defer_small_world_calamity(
             SMALL_WORLD_CALAMITY_RETRY_SECONDS,
             "error",
@@ -2501,11 +2518,19 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
         now = now_str()
         next_key = "next_small_world_time" if feature == "small_world" else "next_miracle_preach_time"
-        self.state[next_key] = add_seconds_str(now, SMALL_WORLD_RETRY_SECONDS)
+        wait = miniapp_circuit_wait_seconds(exc, SMALL_WORLD_RETRY_SECONDS)
+        self.state[next_key] = add_seconds_str(now, wait)
         self.state[f"miniapp_{feature}_last_error"] = code
         self.state[f"miniapp_{feature}_last_error_time"] = now
         self.save_state()
-        log.error("Mini App %s failed for main-soul small world: %s", feature, code, exc_info=True)
+        if isinstance(exc, MiniAppCircuitOpenError):
+            log.info(
+                "Mini App %s paused by upstream circuit until %s",
+                feature,
+                exc.retry_at or f"in {wait}s",
+            )
+        else:
+            log.error("Mini App %s failed for main-soul small world: %s", feature, code, exc_info=True)
 
     async def execute_small_world_once(self):
         """Read the main soul's Mini App small world and manifest a pending prayer."""
@@ -3085,6 +3110,12 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                     continue
                 completed = await self._main_tianxing_destiny_check()
                 await asyncio.sleep(300 if completed else 60)
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, 60)
+                self._defer_main_tianxing_destiny(
+                    f"Mini App 上游熔断，等待至 {exc.retry_at or '下一次探测'}",
+                    wait,
+                )
             except Exception as exc:
                 log.error("Main Tianxing destiny loop error: %s", exc, exc_info=True)
                 await asyncio.sleep(60)
@@ -3170,6 +3201,24 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
             return True
         except asyncio.CancelledError:
             raise
+        except MiniAppCircuitOpenError as exc:
+            retry_seconds = miniapp_circuit_wait_seconds(exc, 300)
+            state.update(
+                {
+                    "tianxing_tianji_error": exc.code,
+                    "tianxing_tianji_last_time": now_str(),
+                    "tianxing_tianji_retry_time": add_seconds_str(
+                        now_str(), retry_seconds
+                    ),
+                }
+            )
+            self.save_state()
+            log.info(
+                "Tianxing Tianji grind [%s] paused by upstream circuit until %s",
+                identity,
+                exc.retry_at or f"in {retry_seconds}s",
+            )
+            return False
         except Exception as exc:
             error_text = str(exc)
             match = re.fullmatch(r"tianji_destiny_prefix_wait:(\d+)", error_text)
@@ -3608,6 +3657,17 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
                 )
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, 60)
+                self.state["next_meditation_retry_time"] = add_seconds_str(
+                    now_str(), wait
+                )
+                self.save_state()
+                log.info(
+                    "Tianxing fate meditation paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
+                await self._sleep_while_tianxing_mode("fate", wait)
             except Exception as exc:
                 log.error("Tianxing fate meditation loop error: %s", exc, exc_info=True)
                 await self._sleep_while_tianxing_mode("fate", 300)

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from intelligent_cultivator import Cultivator
+from miniapp_beast import MiniAppCircuitOpenError
 
 
 class MainTianxingTests(unittest.TestCase):
@@ -65,6 +66,39 @@ class MainTianxingTests(unittest.TestCase):
 
         self.assertEqual(logger.warning.call_count, 1)
         self.assertIn("refresh the configured entry token", logger.warning.call_args.args[0])
+
+    def test_small_world_circuit_records_pause_without_traceback(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {}
+        actor.save_state = Mock()
+        logger = Mock()
+
+        with patch("intelligent_cultivator.log", logger):
+            actor.record_small_world_miniapp_error(
+                "small_world",
+                MiniAppCircuitOpenError(900, "2026-08-19 13:07:17"),
+            )
+
+        self.assertEqual(actor.state["miniapp_small_world_last_error"], "miniapp_circuit_open")
+        self.assertTrue(actor.state["next_small_world_time"])
+        logger.info.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_small_world_calamity_circuit_records_pause_without_traceback(self):
+        actor = Cultivator.__new__(Cultivator)
+        actor.state = {"small_world_calamity_pending": True}
+        actor.save_state = Mock()
+        logger = Mock()
+
+        with patch("intelligent_cultivator.log", logger):
+            actor.record_small_world_calamity_error(
+                MiniAppCircuitOpenError(900, "2026-08-19 13:07:17")
+            )
+
+        self.assertEqual(actor.state["small_world_calamity_last_status"], "paused_upstream")
+        self.assertEqual(actor.state["small_world_calamity_last_error"], "miniapp_circuit_open")
+        logger.info.assert_called_once()
+        logger.error.assert_not_called()
 
     def test_main_meditation_continues_when_tianxing_prefix_is_pending(self):
         actor = self.actor()
