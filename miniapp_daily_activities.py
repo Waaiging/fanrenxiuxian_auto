@@ -19,7 +19,12 @@ from automation_settings import (
     miniapp_tianji_trial_identities_for_account,
     miniapp_tianji_trial_settings,
 )
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_preflight,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_dwelling import apply_dwelling_snapshot, command_result_ok, identity_state
 
 
@@ -1009,13 +1014,21 @@ class MiniAppDailyActivities:
                 f"miniapp_{feature}_last_error_time": now,
             },
         )
-        self.log.error(
-            "Mini App %s failed for %s: %s",
-            feature,
-            identity,
-            code,
-            exc_info=True,
-        )
+        if isinstance(exc, MiniAppCircuitOpenError):
+            self.log.info(
+                "Mini App %s paused for %s while upstream circuit is open; next probe %s",
+                feature,
+                identity,
+                exc.retry_at or f"in {exc.retry_after}s",
+            )
+        else:
+            self.log.error(
+                "Mini App %s failed for %s: %s",
+                feature,
+                identity,
+                code,
+                exc_info=True,
+            )
 
     def _hunt_summary_loot(self, identity: str, today: str) -> dict[str, int]:
         state = self._state(identity)
@@ -1114,16 +1127,27 @@ class MiniAppDailyActivities:
         return "challenged"
 
     async def run_pagoda_daily_once(self, now: datetime | None = None) -> bool:
-        await self.transport.initialize()
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
+        identities = self.identities()
+        if all(
+            self._state(identity).get("miniapp_pagoda_last_date") == today
+            for identity in identities
+        ):
+            return True
+        circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+        if circuit_error is not None:
+            raise circuit_error
+        await self.transport.initialize()
         complete = True
-        for identity in self.identities():
+        for identity in identities:
             try:
                 result = await self.run_pagoda_identity(identity, today=today)
                 if result in {"paused", "retry"}:
                     complete = False
             except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError:
                 raise
             except Exception as exc:
                 complete = False
@@ -1224,16 +1248,27 @@ class MiniAppDailyActivities:
         return "completed"
 
     async def run_tianji_trial_daily_once(self, now: datetime | None = None) -> bool:
-        await self.transport.initialize()
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
+        identities = self.tianji_trial_identities()
+        if all(
+            self._state(identity).get("miniapp_tianji_trial_last_date") == today
+            for identity in identities
+        ):
+            return True
+        circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+        if circuit_error is not None:
+            raise circuit_error
+        await self.transport.initialize()
         complete = True
-        for identity in self.tianji_trial_identities():
+        for identity in identities:
             try:
                 result = await self.run_tianji_trial_identity(identity, today=today)
                 if result in {"paused", "retry"}:
                     complete = False
             except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError:
                 raise
             except Exception as exc:
                 complete = False
@@ -1465,16 +1500,27 @@ class MiniAppDailyActivities:
         )
 
     async def run_fate_cards_daily_once(self, now: datetime | None = None) -> bool:
-        await self.transport.initialize()
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
+        identities = self.fate_cards_identities()
+        if all(
+            self._state(identity).get("miniapp_fate_cards_last_date") == today
+            for identity in identities
+        ):
+            return True
+        circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+        if circuit_error is not None:
+            raise circuit_error
+        await self.transport.initialize()
         complete = True
-        for identity in self.fate_cards_identities():
+        for identity in identities:
             try:
                 result = await self.run_fate_cards_identity(identity, today=today)
                 if result in {"paused", "retry"}:
                     complete = False
             except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError:
                 raise
             except Exception as exc:
                 complete = False
@@ -1610,16 +1656,27 @@ class MiniAppDailyActivities:
         return "retry"
 
     async def run_hunt_daily_once(self, now: datetime | None = None) -> bool:
-        await self.transport.initialize()
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
+        identities = self.identities()
+        if all(
+            self._state(identity).get("miniapp_hunt_last_date") == today
+            for identity in identities
+        ):
+            return True
+        circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+        if circuit_error is not None:
+            raise circuit_error
+        await self.transport.initialize()
         complete = True
-        for identity in self.identities():
+        for identity in identities:
             try:
                 result = await self.run_hunt_identity(identity, today=today)
                 if result in {"paused", "retry"}:
                     complete = False
             except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError:
                 raise
             except Exception as exc:
                 complete = False
@@ -1643,10 +1700,19 @@ class MiniAppDailyActivities:
             pause = getattr(self.actor, "pause_event", None)
             if pause is not None:
                 await pause.wait()
+            circuit_wait = 0
             try:
                 complete = await callback(now=now)
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                circuit_wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                self.log.info(
+                    "Mini App %s daily cycle paused by upstream circuit until %s",
+                    feature,
+                    exc.retry_at or f"in {circuit_wait}s",
+                )
+                complete = False
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 self.log.error(
@@ -1661,7 +1727,7 @@ class MiniAppDailyActivities:
                 wait = max(60, int((next_target - datetime.now()).total_seconds()))
                 self._record_next_schedule(feature, next_target)
             else:
-                wait = self.retry_seconds
+                wait = circuit_wait or self.retry_seconds
                 self._record_next_schedule(
                     feature,
                     datetime.now() + timedelta(seconds=wait),

@@ -24,7 +24,9 @@ from automation_settings import world_boss_identities_for_account
 from log_utils import is_game_bot_sender, resolve_actor_target_chats
 from miniapp_beast import (
     MiniAppBeastError,
+    MiniAppCircuitOpenError,
     _post_json,
+    miniapp_circuit_preflight,
     miniapp_origin,
     request_webview_init_data,
 )
@@ -74,6 +76,7 @@ COMPLETED_EVENT_STATUSES = {
     "not_enough_participants",
     "event_closed",
     "expired",
+    "paused_upstream",
 }
 
 WORLD_BOSS_DIAGNOSTIC_SENSITIVE_PARTS = (
@@ -665,6 +668,10 @@ class WorldBossMonitor:
                 )
                 return
             try:
+                if self.post_json is None:
+                    circuit_error = miniapp_circuit_preflight(entry.origin)
+                    if circuit_error is not None:
+                        raise circuit_error
                 self._record(
                     entry,
                     "running",
@@ -707,6 +714,20 @@ class WorldBossMonitor:
             except asyncio.CancelledError:
                 self._record(entry, "cancelled", error="cancelled")
                 raise
+            except MiniAppCircuitOpenError as exc:
+                code = exc.code
+                self._record(
+                    entry,
+                    "paused_upstream",
+                    identities=identities,
+                    error=code,
+                    retry_at=exc.retry_at,
+                )
+                self.log.info(
+                    "Mini App [%s] Qing Yuanzi World Boss paused by upstream circuit until %s",
+                    ", ".join(identities),
+                    exc.retry_at or f"in {exc.retry_after}s",
+                )
             except MiniAppBeastError as exc:
                 code = exc.code
                 self._record(entry, "failed", identities=identities, error=code)
@@ -741,6 +762,18 @@ class WorldBossMonitor:
             return {"identity": identity, "status": "completed", **outcome, "error": ""}
         except asyncio.CancelledError:
             raise
+        except MiniAppCircuitOpenError as exc:
+            self.log.info(
+                "Mini App [%s] Qing Yuanzi World Boss paused by upstream circuit until %s",
+                identity,
+                exc.retry_at or f"in {exc.retry_after}s",
+            )
+            return {
+                "identity": identity,
+                "status": "paused_upstream",
+                "error": exc.code,
+                "retry_at": exc.retry_at,
+            }
         except MiniAppBeastError as exc:
             code = exc.code
             failure_diagnostics = _error_diagnostics(exc)
@@ -809,6 +842,8 @@ class WorldBossMonitor:
                 if inspect.isawaitable(result):
                     await result
             return int(transport.player_id(identity))
+        except MiniAppCircuitOpenError:
+            raise
         except Exception as exc:
             self.log.warning(
                 "World Boss fixed-entry identity lookup failed for %s (%s); using event choices",
@@ -860,6 +895,8 @@ class WorldBossMonitor:
                         request_timeout,
                         post_json=self.post_json,
                     )
+            except MiniAppCircuitOpenError:
+                raise
             except MiniAppBeastError as exc:
                 if trace is not None:
                     attempt_trace = {
@@ -968,6 +1005,8 @@ class WorldBossMonitor:
                     player_id,
                     trace=request_trace,
                 )
+            except MiniAppCircuitOpenError:
+                raise
             except MiniAppBeastError as exc:
                 observation = {
                     "sequence": entry_request_count,

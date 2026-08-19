@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from automation_settings import miniapp_beast_abyss_settings
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from miniapp_dwelling import identity_state, spirit_beast_abyss_result_text
 
 
@@ -488,6 +488,13 @@ class MiniAppBeastAbyssWorker:
                 wait = await self.run_once("主魂")
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                self._record_error("主魂", exc.code)
+                self.log.info(
+                    "Mini App Wan Beast Valley abyss paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 self._record_error("主魂", code)

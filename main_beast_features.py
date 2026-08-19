@@ -15,7 +15,9 @@ from miniapp_beast import (
     DEFAULT_REFRESH_SECONDS,
     DEFAULT_RETRY_SECONDS,
     MiniAppBeastError,
+    MiniAppCircuitOpenError,
     fetch_miniapp_beast_snapshot,
+    miniapp_circuit_wait_seconds,
     read_cached_spirit_token,
     read_refresh_request,
     write_cached_spirit_token,
@@ -424,6 +426,18 @@ class MainBeastMixin:
             )
             self.main_beast_save()
             return True
+        except MiniAppCircuitOpenError as exc:
+            error = exc.code
+            wait = miniapp_circuit_wait_seconds(exc, settings["retry_seconds"])
+            self.state["last_beast_roster_query_result"] = "miniapp_paused_upstream"
+            self.state["beast_miniapp_last_error"] = error
+            self.state["next_beast_status_check_time"] = beast_add_seconds(wait)
+            self.main_beast_save()
+            self.main_beast_logger().info(
+                "Main beast Mini App sync paused by upstream circuit until %s",
+                exc.retry_at or f"in {wait}s",
+            )
+            return False
         except MiniAppBeastError as exc:
             self._miniapp_beast_token = ""
             error = exc.code

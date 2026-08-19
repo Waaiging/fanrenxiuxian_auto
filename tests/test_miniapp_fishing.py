@@ -146,6 +146,9 @@ class MiniAppFishingTests(unittest.TestCase):
             "miniapp_fishing.fishing_start_wait",
             return_value=(600, "2026-08-01 23:59:00"),
         ), patch(
+            "miniapp_fishing.miniapp_circuit_preflight",
+            side_effect=AssertionError("waiting-start state must not probe upstream"),
+        ), patch(
             "miniapp_fishing.asyncio.sleep",
             new=AsyncMock(side_effect=stop_after_one_cycle),
         ):
@@ -157,6 +160,45 @@ class MiniAppFishingTests(unittest.TestCase):
             actor.state["miniapp_fishing_next_run_time"],
             "2026-08-01 23:59:00",
         )
+
+    def test_disabled_fishing_does_not_report_upstream_outage(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.is_running = True
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(origin="https://asc.aiopenai.app"),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        worker.settings = lambda: {
+            "enabled": False,
+            "participants": ["main|主魂"],
+            "rod_owner": "auto",
+            "start_time": "",
+        }
+        worker._drive_once = AsyncMock(return_value=3)
+
+        async def stop_after_one_cycle(_wait, _settings):
+            actor.is_running = False
+
+        worker._sleep_until_next_cycle = AsyncMock(side_effect=stop_after_one_cycle)
+        with patch(
+            "miniapp_fishing.miniapp_circuit_preflight",
+            side_effect=AssertionError("disabled fishing must not probe upstream"),
+        ):
+            asyncio.run(worker.run_loop())
+
+        worker._drive_once.assert_not_awaited()
+        self.assertEqual(actor.state["miniapp_fishing_status"], "paused")
+        self.assertEqual(actor.state["miniapp_fishing_last_error"], "")
 
     def test_stale_global_lock_owned_by_dead_process_is_reclaimed(self):
         lock_path = miniapp_fishing.MINIAPP_FISHING_GLOBAL_FILE.with_name(

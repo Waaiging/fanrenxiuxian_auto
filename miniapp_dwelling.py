@@ -17,10 +17,12 @@ from telethon import types
 
 from miniapp_beast import (
     MiniAppBeastError,
+    MiniAppCircuitOpenError,
     _post_json,
     extract_spirit_token,
     miniapp_entry_start_param,
     miniapp_origin,
+    miniapp_circuit_preflight,
     normalize_spirit_beast_roster,
     request_webview_init_data,
 )
@@ -601,11 +603,17 @@ class MiniAppDwellingTransport:
         log_operation: bool = True,
     ) -> dict[str, Any]:
         """Execute one Mini App operation; errors are logged even in quiet mode."""
+        if self.post_json is None:
+            circuit_error = miniapp_circuit_preflight(self.origin)
+            if circuit_error is not None:
+                raise circuit_error
         if log_operation:
             self._log("info", "OUT [Mini App | %s]:\n%s", identity, operation)
         try:
             payload = await callback()
         except asyncio.CancelledError:
+            raise
+        except MiniAppCircuitOpenError:
             raise
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
@@ -629,6 +637,10 @@ class MiniAppDwellingTransport:
         return payload
 
     async def initialize(self, force: bool = False) -> dict[str, Any]:
+        if self.post_json is None:
+            circuit_error = miniapp_circuit_preflight(self.origin)
+            if circuit_error is not None:
+                raise circuit_error
         async with self._lock:
             if self.init_data and self.start_payload and not force:
                 return self.start_payload
@@ -648,6 +660,8 @@ class MiniAppDwellingTransport:
                 self.timeout,
                 post_json=self.post_json,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if exc.code != ENTRY_URL_REFRESH_ERROR or not await self._refresh_entry_from_pinned_message():
                 raise
@@ -736,6 +750,8 @@ class MiniAppDwellingTransport:
                 self.timeout,
                 post_json=self.post_json,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if retry_auth and exc.code in AUTH_ERROR_CODES:
                 self._log("warning", "Mini App authorization expired; refreshing fixed entry")
@@ -1029,6 +1045,8 @@ class MiniAppDwellingTransport:
                 int(timeout or self.timeout),
                 post_json=self.post_json,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if not retry_auth or exc.code not in AUTH_ERROR_CODES | {
                 "entry_token_missing",
@@ -1309,6 +1327,8 @@ class MiniAppDwellingTransport:
                 int(timeout or self.timeout),
                 post_json=self.post_json,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if exc.code not in AUTH_ERROR_CODES:
                 raise

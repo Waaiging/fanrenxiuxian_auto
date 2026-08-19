@@ -16,7 +16,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_seek import MiniAppBeastSeekWorker
 from miniapp_dwelling import (
@@ -209,6 +213,20 @@ class MiniAppCommandRouter:
         try:
             await self.transport.initialize(force=recovery)
             self._last_auth_refresh = datetime.now()
+        except MiniAppCircuitOpenError as exc:
+            self._route_active = False
+            wait = miniapp_circuit_wait_seconds(exc, self.route_recovery_seconds)
+            self._record(
+                miniapp_route_active=False,
+                miniapp_route_last_error=exc.code,
+                miniapp_route_retry_at=exc.retry_at,
+            )
+            if not recovery:
+                self.log.warning(
+                    "Mini App command routing paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
+            return False
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self._route_active = False
@@ -346,7 +364,16 @@ class MiniAppCommandRouter:
 
     async def run_route_recovery_loop(self) -> None:
         while getattr(self.actor, "is_running", True) and not self._route_active:
-            await asyncio.sleep(self.route_recovery_seconds)
+            wait = self.route_recovery_seconds
+            try:
+                from miniapp_beast import miniapp_circuit_preflight
+
+                probe = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+                if probe is not None:
+                    wait = miniapp_circuit_wait_seconds(probe, wait)
+            except Exception:
+                pass
+            await asyncio.sleep(max(self.route_recovery_seconds, wait))
             if not getattr(self.actor, "is_running", True):
                 return
             if await self._initialize_route(recovery=True):
@@ -391,6 +418,14 @@ class MiniAppCommandRouter:
                 synced += 1
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                identity_state(self.actor, identity)["miniapp_last_error"] = exc.code
+                self.log.info(
+                    "Mini App profile sync paused for %s while upstream circuit is open; next probe %s",
+                    identity,
+                    exc.retry_at or f"in {exc.retry_after}s",
+                )
+                break
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 identity_state(self.actor, identity)["miniapp_last_error"] = code
@@ -617,6 +652,16 @@ class MiniAppCommandRouter:
                     wait = await self.run_star_farm_cycle(identity)
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                state = identity_state(self.actor, identity)
+                state["star_miniapp_last_error"] = exc.code
+                state["star_miniapp_last_error_time"] = _now_text()
+                self._save_star_state()
+                wait = miniapp_circuit_wait_seconds(exc, self.star_farm_retry_seconds)
+                self.log.info(
+                    "Mini App star-farm paused while upstream circuit is open; next probe %s",
+                    exc.retry_at or f"in {wait}s",
+                )
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 state = identity_state(self.actor, identity)
@@ -650,6 +695,17 @@ class MiniAppCommandRouter:
             await self.transport.initialize(force=True)
             self._sync_avatar_dao_names_from_transport()
             self._last_auth_refresh = datetime.now()
+        except MiniAppCircuitOpenError as exc:
+            self._last_auth_refresh = datetime.now()
+            self._last_auth_refresh_failure = self._last_auth_refresh
+            self._route_active = False
+            self._record(
+                miniapp_route_active=False,
+                miniapp_route_last_error=exc.code,
+                miniapp_route_retry_at=exc.retry_at,
+            )
+            self._start_recovery_task()
+            return
         except Exception as exc:
             # Do not retry a failed refresh for every command.  In particular,
             # a fixed entry token can expire independently of Telegram initData;
@@ -760,6 +816,16 @@ class MiniAppCommandRouter:
             )
         except asyncio.CancelledError:
             raise
+        except MiniAppCircuitOpenError as exc:
+            self._record(
+                miniapp_route_active=False,
+                miniapp_route_last_error=exc.code,
+                miniapp_route_last_error_at=_now_text(),
+                miniapp_route_retry_at=exc.retry_at,
+            )
+            self._route_active = False
+            self._start_recovery_task()
+            return None
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self._record(

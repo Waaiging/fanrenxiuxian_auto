@@ -1,9 +1,13 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from red_packet_account import install_restricted_exchange_monitor
+from miniapp_beast import MiniAppCircuitOpenError
+from red_packet_account import (
+    install_restricted_exchange_monitor,
+    resume_restricted_miniapp_after_circuit,
+)
 
 
 class RestrictedExchangeMonitorTests(unittest.TestCase):
@@ -32,6 +36,39 @@ class RestrictedExchangeMonitorTests(unittest.TestCase):
         self.assertEqual(len(registrations), 2)
         self.assertEqual(actor.client.handlers, registrations)
         handler.assert_awaited_once_with(actor, event)
+
+    def test_startup_recovery_only_runs_after_breaker_waits(self):
+        actor = SimpleNamespace(
+            is_running=True,
+            state={},
+            save_state=Mock(),
+        )
+        worker = SimpleNamespace(
+            start=AsyncMock(
+                side_effect=[
+                    MiniAppCircuitOpenError(900, "2026-08-19 13:15:00"),
+                    None,
+                ]
+            )
+        )
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        sleep = AsyncMock()
+
+        with patch("red_packet_account.asyncio.sleep", new=sleep):
+            recovered = asyncio.run(
+                resume_restricted_miniapp_after_circuit(
+                    worker,
+                    actor,
+                    "xiaohao",
+                    MiniAppCircuitOpenError(600, "2026-08-19 13:00:00"),
+                    logger=logger,
+                )
+            )
+
+        self.assertTrue(recovered)
+        self.assertEqual([call.args[0] for call in sleep.await_args_list], [600, 900])
+        self.assertEqual(worker.start.await_count, 2)
+        logger.error.assert_not_called()
 
 
 if __name__ == "__main__":

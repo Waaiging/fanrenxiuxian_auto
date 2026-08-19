@@ -127,10 +127,10 @@ class MiniAppBeastTests(unittest.TestCase):
             with (
                 patch("miniapp_beast._MINIAPP_CIRCUIT", breaker),
                 patch("miniapp_beast._post_json_sync", post),
-                patch("miniapp_beast._CIRCUIT_FAST_FAIL_ORIGINS", set()),
             ):
-                with self.assertRaisesRegex(MiniAppBeastError, "invalid_json"):
+                with self.assertRaises(MiniAppCircuitOpenError) as opened:
                     asyncio.run(_post_json(origin, "/start", {}, 5))
+                self.assertGreaterEqual(opened.exception.retry_after, 9)
                 self.assertEqual(post.call_count, 1)
 
                 with self.assertRaises(MiniAppCircuitOpenError) as blocked:

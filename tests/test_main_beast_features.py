@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import intelligent_cultivator
 import dashboard_server
 import main_beast_features
+from miniapp_beast import MiniAppCircuitOpenError
 from dashboard_server import build_command_panels
 from main_beast_features import (
     ABYSS_CD_SECONDS,
@@ -361,6 +362,34 @@ class MainBeastFeatureTests(unittest.TestCase):
         with patch("main_beast_features.fetch_miniapp_beast_snapshot", new=AsyncMock()) as fetch:
             self.assertFalse(asyncio.run(self.actor.update_main_beast_cache()))
         fetch.assert_not_awaited()
+
+    def test_circuit_open_defers_roster_sync_until_shared_probe(self):
+        self.actor.config = {
+            "miniapp_beast": {
+                "enabled": True,
+                "entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture",
+                "retry_seconds": 300,
+            }
+        }
+        self.actor.state["next_beast_status_check_time"] = ""
+        before = datetime.now()
+        with patch(
+            "main_beast_features.fetch_miniapp_beast_snapshot",
+            new=AsyncMock(
+                side_effect=MiniAppCircuitOpenError(900, "2026-08-19 12:00:00")
+            ),
+        ) as fetch:
+            self.assertFalse(asyncio.run(self.actor.update_main_beast_cache()))
+        fetch.assert_awaited_once()
+        retry_at = datetime.strptime(
+            self.actor.state["next_beast_status_check_time"],
+            "%Y-%m-%d %H:%M:%S",
+        )
+        self.assertGreaterEqual((retry_at - before).total_seconds(), 899)
+        self.assertEqual(
+            self.actor.state["last_beast_roster_query_result"],
+            "miniapp_paused_upstream",
+        )
 
     def test_disabled_miniapp_never_falls_back_to_cached_roster(self):
         self.actor.config = {}

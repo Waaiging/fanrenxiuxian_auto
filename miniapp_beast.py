@@ -31,14 +31,11 @@ TRANSPORT_HEALTH_FILE = "miniapp_transport_health.json"
 DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
 DEFAULT_CIRCUIT_BACKOFF_SECONDS = (15 * 60, 30 * 60, 60 * 60)
 DEFAULT_CIRCUIT_PROBE_LEASE_SECONDS = 90
-HALF_OPEN_POLL_SECONDS = 5
 
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CIRCUIT_LOG = logging.getLogger("miniapp_transport")
 _CIRCUIT_THREAD_LOCK = threading.RLock()
-_CIRCUIT_FAST_FAIL_LOCK = threading.Lock()
-_CIRCUIT_FAST_FAIL_ORIGINS: set[str] = set()
 
 
 class MiniAppBeastError(RuntimeError):
@@ -454,17 +451,38 @@ def miniapp_upstream_failure(exc: BaseException) -> bool:
     )
 
 
+def is_miniapp_circuit_open(exc: BaseException) -> bool:
+    return isinstance(exc, MiniAppCircuitOpenError)
+
+
+def miniapp_circuit_wait_seconds(exc: BaseException, minimum: int = 60) -> int:
+    if not is_miniapp_circuit_open(exc):
+        return max(0, int(minimum or 0))
+    return max(int(minimum or 0), int(getattr(exc, "retry_after", 0) or 0))
+
+
 _MINIAPP_CIRCUIT = MiniAppTransportCircuitBreaker()
 
 
-def _fast_fail_open_circuit_once(origin: str) -> bool:
-    """Let startup escape an already-open circuit once per process."""
-    key = MiniAppTransportCircuitBreaker._origin_key(origin)
-    with _CIRCUIT_FAST_FAIL_LOCK:
-        if key in _CIRCUIT_FAST_FAIL_ORIGINS:
-            return False
-        _CIRCUIT_FAST_FAIL_ORIGINS.add(key)
-        return True
+def miniapp_circuit_preflight(origin: Any) -> MiniAppCircuitOpenError | None:
+    """Return a fast, non-network failure while the shared circuit is cooling."""
+    origin = str(origin or "").strip()
+    if not origin:
+        # Optional and injected transports may not expose a production origin.
+        # They must not inherit the shared production circuit state.
+        return None
+    state = _MINIAPP_CIRCUIT.snapshot(origin)
+    status = str(state.get("status") or "closed")
+    now = float(_MINIAPP_CIRCUIT.clock())
+    if status == "open":
+        next_probe = max(0.0, float(state.get("next_probe_epoch") or 0))
+        if next_probe > now:
+            return MiniAppCircuitOpenError(next_probe - now, MiniAppTransportCircuitBreaker._time_text(next_probe))
+    elif status == "half_open":
+        probe_until = max(0.0, float(state.get("probe_until_epoch") or 0))
+        if probe_until > now:
+            return MiniAppCircuitOpenError(probe_until - now, MiniAppTransportCircuitBreaker._time_text(probe_until))
+    return None
 
 
 def miniapp_entry_start_param(entry_url):
@@ -594,18 +612,12 @@ async def _post_json(origin, path, payload, timeout, post_json=None):
             raise MiniAppBeastError(result.get("error") or "miniapp_request_failed")
         return result
 
-    permit: MiniAppCircuitPermit
-    while True:
-        decision = await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
-        if decision.permit is not None:
-            permit = decision.permit
-            break
-        if _fast_fail_open_circuit_once(origin):
-            raise MiniAppCircuitOpenError(decision.wait_seconds, decision.retry_at)
-        wait_seconds = max(0.1, float(decision.wait_seconds or 0.1))
-        if decision.half_open:
-            wait_seconds = min(wait_seconds, HALF_OPEN_POLL_SECONDS)
-        await asyncio.sleep(wait_seconds)
+    decision = await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
+    if decision.permit is None:
+        # Never hold a transport lock or sleep inside a worker while the service
+        # is down. The caller records a paused state and schedules the next check.
+        raise MiniAppCircuitOpenError(decision.wait_seconds, decision.retry_at)
+    permit = decision.permit
 
     try:
         result = await asyncio.to_thread(_post_json_sync, origin, path, payload, timeout)
@@ -620,6 +632,12 @@ async def _post_json(origin, path, payload, timeout, post_json=None):
                 exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower(),
                 int(getattr(exc, "status", 0) or 0),
             )
+            circuit_error = miniapp_circuit_preflight(origin)
+            if circuit_error is not None:
+                # The circuit transition already emitted the useful outage log.
+                # Pause callers instead of logging or retrying the same failure
+                # as an independent task error.
+                raise circuit_error from exc
         else:
             # A structured application/authentication error proves the HTTP
             # service answered; a half-open transport probe therefore succeeded.
@@ -652,6 +670,10 @@ async def fetch_miniapp_beast_snapshot(
     """Fetch one authoritative roster without sending any Telegram chat command."""
     entry_token = miniapp_entry_start_param(entry_url)
     origin = miniapp_origin(entry_url)
+    if post_json is None:
+        circuit_error = miniapp_circuit_preflight(origin)
+        if circuit_error is not None:
+            raise circuit_error
     init_data = await request_webview_init_data(client, bot_username, entry_token)
 
     spirit_token = str(cached_spirit_token or "").strip()
@@ -669,7 +691,14 @@ async def fetch_miniapp_beast_snapshot(
                 "player": roster.get("player") or {},
                 "spirit_token": spirit_token,
             }
-        except MiniAppBeastError:
+        except MiniAppCircuitOpenError:
+            raise
+        except MiniAppBeastError as exc:
+            if miniapp_upstream_failure(exc):
+                # A stale cached token cannot be repaired while the shared
+                # upstream is unhealthy. Do not spend another request on the
+                # external-token exchange in the same cycle.
+                raise
             spirit_token = ""
 
     await _post_json(

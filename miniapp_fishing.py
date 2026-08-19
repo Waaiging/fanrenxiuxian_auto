@@ -23,7 +23,12 @@ from automation_settings import (
     miniapp_fishing_settings,
 )
 from fishing_features import parse_trade_listing_response, parse_trade_purchase_response
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_preflight,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_dwelling import identity_state
 
 
@@ -1345,6 +1350,8 @@ class MiniAppFishingAutomation:
             return shop, bait
         try:
             quantity = affordable_bait_quantity(bait, BAIT_PURCHASE_QUANTITY, minimum)
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if exc.code == "fishing_bait_unaffordable":
                 shortages = cost_shortages(bait.get("cost"), minimum)
@@ -1424,6 +1431,8 @@ class MiniAppFishingAutomation:
                     str(bait.get("key") or ""),
                     required,
                 )
+            except MiniAppCircuitOpenError:
+                raise
             except MiniAppBeastError as exc:
                 if exc.code == "fishing_bait_unaffordable":
                     return self._use_no_chum_after_unaffordable(identity, shop, chum)
@@ -1448,6 +1457,8 @@ class MiniAppFishingAutomation:
                 chum_key,
                 log_operation=False,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             if exc.code == "fishing_chum_daily_limit":
                 return self._use_no_chum_after_daily_limit(identity, refreshed, chum)
@@ -1620,6 +1631,8 @@ class MiniAppFishingAutomation:
             await asyncio.sleep(0.65 if attempt < 4 else 1.0)
             try:
                 catch_payload = await self.transport.fishing_result(identity, token)
+            except MiniAppCircuitOpenError:
+                raise
             except MiniAppBeastError:
                 if attempt >= 8:
                     break
@@ -1870,6 +1883,8 @@ class MiniAppFishingAutomation:
                 active=challenge or phase in {"waiting", "bite", "reeling"},
                 definitive=True,
             )
+        except MiniAppCircuitOpenError:
+            raise
         except MiniAppBeastError as exc:
             info["error"] = exc.code
             info["definitive"] = exc.code == "fishing_rod_missing"
@@ -2654,9 +2669,34 @@ class MiniAppFishingAutomation:
                         )
                         wait = min(start_wait, 300)
                     else:
+                        circuit_error = miniapp_circuit_preflight(
+                            getattr(self.transport, "origin", "")
+                        )
+                        if circuit_error is not None:
+                            raise circuit_error
                         wait = await self._drive_once(settings)
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                identity = self._status_identity(settings)
+                wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                self._record(
+                    identity,
+                    miniapp_fishing_status="paused_upstream",
+                    miniapp_fishing_last_error=exc.code,
+                    miniapp_fishing_last_error_time=_now_text(),
+                    miniapp_fishing_next_run_time=(
+                        datetime.now() + timedelta(seconds=wait)
+                    ).strftime(TIME_FORMAT),
+                )
+                self._set_global_status(
+                    settings,
+                    "paused_upstream",
+                    f"Mini App 上游熔断，等待至 {exc.retry_at or '下一次探测'}",
+                )
+                wait = max(wait, 60)
+                await self._sleep_until_next_cycle(wait, settings)
+                continue
             except Exception as exc:
                 identity = self._status_identity(settings)
                 code = (

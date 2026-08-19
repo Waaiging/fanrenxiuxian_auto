@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import automation_settings
 import dashboard_server
+from miniapp_beast import MiniAppCircuitOpenError
 from miniapp_dwelling import MiniAppDwellingTransport
 from miniapp_inventory import (
     MiniAppInventoryWorker,
@@ -143,6 +144,39 @@ class MiniAppInventoryTests(unittest.TestCase):
                 "物品": 2,
                 "材料": 1,
             })
+
+    def test_worker_stops_refreshing_remaining_identities_when_circuit_is_open(self):
+        class CircuitTransport(FakeTransport):
+            async def inventory_sections(self, identity):
+                self.calls.append(identity)
+                raise MiniAppCircuitOpenError(900, "2026-08-19 12:00:00")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            actor = FakeActor(["缘生子"])
+            transport = CircuitTransport(["主魂", "缘生子"])
+            worker = MiniAppInventoryWorker(
+                actor,
+                transport,
+                "main",
+                base_dir=tmpdir,
+                inter_identity_delay=0,
+            )
+
+            result = asyncio.run(worker.process_request({
+                "request_id": "circuit-open",
+                "identity": "*",
+                "requested_by": "tester",
+            }))
+
+            self.assertEqual(result["status"], "paused_upstream")
+            self.assertEqual(transport.calls, ["主魂"])
+            self.assertEqual(
+                result["errors"],
+                {
+                    "主魂": "miniapp_circuit_open",
+                    "缘生子": "miniapp_circuit_open",
+                },
+            )
 
     def test_transport_requests_only_inventory_section_for_identity(self):
         calls = []

@@ -19,7 +19,11 @@ from concubine_features import (
     parse_duration_seconds,
     seconds_until,
 )
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_seek import MiniAppBeastSeekWorker
@@ -237,6 +241,7 @@ class RestrictedMiniAppWorker:
             restricted_miniapp_active=True,
             restricted_miniapp_started_at=now_str(),
             restricted_miniapp_last_error="",
+            restricted_miniapp_retry_at="",
             restricted_miniapp_transport="fixed_entry_http_only",
         )
 
@@ -378,7 +383,23 @@ class RestrictedMiniAppWorker:
                 restricted_miniapp_last_identity=identity,
                 restricted_miniapp_last_command_at=now_str(),
                 restricted_miniapp_last_error="",
+                restricted_miniapp_retry_at="",
             )
+        except MiniAppCircuitOpenError as exc:
+            previous_retry_at = str(
+                self.actor.state.get("restricted_miniapp_retry_at") or ""
+            )
+            self._record_worker_state(
+                restricted_miniapp_last_error=exc.code,
+                restricted_miniapp_last_error_at=now_str(),
+                restricted_miniapp_retry_at=exc.retry_at,
+            )
+            if previous_retry_at != exc.retry_at:
+                self.log.info(
+                    "Mini App commands paused while upstream circuit is open; next probe %s",
+                    exc.retry_at or f"in {exc.retry_after}s",
+                )
+            return None
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
             self._record_worker_state(
@@ -435,19 +456,34 @@ class RestrictedMiniAppWorker:
         self._sync_avatar_dao_names_from_transport()
         synced = 0
         for identity in self.identities():
+            container = identity_state(self.actor, identity)
             try:
                 payload = await self.transport.overview(identity)
                 apply_dwelling_snapshot(self.actor, identity, payload)
                 synced += 1
+            except MiniAppCircuitOpenError as exc:
+                container["miniapp_last_error"] = exc.code
+                self.log.info(
+                    "Mini App details sync paused while upstream circuit is open; next probe %s",
+                    exc.retry_at or f"in {exc.retry_after}s",
+                )
+                break
             except Exception as exc:
-                container = identity_state(self.actor, identity)
                 container["miniapp_last_error"] = (
                     exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 )
                 self.log.error("Mini App details sync failed for %s", identity, exc_info=True)
+        updates = {
+            "restricted_miniapp_last_sync_time": now_str(),
+            "restricted_miniapp_identity_count": synced,
+        }
+        if synced == len(self.identities()):
+            updates.update(
+                restricted_miniapp_last_error="",
+                restricted_miniapp_retry_at="",
+            )
         self._record_worker_state(
-            restricted_miniapp_last_sync_time=now_str(),
-            restricted_miniapp_identity_count=synced,
+            **updates,
         )
 
     async def run_auth_refresh_loop(self) -> None:
@@ -462,7 +498,20 @@ class RestrictedMiniAppWorker:
                 self._record_worker_state(
                     restricted_miniapp_last_auth_refresh=now_str(),
                     restricted_miniapp_last_error="",
+                    restricted_miniapp_retry_at="",
                 )
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, 300)
+                self._record_worker_state(
+                    restricted_miniapp_last_error=exc.code,
+                    restricted_miniapp_last_error_at=now_str(),
+                    restricted_miniapp_retry_at=exc.retry_at,
+                )
+                self.log.info(
+                    "Mini App authentication refresh paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
+                await asyncio.sleep(wait)
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 self._record_worker_state(
@@ -718,6 +767,16 @@ class RestrictedMiniAppWorker:
                 )
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, self.star_retry_seconds)
+                state = identity_state(self.actor, STAR_IDENTITY)
+                state["star_miniapp_last_error"] = exc.code
+                state["star_miniapp_last_error_time"] = now_str()
+                self._save()
+                self.log.info(
+                    "Mini App star-farm paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 state = identity_state(self.actor, STAR_IDENTITY)
@@ -762,6 +821,17 @@ class RestrictedMiniAppWorker:
                 self._record_beast_snapshot(snapshot)
             except asyncio.CancelledError:
                 raise
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, 300)
+                self.actor.state["beast_miniapp_last_error"] = exc.code
+                self.actor.state["beast_miniapp_last_error_time"] = now_str()
+                self.actor.state["beast_miniapp_retry_at"] = exc.retry_at
+                self._save()
+                self.log.info(
+                    "Wan Beast Valley Mini App sync paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
+                await asyncio.sleep(wait)
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                 self.actor.state["beast_miniapp_last_error"] = code

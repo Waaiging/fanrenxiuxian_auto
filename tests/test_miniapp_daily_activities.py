@@ -649,8 +649,10 @@ class MiniAppDailyActivityTests(unittest.TestCase):
 
             def __init__(self):
                 self.challenges = []
+                self.initialize_calls = 0
 
             async def initialize(self):
+                self.initialize_calls += 1
                 return {}
 
             async def pagoda_snapshot(self, identity):
@@ -687,6 +689,7 @@ class MiniAppDailyActivityTests(unittest.TestCase):
 
         self.assertTrue(first)
         self.assertTrue(second)
+        self.assertEqual(transport.initialize_calls, 1)
         self.assertEqual(transport.challenges, ["主魂", "素缘子"])
         self.assertEqual(actor.state["last_tower_date"], "2026-07-29")
         self.assertEqual(

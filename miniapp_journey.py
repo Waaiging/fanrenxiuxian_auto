@@ -12,7 +12,12 @@ from automation_settings import (
     miniapp_journey_identities_for_account,
     miniapp_journey_settings,
 )
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_preflight,
+    miniapp_circuit_wait_seconds,
+)
 from miniapp_dwelling import (
     apply_dwelling_snapshot,
     command_result_ok,
@@ -433,6 +438,9 @@ class MiniAppTianxingJourney:
     ) -> tuple[bool, int]:
         if not self.runtime_enabled():
             return False, self.settings_reload_seconds
+        circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+        if circuit_error is not None:
+            raise circuit_error
         await self.transport.initialize()
         now = now or datetime.now()
         identities = self.identities()
@@ -453,6 +461,11 @@ class MiniAppTianxingJourney:
                 if not identity_complete:
                     retry_after = identity_retry if retry_after <= 0 else min(retry_after, identity_retry)
             except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError:
+                # One shared upstream circuit covers every identity. Stop the
+                # current batch so the scheduler emits one pause record rather
+                # than repeating the same event for all remaining identities.
                 raise
             except MiniAppBeastError as exc:
                 if exc.code == "wild_experience_daily_limit":
@@ -481,6 +494,8 @@ class MiniAppTianxingJourney:
                             )
                             continue
                     except asyncio.CancelledError:
+                        raise
+                    except MiniAppCircuitOpenError:
                         raise
                     except Exception:
                         pass
@@ -549,6 +564,16 @@ class MiniAppTianxingJourney:
                     complete, retry_after = await self.run_daily_once(now=now)
                 except asyncio.CancelledError:
                     raise
+                except MiniAppCircuitOpenError as exc:
+                    complete, retry_after = False, miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                    self._record_root(
+                        miniapp_journey_last_error=exc.code,
+                        miniapp_journey_last_error_time=datetime.now().strftime(TIME_FORMAT),
+                    )
+                    self.log.info(
+                        "Mini App journey daily cycle paused by upstream circuit until %s",
+                        exc.retry_at or f"in {retry_after}s",
+                    )
                 except Exception as exc:
                     code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                     self._record_root(

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from automation_settings import automation_account_identities, canonical_automation_identity
+from miniapp_beast import MiniAppCircuitOpenError
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -411,6 +412,23 @@ class MiniAppInventoryWorker:
                     completed += 1
                 except asyncio.CancelledError:
                     raise
+                except MiniAppCircuitOpenError as exc:
+                    errors[identity] = exc.code
+                    for pending in targets[index + 1:]:
+                        errors[pending] = exc.code
+                    progress["status"] = "paused_upstream"
+                    progress["retry_at"] = exc.retry_at
+                    self.log.info(
+                        "[%s] Mini App inventory refresh paused by upstream circuit until %s",
+                        self.account,
+                        exc.retry_at or f"in {exc.retry_after}s",
+                    )
+                    progress["completed"] = index + 1
+                    progress["current_identity"] = identity
+                    progress["errors"] = dict(errors)
+                    cache["request_progress"] = dict(progress)
+                    write_inventory_cache(self.account, cache, self.base_dir)
+                    break
                 except Exception as exc:
                     code = self._error_code(exc)
                     errors[identity] = code
@@ -429,7 +447,9 @@ class MiniAppInventoryWorker:
                     await asyncio.sleep(self.inter_identity_delay)
 
         status = "completed"
-        if errors and completed:
+        if progress.get("status") == "paused_upstream":
+            status = "paused_upstream"
+        elif errors and completed:
             status = "partial"
         elif errors:
             status = "error"

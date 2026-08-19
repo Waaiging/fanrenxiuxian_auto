@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from miniapp_beast_contract import main_soul_is_wanling
 
 
@@ -521,6 +521,21 @@ class MiniAppBeastSeekWorker:
             return await self._run_cycle_unlocked()
         except asyncio.CancelledError:
             raise
+        except MiniAppCircuitOpenError as exc:
+            wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+            self.state.update({
+                "beast_seek_miniapp_last_error": exc.code,
+                "beast_seek_miniapp_last_error_time": _now_text(),
+                "beast_seek_miniapp_next_time": _now_text(
+                    datetime.now() + timedelta(seconds=wait)
+                ),
+            })
+            self._save()
+            self.log.info(
+                "Mini App Wanling beast seek paused by upstream circuit until %s",
+                exc.retry_at or f"in {wait}s",
+            )
+            return False
         except Exception as exc:
             code = _error_code(exc)
             self.state.update({

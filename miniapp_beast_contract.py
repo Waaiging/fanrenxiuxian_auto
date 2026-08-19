@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from miniapp_dwelling import MiniAppDwellingTransport
 
 
@@ -218,6 +218,17 @@ class MiniAppBeastContractWorker:
                 raise MiniAppBeastError("beast_roster_empty")
         except asyncio.CancelledError:
             raise
+        except MiniAppCircuitOpenError as exc:
+            wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+            state["beast_contract_interaction_last_error"] = exc.code
+            state["beast_contract_interaction_last_error_time"] = contract_time()
+            state["beast_contract_interaction_next_time"] = contract_add_seconds(wait)
+            self._save()
+            self.log.info(
+                "Wan Beast Valley contract paused by upstream circuit until %s",
+                exc.retry_at or f"in {wait}s",
+            )
+            return False
         except Exception as exc:
             code = _error_code(exc)
             state["beast_contract_interaction_last_error"] = code
@@ -313,6 +324,10 @@ class MiniAppBeastContractWorker:
                 results[result_key] = item_state
                 self._save()
                 raise
+            except MiniAppCircuitOpenError:
+                results[result_key] = item_state
+                self._save()
+                raise
             except Exception as exc:
                 code = _error_code(exc)
                 failed += 1
@@ -391,4 +406,18 @@ class MiniAppBeastContractWorker:
             if wait > 0:
                 await asyncio.sleep(min(wait, 300))
                 continue
-            await self.run_cycle()
+            try:
+                await self.run_cycle()
+            except asyncio.CancelledError:
+                raise
+            except MiniAppCircuitOpenError as exc:
+                wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                self.actor.state["beast_contract_interaction_last_error"] = exc.code
+                self.actor.state["beast_contract_interaction_last_error_time"] = contract_time()
+                self.actor.state["beast_contract_interaction_next_time"] = contract_add_seconds(wait)
+                self._save()
+                self.log.info(
+                    "Wan Beast Valley contract paused by upstream circuit until %s",
+                    exc.retry_at or f"in {wait}s",
+                )
+                await asyncio.sleep(max(60, wait))

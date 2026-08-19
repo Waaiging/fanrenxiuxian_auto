@@ -11,6 +11,7 @@ from telethon import events
 
 from auto_reply_features import maybe_restricted_exchange_place
 from log_utils import actor_target_chat_ids, resolve_actor_target_chats, routed_telegram_event_handler
+from miniapp_beast import MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 from world_boss_features import install_world_boss_monitor
@@ -74,12 +75,65 @@ def install_restricted_exchange_monitor(actor, logger=None):
     return registrations
 
 
+async def resume_restricted_miniapp_after_circuit(
+    worker,
+    actor,
+    account: str,
+    first_error: MiniAppCircuitOpenError,
+    logger=None,
+) -> bool:
+    """Resume only at breaker-approved times; never poll a failed upstream."""
+    log = logger or logging.getLogger(f"red_packet.{account}")
+    circuit_error = first_error
+    last_logged_retry_at = ""
+    while getattr(actor, "is_running", True):
+        wait = miniapp_circuit_wait_seconds(circuit_error, 60)
+        retry_at = circuit_error.retry_at or f"in {wait}s"
+        if retry_at != last_logged_retry_at:
+            log.info(
+                "[%s] Mini App scheduler will make one recovery attempt at %s; "
+                "no requests will be sent before then",
+                account,
+                retry_at,
+            )
+            last_logged_retry_at = retry_at
+        await asyncio.sleep(wait)
+        if not getattr(actor, "is_running", True):
+            return False
+        try:
+            await worker.start()
+        except asyncio.CancelledError:
+            raise
+        except MiniAppCircuitOpenError as exc:
+            circuit_error = exc
+            continue
+        except Exception as exc:
+            code = getattr(exc, "code", "") or type(exc).__name__.lower()
+            actor.state["restricted_miniapp_active"] = False
+            actor.state["restricted_miniapp_last_error"] = code
+            actor.save_state()
+            log.error(
+                "[%s] Mini App scheduler recovery stopped after a non-upstream error: %s",
+                account,
+                code,
+                exc_info=True,
+            )
+            return False
+        log.warning(
+            "[%s] Mini App upstream recovered; restricted scheduler resumed",
+            account,
+        )
+        return True
+    return False
+
+
 async def run(account: str) -> None:
     logger = logging.getLogger(f"red_packet.{account}")
     actor = build_actor(account)
     client = actor.client
     monitor = None
     miniapp_worker = None
+    miniapp_recovery_task = None
     world_boss_monitor = None
     exchange_handlers = []
     await client.connect()
@@ -104,7 +158,34 @@ async def run(account: str) -> None:
             )
             actor.save_state()
             code = getattr(exc, "code", "") or type(exc).__name__.lower()
-            if code == "dwelling_token_expired":
+            if isinstance(exc, MiniAppCircuitOpenError):
+                actor.state["restricted_miniapp_retry_at"] = exc.retry_at
+                actor.save_state()
+                logger.info(
+                    "[%s] Mini App scheduler paused by upstream circuit until %s; "
+                    "red-packet listener remains active",
+                    account,
+                    exc.retry_at or f"in {exc.retry_after}s",
+                )
+
+                async def recover_scheduler(circuit_error=exc) -> None:
+                    recovered = await resume_restricted_miniapp_after_circuit(
+                        miniapp_worker,
+                        actor,
+                        account,
+                        circuit_error,
+                        logger=logger,
+                    )
+                    if recovered:
+                        exchange_handlers.extend(
+                            install_restricted_exchange_monitor(actor, logger=logger)
+                        )
+
+                miniapp_recovery_task = asyncio.create_task(
+                    recover_scheduler(),
+                    name=f"miniapp_{account}_startup_recovery",
+                )
+            elif code == "dwelling_token_expired":
                 logger.error(
                     "[%s] Mini App scheduler disabled: fixed entry token expired; "
                     "red-packet listener remains active",
@@ -127,6 +208,9 @@ async def run(account: str) -> None:
         logger.warning("[%s] Restricted account entered Mini App standby mode", account)
         await client.run_until_disconnected()
     finally:
+        if miniapp_recovery_task is not None:
+            miniapp_recovery_task.cancel()
+            await asyncio.gather(miniapp_recovery_task, return_exceptions=True)
         for callback, builder in exchange_handlers:
             client.remove_event_handler(callback, builder)
         if world_boss_monitor is not None:

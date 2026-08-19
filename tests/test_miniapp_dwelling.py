@@ -3,9 +3,9 @@ import json
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from miniapp_beast import MiniAppBeastError
+from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError
 from common_command_features import CommonCommandMixin
 from miniapp_dwelling import (
     MiniAppCommandResponse,
@@ -350,6 +350,40 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertTrue(actor.state["miniapp_route_active"])
         self.assertEqual(actor.state["miniapp_route_last_error"], "")
         self.assertTrue(any("recovered" in row for row in logger.warning_messages))
+
+    def test_runtime_circuit_open_starts_route_recovery_without_error_log(self):
+        class Actor:
+            def __init__(self):
+                self.client = object()
+                self.config = {"miniapp_beast": {"entry_url": ENTRY}}
+                self.state = {}
+                self.avatars = []
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = FakeLogger()
+        router = MiniAppCommandRouter(actor, "main", logger=logger)
+        router._route_active = True
+        router.transport.identity_player_ids = {"主魂": 100}
+        router._maybe_refresh_auth = AsyncMock()
+        router._start_recovery_task = Mock()
+        router.transport.command = AsyncMock(
+            side_effect=MiniAppCircuitOpenError(900, "2026-08-19 12:00:00")
+        )
+
+        result = asyncio.run(
+            router._route("主魂", ".问道", AsyncMock(), (), {})
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(router._route_active)
+        self.assertFalse(actor.state["miniapp_route_active"])
+        self.assertEqual(actor.state["miniapp_route_last_error"], "miniapp_circuit_open")
+        self.assertEqual(actor.state["miniapp_route_retry_at"], "2026-08-19 12:00:00")
+        router._start_recovery_task.assert_called_once_with()
+        self.assertEqual(logger.error_messages, [])
 
     def test_soul_curse_chain_routes_to_group(self):
         class Actor:
