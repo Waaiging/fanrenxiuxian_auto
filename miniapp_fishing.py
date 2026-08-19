@@ -1308,6 +1308,8 @@ class MiniAppFishingAutomation:
         shop: dict[str, Any],
         bait_key: str,
         minimum: int = 1,
+        *,
+        notify_shortage: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         bait = fishing_option(shop.get("baits"), bait_key)
         if not bait:
@@ -1322,7 +1324,7 @@ class MiniAppFishingAutomation:
         except MiniAppCircuitOpenError:
             raise
         except MiniAppBeastError as exc:
-            if exc.code == "fishing_bait_unaffordable":
+            if exc.code == "fishing_bait_unaffordable" and notify_shortage:
                 shortages = cost_shortages(bait.get("cost"), minimum)
                 await self._notify_material_shortage(
                     identity,
@@ -1366,6 +1368,91 @@ class MiniAppFishingAutomation:
             miniapp_fishing_pending_purchases=pending_purchases,
         )
         return updated_shop, updated_bait
+
+    async def _ensure_cast_bait(
+        self,
+        identity: str,
+        token: str,
+        shop: dict[str, Any],
+        configured_key: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        try:
+            updated_shop, bait = await self._ensure_bait(
+                identity,
+                token,
+                shop,
+                configured_key,
+                notify_shortage=False,
+            )
+            return updated_shop, bait, configured_key
+        except MiniAppCircuitOpenError:
+            raise
+        except MiniAppBeastError as exc:
+            if exc.code not in {"fishing_bait_unaffordable", "fishing_bait_level_low"}:
+                raise
+            configured_error = exc
+
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for index, item in enumerate(_items(shop.get("baits"))):
+            key = str(item.get("key") or "")
+            if not key or key == configured_key or not item.get("unlocked"):
+                continue
+            count = _integer(item.get("count"), 0)
+            if count > 0:
+                capacity = min(BAIT_PURCHASE_QUANTITY, count)
+            else:
+                try:
+                    capacity = affordable_bait_quantity(
+                        item,
+                        BAIT_PURCHASE_QUANTITY,
+                    )
+                except MiniAppBeastError:
+                    continue
+            candidates.append((capacity, index, item))
+
+        if not candidates:
+            configured_bait = fishing_option(shop.get("baits"), configured_key)
+            if configured_error.code == "fishing_bait_unaffordable":
+                await self._notify_material_shortage(
+                    identity,
+                    kind="鱼饵",
+                    name=str(configured_bait.get("name") or configured_key),
+                    shortages=cost_shortages(configured_bait.get("cost")),
+                )
+            raise configured_error
+
+        _, _, fallback = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+        fallback_key = str(fallback.get("key") or "")
+        updated_shop, bait = await self._ensure_bait(
+            identity,
+            token,
+            shop,
+            fallback_key,
+            notify_shortage=False,
+        )
+        state = self._state(identity)
+        today = _today_text()
+        already_recorded = (
+            str(state.get("miniapp_fishing_bait_fallback_date") or "") == today
+            and str(state.get("miniapp_fishing_bait_fallback_key") or "") == configured_key
+            and str(state.get("miniapp_fishing_bait_fallback_to") or "") == fallback_key
+        )
+        self._record(
+            identity,
+            miniapp_fishing_bait_fallback_date=today,
+            miniapp_fishing_bait_fallback_key=configured_key,
+            miniapp_fishing_bait_fallback_to=fallback_key,
+            miniapp_fishing_bait_fallback_name=str(bait.get("name") or fallback_key),
+            miniapp_fishing_bait_fallback_reason=configured_error.code,
+        )
+        if not already_recorded:
+            self.log.warning(
+                "Mini App fishing bait %s is unavailable for %s; falling back to %s.",
+                configured_key,
+                identity,
+                fallback_key,
+            )
+        return updated_shop, bait, fallback_key
 
     async def _ensure_chum(
         self,
@@ -1583,7 +1670,12 @@ class MiniAppFishingAutomation:
         pond, pond_key = self._resolve_pond(identity, shop, pond_key)
         self._record(identity, miniapp_fishing_pending_purchases=[])
         shop = await self._ensure_chum(identity, token, shop, chum_key)
-        shop, bait = await self._ensure_bait(identity, token, shop, bait_key)
+        shop, bait, bait_key = await self._ensure_cast_bait(
+            identity,
+            token,
+            shop,
+            bait_key,
+        )
         token, _ = await self.transport.fishing_next_cast(
             identity,
             token,

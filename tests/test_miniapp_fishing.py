@@ -708,6 +708,99 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(worker.actor.state["miniapp_fishing_pond_fallback_to"], "qingxi")
 
+    def test_unaffordable_configured_bait_falls_back_to_most_available_bait(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        initial = shop_payload(bait_count=0)
+        initial["shop"]["baits"] = [
+            {
+                "key": "plain",
+                "itemId": "item_fishing_bait_plain",
+                "name": "凡饵",
+                "count": 0,
+                "unlocked": True,
+                "cost": [{"name": "灵石", "qty": 12, "owned": 125}],
+            },
+            {
+                "key": "spirit_worm",
+                "itemId": "item_fishing_bait_spirit_worm",
+                "name": "灵虫饵",
+                "count": 0,
+                "unlocked": True,
+                "cost": [
+                    {"name": "灵石", "qty": 90, "owned": 125},
+                    {"name": "凝血草", "qty": 2, "owned": 123},
+                ],
+            },
+            {
+                "key": "demon_blood",
+                "itemId": "item_fishing_bait_demon_blood",
+                "name": "妖血饵",
+                "count": 0,
+                "unlocked": True,
+                "cost": [
+                    {"name": "灵石", "qty": 220, "owned": 125},
+                    {"name": "一阶妖丹", "qty": 1, "owned": 187},
+                ],
+            },
+        ]
+        purchased = shop_payload(bait_count=0)
+        purchased["shop"]["baits"] = [dict(item) for item in initial["shop"]["baits"]]
+        purchased["shop"]["baits"][0]["count"] = 10
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(
+                return_value=(
+                    "fish_lobby",
+                    {"session": {"phase": "lobby", "rod": {"name": "银竹钓竿"}}},
+                )
+            ),
+            fishing_shop=AsyncMock(return_value=initial),
+            fishing_buy_bait=AsyncMock(return_value=purchased),
+            fishing_next_cast=AsyncMock(return_value=("fish_cast", {"token": "fish_cast"})),
+            fishing_start=AsyncMock(
+                return_value=(
+                    "fish_cast",
+                    {"session": {"phase": "waiting", "serverNow": 1000, "biteAt": 31000}},
+                )
+            ),
+        )
+        worker = MiniAppFishingAutomation(
+            Actor(),
+            transport,
+            "xiaohao",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+
+        wait = asyncio.run(
+            worker.run_cycle(
+                {"enabled": True, "pond": "qingxi", "bait": "demon_blood", "chum": "none"}
+            )
+        )
+
+        self.assertEqual(wait, 31)
+        transport.fishing_buy_bait.assert_awaited_once_with(
+            "主魂",
+            "fish_lobby",
+            "plain",
+            10,
+            [{"name": "灵石", "qty": 12, "owned": 125}],
+            log_operation=False,
+        )
+        transport.fishing_next_cast.assert_awaited_once_with(
+            "主魂",
+            "fish_lobby",
+            "qingxi",
+            "item_fishing_bait_plain",
+            log_operation=False,
+        )
+        self.assertEqual(worker.actor.state["miniapp_fishing_bait_fallback_to"], "plain")
+
     def test_lobby_purchase_is_limited_by_available_cost_materials(self):
         class Actor:
             def __init__(self):
