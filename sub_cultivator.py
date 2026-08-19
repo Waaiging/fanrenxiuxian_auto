@@ -100,6 +100,7 @@ from yinluo_features import YinluoMixin
 YINLUO_IDENTITY = SUB_YINLUO_IDENTITY
 
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
+from state_io import load_json_state, save_json_state
 
 from log_utils import (
     CommandLogFilter,           # 日志过滤器：将包含指令关键词的日志行额外标记
@@ -1256,10 +1257,15 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         default_state.update(common_command_default_state())
         default_state.update(concubine_default_state())
 
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    s = json.load(f)
+        if os.path.exists(self.state_file) or os.path.exists(f"{self.state_file}.bak"):
+            s = load_json_state(
+                self.state_file,
+                expected_type=dict,
+                logger=log,
+                default=None,
+            )
+            if isinstance(s, dict):
+                try:
                     # 字段迁移：如果存在旧的 next_deep_meditation_time 且新的 deep_meditation_end_time 为空，则进行迁移
                     # 这是为了兼容旧版本状态文件的字段命名变化
                     if "next_deep_meditation_time" in s and s["next_deep_meditation_time"]:
@@ -1285,8 +1291,8 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                         s["next_formation_time"] = retry_time
                     self.ensure_meditation_guard_from_end_time(s)
                     return s
-            except Exception:
-                pass  # 文件损坏或解析失败时忽略异常，返回默认状态
+                except Exception as exc:
+                    log.error("Load State JSON migration Error: %s", exc, exc_info=True)
         return default_state
 
     def save_state(self):
@@ -1294,11 +1300,14 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         将当前运行时状态持久化到 state_sub.json。
         每次状态变更后调用，保证脚本重启后能恢复现场。
         """
+        state_file = getattr(self, "state_file", None)
+        if not state_file:
+            log.debug("Save State skipped: actor has no state_file (fixture/non-runtime object).")
+            return
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
+            save_json_state(state_file, self.state, logger=log)
         except Exception as e:
-            log.error(f"Save State Error: {e}")
+            log.error(f"Save State Error: {e}", exc_info=True)
 
     # ============================================================
     # 消息发送与删除基础方法

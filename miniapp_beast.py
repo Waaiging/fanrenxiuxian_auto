@@ -29,7 +29,13 @@ REFRESH_REQUEST_FILE = "miniapp_beast_refresh_request.json"
 SESSION_CACHE_FILE = "miniapp_beast_session.json"
 TRANSPORT_HEALTH_FILE = "miniapp_transport_health.json"
 DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
-DEFAULT_CIRCUIT_BACKOFF_SECONDS = (15 * 60, 30 * 60, 60 * 60)
+DEFAULT_CIRCUIT_BACKOFF_SECONDS = (
+    15 * 60,
+    30 * 60,
+    60 * 60,
+    3 * 60 * 60,
+    6 * 60 * 60,
+)
 DEFAULT_CIRCUIT_PROBE_LEASE_SECONDS = 90
 
 

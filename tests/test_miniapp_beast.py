@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from miniapp_beast import (
+    DEFAULT_CIRCUIT_BACKOFF_SECONDS,
     MiniAppBeastError,
     MiniAppCircuitOpenError,
     MiniAppTransportCircuitBreaker,
@@ -41,6 +42,12 @@ ROSTER_PAYLOAD = {
 
 
 class MiniAppBeastTests(unittest.TestCase):
+    def test_default_circuit_uses_long_backoff_after_repeated_server_failures(self):
+        self.assertEqual(
+            DEFAULT_CIRCUIT_BACKOFF_SECONDS,
+            (15 * 60, 30 * 60, 60 * 60, 3 * 60 * 60, 6 * 60 * 60),
+        )
+
     def test_upstream_failure_classifier_covers_transport_and_http_5xx(self):
         self.assertTrue(miniapp_upstream_failure(MiniAppBeastError("invalid_json")))
         self.assertTrue(miniapp_upstream_failure(MiniAppBeastError("maintenance", 503)))

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import duel_features
+from automation_settings import SUB_YINLUO_IDENTITY
 from common_command_features import CommonCommandMixin
 
 
@@ -639,24 +640,30 @@ class DuelControlTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "身份暂停")
 
     def test_rebirth_refreshes_duel_identity_and_pending_participant_key(self):
+        old_identity = SUB_YINLUO_IDENTITY
         identity_item = next(
             item for item in duel_features.DUEL_IDENTITIES["sub"]
-            if item["identity"] == "竹和生"
+            if item["identity"] == old_identity
         )
         queue_item = next(
             item for item in duel_features.DUEL_QUEUES[ROTATION]["participants"]
-            if item["account"] == "sub" and item["identity"] == "竹和生"
+            if item["account"] == "sub" and item["identity"] == old_identity
         )
-        duel_features.set_duel_participant_control(True, "sub|竹和生", "Weeguu")
+        duel_features.set_duel_participant_control(True, f"sub|{old_identity}", "Weeguu")
         try:
-            self.assertTrue(duel_features.refresh_duel_identity_name("sub", "竹和生", "新缘子"))
+            self.assertTrue(
+                duel_features.refresh_duel_identity_name("sub", old_identity, "新缘子")
+            )
             self.assertEqual(duel_features.duel_identity_for_username("lvdoumiao")["identity"], "新缘子")
             state = duel_features.load_duel_state()
             self.assertIn("sub|新缘子", state["queues"][ROTATION]["participants"])
-            self.assertNotIn("sub|竹和生", state["queues"][ROTATION]["participants"])
+            self.assertNotIn(
+                f"sub|{old_identity}",
+                state["queues"][ROTATION]["participants"],
+            )
         finally:
-            identity_item["identity"] = "竹和生"
-            queue_item["identity"] = "竹和生"
+            identity_item["identity"] = old_identity
+            queue_item["identity"] = old_identity
 
     def test_avatar_duel_replies_to_switch_message_with_plain_command(self):
         class Actor(duel_features.DuelMixin):

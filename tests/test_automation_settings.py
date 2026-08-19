@@ -31,8 +31,8 @@ class AutomationSettingsTests(unittest.TestCase):
         settings._SUB_IDENTITY_STATE_CACHE["signature"] = None
         settings._SUB_IDENTITY_STATE_CACHE["state"] = {}
 
-        real_json_load = json.load
-        with patch.object(settings.json, "load", wraps=real_json_load) as load_mock:
+        real_load_state = settings.load_json_state
+        with patch.object(settings, "load_json_state", wraps=real_load_state) as load_mock:
             value = settings.normalize_automation_settings({
                 "world_boss": {"participants": ["sub|竹和生"]},
                 "miniapp_fishing": {

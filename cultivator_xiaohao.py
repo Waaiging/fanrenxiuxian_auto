@@ -83,6 +83,7 @@ from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_d
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
+from state_io import load_json_state, save_json_state
 from group_visibility_control import run_telegram_write_permission_monitor
 from miniapp_beast import MiniAppBeastError
 from miniapp_beast_contract import MiniAppBeastContractWorker
@@ -543,10 +544,15 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         }
         default_state.update(common_command_default_state())
         default_state.update(concubine_default_state())
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    s = json.load(f)
+        if os.path.exists(self.state_file) or os.path.exists(f"{self.state_file}.bak"):
+            s = load_json_state(
+                self.state_file,
+                expected_type=dict,
+                logger=log,
+                default=None,
+            )
+            if isinstance(s, dict):
+                try:
                     for k in default_state:
                         if k not in s:
                             s[k] = default_state[k]
@@ -560,17 +566,20 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                         s["best_beast_status"] = best.get("status", "未知")
                         s["best_beast_stamina"] = best.get("stamina", -1)
                     return s
-            except:
-                pass
+                except Exception as exc:
+                    log.error("Load State JSON migration Error: %s", exc, exc_info=True)
         return default_state
 
     def save_state(self):
         """保存状态到 JSON 文件"""
+        state_file = getattr(self, "state_file", None)
+        if not state_file:
+            log.debug("Save State skipped: actor has no state_file (fixture/non-runtime object).")
+            return
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
+            save_json_state(state_file, self.state, logger=log)
         except Exception as e:
-            log.error(f"Save State Error: {e}")
+            log.error(f"Save State Error: {e}", exc_info=True)
 
     # ---- 身外化身：状态管理 ----
 

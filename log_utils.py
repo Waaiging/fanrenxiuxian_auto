@@ -303,6 +303,8 @@ BOT_ACTIVITY_HISTORY_SCAN_INTERVAL_SECONDS = 30  # 历史消息扫描间隔
 BOT_ACTIVITY_HISTORY_SCAN_LIMIT = 40        # 扫描最近 40 条消息
 BOT_ACTIVITY_SHARED_LOG_INTERVAL_SECONDS = 5 * 60  # 跨脚本对账日志限流
 BOT_COMMAND_RESPONSE_GRACE_SECONDS = 30     # 带点指令超过 30 秒无回执视作机器人维护信号
+BOT_COMMAND_SILENCE_MAX_SECONDS = 10 * 60   # 单条无回执不能永久冻结所有账号
+BOT_ACTIVITY_WAIT_ABORT_SECONDS = 2 * 60    # 机器人异常时本轮最多等待 2 分钟，随后释放业务锁
 CLIENT_DISCONNECT_ABORT_SECONDS = 2 * 60    # 本地 Telegram 客户端断线超过 2 分钟就释放发送锁
 
 # 游戏机器人账号列表
@@ -1885,6 +1887,15 @@ def shared_bot_command_silence_status(actor, grace_seconds=BOT_COMMAND_RESPONSE_
 
     age = max(0, time.time() - probe_epoch)
     remaining = max(0, int(grace_seconds - age))
+    if age > BOT_COMMAND_SILENCE_MAX_SECONDS:
+        return {
+            "active": False,
+            "expired": True,
+            "probe": probe,
+            "response": response,
+            "age_seconds": age,
+            "remaining_seconds": 0,
+        }
     return {
         "active": age >= grace_seconds,
         "probe": probe,
@@ -2223,6 +2234,7 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
         return True
 
     disconnected_since = 0
+    wait_started = time.monotonic()
     try:
         while getattr(actor, "is_running", True):
             if not await ensure_client_connected_before_send(actor, key, logger):
@@ -2262,6 +2274,22 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                             f"({source}, remaining {int(maintenance_status.get('remaining_seconds') or 0)}s)."
                         )
                     setattr(actor, "_bot_activity_wait_log_last", now)
+                if maintenance_status.get("source") != "shared_activity_stale":
+                    if logger:
+                        logger.warning(
+                            f"Bot unavailable before [{key}] ({maintenance_status.get('source')}); "
+                            "skipping this attempt instead of waiting or retrying continuously."
+                        )
+                    return False
+                if now - wait_started >= BOT_ACTIVITY_WAIT_ABORT_SECONDS:
+                    _record_shared_bot_maintenance(actor, key, BOT_HEALTH_PAUSE_SECONDS)
+                    if logger:
+                        logger.warning(
+                            f"Bot activity did not recover within {BOT_ACTIVITY_WAIT_ABORT_SECONDS}s "
+                            f"before [{key}]; skipping this attempt and pausing sends for "
+                            f"{BOT_HEALTH_PAUSE_SECONDS}s."
+                        )
+                    return False
                 await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
                 continue
 
@@ -2365,6 +2393,16 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                                 pass
                         except Exception:
                             pass
+
+            if now - wait_started >= BOT_ACTIVITY_WAIT_ABORT_SECONDS:
+                _record_shared_bot_maintenance(actor, key, BOT_HEALTH_PAUSE_SECONDS)
+                if logger:
+                    logger.warning(
+                        f"Bot activity did not recover within {BOT_ACTIVITY_WAIT_ABORT_SECONDS}s "
+                        f"before [{key}]; skipping this attempt and pausing sends for "
+                        f"{BOT_HEALTH_PAUSE_SECONDS}s."
+                    )
+                return False
 
             await asyncio.sleep(BOT_ACTIVITY_POLL_SECONDS)
         return False

@@ -1,7 +1,5 @@
 import asyncio
-import os
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -200,20 +198,18 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(actor.state["miniapp_fishing_status"], "paused")
         self.assertEqual(actor.state["miniapp_fishing_last_error"], "")
 
-    def test_stale_global_lock_owned_by_dead_process_is_reclaimed(self):
+    def test_legacy_lock_file_does_not_block_os_managed_state_lock(self):
         lock_path = miniapp_fishing.MINIAPP_FISHING_GLOBAL_FILE.with_name(
             "miniapp_fishing_global.json.lock"
         )
         lock_path.write_text("999999999", encoding="ascii")
-        old = time.time() - miniapp_fishing.FISHING_GLOBAL_LOCK_STALE_SECONDS - 1
-        os.utime(lock_path, (old, old))
 
-        descriptor, acquired_path = miniapp_fishing._acquire_global_lock(timeout=0.5)
-        try:
-            self.assertIsNotNone(descriptor)
-            self.assertEqual(acquired_path, lock_path)
-        finally:
-            miniapp_fishing._release_global_lock((descriptor, acquired_path))
+        runtime = miniapp_fishing._update_global_state(
+            lambda data: data.update(status="ready")
+        )
+
+        self.assertEqual(runtime["status"], "ready")
+        self.assertTrue(lock_path.exists())
 
     def test_global_lock_timeout_keeps_scheduler_alive(self):
         class Actor:
@@ -242,22 +238,76 @@ class MiniAppFishingTests(unittest.TestCase):
         worker._clear_irrelevant_local_statuses = Mock()
         worker._apply_force_retry_request = Mock(return_value={})
         worker._drive_once = AsyncMock(
-            side_effect=RuntimeError("miniapp_fishing_global_lock_timeout")
+            side_effect=miniapp_fishing.MiniAppFishingGlobalStateBusy()
         )
 
-        async def stop_after_retry(_wait, _settings):
+        async def stop_after_retry(_wait, _settings, **_kwargs):
             actor.is_running = False
 
         worker._sleep_until_next_cycle = AsyncMock(side_effect=stop_after_retry)
         asyncio.run(worker.run_loop())
 
-        self.assertEqual(actor.state["miniapp_fishing_status"], "waiting")
+        self.assertEqual(actor.state["miniapp_fishing_status"], "paused_state")
         self.assertEqual(
             actor.state["miniapp_fishing_last_error"],
             "miniapp_fishing_global_lock_timeout",
         )
+        worker._sleep_until_next_cycle.assert_awaited_once_with(
+            miniapp_fishing.FISHING_GLOBAL_LOCK_RETRY_SECONDS[0],
+            settings,
+            uncapped=True,
+        )
         logger.error.assert_not_called()
         logger.warning.assert_called_once()
+
+    def test_repeated_global_lock_timeouts_escalate_instead_of_retrying_every_minute(self):
+        actor = SimpleNamespace(
+            state={},
+            config={},
+            is_running=True,
+            save_state=lambda: None,
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        worker._clear_irrelevant_local_statuses = Mock()
+        worker._apply_force_retry_request = Mock(return_value={})
+        worker._drive_once = AsyncMock(
+            side_effect=miniapp_fishing.MiniAppFishingGlobalStateBusy()
+        )
+        waits = []
+
+        async def record_wait(wait, _settings, **kwargs):
+            waits.append((wait, kwargs))
+            if len(waits) == 3:
+                actor.is_running = False
+
+        worker._sleep_until_next_cycle = AsyncMock(side_effect=record_wait)
+        asyncio.run(worker.run_loop())
+
+        self.assertEqual(
+            waits,
+            [
+                (5 * 60, {"uncapped": True}),
+                (15 * 60, {"uncapped": True}),
+                (60 * 60, {"uncapped": True}),
+            ],
+        )
+        self.assertEqual(worker._drive_once.await_count, 3)
 
     def test_unselected_xiaohao_clears_stale_status_without_driving(self):
         class Actor:

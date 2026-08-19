@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from state_io import load_json_state
+
 
 CONFIG_DIR = Path(__file__).resolve().parent
 AUTOMATION_SETTINGS_FILE = CONFIG_DIR / "automation_settings.json"
@@ -47,12 +49,11 @@ def _load_sub_identity_state() -> dict[str, Any]:
             cached = _SUB_IDENTITY_STATE_CACHE.get("state")
             return cached if isinstance(cached, dict) else {}
 
-        try:
-            with SUB_STATE_FILE.open("r", encoding="utf-8") as handle:
-                state = json.load(handle)
-        except (OSError, ValueError, TypeError):
-            return {}
-        state = state if isinstance(state, dict) else {}
+        state = load_json_state(
+            str(SUB_STATE_FILE),
+            expected_type=dict,
+            default={},
+        ) or {}
         _SUB_IDENTITY_STATE_CACHE["signature"] = signature
         _SUB_IDENTITY_STATE_CACHE["state"] = state
         return state

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import sub_cultivator
+from automation_settings import SUB_YINLUO_IDENTITY
 from sub_cultivator import SubCultivator
 
 
@@ -41,7 +42,7 @@ class SubHuanglongEntryTests(unittest.TestCase):
             {
                 "主魂": "元婴宗",
                 "厚土": "星宫",
-                "竹和生": "阴罗宗",
+                SUB_YINLUO_IDENTITY: "阴罗宗",
                 "寻真子": "落云宗",
             },
         )

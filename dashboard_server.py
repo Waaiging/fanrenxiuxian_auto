@@ -87,6 +87,7 @@ from miniapp_inventory import (
     search_inventory_caches,
     write_inventory_request,
 )
+from state_io import load_json_state, save_json_state, update_json_state
 from reward_parsing import (
     compact_reward_summary,
     daily_reward_items_for_command,
@@ -570,24 +571,23 @@ WINDOW_MAP = {"main": 0, "sub": 1, "xiaohao": 2, "waaiging": 3}
 def get_state(name):
     """读取账号的状态 JSON 文件，预处理显示字段"""
     path = os.path.join(CONFIG_DIR, f'state_{name}.json')
-    if os.path.exists(path):
+    if os.path.exists(path) or os.path.exists(f"{path}.bak"):
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Waaiging is a single-soul account. Ignore stale avatar data
-                # copied from another account until its next clean save.
-                if name == "waaiging":
-                    data.pop("avatars", None)
-                if data.get("deep_meditation_end_time"):
-                    from datetime import datetime
-                    end_time = data["deep_meditation_end_time"]
-                    if datetime.strptime(end_time, TIME_FORMAT) > datetime.now():
-                        data["in_deep_meditation"] = True
-                apply_common_display_times(data)
-                if name == "sub":
-                    apply_sub_display_times(data)
-                return data
-        except:
+            data = load_json_state(path, expected_type=dict, default={}) or {}
+            # Waaiging is a single-soul account. Ignore stale avatar data
+            # copied from another account until its next clean save.
+            if name == "waaiging":
+                data.pop("avatars", None)
+            if data.get("deep_meditation_end_time"):
+                from datetime import datetime
+                end_time = data["deep_meditation_end_time"]
+                if datetime.strptime(end_time, TIME_FORMAT) > datetime.now():
+                    data["in_deep_meditation"] = True
+            apply_common_display_times(data)
+            if name == "sub":
+                apply_sub_display_times(data)
+            return data
+        except Exception:
             return {}
     return {}
 
@@ -1602,13 +1602,7 @@ def fishing_auto_identity_key(account, identity):
 
 
 def save_json_atomic(path, data):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data or {}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    save_json_state(path, data or {}, backup=False)
 
 
 def account_state_path(account):
@@ -1617,12 +1611,7 @@ def account_state_path(account):
 
 def load_account_state_raw(account):
     path = account_state_path(account)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return load_json_state(path, expected_type=dict, default={}) or {}
 
 
 def fishing_identity_state_raw(root, identity, create=False):
@@ -1680,32 +1669,40 @@ def set_fishing_auto_holder_state(account, identity, username="dashboard"):
 
     for account_name in FISHING_AUTO_CONTROL_ACCOUNTS:
         state_path = account_state_path(account_name)
-        root = load_account_state_raw(account_name)
-        if not root:
+        if not os.path.exists(state_path) and not os.path.exists(f"{state_path}.bak"):
             continue
-        changed = False
-        for candidate in FISHING_AUTO_ACCOUNT_IDENTITIES.get(account_name, ("主魂",)):
-            fishing = fishing_identity_state_raw(root, candidate, create=(account_name == account and candidate == identity))
-            if not isinstance(fishing, dict):
-                continue
-            owned = bool(account_name == account and candidate == identity)
-            if fishing.get("rod_owned") is not owned:
-                fishing["rod_owned"] = owned
-                changed = True
-        auto_state = root.setdefault("fishing_auto", {})
-        if account_name == account:
-            auto_state["rod_holder"] = identity
-            auto_state["active_identity"] = identity
-            auto_state["last_status"] = "holder_set"
-            auto_state["last_detail"] = f"dashboard 指定鱼竿持有者：{identity}"
-            auto_state["next_action_at"] = ""
-            changed = True
-        elif auto_state.get("rod_holder") or auto_state.get("active_identity"):
-            auto_state["rod_holder"] = ""
-            auto_state["active_identity"] = ""
-            changed = True
-        if changed:
-            save_json_atomic(state_path, root)
+
+        def update_account(root, account_name=account_name):
+            if not isinstance(root, dict) or not root:
+                return root
+            for candidate in FISHING_AUTO_ACCOUNT_IDENTITIES.get(account_name, ("主魂",)):
+                fishing = fishing_identity_state_raw(
+                    root,
+                    candidate,
+                    create=(account_name == account and candidate == identity),
+                )
+                if isinstance(fishing, dict):
+                    fishing["rod_owned"] = bool(
+                        account_name == account and candidate == identity
+                    )
+            auto_state = root.setdefault("fishing_auto", {})
+            if account_name == account:
+                auto_state["rod_holder"] = identity
+                auto_state["active_identity"] = identity
+                auto_state["last_status"] = "holder_set"
+                auto_state["last_detail"] = f"dashboard 指定鱼竿持有者：{identity}"
+                auto_state["next_action_at"] = ""
+            else:
+                auto_state["rod_holder"] = ""
+                auto_state["active_identity"] = ""
+            return root
+
+        update_json_state(
+            state_path,
+            update_account,
+            expected_type=dict,
+            default={},
+        )
     return holder
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import duel_features
+from automation_settings import SUB_YINLUO_IDENTITY
 
 
 ROTATION = duel_features.DUEL_ROTATION_QUEUE_KEY
@@ -61,7 +62,7 @@ class DuelFeatureTests(unittest.TestCase):
             ("main", "主魂"), ("main", "无咎子"),
             ("main", "缘生子"), ("main", "素缘子"),
             ("sub", "主魂"), ("sub", "厚土"),
-            ("sub", "竹和生"), ("sub", "寻真子"),
+            ("sub", SUB_YINLUO_IDENTITY), ("sub", "寻真子"),
             ("xiaohao", "主魂"), ("xiaohao", "问心子"),
             ("xiaohao", "素心子"), ("xiaohao", "缘生子"),
             ("waaiging", "主魂"),

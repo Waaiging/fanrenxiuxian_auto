@@ -30,6 +30,12 @@ from miniapp_beast import (
     miniapp_circuit_wait_seconds,
 )
 from miniapp_dwelling import identity_state
+from state_io import (
+    StateFileLockTimeout,
+    load_json_state,
+    save_json_state,
+    update_json_state,
+)
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -45,7 +51,7 @@ FISHING_TRANSFER_FAILURE_RETRY_SECONDS = 3600
 FISHING_SHOP_RETRY_SECONDS = 3600
 FISHING_MATERIAL_NOTICE_RETRY_SECONDS = 3600
 FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS = 8.0
-FISHING_GLOBAL_LOCK_STALE_SECONDS = 30.0
+FISHING_GLOBAL_LOCK_RETRY_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
 FISHING_TRANSFER_FAILURE_STATUSES = {
     "listing_failed",
     "listing_unknown",
@@ -53,6 +59,15 @@ FISHING_TRANSFER_FAILURE_STATUSES = {
     "purchase_unknown",
 }
 MINIAPP_FISHING_GLOBAL_FILE = Path(__file__).resolve().parent / "miniapp_fishing_global.json"
+
+
+class MiniAppFishingGlobalStateBusy(RuntimeError):
+    """The shared fishing ledger is temporarily owned by another process."""
+
+    code = "miniapp_fishing_global_lock_timeout"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -248,14 +263,8 @@ def _migrate_global_participant_keys(data: dict[str, Any]) -> None:
                 }
 
 
-def _load_global_state() -> dict[str, Any]:
-    try:
-        with MINIAPP_FISHING_GLOBAL_FILE.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError, TypeError):
-        data = {}
+def _normalize_global_state(data: Any) -> dict[str, Any]:
+    data = data if isinstance(data, dict) else {}
     defaults = _global_default_state()
     for key, value in defaults.items():
         data.setdefault(key, value)
@@ -286,90 +295,33 @@ def _load_global_state() -> dict[str, Any]:
     return data
 
 
+def _load_global_state() -> dict[str, Any]:
+    """Read the last atomically published ledger without taking the writer lock."""
+
+    try:
+        with MINIAPP_FISHING_GLOBAL_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        # Normal writes are atomic, so this path is only expected for a legacy
+        # truncated file. Recover its last valid backup under the shared lock.
+        data = load_json_state(
+            str(MINIAPP_FISHING_GLOBAL_FILE),
+            expected_type=dict,
+            lock_timeout=FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS,
+            default={},
+        )
+    return _normalize_global_state(data)
+
+
 def _save_global_state(data: dict[str, Any]) -> None:
-    path = MINIAPP_FISHING_GLOBAL_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
     data["version"] = 3
     data["date"] = _today_text()
     data["updated_at"] = _now_text()
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(temporary, path)
-
-
-def _global_lock_is_stale(lock_path: Path) -> bool:
-    """Only reclaim an old lock when its recorded owner is no longer alive."""
-    try:
-        age = time.time() - lock_path.stat().st_mtime
-    except OSError:
-        return False
-    if age <= FISHING_GLOBAL_LOCK_STALE_SECONDS:
-        return False
-    try:
-        owner_text = lock_path.read_text(encoding="ascii").strip().split()[0]
-        owner_pid = int(owner_text)
-    except (OSError, IndexError, TypeError, ValueError):
-        return True
-    if owner_pid <= 0:
-        return True
-    try:
-        os.kill(owner_pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError:
-        return True
-    return False
-
-
-def _acquire_global_lock(
-    timeout: float = FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS,
-) -> tuple[int | None, Path]:
-    lock_path = MINIAPP_FISHING_GLOBAL_FILE.with_name(
-        f"{MINIAPP_FISHING_GLOBAL_FILE.name}.lock"
+    save_json_state(
+        str(MINIAPP_FISHING_GLOBAL_FILE),
+        data,
+        lock_timeout=FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS,
     )
-    deadline = time.monotonic() + max(0.5, float(timeout or 0.5))
-    while True:
-        try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                os.write(descriptor, str(os.getpid()).encode("ascii", errors="ignore"))
-            except OSError:
-                os.close(descriptor)
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
-                raise
-            return descriptor, lock_path
-        except FileExistsError:
-            try:
-                if _global_lock_is_stale(lock_path):
-                    lock_path.unlink()
-                    continue
-            except FileNotFoundError:
-                continue
-            except OSError:
-                pass
-            if time.monotonic() >= deadline:
-                return None, lock_path
-            time.sleep(0.05)
-
-
-def _release_global_lock(lock: tuple[int | None, Path]) -> None:
-    descriptor, lock_path = lock
-    try:
-        if descriptor is not None:
-            os.close(descriptor)
-    except OSError:
-        pass
-    try:
-        if descriptor is not None:
-            lock_path.unlink()
-    except OSError:
-        pass
 
 
 def _next_participant(
@@ -531,19 +483,27 @@ def _update_global_state(
     updater: Any = None,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    lock = _acquire_global_lock(FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS)
-    if lock[0] is None:
-        raise RuntimeError("miniapp_fishing_global_lock_timeout")
-    try:
-        data = _load_global_state()
+    def transaction(current: Any) -> dict[str, Any]:
+        data = _normalize_global_state(current)
         if settings is not None:
             _reconcile_global_state(data, settings)
         if callable(updater):
             updater(data)
-        _save_global_state(data)
+        data["version"] = 3
+        data["date"] = _today_text()
+        data["updated_at"] = _now_text()
         return data
-    finally:
-        _release_global_lock(lock)
+
+    try:
+        return update_json_state(
+            str(MINIAPP_FISHING_GLOBAL_FILE),
+            transaction,
+            expected_type=dict,
+            default={},
+            lock_timeout=FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS,
+        )
+    except StateFileLockTimeout as exc:
+        raise MiniAppFishingGlobalStateBusy() from exc
 
 
 def miniapp_fishing_global_snapshot(
@@ -908,6 +868,7 @@ class MiniAppFishingAutomation:
         self._last_round_completed = False
         self._scan_started = False
         self._force_retry_request_id = ""
+        self._global_state_busy_failures = 0
 
     @property
     def supported(self) -> bool:
@@ -1081,9 +1042,17 @@ class MiniAppFishingAutomation:
             )
         return force
 
-    async def _sleep_until_next_cycle(self, wait: int, settings: dict[str, Any]) -> None:
+    async def _sleep_until_next_cycle(
+        self,
+        wait: int,
+        settings: dict[str, Any],
+        *,
+        uncapped: bool = False,
+    ) -> None:
         """Keep normal backoff while allowing a new dashboard retry to wake the loop."""
-        remaining = max(1, min(int(wait), 300))
+        remaining = max(1, int(wait))
+        if not uncapped:
+            remaining = min(remaining, 300)
         while remaining > 0 and getattr(self.actor, "is_running", True):
             interval = min(5, remaining)
             await asyncio.sleep(interval)
@@ -2675,6 +2644,7 @@ class MiniAppFishingAutomation:
                         if circuit_error is not None:
                             raise circuit_error
                         wait = await self._drive_once(settings)
+                self._global_state_busy_failures = 0
             except asyncio.CancelledError:
                 raise
             except MiniAppCircuitOpenError as exc:
@@ -2689,13 +2659,46 @@ class MiniAppFishingAutomation:
                         datetime.now() + timedelta(seconds=wait)
                     ).strftime(TIME_FORMAT),
                 )
-                self._set_global_status(
-                    settings,
-                    "paused_upstream",
-                    f"Mini App 上游熔断，等待至 {exc.retry_at or '下一次探测'}",
-                )
+                try:
+                    self._set_global_status(
+                        settings,
+                        "paused_upstream",
+                        f"Mini App 上游熔断，等待至 {exc.retry_at or '下一次探测'}",
+                    )
+                except MiniAppFishingGlobalStateBusy:
+                    # The per-account pause is already persisted. Do not let an
+                    # unrelated ledger writer turn an upstream pause into a
+                    # traceback or an immediate retry.
+                    pass
                 wait = max(wait, 60)
-                await self._sleep_until_next_cycle(wait, settings)
+                await self._sleep_until_next_cycle(wait, settings, uncapped=True)
+                continue
+            except MiniAppFishingGlobalStateBusy:
+                identity = self._status_identity(settings)
+                self._global_state_busy_failures += 1
+                level = min(
+                    self._global_state_busy_failures,
+                    len(FISHING_GLOBAL_LOCK_RETRY_SECONDS),
+                )
+                wait = FISHING_GLOBAL_LOCK_RETRY_SECONDS[level - 1]
+                self._record(
+                    identity,
+                    miniapp_fishing_status="paused_state",
+                    miniapp_fishing_last_error="miniapp_fishing_global_lock_timeout",
+                    miniapp_fishing_last_error_time=_now_text(),
+                    miniapp_fishing_next_run_time=(
+                        datetime.now() + timedelta(seconds=wait)
+                    ).strftime(TIME_FORMAT),
+                )
+                if self._global_state_busy_failures <= len(FISHING_GLOBAL_LOCK_RETRY_SECONDS):
+                    self.log.warning(
+                        "Mini App fishing shared state stayed busy for %s; "
+                        "pausing this worker for %ss (level %s).",
+                        identity,
+                        wait,
+                        level,
+                    )
+                await self._sleep_until_next_cycle(wait, settings, uncapped=True)
                 continue
             except Exception as exc:
                 identity = self._status_identity(settings)
@@ -2704,32 +2707,13 @@ class MiniAppFishingAutomation:
                     if isinstance(exc, MiniAppBeastError)
                     else type(exc).__name__.lower()
                 )
-                if (
-                    code == "runtimeerror"
-                    and str(exc) == "miniapp_fishing_global_lock_timeout"
-                ):
-                    previous_status = str(
-                        self._state(identity).get("miniapp_fishing_status") or ""
-                    )
-                    wait = self.retry_seconds
-                    self._record(
-                        identity,
-                        miniapp_fishing_status="waiting",
-                        miniapp_fishing_last_error="miniapp_fishing_global_lock_timeout",
-                        miniapp_fishing_last_error_time=_now_text(),
-                        miniapp_fishing_next_run_time=(
-                            datetime.now() + timedelta(seconds=wait)
-                        ).strftime(TIME_FORMAT),
-                    )
-                    if previous_status != "waiting":
-                        self.log.warning(
-                            "Mini App fishing global state is busy for %s; retrying.",
-                            identity,
-                        )
-                    await self._sleep_until_next_cycle(wait, settings)
-                    continue
                 participant_key = automation_participant_key(self.account, identity)
-                force_state = _mapping(miniapp_fishing_global_snapshot(settings).get("force_retry"))
+                try:
+                    force_state = _mapping(
+                        miniapp_fishing_global_snapshot(settings).get("force_retry")
+                    )
+                except MiniAppFishingGlobalStateBusy:
+                    force_state = _mapping(_load_global_state().get("force_retry"))
                 force_retry_active = participant_key in (force_state.get("pending") or [])
                 previous_status = str(
                     self._state(identity).get("miniapp_fishing_status") or ""
