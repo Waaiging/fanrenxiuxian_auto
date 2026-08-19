@@ -49,7 +49,6 @@ DEFAULT_STAR_FARM_RETRY_SECONDS = 5 * 60
 STAR_FARM_WAKE_GRACE_SECONDS = 5
 DEFAULT_STAR_FARM_TARGET = "天雷星"
 ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS = 15 * 60
-MINIAPP_REPLY_TARGET_OPTIONAL_COMMANDS = {".共历心劫"}
 
 
 def _now_text() -> str:
@@ -695,10 +694,7 @@ class MiniAppCommandRouter:
         command = normalize_miniapp_command(message)
         if not miniapp_command_allowed(command):
             return await fallback(message, *args, **kwargs)
-        if (
-            kwargs.get("reply_to") is not None
-            and command not in MINIAPP_REPLY_TARGET_OPTIONAL_COMMANDS
-        ):
+        if kwargs.get("reply_to") is not None:
             self._record(
                 miniapp_route_last_error="reply_target_not_supported",
                 miniapp_route_last_error_at=_now_text(),

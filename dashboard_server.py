@@ -958,15 +958,26 @@ def command_row(
     return row
 
 
-def time_command(state, key, command, label=None, waiting="冷却中", ready="就绪", missing="就绪", detail="", group=""):
+def time_command(
+    state,
+    key,
+    command,
+    label=None,
+    waiting="冷却中",
+    ready="就绪",
+    missing="就绪",
+    detail="",
+    group="",
+    default_paused=False,
+):
     """Display a timestamp-backed command as cooldown/ready."""
     raw = state.get(key, "")
     if raw in ("就绪",):
-        return command_row(command, label, "就绪", "ready", remaining="0秒", detail=detail, group=group, schedule_type="cooldown", next_seconds=0)
+        return command_row(command, label, "就绪", "ready", remaining="0秒", detail=detail, group=group, schedule_type="cooldown", next_seconds=0, default_paused=default_paused)
     if raw == "本轮已无下一次":
-        return command_row(command, label, "本轮结束", "done", at=raw, detail=detail, group=group, schedule_type="cooldown")
+        return command_row(command, label, "本轮结束", "done", at=raw, detail=detail, group=group, schedule_type="cooldown", default_paused=default_paused)
     if raw == "---":
-        return command_row(command, label, "未开启", "unknown", at=raw, detail=detail, group=group, schedule_type="cooldown")
+        return command_row(command, label, "未开启", "unknown", at=raw, detail=detail, group=group, schedule_type="cooldown", default_paused=default_paused)
     target = parse_state_time(raw)
     if not target:
         next_seconds = 0 if missing == "就绪" else None
@@ -975,12 +986,13 @@ def time_command(state, key, command, label=None, waiting="冷却中", ready="�
             remaining="0秒" if missing == "就绪" else "",
             at=str(raw or ""), detail=detail, group=group,
             schedule_type="cooldown", next_seconds=next_seconds,
+            default_paused=default_paused,
         )
     now = datetime.now()
     if target > now:
         next_seconds = max(0, int((target - now).total_seconds()))
-        return command_row(command, label, waiting, "cooldown", format_remaining(next_seconds), str(raw), detail, group, schedule_type="cooldown", next_seconds=next_seconds)
-    return command_row(command, label, ready, "ready", "0秒", str(raw), detail, group, schedule_type="cooldown", next_seconds=0)
+        return command_row(command, label, waiting, "cooldown", format_remaining(next_seconds), str(raw), detail, group, schedule_type="cooldown", next_seconds=next_seconds, default_paused=default_paused)
+    return command_row(command, label, ready, "ready", "0秒", str(raw), detail, group, schedule_type="cooldown", next_seconds=0, default_paused=default_paused)
 
 
 def yuanying_retreat_command(state):
@@ -2288,6 +2300,15 @@ def concubine_commands(state, include_divination=True, include_voyage=False, inc
     if include_status:
         rows.append(manual_command(".我的侍妾", "我的侍妾", "查询侍妾/冷却", "侍妾"))
     rows.append(time_command(state, "next_dream_map_time", ".入梦寻图", "入梦寻图", group="侍妾"))
+    rows.append(time_command(
+        state,
+        "next_heart_trial_time",
+        ".共历心劫",
+        "共历心劫",
+        detail="仅在 Telegram 群聊执行",
+        group="侍妾",
+        default_paused=True,
+    ))
     if include_voyage:
         rows.append(time_command(
             state, "next_concubine_voyage_time", ".侍妾远航 月殿寻痕", "侍妾远航",

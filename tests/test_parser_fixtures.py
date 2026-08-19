@@ -11530,8 +11530,54 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertTrue(hasattr(ConcubineMixin, "execute_avatar_heart_trial"))
         self.assertFalse(command_feedback.is_retired_auto_command(".共历心劫"))
         self.assertFalse(command_feedback.is_retired_auto_command(".稳"))
-        self.assertTrue(miniapp_dwelling.miniapp_command_allowed(".共历心劫"))
+        self.assertFalse(miniapp_dwelling.miniapp_command_allowed(".共历心劫"))
         self.assertTrue(miniapp_dwelling.miniapp_command_allowed(".稳"))
+
+    def test_heart_trial_automation_defaults_off_for_every_production_identity(self):
+        actor = DummyConcubine()
+        actor.state_file = "state_main.json"
+        actor.avatars = ["无咎子", "缘生子", "素缘子"]
+
+        with patch.object(concubine_features, "dashboard_command_control_entry", return_value=None):
+            for identity in ("主魂", *actor.avatars):
+                with self.subTest(identity=identity):
+                    self.assertFalse(actor.heart_trial_auto_enabled(identity))
+                    self.assertFalse(actor.concubine_task_enabled("heart_trial", identity))
+                    self.assertTrue(actor._concubine_command_paused(".共历心劫", identity))
+
+        with patch.object(
+            concubine_features,
+            "dashboard_command_control_entry",
+            return_value={"disabled": False},
+        ):
+            for identity in ("主魂", *actor.avatars):
+                with self.subTest(identity=f"enabled:{identity}"):
+                    self.assertTrue(actor.heart_trial_auto_enabled(identity))
+                    self.assertTrue(actor.concubine_task_enabled("heart_trial", identity))
+                    self.assertFalse(actor._concubine_command_paused(".共历心劫", identity))
+
+    def test_dashboard_heart_trial_row_defaults_paused_and_can_be_enabled(self):
+        rows = dashboard_server.concubine_commands({})
+        heart_row = next(row for row in rows if row["command"] == ".共历心劫")
+        self.assertTrue(heart_row["default_paused"])
+        self.assertIn("Telegram 群聊", heart_row["detail"])
+
+        panel = {"identity": "缘生子", "commands": [dict(heart_row)]}
+        with patch.object(dashboard_server, "load_command_controls", return_value={}):
+            dashboard_server.apply_command_controls("main", panel)
+        self.assertTrue(panel["commands"][0]["control_disabled"])
+
+        controls = {
+            "main": {
+                "缘生子": {
+                    ".共历心劫": {"disabled": False},
+                },
+            },
+        }
+        panel = {"identity": "缘生子", "commands": [dict(heart_row)]}
+        with patch.object(dashboard_server, "load_command_controls", return_value=controls):
+            dashboard_server.apply_command_controls("main", panel)
+        self.assertFalse(panel["commands"][0]["control_disabled"])
 
     def test_main_heart_trial_anchor_lost_syncs_cooldown_without_unknown_alert(self):
         actor = DummyConcubine()
@@ -11631,62 +11677,7 @@ class ParserFixtureTests(unittest.TestCase):
             9 * 3600,
         )
 
-    def test_shared_avatar_heart_trial_uses_miniapp_for_all_rounds(self):
-        actor = Cultivator.__new__(Cultivator)
-        actor.avatars = ["缘生子"]
-        actor.avatar_nicknames = {"缘生子": ""}
-        actor.avatar_usernames = {}
-        actor.state = {"avatars": {"缘生子": {}}}
-        actor.save_state = lambda: None
-        actor._current_identity = "缘生子"
-        sent = []
-        responses = [
-            miniapp_dwelling.MiniAppCommandResponse(
-                "【坠魔心劫·第一轮】请选择应对之法",
-                {"actionResult": {"ok": True}},
-            ),
-            miniapp_dwelling.MiniAppCommandResponse(
-                "【第1轮已定】【坠魔心劫·第二轮】",
-                {"actionResult": {"ok": True}},
-            ),
-            miniapp_dwelling.MiniAppCommandResponse(
-                "【第2轮已定】【坠魔心劫·第三轮】",
-                {"actionResult": {"ok": True}},
-            ),
-            miniapp_dwelling.MiniAppCommandResponse(
-                "【坠魔心劫·结算】共历心劫完成。",
-                {"actionResult": {"ok": True}},
-            ),
-        ]
-
-        async def fake_identity_send(identity, command, **kwargs):
-            sent.append((identity, command, kwargs.get("reply_to")))
-            return responses.pop(0)
-
-        class FailClient:
-            async def send_message(self, *args, **kwargs):
-                raise AssertionError("Mini App heart trial must not send .稳 to Telegram")
-
-        actor.send_and_wait_feedback_identity = fake_identity_send
-        actor.client = FailClient()
-        status = DummyMessage(
-            2500,
-            text="[Avatar: 缘生子]\n你的道心侍妾：瑶光\n共历心劫冷却：无",
-        )
-
-        self.assertTrue(asyncio.run(actor.execute_avatar_heart_trial("缘生子", status)))
-        self.assertEqual(sent, [
-            ("缘生子", ".共历心劫", 2500),
-            ("缘生子", ".稳", None),
-            ("缘生子", ".稳", None),
-            ("缘生子", ".稳", None),
-        ])
-        self.assertGreater(
-            common_seconds_until(actor.state["avatars"]["缘生子"]["next_heart_trial_time"]),
-            9 * 3600,
-        )
-
-    def test_restricted_miniapp_heart_trial_runs_three_rounds(self):
+    def test_restricted_miniapp_heart_trial_never_sends_group_only_command(self):
         actor = DummyConcubine()
         actor.dashboard_command_paused = lambda command, identity="主魂": False
         worker = restricted_miniapp_worker.RestrictedMiniAppWorker.__new__(
@@ -11694,40 +11685,10 @@ class ParserFixtureTests(unittest.TestCase):
         )
         worker.actor = actor
         worker.log = Mock()
-        responses = {
-            ".我的侍妾": [
-                "你的道心侍妾：慕沛灵\n共历心劫冷却：无",
-            ],
-            ".共历心劫": ["【坠魔心劫·第一轮】请选择应对之法"],
-            ".稳": [
-                "【第1轮已定】【坠魔心劫·第二轮】",
-                "【第2轮已定】【坠魔心劫·第三轮】",
-                "【坠魔心劫·结算】共历心劫完成。",
-            ],
-        }
-        sent = []
+        worker._send = AsyncMock(side_effect=AssertionError("must not send through Mini App"))
 
-        async def fake_send(identity, command, **kwargs):
-            sent.append((identity, command))
-            text = responses[command].pop(0)
-            return SimpleNamespace(text=text) if kwargs.get("return_response_msg") else text
-
-        worker._send = fake_send
-
-        async def fake_sleep(seconds):
-            return None
-
-        with patch.object(restricted_miniapp_worker.asyncio, "sleep", new=fake_sleep):
-            self.assertTrue(asyncio.run(worker._run_miniapp_heart_trial("主魂")))
-
-        self.assertEqual(sent, [
-            ("主魂", ".我的侍妾"),
-            ("主魂", ".共历心劫"),
-            ("主魂", ".稳"),
-            ("主魂", ".稳"),
-            ("主魂", ".稳"),
-        ])
-        self.assertGreater(seconds_until(actor.state["next_heart_trial_time"]), 9 * 3600)
+        self.assertTrue(asyncio.run(worker._run_miniapp_heart_trial("主魂")))
+        worker._send.assert_not_awaited()
 
     def test_main_avatar_heart_trial_anchor_lost_syncs_identity_cooldown(self):
         actor = Cultivator.__new__(Cultivator)

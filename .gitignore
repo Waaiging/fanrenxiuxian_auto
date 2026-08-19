@@ -37,6 +37,8 @@ miniapp_fishing_global.json
 miniapp_fishing_global.json.lock
 miniapp_beast_session.json
 miniapp_beast_refresh_request.json
+miniapp_transport_health.json
+miniapp_transport_health.json.lock
 miniapp_inventory_request_*.json
 miniapp_inventory_cache_*.json
 miniapp_inventory_non_tradable.json

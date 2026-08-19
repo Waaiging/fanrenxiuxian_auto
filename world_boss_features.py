@@ -844,12 +844,14 @@ class WorldBossMonitor:
             try:
                 request_timeout = int(timeout or self.timeout)
                 if self.post_json is None:
-                    normalized_origin = miniapp_origin(origin)
-                    client = self._json_clients.get(normalized_origin)
-                    if client is None:
-                        client = _PersistentWorldBossJsonClient(normalized_origin)
-                        self._json_clients[normalized_origin] = client
-                    result = await client.post(path, payload, request_timeout)
+                    # Use the shared Mini App transport so upstream outages obey
+                    # the same cross-process circuit breaker as every other task.
+                    result = await _post_json(
+                        origin,
+                        path,
+                        payload,
+                        request_timeout,
+                    )
                 else:
                     result = await _post_json(
                         origin,

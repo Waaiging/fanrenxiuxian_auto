@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from log_utils import (
     actor_account_key,            # 当前脚本账号 key
     command_send_allowed,          # 指令频率守卫
+    dashboard_command_control_entry,  # Dashboard 显式指令开关
     log_incoming_message,          # 记录收到的消息
     notify_unrecognized_response,  # 无法识别的回复告警
     record_bot_no_response,        # 记录机器人无响应
@@ -780,6 +781,8 @@ class ConcubineMixin:
         return CONCUBINE_VOYAGE_AUTO_START_ENABLED and self.concubine_voyage_enabled(identity)
 
     def concubine_task_enabled(self, task_key, identity="主魂"):
+        if task_key == "heart_trial":
+            return self.heart_trial_auto_enabled(identity)
         if task_key != "voyage":
             return True
         if not self.concubine_voyage_enabled(identity):
@@ -790,7 +793,27 @@ class ConcubineMixin:
         return bool(state.get("concubine_voyage_active"))
 
     def _concubine_command_paused(self, command, identity="主魂"):
+        if command == CONCUBINE_TASKS["heart_trial"]["command"]:
+            return not self.heart_trial_auto_enabled(identity)
         return hasattr(self, "dashboard_command_paused") and self.dashboard_command_paused(command, identity or "主魂")
+
+    def heart_trial_auto_enabled(self, identity="主魂"):
+        """Default heart-trial automation to off; require an explicit Dashboard enable."""
+        identity = identity or "主魂"
+        # Lightweight unit-test/dummy actors do not own a production state file.
+        # Keep their direct protocol helpers usable while production actors remain opt-in.
+        if not str(getattr(self, "state_file", "") or "").strip():
+            return True
+        entry = dashboard_command_control_entry(
+            self,
+            CONCUBINE_TASKS["heart_trial"]["command"],
+            identity=identity,
+        )
+        if entry is None:
+            return False
+        if isinstance(entry, dict):
+            return not bool(entry.get("disabled"))
+        return not bool(entry)
 
     @staticmethod
     def _concubine_response_text(response):
@@ -1966,9 +1989,6 @@ class ConcubineMixin:
             notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫")
             self.defer_concubine_task("heart_trial")
             return False
-        if self.heart_trial_uses_miniapp_response(trial_msg):
-            return await self.execute_miniapp_heart_trial_rounds("主魂")
-
         current_msg = trial_msg
         if hasattr(self, "switch_back_to_main"):
             await self.switch_back_to_main()
@@ -2314,100 +2334,6 @@ class ConcubineMixin:
             "还没有侍妾",
         ])
 
-    @staticmethod
-    def heart_trial_uses_miniapp_response(response):
-        """Mini App command responses have no Telegram reply anchor (their id is zero)."""
-        return bool(
-            response
-            and getattr(response, "id", None) == 0
-            and hasattr(response, "payload")
-        )
-
-    def defer_identity_heart_trial(self, identity="主魂", seconds=600):
-        if (identity or "主魂") == "主魂":
-            self.defer_concubine_task("heart_trial", seconds)
-        else:
-            self.set_avatar_state(
-                identity,
-                CONCUBINE_TASKS["heart_trial"]["state_key"],
-                add_seconds_str(now_str(), seconds),
-            )
-
-    def record_identity_heart_trial_cooldown(self, identity="主魂"):
-        if (identity or "主魂") == "主魂":
-            self.record_concubine_cd("heart_trial")
-        else:
-            task = CONCUBINE_TASKS["heart_trial"]
-            self.set_avatar_state(
-                identity,
-                task["state_key"],
-                add_seconds_str(now_str(), task["cooldown"]),
-            )
-
-    async def execute_miniapp_heart_trial_rounds(self, identity="主魂"):
-        """Advance three heart-trial rounds through the Mini App command router."""
-        identity = identity or "主魂"
-        for round_num in range(1, 4):
-            confirmed = False
-            current_text = ""
-            for attempt in range(1, 4):
-                if self._concubine_command_paused(".稳", identity):
-                    self.defer_identity_heart_trial(identity)
-                    return False
-                if identity == "主魂":
-                    response = await self.send_and_wait_feedback(
-                        ".稳",
-                        timeout=90,
-                        max_retries=1,
-                        return_response_msg=True,
-                        delete_after=False,
-                    )
-                else:
-                    response = await self.send_and_wait_feedback_identity(
-                        identity,
-                        ".稳",
-                        timeout=90,
-                        max_retries=1,
-                        return_response_msg=True,
-                        delete_after=False,
-                    )
-                current_text = self._concubine_response_text(response)
-                log.info(
-                    f"IN [Mini App | {identity}]: .稳 "
-                    f"({round_num}/3, try {attempt}/3) -> {current_text[:240]}"
-                )
-                if self.heart_trial_settled(current_text):
-                    self.record_identity_heart_trial_cooldown(identity)
-                    log.info(f"RESULT [Mini App | {identity}]: .共历心劫 completed.")
-                    return True
-                if self.heart_trial_terminal_failure(current_text):
-                    if identity == "主魂":
-                        if not await self.refresh_heart_trial_cooldown_after_uncertain(
-                            f"Mini App .稳 第{round_num}轮终止返回"
-                        ):
-                            self.defer_identity_heart_trial(identity)
-                    else:
-                        await self.sync_avatar_heart_trial_cooldown_after_failure(
-                            identity,
-                            f"Mini App round {round_num} terminal response: {current_text[:80]}",
-                        )
-                    return False
-                if self.heart_trial_round_confirmed(current_text, round_num):
-                    confirmed = True
-                    break
-                if attempt < 3:
-                    await asyncio.sleep(3)
-            if not confirmed:
-                log.warning(
-                    f"Mini App heart trial [{identity}]: round {round_num} "
-                    "did not confirm after 3 attempts."
-                )
-                self.defer_identity_heart_trial(identity)
-                return False
-        self.record_identity_heart_trial_cooldown(identity)
-        log.info(f"RESULT [Mini App | {identity}]: .共历心劫 completed all three rounds.")
-        return True
-
     async def sync_avatar_heart_trial_cooldown_after_failure(self, avatar, reason, fallback_seconds=600):
         """化身心劫锚点异常后查询 .我的侍妾，按真实冷却重排。"""
         if not hasattr(self, "send_and_wait_feedback_identity") or not hasattr(self, "set_avatar_state"):
@@ -2587,9 +2513,6 @@ class ConcubineMixin:
                     )
                     self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
                     return False
-                if self.heart_trial_uses_miniapp_response(trial_resp):
-                    return await self.execute_miniapp_heart_trial_rounds(avatar)
-
                 current_msg = trial_resp
                 current_text = trial_text
                 for round_num in range(1, 4):

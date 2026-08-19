@@ -442,22 +442,25 @@ class WorldBossFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_default_requests_reuse_one_persistent_client_per_origin(self):
+    def test_default_requests_use_shared_circuit_breaker_transport(self):
         async def run():
-            fake_client = SimpleNamespace(
-                post=AsyncMock(return_value={"ok": True}),
-                close=lambda: None,
-            )
             monitor = WorldBossMonitor(FakeActor(), "main")
             with patch(
-                "world_boss_features._PersistentWorldBossJsonClient",
-                return_value=fake_client,
-            ) as client_type:
+                "world_boss_features._post_json",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as post_json:
                 await monitor._request("https://asc.aiopenai.app", "/one", {})
                 await monitor._request("https://asc.aiopenai.app", "/two", {})
 
-            client_type.assert_called_once_with("https://asc.aiopenai.app")
-            self.assertEqual(fake_client.post.await_count, 2)
+            self.assertEqual(post_json.await_count, 2)
+            self.assertEqual(post_json.await_args_list[0].args[:2], (
+                "https://asc.aiopenai.app",
+                "/one",
+            ))
+            self.assertEqual(post_json.await_args_list[1].args[:2], (
+                "https://asc.aiopenai.app",
+                "/two",
+            ))
 
         asyncio.run(run())
 

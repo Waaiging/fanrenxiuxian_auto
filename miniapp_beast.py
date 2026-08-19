@@ -2,15 +2,21 @@
 """Read Wanling spirit-beast state from the Telegram Mini App."""
 
 import asyncio
+from contextlib import contextmanager
+from dataclasses import dataclass
 import hashlib
 import inspect
 import json
+import logging
 import os
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
+from typing import Any, Callable
 
 from telethon import types, utils
 from telethon.tl.functions.messages import RequestMainWebViewRequest
@@ -21,6 +27,18 @@ DEFAULT_REFRESH_SECONDS = 30 * 60
 DEFAULT_RETRY_SECONDS = 5 * 60
 REFRESH_REQUEST_FILE = "miniapp_beast_refresh_request.json"
 SESSION_CACHE_FILE = "miniapp_beast_session.json"
+TRANSPORT_HEALTH_FILE = "miniapp_transport_health.json"
+DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
+DEFAULT_CIRCUIT_BACKOFF_SECONDS = (15 * 60, 30 * 60, 60 * 60)
+DEFAULT_CIRCUIT_PROBE_LEASE_SECONDS = 90
+HALF_OPEN_POLL_SECONDS = 5
+
+
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_CIRCUIT_LOG = logging.getLogger("miniapp_transport")
+_CIRCUIT_THREAD_LOCK = threading.RLock()
+_CIRCUIT_FAST_FAIL_LOCK = threading.Lock()
+_CIRCUIT_FAST_FAIL_ORIGINS: set[str] = set()
 
 
 class MiniAppBeastError(RuntimeError):
@@ -30,6 +48,423 @@ class MiniAppBeastError(RuntimeError):
         self.code = str(code or "miniapp_request_failed")
         self.status = int(status or 0)
         super().__init__(self.code)
+
+
+class MiniAppCircuitOpenError(MiniAppBeastError):
+    """The shared upstream circuit is open, so no HTTP request was attempted."""
+
+    def __init__(self, retry_after: float = 0, retry_at: str = ""):
+        super().__init__("miniapp_circuit_open")
+        self.retry_after = max(0, int(round(float(retry_after or 0))))
+        self.retry_at = str(retry_at or "")
+
+
+@dataclass(frozen=True)
+class MiniAppCircuitPermit:
+    probe_token: str = ""
+
+    @property
+    def is_probe(self) -> bool:
+        return bool(self.probe_token)
+
+
+@dataclass(frozen=True)
+class MiniAppCircuitDecision:
+    permit: MiniAppCircuitPermit | None = None
+    wait_seconds: float = 0
+    retry_at: str = ""
+    half_open: bool = False
+
+
+@contextmanager
+def _exclusive_transport_health_lock(path: str):
+    """Serialize shared circuit state across the four VPS processes."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with _CIRCUIT_THREAD_LOCK:
+        handle = open(path, "a+b")
+        locked = False
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.02)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
+            yield
+        finally:
+            if locked:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
+
+
+class MiniAppTransportCircuitBreaker:
+    """Cross-process circuit breaker for the shared Mini App HTTP upstream."""
+
+    def __init__(
+        self,
+        state_path: str | None = None,
+        *,
+        failure_threshold: int = DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
+        backoff_seconds: tuple[int, ...] = DEFAULT_CIRCUIT_BACKOFF_SECONDS,
+        probe_lease_seconds: int = DEFAULT_CIRCUIT_PROBE_LEASE_SECONDS,
+        clock: Callable[[], float] = time.time,
+        logger: Any = None,
+    ) -> None:
+        self.state_path = os.path.abspath(
+            state_path or os.path.join(_MODULE_DIR, TRANSPORT_HEALTH_FILE)
+        )
+        self.lock_path = f"{self.state_path}.lock"
+        self.failure_threshold = max(1, int(failure_threshold or 1))
+        durations = tuple(max(1, int(value)) for value in backoff_seconds)
+        self.backoff_seconds = durations or DEFAULT_CIRCUIT_BACKOFF_SECONDS
+        self.probe_lease_seconds = max(5, int(probe_lease_seconds or 5))
+        self.clock = clock
+        self.log = logger or _CIRCUIT_LOG
+
+    @staticmethod
+    def _origin_key(origin: str) -> str:
+        parsed = urllib.parse.urlsplit(str(origin or "").strip())
+        if parsed.scheme and parsed.netloc:
+            return urllib.parse.urlunsplit(
+                (parsed.scheme.lower(), parsed.netloc.lower(), "", "", "")
+            ).rstrip("/")
+        return str(origin or "").strip().rstrip("/") or "unknown"
+
+    @staticmethod
+    def _time_text(epoch: float) -> str:
+        if epoch <= 0:
+            return ""
+        return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _empty_document() -> dict[str, Any]:
+        return {"version": 1, "origins": {}}
+
+    @staticmethod
+    def _empty_entry() -> dict[str, Any]:
+        return {
+            "status": "closed",
+            "consecutive_failures": 0,
+            "backoff_level": 0,
+            "generation": 0,
+            "outage_started_epoch": 0,
+            "opened_at_epoch": 0,
+            "next_probe_epoch": 0,
+            "probe_owner": "",
+            "probe_until_epoch": 0,
+            "last_error": "",
+            "last_http_status": 0,
+            "updated_at": "",
+        }
+
+    def _read_unlocked(self) -> dict[str, Any]:
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return self._empty_document()
+        if not isinstance(document, dict):
+            return self._empty_document()
+        origins = document.get("origins")
+        if not isinstance(origins, dict):
+            origins = {}
+        document["version"] = 1
+        document["origins"] = origins
+        return document
+
+    def _write_unlocked(self, document: dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        temp_path = f"{self.state_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(document, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.state_path)
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+
+    def _load_entry(self, document: dict[str, Any], origin: str) -> tuple[str, dict[str, Any]]:
+        key = self._origin_key(origin)
+        stored = document["origins"].get(key)
+        entry = self._empty_entry()
+        if isinstance(stored, dict):
+            entry.update(stored)
+        return key, entry
+
+    def acquire(self, origin: str) -> MiniAppCircuitDecision:
+        now = float(self.clock())
+        with _exclusive_transport_health_lock(self.lock_path):
+            document = self._read_unlocked()
+            key, entry = self._load_entry(document, origin)
+            status = str(entry.get("status") or "closed")
+            if status == "closed":
+                return MiniAppCircuitDecision(permit=MiniAppCircuitPermit())
+
+            next_probe = max(0.0, float(entry.get("next_probe_epoch") or 0))
+            if now < next_probe:
+                return MiniAppCircuitDecision(
+                    wait_seconds=max(0.1, next_probe - now),
+                    retry_at=self._time_text(next_probe),
+                    half_open=False,
+                )
+
+            probe_until = max(0.0, float(entry.get("probe_until_epoch") or 0))
+            if status == "half_open" and probe_until > now:
+                return MiniAppCircuitDecision(
+                    wait_seconds=max(0.1, probe_until - now),
+                    retry_at=self._time_text(probe_until),
+                    half_open=True,
+                )
+
+            token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+            entry.update({
+                "status": "half_open",
+                "probe_owner": token,
+                "probe_until_epoch": now + self.probe_lease_seconds,
+                "updated_at": self._time_text(now),
+            })
+            document["origins"][key] = entry
+            self._write_unlocked(document)
+            return MiniAppCircuitDecision(
+                permit=MiniAppCircuitPermit(probe_token=token),
+            )
+
+    def record_success(self, origin: str, permit: MiniAppCircuitPermit) -> None:
+        now = float(self.clock())
+        recovery: tuple[int, float] | None = None
+        with _exclusive_transport_health_lock(self.lock_path):
+            document = self._read_unlocked()
+            key, entry = self._load_entry(document, origin)
+            status = str(entry.get("status") or "closed")
+            if status == "closed":
+                if int(entry.get("consecutive_failures") or 0) <= 0 and not entry.get("last_error"):
+                    return
+                entry.update({
+                    "consecutive_failures": 0,
+                    "last_error": "",
+                    "last_http_status": 0,
+                    "updated_at": self._time_text(now),
+                })
+            elif permit.is_probe and str(entry.get("probe_owner") or "") == permit.probe_token:
+                level = max(1, int(entry.get("backoff_level") or 1))
+                outage_started = max(0.0, float(entry.get("outage_started_epoch") or now))
+                recovery = (level, max(0.0, now - outage_started))
+                entry = self._empty_entry()
+                entry["generation"] = int(
+                    document["origins"].get(key, {}).get("generation") or 0
+                )
+                entry["updated_at"] = self._time_text(now)
+            else:
+                return
+            document["origins"][key] = entry
+            self._write_unlocked(document)
+        if recovery is not None:
+            level, outage_seconds = recovery
+            self.log.warning(
+                "Mini App upstream circuit recovered after a successful probe "
+                "(level=%s, outage=%ss); HTTP requests resumed",
+                level,
+                int(round(outage_seconds)),
+            )
+
+    def record_failure(
+        self,
+        origin: str,
+        permit: MiniAppCircuitPermit,
+        error_code: str,
+        http_status: int = 0,
+    ) -> None:
+        now = float(self.clock())
+        transition: tuple[str, int, int, str, str] | None = None
+        with _exclusive_transport_health_lock(self.lock_path):
+            document = self._read_unlocked()
+            key, entry = self._load_entry(document, origin)
+            status = str(entry.get("status") or "closed")
+            code = str(error_code or "miniapp_request_failed")
+            http_status = int(http_status or 0)
+
+            if permit.is_probe:
+                if status != "half_open" or str(entry.get("probe_owner") or "") != permit.probe_token:
+                    return
+                level = min(
+                    len(self.backoff_seconds),
+                    max(1, int(entry.get("backoff_level") or 1)) + 1,
+                )
+                duration = self.backoff_seconds[level - 1]
+                next_probe = now + duration
+                entry.update({
+                    "status": "open",
+                    "consecutive_failures": self.failure_threshold,
+                    "backoff_level": level,
+                    "generation": int(entry.get("generation") or 0) + 1,
+                    "opened_at_epoch": now,
+                    "next_probe_epoch": next_probe,
+                    "probe_owner": "",
+                    "probe_until_epoch": 0,
+                    "last_error": code,
+                    "last_http_status": http_status,
+                    "updated_at": self._time_text(now),
+                })
+                transition = (
+                    "extended",
+                    level,
+                    duration,
+                    code,
+                    self._time_text(next_probe),
+                )
+            elif status == "closed":
+                failures = int(entry.get("consecutive_failures") or 0) + 1
+                entry.update({
+                    "consecutive_failures": failures,
+                    "last_error": code,
+                    "last_http_status": http_status,
+                    "updated_at": self._time_text(now),
+                })
+                if failures >= self.failure_threshold:
+                    level = 1
+                    duration = self.backoff_seconds[0]
+                    next_probe = now + duration
+                    entry.update({
+                        "status": "open",
+                        "backoff_level": level,
+                        "generation": int(entry.get("generation") or 0) + 1,
+                        "outage_started_epoch": now,
+                        "opened_at_epoch": now,
+                        "next_probe_epoch": next_probe,
+                        "probe_owner": "",
+                        "probe_until_epoch": 0,
+                    })
+                    transition = (
+                        "opened",
+                        level,
+                        duration,
+                        code,
+                        self._time_text(next_probe),
+                    )
+            else:
+                # Ignore requests that were already in flight when another process
+                # opened the circuit. Only the elected half-open probe may extend it.
+                return
+
+            document["origins"][key] = entry
+            self._write_unlocked(document)
+
+        if transition is None:
+            return
+        action, level, duration, code, retry_at = transition
+        if action == "opened":
+            self.log.error(
+                "Mini App upstream circuit opened after %s consecutive failures (%s); "
+                "HTTP requests paused for %s minutes until %s",
+                self.failure_threshold,
+                code,
+                max(1, duration // 60),
+                retry_at,
+            )
+        else:
+            self.log.error(
+                "Mini App upstream recovery probe failed (%s); circuit extended "
+                "to level %s for %s minutes until %s",
+                code,
+                level,
+                max(1, duration // 60),
+                retry_at,
+            )
+
+    def snapshot(self, origin: str) -> dict[str, Any]:
+        with _exclusive_transport_health_lock(self.lock_path):
+            document = self._read_unlocked()
+            _, entry = self._load_entry(document, origin)
+            return dict(entry)
+
+
+def miniapp_upstream_failure(exc: BaseException) -> bool:
+    """Return whether an error indicates the shared HTTP service is unhealthy."""
+    code = (
+        exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__
+    )
+    code = str(code or "").strip().lower()
+    status = int(getattr(exc, "status", 0) or 0)
+    if status >= 500:
+        return True
+    if code in {
+        "invalid_json",
+        "invalid_response",
+        "timeouterror",
+        "timeout",
+        "urlerror",
+        "request_failed",
+        "api_timeout",
+        "api_unreachable",
+        "bad_response",
+        "server_busy",
+        "server_error",
+        "remotedisconnected",
+        "incompleteread",
+        "connectionerror",
+        "connectionrefusederror",
+        "connectionreseterror",
+        "brokenpipeerror",
+        "sslerror",
+        "gaierror",
+    }:
+        return True
+    if code.startswith("http_"):
+        try:
+            return int(code.partition("_")[2]) >= 500
+        except ValueError:
+            return False
+    return any(
+        marker in code
+        for marker in ("timeout", "connection", "unreachable", "disconnected")
+    )
+
+
+_MINIAPP_CIRCUIT = MiniAppTransportCircuitBreaker()
+
+
+def _fast_fail_open_circuit_once(origin: str) -> bool:
+    """Let startup escape an already-open circuit once per process."""
+    key = MiniAppTransportCircuitBreaker._origin_key(origin)
+    with _CIRCUIT_FAST_FAIL_LOCK:
+        if key in _CIRCUIT_FAST_FAIL_ORIGINS:
+            return False
+        _CIRCUIT_FAST_FAIL_ORIGINS.add(key)
+        return True
 
 
 def miniapp_entry_start_param(entry_url):
@@ -147,15 +582,50 @@ def _post_json_sync(origin, path, payload, timeout):
 
 
 async def _post_json(origin, path, payload, timeout, post_json=None):
-    if post_json is None:
-        return await asyncio.to_thread(_post_json_sync, origin, path, payload, timeout)
-    result = post_json(origin, path, payload, timeout)
-    if inspect.isawaitable(result):
-        result = await result
-    if not isinstance(result, dict):
-        raise MiniAppBeastError("invalid_response")
-    if result.get("ok") is False:
-        raise MiniAppBeastError(result.get("error") or "miniapp_request_failed")
+    if post_json is not None:
+        # Injected transports are used by focused tests and do not represent the
+        # shared production HTTP service.
+        result = post_json(origin, path, payload, timeout)
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, dict):
+            raise MiniAppBeastError("invalid_response")
+        if result.get("ok") is False:
+            raise MiniAppBeastError(result.get("error") or "miniapp_request_failed")
+        return result
+
+    permit: MiniAppCircuitPermit
+    while True:
+        decision = await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
+        if decision.permit is not None:
+            permit = decision.permit
+            break
+        if _fast_fail_open_circuit_once(origin):
+            raise MiniAppCircuitOpenError(decision.wait_seconds, decision.retry_at)
+        wait_seconds = max(0.1, float(decision.wait_seconds or 0.1))
+        if decision.half_open:
+            wait_seconds = min(wait_seconds, HALF_OPEN_POLL_SECONDS)
+        await asyncio.sleep(wait_seconds)
+
+    try:
+        result = await asyncio.to_thread(_post_json_sync, origin, path, payload, timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if miniapp_upstream_failure(exc):
+            await asyncio.to_thread(
+                _MINIAPP_CIRCUIT.record_failure,
+                origin,
+                permit,
+                exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower(),
+                int(getattr(exc, "status", 0) or 0),
+            )
+        else:
+            # A structured application/authentication error proves the HTTP
+            # service answered; a half-open transport probe therefore succeeded.
+            await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
+        raise
+    await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
     return result
 
 

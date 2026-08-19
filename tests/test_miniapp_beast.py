@@ -2,12 +2,16 @@ import asyncio
 import os
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from miniapp_beast import (
     MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    MiniAppTransportCircuitBreaker,
+    _post_json,
     fetch_miniapp_beast_snapshot,
     miniapp_entry_start_param,
+    miniapp_upstream_failure,
     normalize_spirit_beast_roster,
     read_cached_spirit_token,
     read_refresh_request,
@@ -37,6 +41,109 @@ ROSTER_PAYLOAD = {
 
 
 class MiniAppBeastTests(unittest.TestCase):
+    def test_upstream_failure_classifier_covers_transport_and_http_5xx(self):
+        self.assertTrue(miniapp_upstream_failure(MiniAppBeastError("invalid_json")))
+        self.assertTrue(miniapp_upstream_failure(MiniAppBeastError("maintenance", 503)))
+        self.assertTrue(miniapp_upstream_failure(TimeoutError()))
+        self.assertFalse(miniapp_upstream_failure(MiniAppBeastError("bad_request", 400)))
+
+    def test_shared_circuit_opens_extends_and_recovers_only_on_transitions(self):
+        class Logger:
+            def __init__(self):
+                self.errors = []
+                self.warnings = []
+
+            def error(self, message, *args):
+                self.errors.append(message % args if args else message)
+
+            def warning(self, message, *args):
+                self.warnings.append(message % args if args else message)
+
+        clock = [1000.0]
+        logger = Logger()
+        origin = "https://asc.aiopenai.app"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            breaker = MiniAppTransportCircuitBreaker(
+                os.path.join(tmpdir, "health.json"),
+                failure_threshold=2,
+                backoff_seconds=(10, 20, 40),
+                probe_lease_seconds=5,
+                clock=lambda: clock[0],
+                logger=logger,
+            )
+
+            first = breaker.acquire(origin)
+            self.assertIsNotNone(first.permit)
+            breaker.record_failure(origin, first.permit, "invalid_json")
+            self.assertEqual(logger.errors, [])
+
+            second = breaker.acquire(origin)
+            breaker.record_failure(origin, second.permit, "timeouterror")
+            state = breaker.snapshot(origin)
+            self.assertEqual(state["status"], "open")
+            self.assertEqual(state["backoff_level"], 1)
+            self.assertEqual(len(logger.errors), 1)
+
+            blocked = breaker.acquire(origin)
+            self.assertIsNone(blocked.permit)
+            self.assertEqual(int(blocked.wait_seconds), 10)
+            self.assertEqual(len(logger.errors), 1)
+
+            clock[0] += 10
+            probe = breaker.acquire(origin)
+            self.assertTrue(probe.permit.is_probe)
+            competing = breaker.acquire(origin)
+            self.assertIsNone(competing.permit)
+            self.assertTrue(competing.half_open)
+            breaker.record_failure(origin, probe.permit, "invalid_json")
+            state = breaker.snapshot(origin)
+            self.assertEqual(state["status"], "open")
+            self.assertEqual(state["backoff_level"], 2)
+            self.assertEqual(len(logger.errors), 2)
+
+            clock[0] += 20
+            recovery_probe = breaker.acquire(origin)
+            self.assertTrue(recovery_probe.permit.is_probe)
+            breaker.record_success(origin, recovery_probe.permit)
+            state = breaker.snapshot(origin)
+            self.assertEqual(state["status"], "closed")
+            self.assertEqual(state["consecutive_failures"], 0)
+            self.assertEqual(len(logger.errors), 2)
+            self.assertEqual(len(logger.warnings), 1)
+
+    def test_post_json_skips_http_while_circuit_is_open_then_probes_once(self):
+        clock = [2000.0]
+        origin = "https://asc.aiopenai.app"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            breaker = MiniAppTransportCircuitBreaker(
+                os.path.join(tmpdir, "health.json"),
+                failure_threshold=1,
+                backoff_seconds=(10,),
+                probe_lease_seconds=5,
+                clock=lambda: clock[0],
+                logger=Mock(),
+            )
+            post = Mock(side_effect=[MiniAppBeastError("invalid_json"), {"ok": True}])
+            with (
+                patch("miniapp_beast._MINIAPP_CIRCUIT", breaker),
+                patch("miniapp_beast._post_json_sync", post),
+                patch("miniapp_beast._CIRCUIT_FAST_FAIL_ORIGINS", set()),
+            ):
+                with self.assertRaisesRegex(MiniAppBeastError, "invalid_json"):
+                    asyncio.run(_post_json(origin, "/start", {}, 5))
+                self.assertEqual(post.call_count, 1)
+
+                with self.assertRaises(MiniAppCircuitOpenError) as blocked:
+                    asyncio.run(_post_json(origin, "/details", {}, 5))
+                self.assertGreaterEqual(blocked.exception.retry_after, 9)
+                self.assertEqual(post.call_count, 1)
+
+                clock[0] += 10
+                result = asyncio.run(_post_json(origin, "/details", {}, 5))
+                self.assertEqual(result, {"ok": True})
+                self.assertEqual(post.call_count, 2)
+                self.assertEqual(breaker.snapshot(origin)["status"], "closed")
+
     def test_entry_and_roster_normalization(self):
         entry = "https://t.me/fanrenxiuxian_bot?startapp=df_fixture"
         self.assertEqual(miniapp_entry_start_param(entry), "df_fixture")
