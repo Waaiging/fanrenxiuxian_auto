@@ -1219,8 +1219,11 @@ class MiniAppFishingAutomation:
         summary: str,
     ) -> None:
         """Journal each completed cast so normal fishing remains observable."""
+        # Account file handlers keep INFO records only when they use the
+        # established IN/OUT envelope; use it so fishing results are visible
+        # in the same per-account logs and dashboard as other Mini App events.
         self.log.info(
-            "Mini App fishing [%s] [%s | %s | %s]: %s",
+            "IN [Mini App | %s]:\nMini App fishing [%s | %s | %s]: %s",
             identity,
             pond or "灵溪",
             bait or "鱼饵",
