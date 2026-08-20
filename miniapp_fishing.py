@@ -2107,9 +2107,10 @@ class MiniAppFishingAutomation:
         failed_status: str,
         detail: str,
         failure_code: str = "",
+        retry_seconds: int = FISHING_TRANSFER_FAILURE_RETRY_SECONDS,
     ) -> None:
         next_retry_at = (
-            datetime.now() + timedelta(seconds=FISHING_TRANSFER_FAILURE_RETRY_SECONDS)
+            datetime.now() + timedelta(seconds=max(1, int(retry_seconds)))
         ).strftime(TIME_FORMAT)
         current["status"] = failed_status
         current["updated_at"] = _now_text()
@@ -2121,9 +2122,7 @@ class MiniAppFishingAutomation:
         elif "failure_code" in current:
             current.pop("failure_code", None)
         data["status"] = "transfer_retry_wait"
-        data["detail"] = (
-            f"{detail}；已安排于 {next_retry_at} 自动补跑，之后每小时重试一次"
-        )
+        data["detail"] = f"{detail}；已安排于 {next_retry_at} 自动补跑"
 
     def _finalize_verified_transfer(
         self,
@@ -2420,6 +2419,11 @@ class MiniAppFishingAutomation:
                     detail=(
                         f"{fishing_participant_label(target_key)} 上架失败或未识别挂单ID"
                     ),
+                    retry_seconds=(
+                        FISHING_TRANSFER_RETRY_SECONDS
+                        if not response_text
+                        else FISHING_TRANSFER_FAILURE_RETRY_SECONDS
+                    ),
                 )
 
         _update_global_state(finish, settings=settings)
@@ -2487,6 +2491,11 @@ class MiniAppFishingAutomation:
                         f"{fishing_participant_label(holder_key)} 购买挂单 {listing_id} 失败"
                     ),
                     failure_code=str(parsed.get("status") or "unrecognized"),
+                    retry_seconds=(
+                        FISHING_TRANSFER_RETRY_SECONDS
+                        if not response_text
+                        else FISHING_TRANSFER_FAILURE_RETRY_SECONDS
+                    ),
                 )
                 if parsed.get("status") == "missing_required_rod":
                     data["rod_holder"] = ""

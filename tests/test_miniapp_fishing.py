@@ -1875,6 +1875,63 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["transfer"]["status"], "purchased")
         self.assertEqual(runtime["status"], "verifying_transfer")
 
+    def test_empty_purchase_response_retries_in_one_minute(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.avatars = []
+                self.send_fishing_command = AsyncMock(return_value="")
+
+            def save_state(self):
+                pass
+
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "sub|主魂"],
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+
+        def seed(data):
+            data.update(current_key="main|主魂", rod_holder="sub|主魂")
+            data["transfer"] = {
+                "id": "transfer-empty-purchase-response",
+                "status": "listed",
+                "from": "sub|主魂",
+                "to": "main|主魂",
+                "listing_id": "24474",
+            }
+
+        miniapp_fishing._update_global_state(seed, settings=settings)
+        actor = Actor()
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(identity_player_ids={}),
+            "sub",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+
+        before = datetime.now()
+        self.assertFalse(
+            asyncio.run(
+                worker._purchase_listing(
+                    settings,
+                    miniapp_fishing.miniapp_fishing_global_snapshot(settings)["transfer"],
+                )
+            )
+        )
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        retry_at = datetime.strptime(
+            runtime["transfer"]["next_retry_at"], miniapp_fishing.TIME_FORMAT
+        )
+
+        self.assertEqual(runtime["transfer"]["status"], "purchase_unknown")
+        self.assertGreaterEqual((retry_at - before).total_seconds(), 59)
+        self.assertLessEqual((retry_at - before).total_seconds(), 61)
+
     def test_wrong_cached_holder_recovers_with_verified_holder_on_same_listing(self):
         class Actor:
             def __init__(self):
