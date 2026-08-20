@@ -366,6 +366,11 @@ Dashboard 启动前在部署目录创建未提交的 `.env`：
 ```bash
 DASHBOARD_USERS=admin
 DASHBOARD_PASSWORD=replace-with-a-long-random-password
+DASHBOARD_SESSION_DAYS=180
+DASHBOARD_SESSION_SECRET=replace-with-another-long-random-value
 ```
+
+Dashboard 使用登录页和签名会话 Cookie。首次登录后，同一浏览器默认保持登录 180 天；
+密码管理器也可以正常保存账号密码。点击页面右上角退出按钮会立即清除本机登录会话。
 
 纯 README 或项目记忆更新不需要重启运行服务。

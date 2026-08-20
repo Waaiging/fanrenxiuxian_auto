@@ -2,12 +2,64 @@ import unittest
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch
+from fastapi.testclient import TestClient
 
 import dashboard_server
 from log_utils import CommandLogFilter
 
 
 class DashboardProcessTests(unittest.TestCase):
+    def test_dashboard_session_is_signed_and_expires(self):
+        with patch.object(dashboard_server, "DASHBOARD_PASSWORD", "test-password"), patch.object(
+            dashboard_server, "DASHBOARD_SESSION_SECRET", "test-session-secret"
+        ), patch.object(dashboard_server, "DASHBOARD_SESSION_DAYS", 180):
+            token = dashboard_server.create_dashboard_session("admin", now=1_000)
+
+            self.assertEqual(dashboard_server.dashboard_session_user(token, now=1_001), "admin")
+            self.assertEqual(dashboard_server.dashboard_session_user(token + "x", now=1_001), "")
+            self.assertEqual(
+                dashboard_server.dashboard_session_user(token, now=1_000 + 180 * 86400),
+                "",
+            )
+
+    def test_dashboard_login_next_path_rejects_external_redirects(self):
+        self.assertEqual(dashboard_server._safe_next_path("/api/status"), "/api/status")
+        self.assertEqual(dashboard_server._safe_next_path("https://example.com"), "/")
+        self.assertEqual(dashboard_server._safe_next_path("//example.com"), "/")
+
+    def test_dashboard_browser_login_persists_until_logout(self):
+        with patch.object(dashboard_server, "DASHBOARD_PASSWORD", "test-password"), patch.object(
+            dashboard_server, "DASHBOARD_SESSION_SECRET", "test-session-secret"
+        ), patch.object(dashboard_server, "DASHBOARD_COOKIE_SECURE", False):
+            with TestClient(dashboard_server.app, follow_redirects=False) as client:
+                anonymous = client.get("/")
+                self.assertEqual(anonymous.status_code, 303)
+                self.assertEqual(anonymous.headers["location"], "/login")
+
+                rejected = client.post(
+                    "/login",
+                    json={"username": "admin", "password": "wrong", "next_path": "/"},
+                )
+                self.assertEqual(rejected.status_code, 401)
+
+                accepted = client.post(
+                    "/login",
+                    json={"username": "admin", "password": "test-password", "next_path": "/"},
+                )
+                self.assertEqual(accepted.status_code, 303)
+                self.assertIn(dashboard_server.DASHBOARD_SESSION_COOKIE, accepted.headers["set-cookie"])
+                self.assertEqual(client.get("/").status_code, 200)
+
+                logged_out = client.post("/logout")
+                self.assertEqual(logged_out.status_code, 303)
+                self.assertEqual(client.get("/").status_code, 303)
+
+    def test_dashboard_api_keeps_basic_auth_compatibility(self):
+        with patch.object(dashboard_server, "DASHBOARD_PASSWORD", "test-password"):
+            with TestClient(dashboard_server.app) as client:
+                response = client.get("/api/red-packets", auth=("admin", "test-password"))
+                self.assertEqual(response.status_code, 200)
+
     def test_restricted_process_matches_only_its_account(self):
         xiaohao = "/home/ubuntu/deploy/venv/bin/python red_packet_account.py --account xiaohao"
         waaiging = "/home/ubuntu/deploy/venv/bin/python red_packet_account.py --account=waaiging"

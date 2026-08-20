@@ -40,6 +40,10 @@
             position: sticky; top: 0; z-index: 100;
         }
         .logo { font-size: 1.5rem; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .header-actions { display:flex; align-items:center; gap:0.7rem; }
+        .logout-button { width:2rem; height:2rem; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border-color); border-radius:6px; background:rgba(255,255,255,0.04); color:var(--text-secondary); cursor:pointer; }
+        .logout-button:hover { color:var(--text-primary); border-color:rgba(255,255,255,0.24); }
+        .logout-button svg { width:1rem; height:1rem; }
         main { padding: 2rem; max-width: 1400px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 2rem; }
         .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 20px; padding: 1.5rem; backdrop-filter: blur(12px); transition: all 0.3s ease; display: flex; flex-direction: column; }
         .card:hover { border-color: var(--accent-color); }
@@ -1281,7 +1285,10 @@
             <span class="brand-mark" aria-hidden="true"><i data-lucide="activity"></i></span>
             <div class="logo">凡人修仙监控台</div>
         </div>
-        <div class="server-clock"><i data-lucide="clock-3" aria-hidden="true"></i><span id="server-time">Loading...</span></div>
+        <div class="header-actions">
+            <div class="server-clock"><i data-lucide="clock-3" aria-hidden="true"></i><span id="server-time">Loading...</span></div>
+            <form method="post" action="/logout"><button class="logout-button" type="submit" title="退出登录" aria-label="退出登录"><i data-lucide="log-out" aria-hidden="true"></i></button></form>
+        </div>
     </header>
 
     <main>
@@ -1813,6 +1820,16 @@
         function apiUrl(path) {
             return new URL(path, window.location.origin).toString();
         }
+
+        const dashboardFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+            const response = await dashboardFetch(...args);
+            if (response.status === 401) {
+                const nextPath = `${window.location.pathname}${window.location.search}`;
+                window.location.assign(`/login?next=${encodeURIComponent(nextPath)}`);
+            }
+            return response;
+        };
 
         function refreshIcons() {
             if (!window.lucide || typeof window.lucide.createIcons !== 'function') return;

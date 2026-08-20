@@ -23,6 +23,10 @@ import json
 import time
 import subprocess
 import secrets
+import base64
+import hashlib
+import hmac
+import html
 import sys
 import threading
 import uuid
@@ -31,8 +35,8 @@ import signal
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
@@ -131,7 +135,7 @@ from soul_curse_features import (
 from yinluo_features import YINLUO_APPEASE_COMMAND, YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
 app = FastAPI()
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
 
 # =====================================================================
 # 安全配置（HTTP Basic 认证）
@@ -142,23 +146,88 @@ USER_NAMES = tuple(
     if item.strip()
 )
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+DASHBOARD_SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET", "")
+DASHBOARD_SESSION_DAYS = max(1, min(3650, int(os.environ.get("DASHBOARD_SESSION_DAYS", "180") or 180)))
+DASHBOARD_COOKIE_SECURE = os.environ.get("DASHBOARD_COOKIE_SECURE", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+DASHBOARD_SESSION_COOKIE = "fanren_dashboard_session"
 
-def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
-    """HTTP Basic 认证验证"""
+
+def _session_signing_key():
+    return (DASHBOARD_SESSION_SECRET or DASHBOARD_PASSWORD).encode("utf-8")
+
+
+def create_dashboard_session(username, now=None):
+    """Create a signed, expiring session token without storing server-side secrets."""
+    if not DASHBOARD_PASSWORD or not _session_signing_key():
+        return ""
+    issued_at = int(time.time() if now is None else now)
+    payload = json.dumps(
+        {
+            "u": str(username or ""),
+            "iat": issued_at,
+            "exp": issued_at + DASHBOARD_SESSION_DAYS * 86400,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    signature = hmac.new(_session_signing_key(), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def dashboard_session_user(token, now=None):
+    """Return the authenticated user from a valid session token."""
+    try:
+        encoded, signature = str(token or "").rsplit(".", 1)
+        expected = hmac.new(
+            _session_signing_key(), encoded.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return ""
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        username = str(payload.get("u") or "")
+        current = int(time.time() if now is None else now)
+        if current >= int(payload.get("exp") or 0):
+            return ""
+        if not any(secrets.compare_digest(username, name) for name in USER_NAMES):
+            return ""
+        return username
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return ""
+
+
+def dashboard_credentials_valid(username, password):
+    if not DASHBOARD_PASSWORD:
+        return False
+    correct_username = any(
+        secrets.compare_digest(str(username or ""), name) for name in USER_NAMES
+    )
+    correct_password = secrets.compare_digest(str(password or ""), DASHBOARD_PASSWORD)
+    return correct_username and correct_password
+
+
+def authenticate(
+    request: Request,
+    credentials: Optional[HTTPBasicCredentials] = Depends(security),
+):
+    """Accept a persistent signed browser session or legacy HTTP Basic credentials."""
     if not DASHBOARD_PASSWORD:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Dashboard authentication is not configured",
         )
-    correct_username = any(secrets.compare_digest(credentials.username, name) for name in USER_NAMES)
-    correct_password = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
-    if not (correct_username and correct_password):
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="暗号不对，道友请留步",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+    session_user = dashboard_session_user(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    if session_user:
+        return session_user
+    if credentials and dashboard_credentials_valid(credentials.username, credentials.password):
+        return credentials.username
+    raise HTTPException(
+        status_code=http_status.HTTP_401_UNAUTHORIZED,
+        detail="暗号不对，道友请留步",
+    )
 
 def safe_console_print(*args, **kwargs):
     """Best-effort console output for background jobs."""
@@ -4940,6 +5009,121 @@ def start_clear_job(account):
 # FastAPI 路由
 # =====================================================================
 
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 · 凡人修仙监控台</title>
+    <style>
+        :root { color-scheme: dark; --bg:#0b0e13; --panel:#151a22; --border:#303846; --text:#e7edf5; --muted:#95a1b2; --accent:#21b8d7; --danger:#ff7b7b; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",sans-serif; letter-spacing:0; }
+        main { width:min(100%,380px); }
+        .brand { margin-bottom:24px; }
+        h1 { margin:0 0 6px; font-size:24px; letter-spacing:0; }
+        .subtitle { margin:0; color:var(--muted); font-size:14px; }
+        form { border:1px solid var(--border); border-radius:8px; background:var(--panel); padding:22px; display:grid; gap:16px; }
+        label { display:grid; gap:7px; color:var(--muted); font-size:13px; font-weight:600; }
+        input { width:100%; height:42px; border:1px solid var(--border); border-radius:6px; background:#0d1117; color:var(--text); padding:0 12px; font:inherit; outline:none; }
+        input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(33,184,215,.14); }
+        button { height:42px; border:0; border-radius:6px; background:var(--accent); color:#061015; font:inherit; font-weight:800; cursor:pointer; }
+        button:hover { filter:brightness(1.08); }
+        .error { margin:0; color:var(--danger); font-size:13px; }
+    </style>
+</head>
+<body>
+<main>
+    <div class="brand"><h1>凡人修仙监控台</h1><p class="subtitle">登录后将在此设备保持会话</p></div>
+    <form id="login-form">
+        <input type="hidden" name="next_path" value="__NEXT_PATH__">
+        <label>账号<input name="username" autocomplete="username" value="__USERNAME__" required autofocus></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="error" id="login-error" role="alert">__ERROR__</p>
+        <button type="submit">登录</button>
+    </form>
+</main>
+<script>
+    const form = document.getElementById('login-form');
+    const error = document.getElementById('login-error');
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        button.disabled = true;
+        error.textContent = '';
+        const fields = new FormData(form);
+        try {
+            const response = await fetch('/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(Object.fromEntries(fields.entries())),
+            });
+            if (response.redirected) {
+                window.location.assign(response.url);
+                return;
+            }
+            const payload = await response.json().catch(() => ({}));
+            error.textContent = payload.detail || '登录失败';
+        } catch (_) {
+            error.textContent = '暂时无法连接 Dashboard';
+        } finally {
+            button.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>"""
+
+
+def _safe_next_path(value):
+    value = str(value or "/").strip()
+    return value if value.startswith("/") and not value.startswith("//") else "/"
+
+
+def dashboard_login_page(next_path="/", username="admin", error=""):
+    return (
+        LOGIN_PAGE.replace("__NEXT_PATH__", html.escape(_safe_next_path(next_path), quote=True))
+        .replace("__USERNAME__", html.escape(str(username or "admin"), quote=True))
+        .replace("__ERROR__", html.escape(str(error or "")))
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, next: str = "/"):
+    if dashboard_session_user(request.cookies.get(DASHBOARD_SESSION_COOKIE)):
+        return RedirectResponse(_safe_next_path(next), status_code=303)
+    return HTMLResponse(dashboard_login_page(next_path=next), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/login")
+async def login(payload: dict = Body(...)):
+    username = str(payload.get("username") or "")
+    password = str(payload.get("password") or "")
+    next_path = str(payload.get("next_path") or "/")
+    if not DASHBOARD_PASSWORD:
+        raise HTTPException(status_code=503, detail="Dashboard 认证尚未配置")
+    if not dashboard_credentials_valid(username, password):
+        raise HTTPException(status_code=401, detail="账号或密码不正确")
+    response = RedirectResponse(_safe_next_path(next_path), status_code=303)
+    response.set_cookie(
+        DASHBOARD_SESSION_COOKIE,
+        create_dashboard_session(username),
+        max_age=DASHBOARD_SESSION_DAYS * 86400,
+        httponly=True,
+        secure=DASHBOARD_COOKIE_SECURE,
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/logout")
+async def logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/")
+    return response
+
 @app.get("/api/status")
 def status(username: str = Depends(authenticate)):
     """获取所有账号的实时状态"""
@@ -5812,8 +5996,10 @@ async def account_action(account: str, action: str, username: str = Depends(auth
     except Exception as e: return {"success": False, "msg": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
-async def index(username: str = Depends(authenticate)):
+async def index(request: Request):
     """前端页面"""
+    if not dashboard_session_user(request.cookies.get(DASHBOARD_SESSION_COOKIE)):
+        return RedirectResponse("/login", status_code=303)
     html_path = os.path.join(CONFIG_DIR, 'dashboard.html')
     if os.path.exists(html_path):
         with open(html_path, 'r', encoding='utf-8') as f:
