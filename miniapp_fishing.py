@@ -2106,14 +2106,24 @@ class MiniAppFishingAutomation:
             challenge = bool(_mapping(payload.get("challenge")))
             rod_name = str(rod.get("name") or "").strip()
             rod_matches = fishing_rod_matches(settings, rod_name)
+            # A settled fishing result may temporarily report a lobby while
+            # its reward is still being materialized.  Keep the rod assigned to
+            # this identity until the persisted pending result is recovered.
+            pending_result = bool(
+                _mapping(self._state(identity).get("miniapp_fishing_pending_result"))
+            )
             info.update(
                 has_rod=rod_matches,
                 has_any_rod=bool(rod),
                 rod_name=rod_name,
                 rod_matches=rod_matches,
-                phase=phase,
+                phase=("settling" if pending_result and phase == "lobby" else phase),
                 challenge=challenge,
-                active=challenge or phase in {"waiting", "bite", "reeling"},
+                active=bool(
+                    pending_result
+                    or challenge
+                    or phase in {"waiting", "bite", "reeling"}
+                ),
                 definitive=True,
             )
         except MiniAppCircuitOpenError:

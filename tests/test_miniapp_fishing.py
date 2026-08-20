@@ -1739,6 +1739,47 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(info["rod_name"], "金竹钓竿")
         self.assertEqual(runtime["rod_holder"], "")
 
+    def test_scan_keeps_pending_result_identity_active_when_server_reports_lobby(self):
+        actor = SimpleNamespace(
+            state={"miniapp_fishing_pending_result": {"id": "pending-1"}},
+            config={},
+            save_state=lambda: None,
+        )
+        transport = SimpleNamespace(
+            identity_player_ids={"主魂": 1},
+            fishing_entry=AsyncMock(
+                return_value=(
+                    "fish_pending",
+                    {
+                        "session": {
+                            "phase": "lobby",
+                            "rod": {"itemId": "rod_silver", "name": "银竹钓竿"},
+                        }
+                    },
+                )
+            ),
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+
+        info = asyncio.run(worker._scan_identity("主魂", settings))
+
+        self.assertTrue(info["active"])
+        self.assertEqual(info["phase"], "settling")
+
     def test_auto_rod_uses_detected_type_for_transfer_listing(self):
         actor = SimpleNamespace(
             state={},
