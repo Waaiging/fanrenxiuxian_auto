@@ -99,6 +99,7 @@ ACCOUNT_IDENTITIES = {
 MULAN_SUPPORT_MODES = ("斥候", "破灯", "奇袭", "护阵")
 DEFAULT_MULAN_SUPPORT_MODE = "护阵"
 MINIAPP_FISHING_PONDS = (
+    ("auto", "默认最高级"),
     ("qingxi", "青溪浅滩"),
     ("hantan", "灵眼寒潭"),
     ("luanxing", "乱星海礁"),

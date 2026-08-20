@@ -708,6 +708,28 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(worker.actor.state["miniapp_fishing_pond_fallback_to"], "qingxi")
 
+    def test_auto_pond_selects_highest_unlocked_tier_for_identity(self):
+        actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "xiaohao",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        pond, key = worker._resolve_pond(
+            "问心子",
+            {
+                "ponds": [
+                    {"key": "qingxi", "unlocked": True, "requiredExp": 0, "currentExp": 399},
+                    {"key": "hantan", "unlocked": True, "requiredExp": 399, "currentExp": 399},
+                    {"key": "luanxing", "unlocked": False, "requiredExp": 2400, "currentExp": 399},
+                ]
+            },
+            "auto",
+        )
+        self.assertEqual(key, "hantan")
+        self.assertEqual(pond["key"], "hantan")
+
     def test_unaffordable_configured_bait_falls_back_to_most_available_bait(self):
         class Actor:
             def __init__(self):

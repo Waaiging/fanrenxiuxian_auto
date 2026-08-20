@@ -148,6 +148,14 @@ class AutomationSettingsTests(unittest.TestCase):
             },
         )
 
+    def test_save_accepts_default_highest_fishing_pond(self):
+        value = settings.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            miniapp_fishing_pond="auto",
+        )
+        self.assertEqual(value["miniapp_fishing"]["pond"], "auto")
+
     def test_legacy_sub_dao_name_is_migrated_without_changing_other_accounts(self):
         value = settings.normalize_automation_settings({
             "world_boss": {"participants": ["main|缘生子", "sub|缘生子"]},
@@ -452,7 +460,8 @@ class AutomationSettingsTests(unittest.TestCase):
             ["main|主魂", "main|无咎子", "waaiging|主魂"],
         )
         self.assertEqual(len(payload["miniapp_journey"]["accounts"]), 4)
-        self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 3)
+        self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 4)
+        self.assertEqual(payload["miniapp_fishing"]["ponds"][0], {"key": "auto", "name": "默认最高级"})
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
         self.assertEqual(len(payload["tianxing"]["tianji_accounts"]), 2)
         self.assertEqual(

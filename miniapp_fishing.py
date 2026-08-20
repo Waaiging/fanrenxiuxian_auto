@@ -1604,7 +1604,25 @@ class MiniAppFishingAutomation:
         shop: dict[str, Any],
         configured_key: str,
     ) -> tuple[dict[str, Any], str]:
-        """Use the configured pond when available, otherwise a safe unlocked pond."""
+        """Resolve the configured pond, including the per-identity highest tier."""
+        if configured_key == "auto":
+            unlocked = [
+                item
+                for item in _items(shop.get("ponds"))
+                if isinstance(item, dict) and item.get("unlocked") and item.get("key")
+            ]
+            if not unlocked:
+                raise MiniAppBeastError("fishing_pond_locked")
+            pond = max(
+                enumerate(unlocked),
+                key=lambda pair: (
+                    _integer(pair[1].get("requiredExp"), 0),
+                    _integer(pair[1].get("currentExp"), 0),
+                    pair[0],
+                ),
+            )[1]
+            return pond, str(pond.get("key") or "")
+
         pond = fishing_option(shop.get("ponds"), configured_key)
         if not pond:
             raise MiniAppBeastError("fishing_pond_invalid")
