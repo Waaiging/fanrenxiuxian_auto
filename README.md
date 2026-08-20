@@ -6,9 +6,9 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 
 ## 运行入口与 tmux
 
-线上目录：`/home/ubuntu/deploy`
+线上目录示例：`/srv/fanrenxiuxian-auto`
 
-本地目录：`C:\path\to\repository`
+本地目录：仓库根目录
 
 | tmux | 进程 | 账号定位 |
 | --- | --- | --- |
@@ -318,7 +318,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 已知工程债
 
-- Dashboard 登录仍使用源代码中的静态配置，且状态变更接口没有独立 CSRF 令牌。仓库扩大共享范围前，应迁移到环境变量或私有配置、轮换凭据，并补充请求来源保护和登录限速。
+- Dashboard 登录凭据由未提交的 `.env` 提供；状态变更接口尚无独立 CSRF 令牌，公网部署仍应补充请求来源保护和登录限速。
 - 四个账号的主 state 保存仍直接覆盖目标 JSON；进程在写入中断时可能产生截断文件并回落到默认状态。应统一改为临时文件、`fsync`、原子替换，并在加载失败时自动恢复最近快照。
 - `requirements.txt` 尚未锁定版本，仓库也没有 CI；本地 Python 与 VPS Python 版本可能不同，当前仍依赖人工执行本地全量测试和远端定向测试。
 - 主账号脚本和解析回归文件体积较大。新增公共能力应继续下沉到共享模块，并优先拆分可独立验证的解析器和状态迁移逻辑。
@@ -328,8 +328,8 @@ python -m unittest discover -s tests -p "test_*.py"
 VPS 运行目录不是 Git 工作区，部署使用 SCP。所有 SSH/SCP 必须显式带 key：
 
 ```powershell
-ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST
-scp -O -i C:\path\to\vps-key.pem .\changed_file.py ubuntu@VPS_HOST:/home/ubuntu/deploy/
+ssh -i C:\path\to\vps-key.pem deploy@VPS_HOST
+scp -O -i C:\path\to\vps-key.pem .\changed_file.py deploy@VPS_HOST:/srv/fanrenxiuxian-auto/
 ```
 
 推荐流程：
@@ -340,13 +340,13 @@ scp -O -i C:\path\to\vps-key.pem .\changed_file.py ubuntu@VPS_HOST:/home/ubuntu/
 4. 使用远端虚拟环境编译：
 
 ```powershell
-ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST "cd /home/ubuntu/deploy && /home/ubuntu/deploy/venv/bin/python -m py_compile changed_file.py"
+ssh -i C:\path\to\vps-key.pem deploy@VPS_HOST "cd /srv/fanrenxiuxian-auto && ./venv/bin/python -m py_compile changed_file.py"
 ```
 
 5. 只重启受影响窗口，例如：
 
 ```powershell
-ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST "tmux respawn-window -k -t xiuxian:2 'cd /home/ubuntu/deploy && source venv/bin/activate && exec python3 cultivator_xiaohao.py'"
+ssh -i C:\path\to\vps-key.pem deploy@VPS_HOST "tmux respawn-window -k -t xiuxian:2 'cd /srv/fanrenxiuxian-auto && source venv/bin/activate && exec python3 cultivator_xiaohao.py'"
 ```
 
 该示例只适用于确认小号应运行完整脚本时；账号群发受限时应保留或恢复 `red_packet_account.py --account xiaohao`，不要用部署重启绕过可见性控制器。
@@ -357,8 +357,15 @@ ssh -i C:\path\to\vps-key.pem ubuntu@VPS_HOST "tmux respawn-window -k -t xiuxian
 全量启动：
 
 ```bash
-cd /home/ubuntu/deploy
+cd /srv/fanrenxiuxian-auto
 bash start_all.sh
+```
+
+Dashboard 启动前在部署目录创建未提交的 `.env`：
+
+```bash
+DASHBOARD_USERS=admin
+DASHBOARD_PASSWORD=replace-with-a-long-random-password
 ```
 
 纯 README 或项目记忆更新不需要重启运行服务。

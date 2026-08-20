@@ -136,13 +136,22 @@ security = HTTPBasic()
 # =====================================================================
 # 安全配置（HTTP Basic 认证）
 # =====================================================================
-USER_NAMES = ("wg", "admin")       # 允许登录的用户名
-USER_PWD = "REMOVED_DASHBOARD_PASSWORD"           # 密码
+USER_NAMES = tuple(
+    item.strip()
+    for item in os.environ.get("DASHBOARD_USERS", "admin").split(",")
+    if item.strip()
+)
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
     """HTTP Basic 认证验证"""
+    if not DASHBOARD_PASSWORD:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Dashboard authentication is not configured",
+        )
     correct_username = any(secrets.compare_digest(credentials.username, name) for name in USER_NAMES)
-    correct_password = secrets.compare_digest(credentials.password, USER_PWD)
+    correct_password = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
     if not (correct_username and correct_password):
         raise HTTPException(
             status_code=http_status.HTTP_401_UNAUTHORIZED,

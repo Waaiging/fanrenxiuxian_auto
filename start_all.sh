@@ -8,6 +8,13 @@ SESSION_NAME="xiuxian"
 DEPLOY_DIR="$HOME/deploy"
 VENV_PATH="$DEPLOY_DIR/venv/bin/activate"
 
+if [ -f "$DEPLOY_DIR/.env" ]; then
+    set -a
+    # Runtime credentials stay outside Git and are inherited by tmux workers.
+    source "$DEPLOY_DIR/.env"
+    set +a
+fi
+
 create_placeholder_window() {
     local index="$1"
     local name="$2"

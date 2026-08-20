@@ -48,8 +48,8 @@
     "star_retry_seconds": 300
   },
   "monitor": {
-    "chat_id": "fanrenxxz",
-    "chat_ids": ["fanrenxxz", "@ja_netfilter_group"],
+    "chat_id": "your_primary_group",
+    "chat_ids": ["your_primary_group", "@your_secondary_group"],
     "topic_id": null,
     "restricted_accounts": [
       {
@@ -79,20 +79,11 @@
     ],
     "watch_bot": "fanrenxiuxian_bot",
     "notify_users": [
-      "Waaiging",
-      "Gamling33",
-      "TitanCreeper",
-      "无咎子",
-      "缘生子",
-      "素缘子",
-      "厚土",
-      "寻真子",
-      "问心子",
-      "素心子"
+      "your_username"
     ]
   },
-  "notify_bot": "waaiging_bot",
-  "notify_target": "8219248252",
+  "notify_bot": "your_notify_bot",
+  "notify_target": "YOUR_TELEGRAM_USER_ID",
   "notify_bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
   "daily_reward_summary_push": false
 }
