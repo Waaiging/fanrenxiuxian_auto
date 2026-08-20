@@ -573,6 +573,57 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertIn("银须灵鲢", summary)
         self.assertIn("灵石x8", summary)
 
+    def test_pond_matched_bait_overrides_incompatible_global_preference(self):
+        shop = {
+            "baits": [
+                {"key": "plain", "unlocked": True},
+                {"key": "spirit_worm", "unlocked": True},
+                {"key": "demon_blood", "unlocked": True},
+            ]
+        }
+
+        self.assertEqual(
+            miniapp_fishing.fishing_bait_key_for_pond(
+                shop,
+                "qingxi",
+                "demon_blood",
+            ),
+            ("plain", "pond_match"),
+        )
+        self.assertEqual(
+            miniapp_fishing.fishing_bait_key_for_pond(
+                shop,
+                "hantan",
+                "demon_blood",
+            ),
+            ("spirit_worm", "pond_match"),
+        )
+        self.assertEqual(
+            miniapp_fishing.fishing_bait_key_for_pond(
+                shop,
+                "luanxing",
+                "demon_blood",
+            ),
+            ("demon_blood", "configured"),
+        )
+
+    def test_pond_matched_bait_falls_back_to_configured_when_recommendation_locked(self):
+        shop = {
+            "baits": [
+                {"key": "plain", "unlocked": False},
+                {"key": "demon_blood", "unlocked": True},
+            ]
+        }
+
+        self.assertEqual(
+            miniapp_fishing.fishing_bait_key_for_pond(
+                shop,
+                "qingxi",
+                "demon_blood",
+            ),
+            ("demon_blood", "configured"),
+        )
+
     def test_lobby_buys_ten_selected_baits_before_casting(self):
         class Actor:
             def __init__(self):
@@ -821,7 +872,15 @@ class MiniAppFishingTests(unittest.TestCase):
             "item_fishing_bait_plain",
             log_operation=False,
         )
-        self.assertEqual(worker.actor.state["miniapp_fishing_bait_fallback_to"], "plain")
+        self.assertEqual(worker.actor.state["miniapp_fishing_bait_key"], "plain")
+        self.assertEqual(
+            worker.actor.state["miniapp_fishing_configured_bait_key"],
+            "demon_blood",
+        )
+        self.assertEqual(
+            worker.actor.state["miniapp_fishing_bait_selection_reason"],
+            "pond_match",
+        )
 
     def test_lobby_purchase_is_limited_by_available_cost_materials(self):
         class Actor:

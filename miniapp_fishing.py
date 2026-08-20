@@ -44,6 +44,11 @@ DEFAULT_DISABLED_SECONDS = 30
 DEFAULT_RESULT_ATTEMPTS = 18
 BAIT_PURCHASE_QUANTITY = 10
 FISHING_DAILY_CAST_LIMIT = 10
+FISHING_POND_RECOMMENDED_BAITS = {
+    "qingxi": "plain",
+    "hantan": "spirit_worm",
+    "luanxing": "demon_blood",
+}
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 FISHING_ROD_ITEMS = frozenset(key for key, _ in MINIAPP_FISHING_RODS if key != "auto")
 FISHING_ROD_SCAN_SECONDS = 300
@@ -602,6 +607,20 @@ def fishing_bait_by_name(shop: Any, name: Any) -> dict[str, Any]:
         if str(item.get("name") or "").strip() == wanted:
             return item
     return {}
+
+
+def fishing_bait_key_for_pond(
+    shop: Any,
+    pond_key: Any,
+    configured_key: Any,
+) -> tuple[str, str]:
+    """Use the shop's pond-matched bait instead of forcing one bait everywhere."""
+    configured = str(configured_key or "demon_blood").strip() or "demon_blood"
+    recommended = FISHING_POND_RECOMMENDED_BAITS.get(str(pond_key or "").strip(), "")
+    bait = fishing_option(_mapping(shop).get("baits"), recommended)
+    if recommended and bait and bait.get("unlocked"):
+        return recommended, ("configured" if recommended == configured else "pond_match")
+    return configured, "configured"
 
 
 def affordable_bait_quantity(bait: dict[str, Any], requested: int, minimum: int = 1) -> int:
@@ -1296,6 +1315,7 @@ class MiniAppFishingAutomation:
                     "name": str(item.get("name") or ""),
                     "count": _integer(item.get("count"), 0),
                     "unlocked": bool(item.get("unlocked")),
+                    "description": str(item.get("desc") or ""),
                     "cost": [dict(cost) for cost in _items(item.get("cost"))],
                 }
                 for item in _items(shop.get("baits"))
@@ -1697,9 +1717,14 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
     ) -> int:
         pond_key = str(settings.get("pond") or "qingxi")
-        bait_key = str(settings.get("bait") or "demon_blood")
+        configured_bait_key = str(settings.get("bait") or "demon_blood")
         chum_key = str(settings.get("chum") or "none")
         pond, pond_key = self._resolve_pond(identity, shop, pond_key)
+        bait_key, bait_selection_reason = fishing_bait_key_for_pond(
+            shop,
+            pond_key,
+            configured_bait_key,
+        )
         self._record(identity, miniapp_fishing_pending_purchases=[])
         shop = await self._ensure_chum(identity, token, shop, chum_key)
         shop, bait, bait_key = await self._ensure_cast_bait(
@@ -1727,6 +1752,8 @@ class MiniAppFishingAutomation:
             miniapp_fishing_pond_key=pond_key,
             miniapp_fishing_bait=str(bait.get("name") or bait_key),
             miniapp_fishing_bait_key=bait_key,
+            miniapp_fishing_configured_bait_key=configured_bait_key,
+            miniapp_fishing_bait_selection_reason=bait_selection_reason,
             miniapp_fishing_chum=str(active_chum.get("name") or "不打窝"),
             miniapp_fishing_next_run_time=(
                 datetime.now() + timedelta(seconds=wait)
