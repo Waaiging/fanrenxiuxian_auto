@@ -1410,6 +1410,62 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(len(actor.state["miniapp_fishing_round_records"]), 1)
         self.assertEqual(actor.state["miniapp_fishing_pending_result"], {})
 
+    def test_stale_pending_result_scope_is_discarded_after_restart(self):
+        class Actor:
+            def __init__(self):
+                self.state = {
+                    "miniapp_fishing_pending_result": {
+                        "id": "stale-result-token",
+                        "finished_at": "2026-08-20 10:00:00",
+                        "pond": "青溪浅滩",
+                        "bait": "妖血饵",
+                        "chum": "不打窝",
+                        "purchases": [],
+                        "finish_result": {"grade": "甲等", "score": 100},
+                    }
+                }
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(return_value=(
+                "fish_new_scope",
+                {
+                    "session": {
+                        "phase": "waiting",
+                        "biteAt": 2_000,
+                        "serverNow": 1_000,
+                    }
+                },
+            )),
+            fishing_result=AsyncMock(
+                side_effect=MiniAppBeastError("fishing_token_scope")
+            ),
+            fishing_shop=AsyncMock(return_value=shop_payload(bait_count=1)),
+            fishing_next_cast=AsyncMock(),
+        )
+        actor = Actor()
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(actor, transport, "main", logger)
+
+        self.assertGreater(asyncio.run(worker.run_cycle({"enabled": True})), 0)
+
+        transport.fishing_result.assert_awaited_once_with("主魂", "fish_new_scope")
+        transport.fishing_shop.assert_awaited_once_with("主魂", "fish_new_scope")
+        transport.fishing_next_cast.assert_not_awaited()
+        self.assertEqual(actor.state["miniapp_fishing_pending_result"], {})
+        self.assertEqual(
+            actor.state["miniapp_fishing_unrecorded_result_id"],
+            "stale-result-token",
+        )
+        self.assertEqual(
+            actor.state["miniapp_fishing_unrecorded_result_reason"],
+            "fishing_token_scope",
+        )
+        logger.warning.assert_called_once()
+
     def test_tenth_completed_round_emits_summary_without_waiting_for_rejection(self):
         class Actor:
             def __init__(self):

@@ -1910,6 +1910,33 @@ class MiniAppFishingAutomation:
         self._pending_result_tokens[identity] = token
         return self._record_pending_result(identity, pending_result, catch_payload)
 
+    def _discard_unrecoverable_pending_result(
+        self,
+        identity: str,
+        pending_result: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """Release a settled cast whose result token cannot be recovered after restart."""
+        challenge_id = str(pending_result.get("id") or "").strip()
+        self._pending_result_tokens.pop(identity, None)
+        self._record(
+            identity,
+            miniapp_fishing_pending_result={},
+            miniapp_fishing_pending_purchases=[],
+            miniapp_fishing_status="recovering",
+            miniapp_fishing_last_error="",
+            miniapp_fishing_unrecorded_result_id=challenge_id,
+            miniapp_fishing_unrecorded_result_reason=str(reason or "fishing_token_scope"),
+            miniapp_fishing_unrecorded_result_time=_now_text(),
+        )
+        self.log.warning(
+            "Mini App fishing pending result %s for %s cannot be recovered (%s); "
+            "continuing from the authoritative server session.",
+            challenge_id or "unknown",
+            identity,
+            reason or "fishing_token_scope",
+        )
+
     async def run_cycle(
         self,
         settings: dict[str, Any] | None = None,
@@ -1934,6 +1961,7 @@ class MiniAppFishingAutomation:
                 if exc.code not in {
                     "fishing_auth_refreshed",
                     "fishing_token_missing",
+                    "fishing_token_scope",
                     "invalid_token",
                 }:
                     raise
@@ -1941,7 +1969,19 @@ class MiniAppFishingAutomation:
 
         token, payload = await self.transport.fishing_entry(identity)
         if pending_result:
-            return await self._resume_pending_result(identity, token, pending_result)
+            try:
+                return await self._resume_pending_result(identity, token, pending_result)
+            except MiniAppBeastError as exc:
+                if exc.code != "fishing_token_scope":
+                    raise
+                # A persisted result belongs to the token that finished its cast.
+                # After a process restart the server may issue a fresh token scoped
+                # to the current session, making that old result irretrievable.
+                self._discard_unrecoverable_pending_result(
+                    identity,
+                    pending_result,
+                    exc.code,
+                )
         session = _mapping(payload.get("session"))
         challenge = _mapping(payload.get("challenge"))
         shop_payload = await self.transport.fishing_shop(identity, token)
