@@ -1186,15 +1186,11 @@ class MiniAppFishingTests(unittest.TestCase):
             asyncio.run(worker.run_cycle({"enabled": True}))
             asyncio.run(worker.run_cycle({"enabled": True}))
 
-        self.assertEqual(logger.info.call_count, 2)
-        first_round = " ".join(str(part) for part in logger.info.call_args_list[0].args)
-        second_round = " ".join(str(part) for part in logger.info.call_args_list[1].args)
-        self.assertIn("Mini App fishing", first_round)
-        self.assertIn("青溪浅滩", first_round)
-        self.assertIn("银须灵鲢", first_round)
-        self.assertIn("赤尾火鲤", second_round)
+        # Individual casts stay in the state/journal; Dashboard receives one
+        # aggregate entry when the caller explicitly emits the daily summary.
+        self.assertEqual(logger.info.call_count, 0)
         self.assertTrue(worker._emit_daily_summary("主魂"))
-        self.assertEqual(logger.info.call_count, 3)
+        self.assertEqual(logger.info.call_count, 1)
         combined = " ".join(str(part) for part in logger.info.call_args.args)
         self.assertIn("灵溪垂钓汇总", combined)
         self.assertIn("共 2 竿", combined)
@@ -1212,7 +1208,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(worker.actor.state["miniapp_fishing_pending_purchases"], [])
         self.assertEqual(len(worker.actor.state["miniapp_fishing_round_records"]), 2)
         self.assertFalse(worker._emit_daily_summary("主魂"))
-        self.assertEqual(logger.info.call_count, 3)
+        self.assertEqual(logger.info.call_count, 1)
 
     def test_unready_result_blocks_next_cast_until_it_is_recorded(self):
         class Actor:

@@ -1213,28 +1213,6 @@ class MiniAppFishingAutomation:
             miniapp_fishing_summary_emitted_count=min(emitted_count, len(records)),
         )
 
-    def _log_round_result(
-        self,
-        identity: str,
-        *,
-        pond: str,
-        bait: str,
-        chum: str,
-        summary: str,
-    ) -> None:
-        """Journal each completed cast so normal fishing remains observable."""
-        # Account file handlers keep INFO records only when they use the
-        # established IN/OUT envelope; use it so fishing results are visible
-        # in the same per-account logs and dashboard as other Mini App events.
-        self.log.info(
-            "IN [Mini App | %s]:\nMini App fishing [%s | %s | %s]: %s",
-            identity,
-            pond or "灵溪",
-            bait or "鱼饵",
-            chum or "不打窝",
-            summary or "本竿结果未记录",
-        )
-
     def _emit_daily_summary_at_cast_limit(self, identity: str) -> bool:
         """Emit the aggregate as soon as the known daily cast limit is reached."""
         state = self._state(identity)
@@ -1851,13 +1829,6 @@ class MiniAppFishingAutomation:
                 weight=_number(fish.get("weight"), 0),
                 exp_gain=_integer(catch_result.get("expGain"), 0),
                 bonus_loot=_items(catch_result.get("bonusLoot")),
-            )
-            self._log_round_result(
-                identity,
-                pond=pond,
-                bait=bait,
-                chum=chum,
-                summary=summary,
             )
             self._emit_daily_summary_at_cast_limit(identity)
         self._record(
