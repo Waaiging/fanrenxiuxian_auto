@@ -2985,7 +2985,11 @@ def decorate_log_entries(entries):
         if explicit_tags:
             last_command_tag = sorted(explicit_tags)[0]
             last_command_time = entry_time
-        elif last_command_tag and can_inherit_related_command(entry):
+        elif (
+            last_command_tag
+            and last_command_tag != FISHING_LOG_TAG
+            and can_inherit_related_command(entry)
+        ):
             if entry_time is None or last_command_time is None:
                 related_tags.add(last_command_tag)
             else:

@@ -119,6 +119,27 @@ class DashboardProcessTests(unittest.TestCase):
             {dashboard_server.FISHING_LOG_TAG},
         )
 
+    def test_fishing_tag_does_not_leak_to_following_runtime_entry(self):
+        fishing = {
+            "text": "2026-08-20 12:20:00,000 [INFO] IN [Mini App | 主魂]:\n"
+            "灵溪垂钓汇总（共 10 竿）",
+            "lines": [
+                "2026-08-20 12:20:00,000 [INFO] IN [Mini App | 主魂]:",
+                "灵溪垂钓汇总（共 10 竿）",
+            ],
+        }
+        following = {
+            "text": "2026-08-20 12:20:01,000 [INFO] IN [Mini App | 主魂]:\n"
+            "普通状态回复",
+            "lines": [
+                "2026-08-20 12:20:01,000 [INFO] IN [Mini App | 主魂]:",
+                "普通状态回复",
+            ],
+        }
+        decorated = dashboard_server.decorate_log_entries([fishing, following])
+        self.assertEqual(decorated[0]["tags"], {dashboard_server.FISHING_LOG_TAG})
+        self.assertNotIn(dashboard_server.FISHING_LOG_TAG, decorated[1]["tags"])
+
 
 if __name__ == "__main__":
     unittest.main()
