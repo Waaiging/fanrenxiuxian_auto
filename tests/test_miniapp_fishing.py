@@ -1186,9 +1186,15 @@ class MiniAppFishingTests(unittest.TestCase):
             asyncio.run(worker.run_cycle({"enabled": True}))
             asyncio.run(worker.run_cycle({"enabled": True}))
 
-        self.assertEqual(logger.info.call_count, 0)
+        self.assertEqual(logger.info.call_count, 2)
+        first_round = " ".join(str(part) for part in logger.info.call_args_list[0].args)
+        second_round = " ".join(str(part) for part in logger.info.call_args_list[1].args)
+        self.assertIn("Mini App fishing", first_round)
+        self.assertIn("青溪浅滩", first_round)
+        self.assertIn("银须灵鲢", first_round)
+        self.assertIn("赤尾火鲤", second_round)
         self.assertTrue(worker._emit_daily_summary("主魂"))
-        self.assertEqual(logger.info.call_count, 1)
+        self.assertEqual(logger.info.call_count, 3)
         combined = " ".join(str(part) for part in logger.info.call_args.args)
         self.assertIn("灵溪垂钓汇总", combined)
         self.assertIn("共 2 竿", combined)
@@ -1206,7 +1212,39 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(worker.actor.state["miniapp_fishing_pending_purchases"], [])
         self.assertEqual(len(worker.actor.state["miniapp_fishing_round_records"]), 2)
         self.assertFalse(worker._emit_daily_summary("主魂"))
-        self.assertEqual(logger.info.call_count, 1)
+        self.assertEqual(logger.info.call_count, 3)
+
+    def test_tenth_completed_round_emits_summary_without_waiting_for_rejection(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(Actor(), SimpleNamespace(), "main", logger)
+        for index in range(10):
+            worker._append_round_summary(
+                "主魂",
+                record_id=f"limit-round-{index}",
+                pond="青溪浅滩",
+                bait="妖血饵",
+                chum="不打窝",
+                purchases=[],
+                summary=f"提竿成功：【灵鱼{index}】",
+                caught=True,
+                weight=1,
+                exp_gain=1,
+                bonus_loot=[],
+            )
+
+        self.assertTrue(worker._emit_daily_summary_at_cast_limit("主魂"))
+        summary = str(logger.info.call_args.args[-1])
+        self.assertIn("共 10 竿", summary)
+        self.assertIn("灵鱼9", summary)
+        self.assertFalse(worker._emit_daily_summary_at_cast_limit("主魂"))
 
     def test_round_journal_recovers_summary_after_actor_state_is_lost(self):
         class Actor:

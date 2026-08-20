@@ -43,6 +43,7 @@ DEFAULT_RETRY_SECONDS = 60
 DEFAULT_DISABLED_SECONDS = 30
 DEFAULT_RESULT_ATTEMPTS = 18
 BAIT_PURCHASE_QUANTITY = 10
+FISHING_DAILY_CAST_LIMIT = 10
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 FISHING_ROD_ITEMS = frozenset(key for key, _ in MINIAPP_FISHING_RODS if key != "auto")
 FISHING_ROD_SCAN_SECONDS = 300
@@ -1208,6 +1209,34 @@ class MiniAppFishingAutomation:
             miniapp_fishing_summary_emitted_count=min(emitted_count, len(records)),
         )
 
+    def _log_round_result(
+        self,
+        identity: str,
+        *,
+        pond: str,
+        bait: str,
+        chum: str,
+        summary: str,
+    ) -> None:
+        """Journal each completed cast so normal fishing remains observable."""
+        self.log.info(
+            "Mini App fishing [%s] [%s | %s | %s]: %s",
+            identity,
+            pond or "灵溪",
+            bait or "鱼饵",
+            chum or "不打窝",
+            summary or "本竿结果未记录",
+        )
+
+    def _emit_daily_summary_at_cast_limit(self, identity: str) -> bool:
+        """Emit the aggregate as soon as the known daily cast limit is reached."""
+        state = self._state(identity)
+        if str(state.get("miniapp_fishing_summary_date") or "") != _today_text():
+            return False
+        if _integer(state.get("miniapp_fishing_round_count_today"), 0) < FISHING_DAILY_CAST_LIMIT:
+            return False
+        return self._emit_daily_summary(identity)
+
     def _emit_daily_summary(self, identity: str, *, daily_limit_reached: bool = False) -> bool:
         state = self._state(identity)
         try:
@@ -1788,6 +1817,14 @@ class MiniAppFishingAutomation:
                 exp_gain=_integer(catch_result.get("expGain"), 0),
                 bonus_loot=_items(catch_result.get("bonusLoot")),
             )
+            self._log_round_result(
+                identity,
+                pond=pond,
+                bait=bait,
+                chum=chum,
+                summary=summary,
+            )
+            self._emit_daily_summary_at_cast_limit(identity)
         self._record(
             identity,
             miniapp_fishing_status=("caught" if caught else "empty" if ready else "settling"),
@@ -1877,6 +1914,15 @@ class MiniAppFishingAutomation:
                 self._state(identity).get("miniapp_fishing_pending_purchases")
             )
             if ready:
+                pond = str(
+                    self._state(identity).get("miniapp_fishing_pond") or "灵溪"
+                )
+                bait = str(
+                    self._state(identity).get("miniapp_fishing_bait") or "鱼饵"
+                )
+                chum = str(
+                    self._state(identity).get("miniapp_fishing_chum") or "不打窝"
+                )
                 self._append_round_summary(
                     identity,
                     record_id=str(
@@ -1885,9 +1931,9 @@ class MiniAppFishingAutomation:
                         or session.get("castId")
                         or ""
                     ),
-                    pond=str(self._state(identity).get("miniapp_fishing_pond") or "灵溪"),
-                    bait=str(self._state(identity).get("miniapp_fishing_bait") or "鱼饵"),
-                    chum=str(self._state(identity).get("miniapp_fishing_chum") or "不打窝"),
+                    pond=pond,
+                    bait=bait,
+                    chum=chum,
                     purchases=pending_purchases,
                     summary=summary,
                     caught=bool(catch_result.get("caught")),
@@ -1895,6 +1941,14 @@ class MiniAppFishingAutomation:
                     exp_gain=_integer(catch_result.get("expGain"), 0),
                     bonus_loot=_items(catch_result.get("bonusLoot")),
                 )
+                self._log_round_result(
+                    identity,
+                    pond=pond,
+                    bait=bait,
+                    chum=chum,
+                    summary=summary,
+                )
+                self._emit_daily_summary_at_cast_limit(identity)
             self._record(
                 identity,
                 miniapp_fishing_status="settled",
