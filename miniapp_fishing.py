@@ -1263,6 +1263,33 @@ class MiniAppFishingAutomation:
                 if str(item.get("id") or "").strip()
             }
         if not records:
+            # A force-retry can discover that the server has already consumed
+            # today's casts before this worker has any local result journal
+            # (for example after a manual cast or an unrecoverable result
+            # token). Keep that state visible without inventing catch details.
+            if daily_limit_reached:
+                today = _today_text()
+                if (
+                    str(state.get("miniapp_fishing_summary_date") or "") == today
+                    and str(state.get("miniapp_fishing_last_daily_summary") or "").startswith(
+                        "灵溪垂钓汇总（服务端今日竿数已尽"
+                    )
+                ):
+                    return False
+                summary_text = (
+                    "灵溪垂钓汇总（服务端今日竿数已尽；本地没有可恢复的逐竿记录）\n"
+                    "服务端已确认该身份今日钓鱼次数用尽，鱼获明细可能来自重启前或手动垂钓，"
+                    "本地无法补录。"
+                )
+                self.log.info("IN [Mini App | %s]:\n%s", identity, summary_text)
+                self._record(
+                    identity,
+                    miniapp_fishing_summary_date=today,
+                    miniapp_fishing_summary_emitted_count=0,
+                    miniapp_fishing_last_daily_summary=summary_text[:5000],
+                    miniapp_fishing_last_daily_summary_time=_now_text(),
+                )
+                return True
             return False
         pending = [
             item

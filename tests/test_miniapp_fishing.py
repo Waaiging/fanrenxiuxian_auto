@@ -1614,6 +1614,26 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(actor.state["miniapp_fishing_status"], "daily_done")
         self.assertEqual(actor.state["miniapp_fishing_summary_emitted_count"], 1)
 
+    def test_daily_limit_without_local_records_is_visible_once(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        actor = Actor()
+        logger = SimpleNamespace(info=Mock(), warning=Mock(), error=Mock())
+        worker = MiniAppFishingAutomation(actor, SimpleNamespace(), "main", logger)
+
+        self.assertTrue(worker._emit_daily_summary("素缘子", daily_limit_reached=True))
+        message = str(logger.info.call_args.args[-1])
+        self.assertIn("服务端今日竿数已尽", message)
+        self.assertIn("没有可恢复的逐竿记录", message)
+        self.assertFalse(worker._emit_daily_summary("素缘子", daily_limit_reached=True))
+        self.assertEqual(logger.info.call_count, 1)
+
     def test_dashboard_daily_limit_uses_configured_bait_and_done_status(self):
         state = {
             "miniapp_fishing_status": "daily_done",
