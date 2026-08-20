@@ -1214,6 +1214,147 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertFalse(worker._emit_daily_summary("主魂"))
         self.assertEqual(logger.info.call_count, 3)
 
+    def test_unready_result_blocks_next_cast_until_it_is_recorded(self):
+        class Actor:
+            def __init__(self):
+                self.state = {"miniapp_fishing_chum": "不打窝"}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        challenge = {
+            "challengeId": "delayed-result-1",
+            "fishSeed": "delayed-result-1",
+            "fishPower": 1.7,
+            "targetLow": 41,
+            "targetHigh": 68,
+            "minDurationMs": 5200,
+            "maxDurationMs": 70000,
+        }
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(return_value=(
+                "fish_delayed",
+                {
+                    "session": {
+                        "phase": "bite",
+                        "pond": {"name": "青溪浅滩"},
+                        "bait": {"name": "妖血饵"},
+                    },
+                    "challenge": challenge,
+                },
+            )),
+            fishing_shop=AsyncMock(return_value=shop_payload(bait_count=1)),
+            fishing_finish=AsyncMock(return_value={
+                "result": {
+                    "grade": "甲等",
+                    "score": 100,
+                    "quality_bonus": 0.32,
+                    "details": {"stability": 1},
+                }
+            }),
+            fishing_result=AsyncMock(side_effect=[
+                {"result": {"ready": False}},
+                {
+                    "result": {
+                        "ready": True,
+                        "caught": True,
+                        "fish": {"name": "银须灵鲢", "weight": 1.23},
+                        "rarityLabel": "灵鱼",
+                        "expGain": 4,
+                        "bonusLoot": [],
+                    }
+                },
+            ]),
+        )
+        actor = Actor()
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+
+        with (
+            patch("miniapp_fishing.DEFAULT_RESULT_ATTEMPTS", 1),
+            patch("miniapp_fishing.asyncio.sleep", new=AsyncMock()),
+        ):
+            self.assertEqual(asyncio.run(worker.run_cycle({"enabled": True})), 30)
+            self.assertTrue(actor.state["miniapp_fishing_pending_result"])
+            self.assertNotIn("miniapp_fishing_round_records", actor.state)
+            self.assertEqual(asyncio.run(worker.run_cycle({"enabled": True})), 3)
+
+        transport.fishing_entry.assert_awaited_once()
+        self.assertEqual(transport.fishing_result.await_count, 2)
+        self.assertEqual(len(actor.state["miniapp_fishing_round_records"]), 1)
+        self.assertEqual(
+            actor.state["miniapp_fishing_round_records"][0]["id"],
+            "delayed-result-1",
+        )
+        self.assertEqual(actor.state["miniapp_fishing_pending_result"], {})
+
+    def test_pending_result_resumes_after_worker_restart_before_opening_next_cast(self):
+        class Actor:
+            def __init__(self):
+                self.state = {
+                    "miniapp_fishing_pending_result": {
+                        "id": "restart-delayed-result",
+                        "finished_at": "2026-08-20 10:00:00",
+                        "pond": "青溪浅滩",
+                        "bait": "妖血饵",
+                        "chum": "不打窝",
+                        "purchases": [],
+                        "finish_result": {
+                            "grade": "甲等",
+                            "score": 100,
+                            "quality_bonus": 0.32,
+                            "details": {"stability": 1},
+                        },
+                    }
+                }
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        transport = SimpleNamespace(
+            fishing_entry=AsyncMock(return_value=(
+                "fish_fresh_after_restart",
+                {"session": {"phase": "lobby"}},
+            )),
+            fishing_result=AsyncMock(return_value={
+                "result": {
+                    "ready": True,
+                    "caught": True,
+                    "fish": {"name": "赤尾火鲤", "weight": 3.21},
+                    "rarityLabel": "妖鱼",
+                    "expGain": 8,
+                    "bonusLoot": [],
+                }
+            }),
+            fishing_shop=AsyncMock(),
+            fishing_next_cast=AsyncMock(),
+        )
+        actor = Actor()
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+
+        self.assertEqual(asyncio.run(worker.run_cycle({"enabled": True})), 3)
+
+        transport.fishing_entry.assert_awaited_once()
+        transport.fishing_result.assert_awaited_once_with(
+            "主魂",
+            "fish_fresh_after_restart",
+        )
+        transport.fishing_shop.assert_not_awaited()
+        transport.fishing_next_cast.assert_not_awaited()
+        self.assertEqual(len(actor.state["miniapp_fishing_round_records"]), 1)
+        self.assertEqual(actor.state["miniapp_fishing_pending_result"], {})
+
     def test_tenth_completed_round_emits_summary_without_waiting_for_rejection(self):
         class Actor:
             def __init__(self):

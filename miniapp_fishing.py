@@ -870,6 +870,10 @@ class MiniAppFishingAutomation:
         self._scan_started = False
         self._force_retry_request_id = ""
         self._global_state_busy_failures = 0
+        # Fishing result settlement can outlive the initial polling window.
+        # Keep the active token in memory so the next cycle can query the
+        # completed cast before requesting or starting another one.
+        self._pending_result_tokens: dict[str, str] = {}
 
     @property
     def supported(self) -> bool:
@@ -1782,6 +1786,25 @@ class MiniAppFishingAutomation:
             proof,
             log_operation=False,
         )
+        pending_result = {
+            "id": str(challenge.get("challengeId") or ""),
+            "finished_at": _now_text(),
+            "pond": pond,
+            "bait": bait,
+            "chum": str(self._state(identity).get("miniapp_fishing_chum") or "不打窝"),
+            "purchases": [
+                dict(item)
+                for item in _items(
+                    self._state(identity).get("miniapp_fishing_pending_purchases")
+                )
+            ],
+            "finish_result": dict(_mapping(finish.get("result"))),
+        }
+        self._pending_result_tokens[identity] = token
+        self._record(
+            identity,
+            miniapp_fishing_pending_result=pending_result,
+        )
         catch_payload: dict[str, Any] = {}
         for attempt in range(DEFAULT_RESULT_ATTEMPTS):
             await asyncio.sleep(0.65 if attempt < 4 else 1.0)
@@ -1795,21 +1818,30 @@ class MiniAppFishingAutomation:
                 continue
             if _mapping(catch_payload.get("result")).get("ready"):
                 break
-        summary = fishing_result_summary(finish, catch_payload)
-        score_result = _mapping(finish.get("result"))
+        return self._record_pending_result(identity, pending_result, catch_payload)
+
+    def _record_pending_result(
+        self,
+        identity: str,
+        pending_result: dict[str, Any],
+        catch_payload: dict[str, Any],
+    ) -> int:
+        """Persist one settled cast, or keep it pending without opening another."""
+        score_result = _mapping(pending_result.get("finish_result"))
+        summary = fishing_result_summary({"result": score_result}, catch_payload)
         details = _mapping(score_result.get("details"))
         catch_result = _mapping(catch_payload.get("result"))
         fish = _mapping(catch_result.get("fish"))
         ready = bool(catch_result.get("ready"))
         caught = bool(catch_result.get("caught"))
-        pending_purchases = _items(
-            self._state(identity).get("miniapp_fishing_pending_purchases")
-        )
-        chum = str(self._state(identity).get("miniapp_fishing_chum") or "不打窝")
+        pending_purchases = _items(pending_result.get("purchases"))
+        pond = str(pending_result.get("pond") or "灵溪")
+        bait = str(pending_result.get("bait") or "鱼饵")
+        chum = str(pending_result.get("chum") or "不打窝")
         if ready:
             self._append_round_summary(
                 identity,
-                record_id=str(challenge.get("challengeId") or ""),
+                record_id=str(pending_result.get("id") or ""),
                 pond=pond,
                 bait=bait,
                 chum=chum,
@@ -1847,6 +1879,7 @@ class MiniAppFishingAutomation:
             miniapp_fishing_last_exp_gain=_integer(catch_result.get("expGain"), 0),
             miniapp_fishing_last_bonus_loot=_items(catch_result.get("bonusLoot")),
             miniapp_fishing_pending_purchases=([] if ready else pending_purchases),
+            miniapp_fishing_pending_result=({} if ready else dict(pending_result)),
             miniapp_fishing_next_run_time=(
                 datetime.now() + timedelta(seconds=3 if ready else 30)
             ).strftime(TIME_FORMAT),
@@ -1863,8 +1896,21 @@ class MiniAppFishingAutomation:
                 )
             except Exception:
                 self.log.warning("Mini App fishing reward recording failed", exc_info=True)
+        if ready:
+            self._pending_result_tokens.pop(identity, None)
         self._last_round_completed = ready
         return 3 if ready else 30
+
+    async def _resume_pending_result(
+        self,
+        identity: str,
+        token: str,
+        pending_result: dict[str, Any],
+    ) -> int:
+        """Poll a previous cast before the worker is allowed to create a new one."""
+        catch_payload = await self.transport.fishing_result(identity, token)
+        self._pending_result_tokens[identity] = token
+        return self._record_pending_result(identity, pending_result, catch_payload)
 
     async def run_cycle(
         self,
@@ -1875,7 +1921,29 @@ class MiniAppFishingAutomation:
         identity = str(identity or self._current_identity or "主魂")
         self._current_identity = identity
         self._last_round_completed = False
+        pending_result = _mapping(
+            self._state(identity).get("miniapp_fishing_pending_result")
+        )
+        pending_token = self._pending_result_tokens.get(identity, "")
+        if pending_result and pending_token:
+            try:
+                return await self._resume_pending_result(
+                    identity,
+                    pending_token,
+                    pending_result,
+                )
+            except MiniAppBeastError as exc:
+                if exc.code not in {
+                    "fishing_auth_refreshed",
+                    "fishing_token_missing",
+                    "invalid_token",
+                }:
+                    raise
+                self._pending_result_tokens.pop(identity, None)
+
         token, payload = await self.transport.fishing_entry(identity)
+        if pending_result:
+            return await self._resume_pending_result(identity, token, pending_result)
         session = _mapping(payload.get("session"))
         challenge = _mapping(payload.get("challenge"))
         shop_payload = await self.transport.fishing_shop(identity, token)
@@ -1909,61 +1977,45 @@ class MiniAppFishingAutomation:
             return wait
         if phase in {"expired", "settled", "missed"}:
             catch_payload = await self.transport.fishing_result(identity, token)
-            summary = fishing_result_summary({}, catch_payload)
-            ready = bool(_mapping(catch_payload.get("result")).get("ready"))
-            catch_result = _mapping(catch_payload.get("result"))
-            fish = _mapping(catch_result.get("fish"))
-            pending_purchases = _items(
-                self._state(identity).get("miniapp_fishing_pending_purchases")
-            )
-            if ready:
-                pond = str(
-                    self._state(identity).get("miniapp_fishing_pond") or "灵溪"
-                )
-                bait = str(
-                    self._state(identity).get("miniapp_fishing_bait") or "鱼饵"
-                )
-                chum = str(
-                    self._state(identity).get("miniapp_fishing_chum") or "不打窝"
-                )
-                self._append_round_summary(
-                    identity,
-                    record_id=str(
-                        session.get("id")
-                        or session.get("sessionId")
-                        or session.get("castId")
-                        or ""
+            state = self._state(identity)
+            pending_result = {
+                "id": str(
+                    session.get("id")
+                    or session.get("sessionId")
+                    or session.get("castId")
+                    or ""
+                ),
+                "finished_at": str(
+                    state.get("miniapp_fishing_last_round_time") or _now_text()
+                ),
+                "pond": str(state.get("miniapp_fishing_pond") or "灵溪"),
+                "bait": str(state.get("miniapp_fishing_bait") or "鱼饵"),
+                "chum": str(state.get("miniapp_fishing_chum") or "不打窝"),
+                "purchases": [
+                    dict(item)
+                    for item in _items(
+                        state.get("miniapp_fishing_pending_purchases")
+                    )
+                ],
+                "finish_result": {
+                    "grade": str(state.get("miniapp_fishing_last_grade") or ""),
+                    "score": _integer(state.get("miniapp_fishing_last_score"), 0),
+                    "quality_bonus": (
+                        _number(state.get("miniapp_fishing_last_quality_bonus"), 0) / 100
                     ),
-                    pond=pond,
-                    bait=bait,
-                    chum=chum,
-                    purchases=pending_purchases,
-                    summary=summary,
-                    caught=bool(catch_result.get("caught")),
-                    weight=_number(fish.get("weight"), 0),
-                    exp_gain=_integer(catch_result.get("expGain"), 0),
-                    bonus_loot=_items(catch_result.get("bonusLoot")),
-                )
-                self._log_round_result(
-                    identity,
-                    pond=pond,
-                    bait=bait,
-                    chum=chum,
-                    summary=summary,
-                )
-                self._emit_daily_summary_at_cast_limit(identity)
+                    "details": {
+                        "stability": (
+                            _number(state.get("miniapp_fishing_last_stability"), 0) / 100
+                        )
+                    },
+                },
+            }
+            self._pending_result_tokens[identity] = token
             self._record(
                 identity,
-                miniapp_fishing_status="settled",
-                miniapp_fishing_last_result=summary,
-                miniapp_fishing_last_error="",
-                miniapp_fishing_pending_purchases=([] if ready else pending_purchases),
-                miniapp_fishing_next_run_time=(
-                    datetime.now() + timedelta(seconds=3)
-                ).strftime(TIME_FORMAT),
+                miniapp_fishing_pending_result=pending_result,
             )
-            self._last_round_completed = ready
-            return 3
+            return self._record_pending_result(identity, pending_result, catch_payload)
         self._record(
             identity,
             miniapp_fishing_status="waiting",
