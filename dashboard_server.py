@@ -459,6 +459,7 @@ TWO_PART_COMMANDS = {
     (".野外历练", "谨慎"), (".野外历练", "深入"),
 } | {(".支援慕兰", mode) for mode in MULAN_SUPPORT_MODES}
 OTHER_LOG_TAG = "其他"                    # 未分类日志标签
+FISHING_LOG_TAG = "钓鱼"
 RELATED_LOG_WINDOW_SECONDS = 180          # 关联日志窗口（秒）
 CULTIVATION_DEDUPE_SECONDS = 15           # 修为变更去重窗口
 
@@ -483,6 +484,7 @@ BOT_REPLY_MARKERS = {
 # 每个账号的日志标签定义（对应不同的游戏指令）
 ACCOUNT_LOG_TAGS = {
     "main": [
+        FISHING_LOG_TAG,
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".推命", ".改命", ".观命", ".定命",
         ".登天阶", ".天阶状态", ".引九天罡风", ".问心台",
@@ -502,6 +504,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "sub": [
+        FISHING_LOG_TAG,
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功", ASK_DAO_COMMAND,
         ".启阵", ".助阵", ".强行出关",
         ".查看闭关", ".闭关修炼", ".深度闭关",
@@ -516,6 +519,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "xiaohao": [
+        FISHING_LOG_TAG,
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".寻觅灵兽", ".我的灵兽", ".放生", ".灵兽出战",
         ".灵兽偷菜", ".灵兽探渊", ".一键放养", ".灵兽互动", ".灵兽巡游", ".灵兽巡边", ".巡边状态", ".巡边归来",
@@ -529,6 +533,7 @@ ACCOUNT_LOG_TAGS = {
         OTHER_LOG_TAG,
     ],
     "waaiging": [
+        FISHING_LOG_TAG,
         ".拜入宗门 天星宗",
         ".宗门点卯", *MULAN_SUPPORT_COMMANDS, ".宗门传功",
         ".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关",
@@ -2834,6 +2839,9 @@ def is_probable_bot_reply_log_entry(entry):
 def extract_log_entry_tags(entry):
     """提取日志条目的分类标签"""
     lines = entry.get("lines") or []
+    text = str(entry.get("text") or "\n".join(lines))
+    if "Mini App fishing" in text or "灵溪垂钓汇总" in text:
+        return {FISHING_LOG_TAG}
     if not lines or not is_probable_bot_reply_log_entry(entry):
         return {OTHER_LOG_TAG}
     header = lines[0]

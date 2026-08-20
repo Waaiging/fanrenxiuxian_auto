@@ -82,6 +82,43 @@ class DashboardProcessTests(unittest.TestCase):
         self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(historical_entry))
         self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(attributed_entry))
 
+    def test_fishing_result_is_visible_and_tagged_in_runtime_logs(self):
+        raw = (
+            "2026-08-20 12:10:00,000 [INFO] IN [Mini App | 寻真子]:\n"
+            "Mini App fishing [灵眼寒潭 | 妖血饵 | 妖腥窝]: "
+            "提竿成功：【银须灵鲢】 灵鱼 2.15斤"
+        )
+        entry = {"text": raw, "lines": raw.splitlines()}
+
+        self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(entry))
+        self.assertEqual(
+            dashboard_server.extract_log_entry_tags(entry),
+            {dashboard_server.FISHING_LOG_TAG},
+        )
+        decorated = dashboard_server.decorate_log_entries([entry])[0]
+        self.assertEqual(decorated["identity"], "")
+        self.assertEqual(decorated["tags"], {dashboard_server.FISHING_LOG_TAG})
+        self.assertEqual(
+            dashboard_server.filter_log_entries(
+                [decorated],
+                tag=dashboard_server.FISHING_LOG_TAG,
+            ),
+            [decorated],
+        )
+
+    def test_fishing_summary_is_tagged_in_runtime_logs(self):
+        raw = (
+            "2026-08-20 12:20:00,000 [INFO] IN [Mini App | 主魂]:\n"
+            "灵溪垂钓汇总（共 10 竿）\n合计：成功 9/10 竿"
+        )
+        entry = {"text": raw, "lines": raw.splitlines()}
+
+        self.assertTrue(dashboard_server.is_dashboard_visible_log_entry(entry))
+        self.assertEqual(
+            dashboard_server.extract_log_entry_tags(entry),
+            {dashboard_server.FISHING_LOG_TAG},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
