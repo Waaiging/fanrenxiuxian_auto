@@ -1932,6 +1932,50 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertGreaterEqual((retry_at - before).total_seconds(), 59)
         self.assertLessEqual((retry_at - before).total_seconds(), 61)
 
+    def test_unrelated_worker_keeps_failed_transfer_retry_short(self):
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "sub|主魂", "xiaohao|主魂"],
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+
+        def seed(data):
+            data.update(current_key="sub|主魂", rod_holder="main|主魂")
+            data["transfer"] = {
+                "id": "transfer-unrelated-worker",
+                "status": "purchase_unknown",
+                "from": "main|主魂",
+                "to": "sub|主魂",
+                "listing_id": "24474",
+            }
+
+        miniapp_fishing._update_global_state(seed, settings=settings)
+        worker = MiniAppFishingAutomation(
+            SimpleNamespace(state={}, config={}, avatars=[], save_state=lambda: None),
+            SimpleNamespace(identity_player_ids={}),
+            "xiaohao",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+
+        before = datetime.now()
+        wait = asyncio.run(
+            worker._resume_failed_transfer(
+                settings,
+                miniapp_fishing.miniapp_fishing_global_snapshot(settings)["transfer"],
+            )
+        )
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        retry_at = datetime.strptime(
+            runtime["transfer"]["next_retry_at"], miniapp_fishing.TIME_FORMAT
+        )
+
+        self.assertEqual(wait, miniapp_fishing.FISHING_TRANSFER_RETRY_SECONDS)
+        self.assertGreaterEqual((retry_at - before).total_seconds(), 59)
+        self.assertLessEqual((retry_at - before).total_seconds(), 61)
+
     def test_wrong_cached_holder_recovers_with_verified_holder_on_same_listing(self):
         class Actor:
             def __init__(self):

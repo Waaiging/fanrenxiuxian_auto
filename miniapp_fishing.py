@@ -2585,10 +2585,11 @@ class MiniAppFishingAutomation:
                 failed_status=str(update_transfer.get("status") or "transfer_failed"),
                 detail="转竿恢复时仍未确认鱼竿位置",
                 failure_code=str(update_transfer.get("failure_code") or ""),
+                retry_seconds=FISHING_TRANSFER_RETRY_SECONDS,
             )
 
         _update_global_state(reschedule, settings=settings)
-        return min(FISHING_TRANSFER_FAILURE_RETRY_SECONDS, 300)
+        return FISHING_TRANSFER_RETRY_SECONDS
 
     async def _handle_transfer(
         self,
