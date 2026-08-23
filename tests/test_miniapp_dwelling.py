@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -608,6 +609,27 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(calls[6][1]["action"], "soothe")
         self.assertEqual(calls[7][0], "/api/miniapp/xianxia-dwelling/small-world")
         self.assertEqual(calls[7][1]["action"], "collect")
+
+    def test_cultivation_endpoint_returns_top_level_message(self):
+        calls = []
+
+        async def post_json(origin, path, payload, timeout):
+            calls.append((path, payload))
+            if path.endswith("/start"):
+                return START
+            self.assertEqual(path, "/api/miniapp/xianxia-dwelling/cultivation")
+            return {
+                "ok": True,
+                "message": "【闭关成功】修为增加了 100 点，需要调息 10 分钟。",
+            }
+
+        transport = MiniAppDwellingTransport(object(), ENTRY, post_json=post_json)
+        with patch("miniapp_dwelling.request_webview_init_data", new=AsyncMock(return_value="signed")):
+            response = asyncio.run(transport.command(".闭关修炼", identity="主魂"))
+
+        self.assertIn("【闭关成功】", response.text)
+        self.assertIn("需要调息 10 分钟", response.text)
+        self.assertEqual(calls[-1][0], "/api/miniapp/xianxia-dwelling/cultivation")
 
     def test_forge_treasure_uses_storage_bag_endpoint(self):
         calls = []
@@ -2308,6 +2330,41 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertTrue(state["last_star_collect_time"])
         self.assertEqual(rewards[0][0:2], ("素心子", ".收集精华"))
         self.assertEqual(rewards[0][3], "Mini App 收集精华")
+
+    def test_star_palace_divine_bypasses_cooling_circuit_before_manifestation(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["素缘子"],
+            identity_sect_names={"素缘子": "星宫"},
+            is_running=False,
+            save_state=lambda: None,
+        )
+        router = MiniAppCommandRouter(actor, "main", start_background_tasks=False)
+        router.transport.identity_player_ids = {"素缘子": -103}
+        router.transport.star_palace_action = AsyncMock(return_value={
+            "ok": True,
+            "actionResult": {
+                "message": "观星成功",
+                "divination": {
+                    "active": True,
+                    "remainingSeconds": 25,
+                },
+            },
+        })
+        router.transport.shift_destiny_action = AsyncMock()
+        manifest_dt = datetime.now() + timedelta(seconds=35)
+
+        asyncio.run(router.run_star_palace_cycle("素缘子", manifest_dt, "@Weeguu"))
+
+        kwargs = router.transport.star_palace_action.await_args.kwargs
+        self.assertTrue(kwargs["time_critical"])
+        router.transport.star_palace_action.assert_any_await(
+            "素缘子",
+            "divine",
+            time_critical=True,
+        )
 
     def test_unknown_identity_is_rejected(self):
         transport = MiniAppDwellingTransport(object(), ENTRY)

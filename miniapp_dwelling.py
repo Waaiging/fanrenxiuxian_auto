@@ -205,10 +205,21 @@ def extract_external_start_token(value: str, expected_prefix: str = "") -> str:
 
 
 def command_result_text(payload: dict[str, Any]) -> str:
-    result = payload.get("actionResult") if isinstance(payload, dict) else None
-    if not isinstance(result, dict):
+    """Return the user-facing message from command or action endpoints.
+
+    The dedicated cultivation endpoint returns a top-level ``message`` while
+    most command-center responses nest it under ``actionResult``.
+    """
+    if not isinstance(payload, dict):
         return ""
-    return str(result.get("rawMessage") or result.get("message") or "").strip()
+    result = payload.get("actionResult")
+    if isinstance(result, dict):
+        text = str(result.get("rawMessage") or result.get("message") or "").strip()
+        if text:
+            return text
+        if result.get("ok") is False:
+            return str(result.get("error") or "").strip()
+    return str(payload.get("rawMessage") or payload.get("message") or "").strip()
 
 
 def command_result_ok(payload: dict[str, Any]) -> bool:
@@ -732,6 +743,8 @@ class MiniAppDwellingTransport:
         identity: str = "主魂",
         retry_auth: bool = True,
         include_player_id: bool = True,
+        *,
+        time_critical: bool = False,
     ) -> dict[str, Any]:
         if not self.init_data or not self.start_payload:
             await self._initialize_unlocked()
@@ -749,6 +762,7 @@ class MiniAppDwellingTransport:
                 body,
                 self.timeout,
                 post_json=self.post_json,
+                time_critical=time_critical,
             )
         except MiniAppCircuitOpenError:
             raise
@@ -762,6 +776,7 @@ class MiniAppDwellingTransport:
                     identity=identity,
                     retry_auth=False,
                     include_player_id=include_player_id,
+                    time_critical=time_critical,
                 )
             raise
 
@@ -771,6 +786,8 @@ class MiniAppDwellingTransport:
         payload: dict[str, Any] | None = None,
         identity: str = "主魂",
         include_player_id: bool = True,
+        *,
+        time_critical: bool = False,
     ) -> dict[str, Any]:
         async with self._lock:
             return await self._request_unlocked(
@@ -778,6 +795,7 @@ class MiniAppDwellingTransport:
                 payload=payload,
                 identity=identity,
                 include_player_id=include_player_id,
+                time_critical=time_critical,
             )
 
     async def details(self, identity: str = "主魂") -> dict[str, Any]:
@@ -789,6 +807,44 @@ class MiniAppDwellingTransport:
                 identity=identity,
             ),
         )
+
+    async def star_palace_action(
+        self,
+        identity: str,
+        action: str,
+        target_username: str = "",
+        *,
+        log_operation: bool = True,
+        time_critical: bool = False,
+    ) -> dict[str, Any]:
+        """Execute a Star Palace dwelling action (divine / shift_destiny)."""
+        normalized_action = str(action or "").strip()
+        operation_names = {
+            "refresh": "刷新司星台",
+            "divine": "观星",
+            "shift_destiny": "改换星移",
+        }
+        if normalized_action not in operation_names:
+            raise MiniAppBeastError("star_palace_action_invalid")
+        payload: dict[str, Any] = {"action": normalized_action}
+        if normalized_action == "shift_destiny":
+            target = str(target_username or "").strip().lstrip("@")
+            if not target:
+                raise MiniAppBeastError("star_shift_target_missing")
+            payload["targetUsername"] = target
+        async with self._lock:
+            return await self._logged_operation(
+                identity,
+                operation_names[normalized_action],
+                lambda: self._request_unlocked(
+                    "/api/miniapp/xianxia-dwelling/star-palace",
+                    payload,
+                    identity=identity,
+                    time_critical=time_critical,
+                ),
+                summarize=miniapp_operation_result_text,
+                log_operation=log_operation,
+            )
 
     async def overview(self, identity: str = "主魂") -> dict[str, Any]:
         """Fetch a background profile snapshot without routine success logs."""

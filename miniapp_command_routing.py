@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -53,6 +55,14 @@ DEFAULT_STAR_FARM_RETRY_SECONDS = 5 * 60
 STAR_FARM_WAKE_GRACE_SECONDS = 5
 DEFAULT_STAR_FARM_TARGET = "天雷星"
 ROUTE_BLOCKED_LOG_SUPPRESS_SECONDS = 15 * 60
+DEFAULT_STAR_SHIFT_TARGET = "@Weeguu"
+STAR_GAZING_BOUNDARY_INTERVAL_HOURS = 3
+STAR_GAZING_LEAD_RANGE_SECONDS = (30, 40)
+STAR_PALACE_SHIFT_SAFETY_SECONDS = 3
+STAR_PALACE_TIME_CRITICAL_SECONDS = 90
+STAR_PALACE_SHIFT_MAX_DELAY_SECONDS = 20
+STAR_PALACE_ERROR_RETRY_SECONDS = 90
+STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS = 300
 
 
 def _now_text() -> str:
@@ -103,6 +113,9 @@ class MiniAppCommandRouter:
         )
         self.star_farm_target = str(
             settings.get("star_farm_target") or DEFAULT_STAR_FARM_TARGET
+        ).strip()
+        self.star_shift_target = str(
+            settings.get("star_shift_target") or DEFAULT_STAR_SHIFT_TARGET
         ).strip()
         self.transport = transport or MiniAppDwellingTransport(
             actor.client,
@@ -676,6 +689,291 @@ class MiniAppCommandRouter:
                 )
                 wait = self.star_farm_retry_seconds
             await asyncio.sleep(max(60, int(wait)))
+
+    @staticmethod
+    def _next_star_boundary(now: datetime | None = None) -> datetime:
+        now = now or datetime.now()
+        boundary = now.replace(
+            hour=(now.hour // STAR_GAZING_BOUNDARY_INTERVAL_HOURS)
+            * STAR_GAZING_BOUNDARY_INTERVAL_HOURS,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if now >= boundary:
+            boundary += timedelta(hours=STAR_GAZING_BOUNDARY_INTERVAL_HOURS)
+        return boundary
+
+    @staticmethod
+    def _star_action_mapping(value: Any, *keys: str) -> dict[str, Any]:
+        current = value if isinstance(value, dict) else {}
+        for key in keys:
+            current = current.get(key) if isinstance(current, dict) else None
+            current = current if isinstance(current, dict) else {}
+        return current
+
+    @staticmethod
+    def _star_remaining_seconds(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        match = re.search(r"\d+", str(value))
+        return max(0, int(match.group(0))) if match else None
+
+    def _save_star_palace_identity_state(self, **updates: Any) -> None:
+        state = getattr(self.actor, "state", None)
+        if isinstance(state, dict):
+            state.update(updates)
+            state["miniapp_star_palace_updated_at"] = _now_text()
+        try:
+            self.actor.save_state()
+        except Exception:
+            self.log.warning("Mini App star-palace state save failed", exc_info=True)
+
+    async def _wait_until_star_palace(self, wake_dt: datetime) -> bool:
+        """Sleep until wake time in small chunks; return False when stopped."""
+        while getattr(self.actor, "is_running", True):
+            pause_event = getattr(self.actor, "pause_event", None)
+            if pause_event is not None:
+                await pause_event.wait()
+            remaining = (wake_dt - datetime.now()).total_seconds()
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(
+                STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS,
+                max(1, int(remaining) + (1 if remaining % 1 else 0)),
+            ))
+        return False
+
+    async def run_star_palace_divine_loop(self, identity: str) -> None:
+        """Observe stars through the dwelling shortly before each manifestation."""
+        startup_done = getattr(self.actor, "startup_done", None)
+        if startup_done is not None:
+            await startup_done.wait()
+        target_username = str(getattr(self, "star_shift_target", DEFAULT_STAR_SHIFT_TARGET))
+        while getattr(self.actor, "is_running", True):
+            try:
+                pause_event = getattr(self.actor, "pause_event", None)
+                if pause_event is not None:
+                    await pause_event.wait()
+                if hasattr(self.actor, "identity_pause_seconds"):
+                    pause_seconds = int(self.actor.identity_pause_seconds(identity) or 0)
+                    if pause_seconds > 0:
+                        await asyncio.sleep(min(max(60, pause_seconds), STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
+                        continue
+
+                today = datetime.now().strftime("%Y-%m-%d")
+                if (
+                    getattr(self.actor, "state", {}).get("miniapp_star_palace_done_date")
+                    == today
+                ):
+                    next_boundary = self._next_star_boundary()
+                    if next_boundary.date() == datetime.now().date():
+                        wait = max(60, (next_boundary + timedelta(seconds=5) - datetime.now()).total_seconds())
+                    else:
+                        wait = max(60, (
+                            datetime.combine(datetime.now().date(), datetime.min.time())
+                            + timedelta(days=1, minutes=1)
+                            - datetime.now()
+                        ).total_seconds())
+                    await asyncio.sleep(min(wait, STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
+                    continue
+
+                manifest_dt = self._next_star_boundary()
+                lead = random.uniform(*STAR_GAZING_LEAD_RANGE_SECONDS)
+                wake_dt = manifest_dt - timedelta(seconds=lead)
+                now = datetime.now()
+                if now < wake_dt and (wake_dt - now).total_seconds() > 60:
+                    self.log.info(
+                        "Mini App star palace [%s]: waiting %.0fs for 观星 at %s (%.0fs before %s)",
+                        identity,
+                        (wake_dt - now).total_seconds(),
+                        wake_dt.strftime(TIME_FORMAT),
+                        lead,
+                        manifest_dt.strftime(TIME_FORMAT),
+                    )
+                    if not await self._wait_until_star_palace(wake_dt):
+                        break
+                await self.run_star_palace_cycle(identity, manifest_dt, target_username)
+                # The next opportunity follows the regular three-hour boundary.
+                next_wait = max(
+                    30,
+                    (self._next_star_boundary(manifest_dt) + timedelta(seconds=5) - datetime.now()).total_seconds(),
+                )
+                await asyncio.sleep(min(next_wait, STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+                self._save_star_palace_identity_state(
+                    miniapp_star_palace_last_error=code,
+                    miniapp_star_palace_last_error_time=_now_text(),
+                )
+                self.log.error(
+                    "Mini App star-palace loop failed for %s: %s",
+                    identity,
+                    code,
+                    exc_info=True,
+                )
+                await asyncio.sleep(STAR_PALACE_ERROR_RETRY_SECONDS)
+
+    async def run_star_palace_cycle(
+        self,
+        identity: str,
+        manifest_dt: datetime,
+        target_username: str = DEFAULT_STAR_SHIFT_TARGET,
+    ) -> None:
+        manifest_key = manifest_dt.strftime(TIME_FORMAT)
+        # A time-critical manifestation is worth one direct probe even when the
+        # shared breaker is cooling; ordinary background loops must keep waiting.
+        try:
+            from miniapp_beast import miniapp_circuit_preflight
+            circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
+            if circuit_error is not None:
+                seconds_to_boundary = (manifest_dt - datetime.now()).total_seconds()
+                if seconds_to_boundary <= STAR_PALACE_TIME_CRITICAL_SECONDS:
+                    self.log.warning(
+                        "Mini App star palace [%s]: breaker is open %ss before "
+                        "manifestation; forcing one time-critical probe",
+                        identity,
+                        int(seconds_to_boundary),
+                    )
+                else:
+                    raise circuit_error
+        except ImportError:
+            pass
+        try:
+            seconds_to_boundary = max(
+                0,
+                int((manifest_dt - datetime.now()).total_seconds()),
+            )
+            payload = await self.transport.star_palace_action(
+                identity,
+                "divine",
+                time_critical=seconds_to_boundary <= STAR_PALACE_TIME_CRITICAL_SECONDS,
+            )
+        except MiniAppCircuitOpenError as exc:
+            self.log.info(
+                "Mini App star palace [%s] paused while upstream circuit is open; retry %s",
+                identity,
+                exc.retry_at or f"in {exc.retry_after}s",
+            )
+            raise
+        except MiniAppBeastError as exc:
+            message = ""
+            self._save_star_palace_identity_state(
+                miniapp_star_palace_last_error=exc.code,
+                miniapp_star_palace_last_error_time=_now_text(),
+                miniapp_star_palace_last_manifest=manifest_key,
+            )
+            self.log.warning("Mini App star palace [%s] 观星失败：%s", identity, exc.code)
+            details = await self.transport.details(identity)
+            divination = self._star_action_mapping(details.get("account"), "starPalace", "divination")
+            active = self._star_action_mapping(divination, "active")
+            if not bool(divination.get("canDivine", True)):
+                remaining = self._star_remaining_seconds(active.get("remainingSeconds"))
+                if remaining is not None:
+                    self.log.info(
+                        "Mini App star palace [%s]: divine already active; retrying 改换星移 in %ss",
+                        identity,
+                        remaining,
+                    )
+                    await asyncio.sleep(min(remaining + 2, STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
+                    await self.run_star_palace_cycle(identity, manifest_dt, target_username)
+                    return
+
+        result = self._star_action_mapping(payload, "actionResult")
+        divination = self._star_action_mapping(result, "divination") or self._star_action_mapping(result, "starPalace", "divination")
+        active = self._star_action_mapping(divination, "active")
+        remaining = self._star_remaining_seconds(active.get("remainingSeconds"))
+        message = command_result_text(payload) or miniapp_operation_result_text(payload) or "完成"
+        self._save_star_palace_identity_state(
+            miniapp_star_palace_last_error="",
+            miniapp_star_palace_last_error_time="",
+            miniapp_star_palace_last_success_time=_now_text(),
+            miniapp_star_palace_last_manifest=manifest_key,
+            miniapp_star_palace_last_result=message,
+        )
+        self.log.info(
+            "Mini App star palace [%s]: 观星 completed before %s; result=%s; active=%s",
+            identity,
+            manifest_key,
+            message,
+            bool(active),
+        )
+
+        if not active:
+            return
+
+        # Shift while the manifestation is still pending, never after it lands.
+        if remaining is None:
+            shift_delay = random.randint(0, STAR_PALACE_SHIFT_MAX_DELAY_SECONDS)
+        else:
+            shift_delay = max(
+                0,
+                min(
+                    STAR_PALACE_SHIFT_MAX_DELAY_SECONDS,
+                    remaining - STAR_PALACE_SHIFT_SAFETY_SECONDS,
+                ),
+            )
+        if shift_delay:
+            self.log.info(
+                "Mini App star palace [%s]: waiting %ss to 改换星移 -> %s (remaining=%ss)",
+                identity,
+                shift_delay,
+                target_username,
+                remaining,
+            )
+            await asyncio.sleep(shift_delay)
+        try:
+            shift_payload = await self.transport.star_palace_action(
+                identity,
+                "shift_destiny",
+                target_username=target_username,
+                time_critical=True,
+            )
+            shift_message = (
+                command_result_text(shift_payload)
+                or miniapp_operation_result_text(shift_payload)
+                or "完成"
+            )
+            final_boundary = datetime.now().replace(
+                hour=21,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            updates = {
+                "miniapp_star_palace_last_shift_time": _now_text(),
+                "miniapp_star_palace_last_shift_target": target_username,
+                "miniapp_star_palace_last_shift_result": shift_message,
+            }
+            if manifest_dt >= final_boundary:
+                updates["miniapp_star_palace_done_date"] = datetime.now().strftime(
+                    "%Y-%m-%d"
+                )
+            self._save_star_palace_identity_state(**updates)
+            self.log.info(
+                "Mini App star palace [%s]: 改换星移 -> %s; result=%s",
+                identity,
+                target_username,
+                shift_message,
+            )
+        except MiniAppCircuitOpenError:
+            raise
+        except MiniAppBeastError as exc:
+            self._save_star_palace_identity_state(
+                miniapp_star_palace_last_error=exc.code,
+                miniapp_star_palace_last_error_time=_now_text(),
+                miniapp_star_palace_last_shift_target=target_username,
+            )
+            self.log.error(
+                "Mini App star palace [%s] 改换星移失败：%s",
+                identity,
+                exc.code,
+                exc_info=True,
+            )
 
     def _identity_routable(self, identity: str) -> bool:
         key = self._resolve_identity(identity)

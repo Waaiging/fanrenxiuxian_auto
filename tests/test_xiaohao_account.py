@@ -27,6 +27,7 @@ class XiaoHaoAccountTests(unittest.TestCase):
         actor._miniapp_command_router = SimpleNamespace(
             star_farm_identities=lambda: ["素心子", "星宫二号"],
             run_star_farm_loop=lambda identity: None,
+            run_star_palace_divine_loop=lambda identity: None,
         )
         actor._miniapp_inventory = None
         actor._miniapp_fishing = None
@@ -39,7 +40,12 @@ class XiaoHaoAccountTests(unittest.TestCase):
 
         self.assertEqual(
             registered,
-            ["miniapp_star_farm_素心子", "miniapp_star_farm_星宫二号"],
+            [
+                "miniapp_star_farm_素心子",
+                "miniapp_star_palace_素心子",
+                "miniapp_star_farm_星宫二号",
+                "miniapp_star_palace_星宫二号",
+            ],
         )
 
 

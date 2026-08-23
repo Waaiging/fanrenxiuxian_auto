@@ -151,6 +151,42 @@ class MiniAppBeastTests(unittest.TestCase):
                 self.assertEqual(post.call_count, 2)
                 self.assertEqual(breaker.snapshot(origin)["status"], "closed")
 
+    def test_time_critical_post_json_bypasses_cooling_circuit(self):
+        clock = [3000.0]
+        origin = "https://asc.aiopenai.app"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            breaker = MiniAppTransportCircuitBreaker(
+                os.path.join(tmpdir, "health.json"),
+                failure_threshold=1,
+                backoff_seconds=(600,),
+                probe_lease_seconds=5,
+                clock=lambda: clock[0],
+                logger=Mock(),
+            )
+            post = Mock(side_effect=[MiniAppBeastError("invalid_json"), {"ok": True}])
+            with (
+                patch("miniapp_beast._MINIAPP_CIRCUIT", breaker),
+                patch("miniapp_beast._post_json_sync", post),
+            ):
+                with self.assertRaises(MiniAppBeastError):
+                    asyncio.run(_post_json(origin, "/start", {}, 5))
+                self.assertEqual(post.call_count, 1)
+                self.assertEqual(breaker.snapshot(origin)["status"], "open")
+
+                result = asyncio.run(
+                    _post_json(
+                        origin,
+                        "/star-palace",
+                        {},
+                        5,
+                        time_critical=True,
+                    )
+                )
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(breaker.snapshot(origin)["status"], "closed")
+
     def test_entry_and_roster_normalization(self):
         entry = "https://t.me/fanrenxiuxian_bot?startapp=df_fixture"
         self.assertEqual(miniapp_entry_start_param(entry), "df_fixture")

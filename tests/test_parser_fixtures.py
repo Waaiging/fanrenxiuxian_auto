@@ -11748,10 +11748,12 @@ class ParserFixtureTests(unittest.TestCase):
         ):
             self.assertTrue(asyncio.run(actor.execute_avatar_heart_trial("缘生子", status)))
 
+        # The heart-trial protocol anchors every .稳 to the original
+        # .共历心劫 bot response, not to each round result.
         self.assertEqual(direct_commands, [
             (".稳", 2200),
-            (".稳", 2401),
-            (".稳", 2402),
+            (".稳", 2200),
+            (".稳", 2200),
         ])
         self.assertGreater(
             common_seconds_until(actor.state["avatars"]["缘生子"]["next_heart_trial_time"]),

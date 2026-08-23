@@ -304,6 +304,23 @@ class MiniAppTransportCircuitBreaker:
                 int(round(outage_seconds)),
             )
 
+    def force_recover(self, origin: str) -> None:
+        """Recover after authoritative evidence outside an elected probe."""
+        now = float(self.clock())
+        with _exclusive_transport_health_lock(self.lock_path):
+            document = self._read_unlocked()
+            key, entry = self._load_entry(document, origin)
+            generation = int(entry.get("generation") or 0)
+            entry = self._empty_entry()
+            entry["generation"] = generation
+            entry["updated_at"] = self._time_text(now)
+            document["origins"][key] = entry
+            self._write_unlocked(document)
+        _CIRCUIT_LOG.warning(
+            "Mini App upstream circuit recovered by a time-critical request; "
+            "HTTP requests resumed"
+        )
+
     def record_failure(
         self,
         origin: str,
@@ -605,7 +622,15 @@ def _post_json_sync(origin, path, payload, timeout):
     return data
 
 
-async def _post_json(origin, path, payload, timeout, post_json=None):
+async def _post_json(
+    origin,
+    path,
+    payload,
+    timeout,
+    post_json=None,
+    *,
+    time_critical: bool = False,
+):
     if post_json is not None:
         # Injected transports are used by focused tests and do not represent the
         # shared production HTTP service.
@@ -618,7 +643,14 @@ async def _post_json(origin, path, payload, timeout, post_json=None):
             raise MiniAppBeastError(result.get("error") or "miniapp_request_failed")
         return result
 
-    decision = await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
+    # A manifestation boundary is a rare, user-visible deadline. Try one direct
+    # request even while the shared breaker is cooling; failures still update
+    # the shared health state. Ordinary background traffic keeps waiting.
+    decision = (
+        await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
+        if not time_critical
+        else MiniAppCircuitDecision(permit=MiniAppCircuitPermit())
+    )
     if decision.permit is None:
         # Never hold a transport lock or sleep inside a worker while the service
         # is down. The caller records a paused state and schedules the next check.
@@ -650,6 +682,11 @@ async def _post_json(origin, path, payload, timeout, post_json=None):
             await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
         raise
     await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
+    if time_critical:
+        # A successful deadline request is authoritative evidence that the
+        # upstream has recovered, even though it did not hold the elected
+        # half-open probe lease.
+        await asyncio.to_thread(_MINIAPP_CIRCUIT.force_recover, origin)
     return result
 
 
