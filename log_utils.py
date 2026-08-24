@@ -810,6 +810,8 @@ def command_response_family(command):
         return "divination"
     if cmd == ".查看货品" or cmd.startswith(".购买商品"):
         return "merchant"
+    if cmd.startswith((".上架至万宝阁", ".从万宝阁取下", ".从万宝阁下架")):
+        return "market"
     if cmd == ".宗门传功":
         return "sect_skill"
     if cmd in {".灵树灌溉", ".灵树状态", ".采摘灵果", ".协同守山"}:
@@ -941,6 +943,8 @@ def text_response_family(text):
         return "divination"
     if "天机代卜" in clean or "天机链路" in clean:
         return "divination"
+    if "万宝阁" in clean and any(k in clean for k in ["放置", "收回", "陈列", "展台", "下架"]):
+        return "market"
     if any(k in clean for k in ["异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤", "储物袋"]):
         return "merchant"
     if "宗门传功" in clean or "传功玉简" in clean:
@@ -1086,6 +1090,11 @@ def feedback_response_matches_command(command, text):
         ])
     if expected == "divination":
         return any(k in clean for k in ["天机代卜", "天机链路", "卜算", "代卜", "卦象"])
+    if expected == "market":
+        return any(k in clean for k in [
+            "放置在万宝阁", "收回储物袋", "并未陈列",
+            "储物袋中没有", "展台", "已上架", "上架成功",
+        ])
     if expected == "merchant":
         return any(k in clean for k in [
             "异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤",

@@ -77,6 +77,7 @@ from world_boss_features import install_world_boss_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 #   自动回复辅助：判断消息是否为自动回复链的一部分，并处理私聊互动
 
+from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
     CommonCommandMixin,
     MULAN_SUPPORT_COMMAND,
@@ -6176,6 +6177,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
 
+        recover_wind_thunder_sessions(self)
         log.info("All Sub-Account loops started.")
         # 主线程保持存活
         while self.is_running:

@@ -124,8 +124,24 @@ async def _cleanup(actor: Any, identity: str) -> bool:
     if not state.get("wind_thunder_equipped"):
         return True
     try:
-        await _send_internal(actor, identity, ".散念 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
-        await _send_internal(actor, identity, ".上架至万宝阁 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
+        await _send_internal(
+            actor,
+            identity,
+            ".散念 风雷翅",
+            timeout=60,
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
+        await _send_internal(
+            actor,
+            identity,
+            ".上架至万宝阁 风雷翅",
+            timeout=60,
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
         state.update({
             "wind_thunder_equipped": False,
             "wind_thunder_cleanup_due_at": "",
@@ -151,9 +167,15 @@ def _schedule_cleanup(actor: Any, identity: str) -> None:
     if old and not old.done():
         old.cancel()
 
+    state = _identity_state(actor, key)
+    due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
+    delay = WIND_THUNDER_HOLD_SECONDS
+    if due:
+        delay = max(0.0, (due - _now()).total_seconds())
+
     async def runner() -> None:
         try:
-            await asyncio.sleep(WIND_THUNDER_HOLD_SECONDS)
+            await asyncio.sleep(delay)
             await _cleanup(actor, key)
         except asyncio.CancelledError:
             raise
@@ -164,6 +186,33 @@ def _schedule_cleanup(actor: Any, identity: str) -> None:
         tasks[key] = asyncio.create_task(runner())
     except RuntimeError:
         tasks.pop(key, None)
+
+
+def recover_wind_thunder_sessions(actor: Any) -> None:
+    """Re-arm persisted cleanup timers after a process restart."""
+    candidates = {"主魂"}
+    avatars = getattr(actor, "avatars", None)
+    if isinstance(avatars, (list, tuple, set)):
+        candidates.update(str(value).strip() for value in avatars if str(value).strip())
+    for identity in sorted(candidates):
+        if not wind_thunder_enabled(actor, identity):
+            continue
+        state = _identity_state(actor, identity)
+        due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
+        if not (state.get("wind_thunder_equipped") and due):
+            continue
+        try:
+            if due > _now():
+                _schedule_cleanup(actor, identity)
+            else:
+                task = asyncio.create_task(_cleanup(actor, identity))
+                tasks = getattr(actor, "_wind_thunder_cleanup_tasks", None)
+                if not isinstance(tasks, dict):
+                    tasks = {}
+                    setattr(actor, "_wind_thunder_cleanup_tasks", tasks)
+                tasks[identity] = task
+        except RuntimeError:
+            return
 
 
 async def wind_thunder_send(
@@ -187,6 +236,19 @@ async def wind_thunder_send(
         state = _identity_state(actor, identity)
         due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
         now = _now()
+        # The item is held for one fixed window.  A second accelerated
+        # command inside that window reuses the existing deadline.
+        if state.get("wind_thunder_equipped") and due and due > now:
+            equipped_at = _parse_dt(state.get("wind_thunder_equipped_at"))
+            if equipped_at and 0 <= (now - equipped_at).total_seconds() <= WIND_THUNDER_HOLD_SECONDS:
+                result = await sender()
+                state = _identity_state(actor, identity)
+                persisted_due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
+                if persisted_due:
+                    state["wind_thunder_cleanup_due_at"] = persisted_due.strftime(TIME_FORMAT)
+                    _save(actor)
+                    _schedule_cleanup(actor, identity)
+                return result
         if state.get("wind_thunder_equipped") and due and due <= now:
             await _cleanup(actor, identity)
             state = _identity_state(actor, identity)

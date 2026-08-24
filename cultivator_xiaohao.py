@@ -66,6 +66,7 @@ from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
 from automation_settings import miniapp_beast_abyss_power_in_range
+from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
     CommonCommandMixin,
     MULAN_SUPPORT_COMMAND,
@@ -7853,6 +7854,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             if avatar == CLOUD_STAIRS_AVATAR:
                 self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")
+        recover_wind_thunder_sessions(self)
 
         while self.is_running:
             await asyncio.sleep(60)

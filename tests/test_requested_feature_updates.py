@@ -1,10 +1,16 @@
 import asyncio
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from common_command_features import CommonCommandMixin
+import log_utils
 from automation_settings import current_xiaohao_taiyi_identity
-from wind_thunder_features import wind_thunder_send, wind_thunder_target_cooldown
+from wind_thunder_features import recover_wind_thunder_sessions, wind_thunder_send, wind_thunder_target_cooldown
+
+
+def _state(actor, identity):
+    return actor.identity_state_for_timed_command(identity)
 
 
 class FeatureActor(CommonCommandMixin):
@@ -66,6 +72,51 @@ class RequestedFeatureUpdatesTests(unittest.TestCase):
         }
         self.assertEqual(current_xiaohao_taiyi_identity(state), "灵脉玄")
 
+    def test_wind_thunder_second_command_keeps_fixed_hold_window(self):
+        async def scenario():
+            actor = FeatureActor("sub")
+            with patch("wind_thunder_features.WIND_THUNDER_HOLD_SECONDS", 60):
+                await wind_thunder_send(
+                    actor,
+                    "主魂",
+                    ".探寻裂缝",
+                    lambda: actor.send_and_wait_feedback(".探寻裂缝"),
+                )
+                first_due = _state(actor, "主魂")["wind_thunder_cleanup_due_at"]
+                await wind_thunder_send(
+                    actor,
+                    "主魂",
+                    ".问道",
+                    lambda: actor.send_and_wait_feedback(".问道"),
+                )
+                second_due = _state(actor, "主魂")["wind_thunder_cleanup_due_at"]
+            return actor.calls, first_due, second_due
+
+        calls, first_due, second_due = asyncio.run(scenario())
+        self.assertEqual(calls.count(".装备 风雷翅"), 1)
+        self.assertEqual(datetime.strptime(first_due, "%Y-%m-%d %H:%M:%S"), datetime.strptime(second_due, "%Y-%m-%d %H:%M:%S"))
+
+    def test_wind_thunder_recovery_schedules_future_cleanup(self):
+        async def scenario():
+            actor = FeatureActor("sub")
+            state = _state(actor, "主魂")
+            state["wind_thunder_equipped"] = True
+            state["wind_thunder_equipped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            state["wind_thunder_cleanup_due_at"] = (datetime.now() + timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+            recover_wind_thunder_sessions(actor)
+            task = actor._wind_thunder_cleanup_tasks["主魂"]
+            self.assertFalse(task.done())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+    def test_market_feedback_is_not_retried_as_fishing(self):
+        command = ".上架至万宝阁 风雷翅"
+        self.assertEqual(log_utils.command_response_family(command), "market")
+        self.assertEqual(log_utils.text_response_family("你已将【风雷翅】郑重地放置在万宝阁的展台上。"), "market")
+        self.assertTrue(log_utils.feedback_response_matches_command(command, "你已将【风雷翅】郑重地放置在万宝阁的展台上。"))
     def test_wind_thunder_cooldowns_match_requested_minutes_exactly(self):
         self.assertEqual(wind_thunder_target_cooldown(".寻觅灵兽", 6 * 3600), 252 * 60)
         self.assertEqual(wind_thunder_target_cooldown(".问道", 12 * 3600), 504 * 60)

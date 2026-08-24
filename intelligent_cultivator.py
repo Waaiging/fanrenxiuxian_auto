@@ -105,6 +105,7 @@ from miniapp_dwelling import (
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
+from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
     CommonCommandMixin,
     MULAN_SUPPORT_COMMAND,
@@ -6360,6 +6361,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
 
 
+        recover_wind_thunder_sessions(self)
         # ---- 保持主循环运行 ----
         # 主 coroutine 不能退出，否则子任务也会被取消
         while self.is_running:
