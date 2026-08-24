@@ -16,6 +16,11 @@ from typing import Any
 
 from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from miniapp_beast_contract import main_soul_is_wanling
+from wind_thunder_features import (
+    wind_thunder_enabled,
+    wind_thunder_send,
+    wind_thunder_target_cooldown,
+)
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -190,7 +195,10 @@ class MiniAppBeastSeekWorker:
 
     def _mark_seek_attempt(self, attempted_at: datetime) -> datetime:
         now = datetime.now()
-        next_time = attempted_at + timedelta(seconds=self.interval_seconds)
+        interval = self.interval_seconds
+        if wind_thunder_enabled(self.actor, "主魂"):
+            interval = wind_thunder_target_cooldown(".寻觅灵兽", interval)
+        next_time = attempted_at + timedelta(seconds=interval)
         if next_time <= now:
             next_time = now + timedelta(seconds=self.interval_seconds)
         self.state.update({
@@ -456,7 +464,12 @@ class MiniAppBeastSeekWorker:
         })
         self._save()
 
-        sought = await self.transport.spirit_beast_seek("主魂")
+        sought = await wind_thunder_send(
+            self.actor,
+            "主魂",
+            ".寻觅灵兽",
+            lambda: self.transport.spirit_beast_seek("主魂"),
+        )
         post_beasts = list((sought or {}).get("beasts") or [])
         self._update_cache(post_beasts)
         new_beasts = [item for item in post_beasts if _beast_id(item) not in set(before_ids)]
@@ -470,6 +483,11 @@ class MiniAppBeastSeekWorker:
                 MIN_COOLDOWN_RETRY_SECONDS,
                 cooldown_seconds + COOLDOWN_RETRY_GRACE_SECONDS,
             )
+            if wind_thunder_enabled(self.actor, "主魂"):
+                wait_seconds = min(
+                    wait_seconds,
+                    wind_thunder_target_cooldown(".寻觅灵兽", DEFAULT_INTERVAL_SECONDS),
+                )
             retry_at = datetime.now() + timedelta(seconds=wait_seconds)
             self._clear_inflight()
             self.state.update({

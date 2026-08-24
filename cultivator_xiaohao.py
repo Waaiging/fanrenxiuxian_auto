@@ -73,6 +73,7 @@ from common_command_features import (
     seconds_until_mulan_support_start,
 )
 from duel_features import DuelMixin
+from surprise_raid_features import SurpriseRaidMixin
 from command_feedback import (
     _handle_telegram_send_protection,
     is_retired_auto_command,
@@ -144,7 +145,7 @@ STAR_GAZING_SHIFT_PROFILE = "dynamic"
 STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (6, 28)      # 小号保留历史动态晚窗，覆盖结算较慢的轮次
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
 STAR_GAZING_SHIFT_GRACE_SECONDS = 1                  # 超过配置窗口 1 秒后不再补发，避免结算后无效改换
-STAR_SHIFT_TARGET = "TitanCreeper"            # 分身改换星移的目标用户名
+STAR_SHIFT_TARGET = "Weeguu"            # 分身改换星移的目标用户名
 STAR_GAZING_ACTIVE_WINDOW_SECONDS = 59               # 即时模式活跃窗口为 59 秒
 STAR_GAZING_GOOD_KEYWORDS = ("【Good - 地磁暴动】", "【Good - 星辰异象】", "【Good - 五彩缤纷】", "【Good - 封魔裂隙回响】")
 STAR_GAZING_ROTATING_AVATARS = ["素心子"]  # 观星轮换化身列表：每次 Good 事件只派一个化身
@@ -348,7 +349,7 @@ class AtomicTaskContext:
 # CultivatorXiaoHao 主类
 # =====================================================================
 
-class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
+class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
     """
     万灵宗小号脚本主类。
     继承 CommonCommandMixin（通用指令）和 ConcubineMixin（侍妾功能）。
@@ -440,6 +441,16 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.state_file = STATE_FILE
         self.state = self.load_state()
         self.restore_avatar_dao_names()
+        persisted_sects = self.state.get("identity_sect_names")
+        if isinstance(persisted_sects, dict):
+            merged_sects = dict(self.identity_sect_names)
+            merged_sects.update({
+                str(identity): str(sect)
+                for identity, sect in persisted_sects.items()
+                if str(identity).strip() and str(sect).strip()
+            })
+            self.identity_sect_names = merged_sects
+            self.state["identity_sect_names"] = dict(merged_sects)
         # startup: restore paused state
         if self.state.get("is_paused", False):
             self.pause_event.clear()
@@ -6806,6 +6817,12 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 if self.dashboard_command_paused(TAIYI_GUIDE_COMMAND, avatar):
                     await asyncio.sleep(scheduler_sleep_seconds(600))
                     continue
+                if self.identity_sect_name(avatar) != "太一门":
+                    # Dao names can change sects at runtime.  Keep the task
+                    # alive so a later re-entry is picked up, but never emit
+                    # the old Taiyi-only command while the identity is out.
+                    await asyncio.sleep(scheduler_sleep_seconds(600))
+                    continue
 
                 async with AtomicTaskContext(self, f"TaiyiGuide-{avatar}"):
                     state = self.get_avatar_state(avatar)
@@ -7510,11 +7527,20 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         """Register Mini App-backed background loops used by the XiaoHao account."""
         miniapp_router = getattr(self, "_miniapp_command_router", None)
         if miniapp_router is not None:
+            if callable(getattr(miniapp_router, "run_profile_sync_loop", None)):
+                self.create_scheduler_task(
+                    "miniapp_profiles",
+                    lambda: miniapp_router.run_profile_sync_loop(),
+                )
             star_identities = miniapp_router.star_farm_identities()
             for identity in star_identities:
                 self.create_scheduler_task(
                     f"miniapp_star_farm_{identity}",
                     lambda identity=identity: miniapp_router.run_star_farm_loop(identity),
+                )
+                self.create_scheduler_task(
+                    f"miniapp_star_palace_{identity}",
+                    lambda identity=identity: miniapp_router.run_star_palace_divine_loop(identity),
                 )
         if getattr(self, "_miniapp_inventory", None) is not None:
             self.create_scheduler_task(
@@ -7560,6 +7586,37 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
                 "miniapp_fate_cards",
                 lambda: self._miniapp_daily_activities.run_fate_cards_loop(),
             )
+
+    def reconcile_miniapp_star_palace_tasks(self, identities=None):
+        """Start/stop Star Palace Mini App loops when sect membership changes."""
+        router = getattr(self, "_miniapp_command_router", None)
+        if router is None:
+            return
+        candidates = identities if identities is not None else router.routable_identities()
+        desired = set(router.star_farm_identities(list(candidates)))
+        registry = getattr(self, "_scheduler_task_registry", {}) or {}
+        for identity in desired:
+            for prefix, runner in (
+                ("miniapp_star_farm_", lambda identity=identity: router.run_star_farm_loop(identity)),
+                ("miniapp_star_palace_", lambda identity=identity: router.run_star_palace_divine_loop(identity)),
+            ):
+                name = f"{prefix}{identity}"
+                task = registry.get(name)
+                if task is None or task.done():
+                    self.create_scheduler_task(name, runner)
+        active_identities = set()
+        for name, task in list(registry.items()):
+            if name.startswith("miniapp_star_farm_"):
+                active_identities.add(name[len("miniapp_star_farm_"):])
+            elif name.startswith("miniapp_star_palace_"):
+                active_identities.add(name[len("miniapp_star_palace_"):])
+            if (
+                (name.startswith("miniapp_star_farm_") or name.startswith("miniapp_star_palace_"))
+                and name.rsplit("_", 1)[-1] not in desired
+                and task is not None
+                and not task.done()
+            ):
+                task.cancel()
 
     # ---- 启动 ----
 
@@ -7744,6 +7801,10 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=25))
+        self.create_scheduler_task(
+            "surprise_raid",
+            lambda: self.run_surprise_raid_scheduler(initial_delay=30),
+        )
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
@@ -7761,7 +7822,7 @@ class CultivatorXiaoHao(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMi
             self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
-            if avatar == TAIYI_GUIDE_AVATAR:
+            if self.identity_sect_name(avatar) == "太一门":
                 self.create_scheduler_task(f"avatar_taiyi_guide_{avatar}", lambda avatar=avatar: self.run_avatar_taiyi_guide_loop(avatar, initial_delay=0))
             if avatar == CLOUD_STAIRS_AVATAR:
                 self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))

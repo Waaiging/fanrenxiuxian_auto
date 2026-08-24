@@ -16,12 +16,15 @@ from state_io import load_json_state
 CONFIG_DIR = Path(__file__).resolve().parent
 AUTOMATION_SETTINGS_FILE = CONFIG_DIR / "automation_settings.json"
 SUB_STATE_FILE = CONFIG_DIR / "state_sub.json"
+XIAOHAO_STATE_FILE = CONFIG_DIR / "state_xiaohao.json"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _SUB_IDENTITY_STATE_CACHE: dict[str, Any] = {
     "signature": None,
     "state": {},
 }
 _SUB_IDENTITY_STATE_LOCK = threading.Lock()
+_XIAOHAO_IDENTITY_STATE_CACHE: dict[str, Any] = {"signature": None, "state": {}}
+_XIAOHAO_IDENTITY_STATE_LOCK = threading.Lock()
 
 ACCOUNT_NAMES = {
     "main": "主号",
@@ -31,6 +34,8 @@ ACCOUNT_NAMES = {
 }
 DEFAULT_SUB_YINLUO_IDENTITY = "竹和生"
 SUB_YINLUO_PLAYER_ID = "-1003885521329"
+DEFAULT_XIAOHAO_TAIYI_IDENTITY = "缘生子"
+XIAOHAO_TAIYI_PLAYER_ID = "-1003996748766"
 
 
 def _load_sub_identity_state() -> dict[str, Any]:
@@ -83,6 +88,57 @@ def current_sub_yinluo_identity(state: Any = None) -> str:
         return current
 
     return DEFAULT_SUB_YINLUO_IDENTITY
+
+
+def _load_xiaohao_identity_state() -> dict[str, Any]:
+    with _XIAOHAO_IDENTITY_STATE_LOCK:
+        try:
+            stat = XIAOHAO_STATE_FILE.stat()
+            signature = (
+                str(XIAOHAO_STATE_FILE),
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(stat.st_size),
+            )
+        except OSError:
+            signature = (str(XIAOHAO_STATE_FILE), None, None)
+        if _XIAOHAO_IDENTITY_STATE_CACHE.get("signature") == signature:
+            cached = _XIAOHAO_IDENTITY_STATE_CACHE.get("state")
+            return cached if isinstance(cached, dict) else {}
+        state = load_json_state(str(XIAOHAO_STATE_FILE), expected_type=dict, default={}) or {}
+        _XIAOHAO_IDENTITY_STATE_CACHE["signature"] = signature
+        _XIAOHAO_IDENTITY_STATE_CACHE["state"] = state
+        return state
+
+
+def current_xiaohao_taiyi_identity(state: Any = None) -> str:
+    """Return the current Dao name for the stable small-account avatar."""
+    source = state if isinstance(state, dict) else _load_xiaohao_identity_state()
+    player_names = source.get("avatar_dao_names_by_player_id")
+    if not isinstance(player_names, dict):
+        player_names = source.get("avatar_dao_names_by_tgid")
+    if isinstance(player_names, dict):
+        current = str(player_names.get(XIAOHAO_TAIYI_PLAYER_ID) or "").strip()
+        if current and current != "一缕残魂":
+            return current
+    avatar_states = source.get("avatars")
+    if isinstance(avatar_states, dict):
+        for name, avatar_state in avatar_states.items():
+            if not isinstance(avatar_state, dict):
+                continue
+            if str(avatar_state.get("miniapp_player_id") or "") == XIAOHAO_TAIYI_PLAYER_ID:
+                candidate = str(avatar_state.get("miniapp_dao_name") or name or "").strip()
+                if candidate and candidate != "一缕残魂":
+                    return candidate
+    aliases = source.get("avatar_dao_name_aliases")
+    current = DEFAULT_XIAOHAO_TAIYI_IDENTITY
+    seen = set()
+    while isinstance(aliases, dict) and current not in seen:
+        seen.add(current)
+        mapped = str(aliases.get(current) or "").strip()
+        if not mapped or mapped == current or mapped == "一缕残魂":
+            break
+        current = mapped
+    return current or DEFAULT_XIAOHAO_TAIYI_IDENTITY
 
 
 SUB_YINLUO_IDENTITY = current_sub_yinluo_identity()
@@ -189,6 +245,20 @@ def canonical_automation_identity(account: Any, identity: Any) -> str:
             identity_name = mapped
         if identity_name == "一缕残魂":
             return current
+    elif account_key == "xiaohao":
+        current = current_xiaohao_taiyi_identity()
+        if identity_name in {"缘生子", DEFAULT_XIAOHAO_TAIYI_IDENTITY, current, "一缕残魂"}:
+            return current
+        aliases = _load_xiaohao_identity_state().get("avatar_dao_name_aliases")
+        seen = set()
+        while isinstance(aliases, dict) and identity_name not in seen:
+            seen.add(identity_name)
+            mapped = str(aliases.get(identity_name) or "").strip()
+            if not mapped or mapped == identity_name:
+                break
+            identity_name = mapped
+        if identity_name == "一缕残魂":
+            return current
     return identity_name
 
 
@@ -198,6 +268,11 @@ def automation_account_identities() -> dict[str, tuple[str, ...]]:
     identities["sub"] = tuple(
         current if identity == SUB_YINLUO_IDENTITY else identity
         for identity in ACCOUNT_IDENTITIES["sub"]
+    )
+    current_xiaohao = current_xiaohao_taiyi_identity()
+    identities["xiaohao"] = tuple(
+        current_xiaohao if identity == DEFAULT_XIAOHAO_TAIYI_IDENTITY else identity
+        for identity in ACCOUNT_IDENTITIES["xiaohao"]
     )
     return identities
 
@@ -1056,7 +1131,7 @@ def automation_dashboard_payload() -> dict[str, Any]:
                         for identity in account_identities[account]
                     ],
                 }
-                for account in MINIAPP_FISHING_SUPPORTED_ACCOUNTS
+                for account, identities in account_identities.items()
             ],
             "ponds": [
                 {"key": key, "name": name}

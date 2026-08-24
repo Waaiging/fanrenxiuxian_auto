@@ -69,6 +69,7 @@ from command_modules import (
 )
 from command_feedback import is_retired_auto_command
 from automation_settings import mulan_support_command as configured_mulan_support_command
+from wind_thunder_features import wind_thunder_enabled, wind_thunder_send, wind_thunder_target_cooldown
 from reward_parsing import (
     clean_reward_text as shared_clean_reward_text,
     context_reward_items as shared_context_reward_items,
@@ -223,7 +224,7 @@ TIANXING_DESTINY_ROUTE_RETRY_SECONDS = 15 * 60
 
 # 已知宗门列表（用于解析宗门战双方）
 KNOWN_SECTS = (
-    "凌霄宫", "星宫", "万灵宗", "元婴宗", "天星宗", "黄枫谷",
+    "凌霄宫", "星宫", "万灵宗", "元婴宗", "天星宗", "太一门", "阴罗宗", "散修", "黄枫谷",
     "掩月宗", "落云宗", "古剑门", "百巧院", "鬼灵门",
     "合欢宗", "御灵宗", "天道盟", "九国盟",
 )
@@ -3278,15 +3279,31 @@ class CommonCommandMixin:
         if str(plan.command or "").split()[0] == ".野外历练":
             if not await self.ensure_tianxing_destiny_for_action(identity, "exploration"):
                 return None
+            prefix = await self.send_tianxing_exploration_prefix(identity)
+            if not prefix.get("ok"):
+                state = self.tianxing_identity_state(identity)
+                state[plan.next_key] = add_seconds_str(
+                    now_str(), int(prefix.get("wait") or TIANXING_RIFT_PREFIX_RETRY_SECONDS)
+                )
+                self.save_state()
+                return None
         kwargs = {
             "timeout": plan.timeout,
             "max_retries": plan.max_retries,
             "force_identity_check": plan.force_identity_check,
             "return_response_msg": plan.return_response_msg,
         }
-        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-            return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
-        return await self.send_and_wait_feedback(plan.command, **kwargs)
+        async def send_once():
+            if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+                return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
+            return await self.send_and_wait_feedback(plan.command, **kwargs)
+        try:
+            wind_internal = int(getattr(self, "_wind_thunder_internal_depth", 0) or 0)
+        except (TypeError, ValueError):
+            wind_internal = 0
+        if wind_internal <= 0:
+            return await wind_thunder_send(self, identity, plan.command, send_once)
+        return await send_once()
 
     def allow_retired_auto_command(self, command):
         """Only revive Tianxing exploration commands inside the rift prefix chain."""
@@ -3352,6 +3369,32 @@ class CommonCommandMixin:
                 }
             await asyncio.sleep(TIANXING_RIFT_PREFIX_DELAY_SECONDS)
         return {"ok": True, "wait": 0, "response": None}
+
+    async def send_tianxing_exploration_prefix(self, identity="主魂"):
+        """Send the Tianxing exploration fate change before wild training."""
+        identity = str(identity or "主魂").strip() or "主魂"
+        if not self.tianxing_identity_enabled(identity):
+            return {"ok": True, "wait": 0, "response": None}
+        command = ".改命 探索"
+        self._tianxing_rift_prefix_command = command
+        try:
+            response = await self.send_tianxing_identity_command(
+                identity,
+                command,
+                timeout=90,
+                max_retries=0,
+                force_identity_check=identity != "主魂",
+            )
+        finally:
+            self._tianxing_rift_prefix_command = ""
+        text = self.timed_command_response_text(response)
+        if not self.tianxing_prefix_response_ok(command, text):
+            return {
+                "ok": False,
+                "wait": self.tianxing_prefix_wait_seconds(text) or TIANXING_RIFT_PREFIX_RETRY_SECONDS,
+                "response": response,
+            }
+        return {"ok": True, "wait": 0, "response": response}
 
     async def send_rift_search_plan(self, plan, identity="主魂"):
         identity = str(identity or "主魂").strip() or "主魂"
@@ -3626,7 +3669,9 @@ class CommonCommandMixin:
 
         self.record_daily_reward_event(identity, command, resp, source=command)
         state[last_key] = now
-        actual_cd = self.fixed_command_success_cooldown_seconds(command, resp, cd_seconds)
+        actual_cd = self.fixed_command_success_cooldown_seconds(
+            command, resp, cd_seconds, identity=identity
+        )
         state[next_key] = add_seconds_str(now, actual_cd)
         self.save_state()
         if actual_cd != cd_seconds:
@@ -3664,7 +3709,7 @@ class CommonCommandMixin:
             return self.parse_wait_time("\n".join(relevant_lines))
         return -1
 
-    def fixed_command_success_cooldown_seconds(self, command, resp, fallback_seconds):
+    def fixed_command_success_cooldown_seconds(self, command, resp, fallback_seconds, identity="主魂"):
         """Return the next cooldown after a successful fixed-cooldown command."""
         command = str(command or "").strip()
         fallback = int(fallback_seconds or 0)
@@ -3672,6 +3717,8 @@ class CommonCommandMixin:
             actual = self.rift_success_cooldown_seconds(resp)
             if actual > 0:
                 return actual
+        if command == ".探寻裂缝" and wind_thunder_enabled(self, identity):
+            return wind_thunder_target_cooldown(command, fallback)
         return fallback
 
     def is_rift_cooldown_response(self, text):
@@ -3708,6 +3755,9 @@ class CommonCommandMixin:
             return False
         cd = self.parse_wait_time(resp)
         if cd > 0 and self.is_rift_cooldown_response(resp):
+            state = self.identity_state_for_timed_command(identity)
+            if state.get("wind_thunder_equipped"):
+                cd = wind_thunder_target_cooldown(plan.command, cd)
             now = now_str()
             state[plan.next_key] = add_seconds_str(now, cd)
             state["last_rift_search_cooldown_probe_time"] = now
@@ -4135,10 +4185,11 @@ class CommonCommandMixin:
             "force_identity_check": True,
             "suppress_no_response_alert": True,
         }
-        if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
-            resp = await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
-        else:
-            resp = await self.send_and_wait_feedback(plan.command, **kwargs)
+        async def send_once():
+            if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
+                return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
+            return await self.send_and_wait_feedback(plan.command, **kwargs)
+        resp = await wind_thunder_send(self, identity, plan.command, send_once)
         return self.record_rift_cooldown_probe_response(
             identity,
             self.timed_command_response_text(resp),
@@ -4243,9 +4294,12 @@ class CommonCommandMixin:
             actual_cd = self.ask_dao_success_cooldown_seconds(resp)
             self.record_daily_reward_event("主魂", plan.command, resp, source=source, final=True)
             self.state[last_key] = now
+            cooldown = actual_cd if actual_cd > 0 else self.ask_dao_cd_seconds()
+            if wind_thunder_enabled(self, "主魂"):
+                cooldown = wind_thunder_target_cooldown(plan.command, cooldown)
             self.state[next_key] = add_seconds_str(
                 now,
-                actual_cd if actual_cd > 0 else self.ask_dao_cd_seconds(),
+                cooldown,
             )
             self.state["last_ask_dao_error"] = ""
             if actual_cd > 0:
@@ -4278,6 +4332,8 @@ class CommonCommandMixin:
             return False
         cd = self.parse_wait_time(resp)
         if cd > 0 and self.is_ask_dao_cooldown_response(resp):
+            if wind_thunder_enabled(self, "主魂"):
+                cd = wind_thunder_target_cooldown(source, cd)
             now = now_str()
             self.state[plan.next_key] = add_seconds_str(now, cd)
             self.state["last_ask_dao_cooldown_probe_time"] = now
@@ -4294,13 +4350,15 @@ class CommonCommandMixin:
             await asyncio.sleep(delay)
         log = self.common_command_logger()
         log.info(f"{plan.command}: probing actual cooldown via follow-up command.")
-        resp = await self.send_and_wait_feedback(
-            plan.command,
-            timeout=min(int(plan.timeout or 45), 45),
-            max_retries=0,
-            force_identity_check=True,
-            suppress_no_response_alert=True,
-        )
+        async def send_once():
+            return await self.send_and_wait_feedback(
+                plan.command,
+                timeout=min(int(plan.timeout or 45), 45),
+                max_retries=0,
+                force_identity_check=True,
+                suppress_no_response_alert=True,
+            )
+        resp = await wind_thunder_send(self, "主魂", plan.command, send_once)
         return self.record_ask_dao_cooldown_probe_response(
             self.timed_command_response_text(resp),
             plan.command,
@@ -6215,6 +6273,63 @@ class CommonCommandMixin:
     def account_sect_name(self):
         """获取本账号的宗门名称"""
         return (getattr(self, "sect_name", "") or self.state.get("sect_name", "") or "").strip()
+
+    def sync_identity_sect_from_text(self, identity="主魂", text=""):
+        """Learn an identity's current sect from an authoritative game reply.
+
+        Sect-bound schedulers consult ``identity_sect_name`` on every pass, so
+        changing this mapping immediately retires commands belonging to the
+        previous sect and enables the new sect's features.
+        """
+        identity = str(identity or "主魂").strip() or "主魂"
+        text = str(text or "").replace("**", "").replace("`", "")
+        if not text:
+            return ""
+        sect = ""
+        # Prefer explicit membership/assignment phrases over incidental sect
+        # mentions in reward or battle text.
+        explicit_patterns = (
+            r"(?:所属宗门|当前宗门|宗门)\s*[:：]?\s*[【\[]?([^】\]，,。\s]+)",
+            r"(?:成功)?(?:拜入|加入|加入了|转入)\s*[【\[]?([^】\]，,。\s]+)",
+            r"(?:宗门身份|门派)\s*[:：]?\s*[【\[]?([^】\]，,。\s]+)",
+        )
+        for pattern in explicit_patterns:
+            match = re.search(pattern, text)
+            if match:
+                candidate = str(match.group(1) or "").strip("【】[]()（） ：:，,。")
+                if candidate in KNOWN_SECTS:
+                    sect = candidate
+                    break
+        if not sect:
+            # Defection replies often contain only the old sect and a generic
+            # phrase; mark the identity as 散修 so no sect-specific command is
+            # accidentally sent while waiting for the next membership sync.
+            if re.search(r"叛出宗门|退出宗门|离开宗门|斩断与.{0,12}尘缘|脱离宗门", text):
+                sect = "散修"
+        if not sect:
+            return ""
+        mapping = getattr(self, "identity_sect_names", None)
+        if not isinstance(mapping, dict):
+            mapping = {}
+            setattr(self, "identity_sect_names", mapping)
+        changed = mapping.get(identity) != sect
+        mapping[identity] = sect
+        state = getattr(self, "state", None)
+        if isinstance(state, dict):
+            state_mapping = state.setdefault("identity_sect_names", {})
+            if isinstance(state_mapping, dict):
+                state_mapping[identity] = sect
+            if identity == "主魂":
+                state["sect_name"] = sect
+        if identity == "主魂" and hasattr(self, "sect_name"):
+            self.sect_name = sect
+        if changed:
+            try:
+                self.save_state()
+            except Exception:
+                self.common_command_logger().warning("Failed to persist sect learned from reply.", exc_info=True)
+            self.common_command_logger().info("Sect refreshed from reply: %s -> %s", identity, sect)
+        return sect
 
     def identity_sect_name(self, identity="主魂"):
         """获取某个身份所属宗门；黄龙山等身份级活动使用。"""

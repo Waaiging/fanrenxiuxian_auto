@@ -11,6 +11,11 @@ import time
 from datetime import datetime, timedelta
 
 from automation_settings import miniapp_beast_abyss_power_in_range
+from wind_thunder_features import (
+    wind_thunder_enabled,
+    wind_thunder_send,
+    wind_thunder_target_cooldown,
+)
 from miniapp_beast import (
     DEFAULT_REFRESH_SECONDS,
     DEFAULT_RETRY_SECONDS,
@@ -648,8 +653,21 @@ class MainBeastMixin:
                         else:
                             self.schedule_main_beast_retry("next_hunt_time", HUNT_FAIL_RETRY_SECONDS)
                             continue
-                    response = await self.send_and_wait_feedback(".寻觅灵兽", timeout=60, max_retries=0)
+                    response = await wind_thunder_send(
+                        self,
+                        "主魂",
+                        ".寻觅灵兽",
+                        lambda: self.send_and_wait_feedback(".寻觅灵兽", timeout=60, max_retries=0),
+                    )
                     self.record_main_hunt_response(self.main_beast_response_text(response))
+                    if wind_thunder_enabled(self, "主魂"):
+                        last_hunt = parse_beast_time(self.state.get("last_hunt_time"))
+                        if last_hunt is not None:
+                            self.state["next_hunt_time"] = beast_add_seconds(
+                                wind_thunder_target_cooldown(".寻觅灵兽", HUNT_CD_SECONDS),
+                                last_hunt,
+                            )
+                            self.main_beast_save()
             except asyncio.CancelledError:
                 raise
             except Exception:

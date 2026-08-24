@@ -285,6 +285,8 @@ cp config_sub.example.json config_sub.json
 
 Mini App 主要配置位于 `miniapp_beast`，包括固定入口、问心塔、寻宝、天机试炼时间、深入游历、星宫灵圃和重试时间；受限账号补充配置位于 `restricted_miniapp`。Dashboard“自动化设置”保存在运行时文件 `automation_settings.json`（不提交 Git），包含青元子参战身份、慕兰参数、灵溪垂钓、野外深入历练身份、天机试炼身份和天星宗闭关/天机值设置。配置文件迁移会自动补齐新增区段。
 
+风雷翅加速身份可在 `config.json` 的 `wind_thunder_identities` 中配置，格式为 `account|identity`，例如 `main|主魂`。未配置时使用内置默认身份：主号主魂、主号无咎子、副号主魂、Waaiging 主魂。
+
 ## 开发与验证
 
 VPS 当前使用 Python 3.12；本地开发应至少使用 Python 3.12，并从 `requirements.txt` 安装依赖。当前依赖未锁定精确版本，升级依赖前必须跑完整回归。
@@ -364,12 +366,13 @@ bash start_all.sh
 Dashboard 启动前在部署目录创建未提交的 `.env`：
 
 ```bash
+DASHBOARD_ACCESS_TOKEN=replace-with-a-long-random-token
 DASHBOARD_USERS=admin
-DASHBOARD_PASSWORD=replace-with-a-long-random-password
 DASHBOARD_SESSION_DAYS=180
 DASHBOARD_SESSION_SECRET=replace-with-another-long-random-value
 ```
 
+登录页现在只需填写访问密码；旧的 `DASHBOARD_PASSWORD` 配置仍兼容，HTTP Basic 客户端也仍可使用。
 Dashboard 使用登录页和签名会话 Cookie。首次登录后，同一浏览器默认保持登录 180 天；
 密码管理器也可以正常保存账号密码。点击页面右上角退出按钮会立即清除本机登录会话。
 

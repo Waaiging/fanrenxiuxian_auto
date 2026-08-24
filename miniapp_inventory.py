@@ -30,9 +30,11 @@ _REQUEST_WRITE_LOCK = threading.Lock()
 
 
 def inventory_account_identities() -> dict[str, tuple[str, ...]]:
-    """Return inventory identities with the sub avatar's current Dao name."""
+    """Return inventory identities with current rebirth Dao names."""
     identities = dict(INVENTORY_ACCOUNT_IDENTITIES)
-    identities["sub"] = automation_account_identities()["sub"]
+    dynamic = automation_account_identities()
+    identities["sub"] = dynamic["sub"]
+    identities["xiaohao"] = dynamic["xiaohao"]
     return identities
 
 

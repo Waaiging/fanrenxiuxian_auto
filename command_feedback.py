@@ -570,6 +570,12 @@ async def send_and_wait_feedback_common(
                 record_cultivation_delta_from_text(
                     actor, resp_text, identity=_identity or "主魂", logger=logger, source=message, msg=final_resp_msg
                 )
+                sync_sect = getattr(actor, "sync_identity_sect_from_text", None)
+                if callable(sync_sect):
+                    try:
+                        sync_sect(_identity or "主魂", resp_text)
+                    except Exception:
+                        logger.warning("Failed to sync sect from command reply", exc_info=True)
                 _record_timed_response_guard(
                     actor, message, resp_text, logger=logger, identity=_identity or "主魂"
                 )

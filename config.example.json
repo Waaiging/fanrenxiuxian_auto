@@ -38,6 +38,12 @@
     "journey_retry_seconds": 900,
     "miniapp_daily_retry_seconds": 900
   },
+  "wind_thunder_identities": [
+    "main|主魂",
+    "main|无咎子",
+    "sub|主魂",
+    "waaiging|主魂"
+  ],
   "restricted_miniapp": {
     "enabled": true,
     "status_refresh_seconds": 1800,

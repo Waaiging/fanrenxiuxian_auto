@@ -84,6 +84,7 @@ from common_command_features import (
     seconds_until_mulan_support_start,
 )
 from duel_features import DuelMixin
+from surprise_raid_features import SurpriseRaidMixin
 #   通用指令混入类：提供 send_and_wait_feedback 等共用方法的基础实现与默认状态
 
 from command_feedback import _handle_telegram_send_protection, is_retired_auto_command, send_and_wait_feedback_common
@@ -431,7 +432,7 @@ class AtomicTaskContext:
 # 继承自 CommonCommandMixin（通用指令方法）、ConcubineMixin（侍妾管理方法）和 YinluoMixin（阴罗宗）
 # ============================================================
 
-class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
+class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """星宫副号修仙脚本主类，管理所有自动循环与事件响应。"""
 
     yuanying_main_command = YUANYING_RETREAT_COMMAND
@@ -552,6 +553,16 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
             "-1003340352216": "寻真子",
         }
         self.restore_avatar_dao_names()
+        persisted_sects = self.state.get("identity_sect_names")
+        if isinstance(persisted_sects, dict):
+            merged_sects = dict(self.identity_sect_names)
+            merged_sects.update({
+                str(identity): str(sect)
+                for identity, sect in persisted_sects.items()
+                if str(identity).strip() and str(sect).strip()
+            })
+            self.identity_sect_names = merged_sects
+            self.state["identity_sect_names"] = dict(merged_sects)
         self.avatar_send_lock = asyncio.Lock()     # 化身操作串行锁
         # A persisted identity can be stale when the Telegram session survives
         # a process restart.  Require a fresh switch confirmation first.
@@ -3410,12 +3421,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 continue
 
             log.info(f"Rift search due: sending {command}.")
-            resp_msg = await self.send_and_wait_feedback(
-                command,
-                timeout=plan.timeout,
-                max_retries=plan.max_retries,
-                return_response_msg=plan.return_response_msg,
-            )
+            resp_msg = await self.send_rift_search_plan(plan, "主魂")
             if resp_msg is None:
                 if await self.sleep_after_blocked_command(command, "Rift search"):
                     continue
@@ -3432,11 +3438,7 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
                 self.save_state()
                 await asyncio.sleep(5)
                 # 重试一次
-                resp_msg = await self.send_and_wait_feedback(
-                    command,
-                    timeout=plan.timeout,
-                    return_response_msg=plan.return_response_msg,
-                )
+                resp_msg = await self.send_rift_search_plan(plan, "主魂")
                 if resp_msg is None:
                     if await self.sleep_after_blocked_command(command, "Rift search force-exit retry"):
                         continue
@@ -6145,6 +6147,10 @@ class SubCultivator(DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin,
         if self.main_concubine_enabled:
             self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())       # 侍妾管理（继承）
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=45))
+        self.create_scheduler_task(
+            "surprise_raid",
+            lambda: self.run_surprise_raid_scheduler(initial_delay=50),
+        )
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())    # dashboard 自定义指令
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         self.create_scheduler_task("ask_dao", lambda: self.run_ask_dao_loop())           # 元婴宗问道

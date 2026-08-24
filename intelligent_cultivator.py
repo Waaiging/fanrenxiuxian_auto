@@ -117,6 +117,7 @@ from automation_settings import (
     tianxing_tianji_identities_for_account,
 )
 from duel_features import DuelMixin
+from surprise_raid_features import SurpriseRaidMixin
 from main_beast_features import MainBeastMixin, main_beast_default_state, main_beast_feedback_candidate
 from command_feedback import (
     _handle_telegram_send_protection,
@@ -507,7 +508,7 @@ class AtomicTaskContext:
 # 主类：Cultivator
 # =====================================================================
 
-class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
+class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """
     主号修仙主控类。
     继承自:
@@ -643,8 +644,23 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         if self.state.get("sect_name") != self.sect_name:
             self.state["sect_name"] = self.sect_name
             sect_state_changed = True
-        if self.state.get("identity_sect_names") != self.identity_sect_names:
-            self.state["identity_sect_names"] = dict(self.identity_sect_names)
+        # Keep live sect assignments learned from Mini App/command replies.
+        # Static defaults are only a fallback for identities that have no
+        # persisted assignment yet; replacing the whole mapping here would
+        # resurrect old sects after a rebirth or defection.
+        persisted_sects = self.state.get("identity_sect_names")
+        if not isinstance(persisted_sects, dict):
+            persisted_sects = {}
+        merged_sects = dict(self.identity_sect_names)
+        merged_sects.update({
+            str(identity): str(sect)
+            for identity, sect in persisted_sects.items()
+            if str(identity).strip() and str(sect).strip()
+        })
+        if merged_sects != self.identity_sect_names:
+            self.identity_sect_names = merged_sects
+        if self.state.get("identity_sect_names") != merged_sects:
+            self.state["identity_sect_names"] = dict(merged_sects)
             sect_state_changed = True
         for key, default in (
             ("last_destiny_date", ""),
@@ -3577,6 +3593,8 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
 
                 def cultivation_succeeded(text):
                     clean = self.response_text(text).replace("**", "")
+                    # 增益描述里会出现"闭关失败损失降低"，不能当作失败。
+                    clean = clean.replace("闭关失败损失", "")
                     return bool(clean) and any(
                         marker in clean
                         for marker in ("闭关成功", "修炼成功", "获得修为", "闭关收益")
@@ -6306,6 +6324,10 @@ class Cultivator(MainBeastMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=35))
+        self.create_scheduler_task(
+            "surprise_raid",
+            lambda: self.run_surprise_raid_scheduler(initial_delay=40),
+        )
         if self.enable_main_beasts:
             self.create_scheduler_task("main_beast_miniapp", lambda: self.run_main_beast_miniapp_timer())
             if self._miniapp_beast_contract.enabled:

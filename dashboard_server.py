@@ -48,6 +48,7 @@ from automation_settings import (
     SUB_YINLUO_IDENTITY,
     automation_dashboard_payload,
     current_sub_yinluo_identity,
+    current_xiaohao_taiyi_identity,
     miniapp_beast_abyss_settings,
     miniapp_fishing_settings,
     miniapp_journey_identities_for_account,
@@ -77,6 +78,10 @@ from duel_features import (
     set_duel_target_switch,
     set_titan_beast_mode,
     titan_target_status,
+)
+from surprise_raid_features import (
+    set_surprise_raid_config,
+    surprise_raid_dashboard_payload,
 )
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
@@ -134,6 +139,34 @@ from soul_curse_features import (
 )
 from yinluo_features import YINLUO_APPEASE_COMMAND, YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
+
+def _load_dashboard_dotenv():
+    """Load deployment-local Dashboard settings without requiring a shell export."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key in os.environ:
+            continue
+        if not key.startswith("DASHBOARD_"):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_dashboard_dotenv()
 app = FastAPI()
 security = HTTPBasic(auto_error=False)
 
@@ -146,6 +179,8 @@ USER_NAMES = tuple(
     if item.strip()
 )
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+DASHBOARD_ACCESS_TOKEN = os.environ.get("DASHBOARD_ACCESS_TOKEN", "")
+DASHBOARD_PASSWORD = DASHBOARD_ACCESS_TOKEN or DASHBOARD_PASSWORD
 DASHBOARD_SESSION_SECRET = os.environ.get("DASHBOARD_SESSION_SECRET", "")
 DASHBOARD_SESSION_DAYS = max(1, min(3650, int(os.environ.get("DASHBOARD_SESSION_DAYS", "180") or 180)))
 DASHBOARD_COOKIE_SECURE = os.environ.get("DASHBOARD_COOKIE_SECURE", "true").strip().lower() not in {
@@ -202,8 +237,9 @@ def dashboard_session_user(token, now=None):
 def dashboard_credentials_valid(username, password):
     if not DASHBOARD_PASSWORD:
         return False
-    correct_username = any(
-        secrets.compare_digest(str(username or ""), name) for name in USER_NAMES
+    supplied_username = str(username or "").strip()
+    correct_username = not supplied_username or any(
+        secrets.compare_digest(supplied_username, name) for name in USER_NAMES
     )
     correct_password = secrets.compare_digest(str(password or ""), DASHBOARD_PASSWORD)
     return correct_username and correct_password
@@ -342,6 +378,10 @@ def account_profile_usernames(account, state=None):
     if account == "sub":
         current_identity = current_sub_yinluo_identity(state)
         usernames = mapping.pop(SUB_YINLUO_IDENTITY, {"lvdoumiao"})
+        mapping[current_identity] = usernames
+    elif account == "xiaohao":
+        current_identity = current_xiaohao_taiyi_identity(state)
+        usernames = mapping.pop("缘生子", {"adai925"})
         mapping[current_identity] = usernames
     return {
         identity: sorted(
@@ -1442,18 +1482,12 @@ def miniapp_fishing_command(state):
     score = int(state.get("miniapp_fishing_last_score") or 0)
     participants = runtime.get("participant_labels") or []
     current_label = clean_custom_text(runtime.get("current_label") or "", 60)
-    holder_label = clean_custom_text(runtime.get("rod_holder_label") or "", 60)
     runtime_detail = clean_custom_text(runtime.get("detail") or "", 180)
-    transfer = runtime.get("transfer") if isinstance(runtime.get("transfer"), dict) else {}
     detail_parts = [f"参与 {len(participants)} 个身份", pond, bait, chum, "自动购饵每次 10 份"]
     start_time = clean_custom_text(settings.get("start_time") or "", 10)
     detail_parts.append(f"开始 {start_time}" if start_time else "立即开始")
     if current_label:
         detail_parts.append(f"下一位 {current_label}")
-    if holder_label:
-        detail_parts.append(f"持竿 {holder_label}")
-    if transfer.get("listing_id"):
-        detail_parts.append(f"挂单 {transfer.get('listing_id')}")
     if runtime_detail:
         detail_parts.append(runtime_detail)
     if last_bait and last_bait != bait:
@@ -1475,15 +1509,11 @@ def miniapp_fishing_command(state):
         "ready": ("准备下一竿", "ready"),
         "fishing": ("自动垂钓", "active"),
         "active_round": ("完成当前鱼讯", "active"),
-        "transferring": ("自动转竿", "active"),
-        "waiting_transfer": ("等待换竿", "cooldown"),
         "waiting_start": ("等待开钓", "cooldown"),
-        "verifying_transfer": ("验竿中", "cooldown"),
-        "transfer_retry_wait": ("等待补跑", "cooldown"),
         "shop_unavailable": ("等待鱼饵商店恢复", "cooldown"),
         "waiting_resources": ("等待鱼饵材料", "cooldown"),
-        "transfer_failed": ("转竿已停止", "error"),
         "force_retry": ("强制重试中", "active"),
+        "waiting_force_retry": ("等待其他账号重试", "cooldown"),
         "identity_paused": ("身份暂停", "paused"),
         "no_participants": ("未选身份", "paused"),
         "unavailable": ("状态不可用", "error"),
@@ -2744,11 +2774,25 @@ def star_avatar_commands(name, state, root_state=None):
     return rows
 
 
-def xiaohao_avatar_commands(name, state):
+def xiaohao_avatar_commands(name, state, root_state=None):
     rows = []
     rows.extend(global_sync_commands())
-    rows.extend(meditation_commands(state, include_force_exit=(name in {"素心子", "缘生子"})))
-    if name == "缘生子":
+    root_state = root_state if isinstance(root_state, dict) else {}
+    sect_names = root_state.get("identity_sect_names") or {}
+    sect = str(sect_names.get(name) or state.get("sect_name") or "").strip()
+    # Legacy state files may predate sect snapshots; retain the historical
+    # default only for the still-present key.  Once the stable player ID has
+    # migrated to a new Dao name, the renamed panel uses its explicit sect.
+    is_taiyi = sect == "太一门" or (name == "缘生子" and not sect)
+    is_yinluo = sect == "阴罗宗"
+    is_star_palace = sect == "星宫"
+    rows.extend(meditation_commands(state, include_force_exit=not is_yinluo))
+    if is_yinluo:
+        rows.extend([
+            time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
+            time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+        ])
+    if is_taiyi:
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
@@ -2761,7 +2805,7 @@ def xiaohao_avatar_commands(name, state):
             manual_command(".天阶状态", "天阶状态", "查询天阶状态", "天阶"),
             time_command(state, "next_stairs_time", ".登天阶", "登天阶", group="天阶"),
         ])
-    elif name == "素心子":
+    elif is_star_palace:
         rows.extend([
             time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
         ])
@@ -2781,7 +2825,7 @@ def avatar_commands(account, name, state, root_state=None):
     elif account == "sub":
         rows = star_avatar_commands(name, state, root_state=root_state)
     elif account == "xiaohao":
-        rows = xiaohao_avatar_commands(name, state)
+        rows = xiaohao_avatar_commands(name, state, root_state=root_state)
     else:
         rows = global_sync_commands()
     if name in miniapp_journey_identities_for_account(account):
@@ -2966,7 +3010,7 @@ def profile_username_identity(account, username):
     username = normalize_profile_username(username)
     if not account or not username:
         return ""
-    for identity, names in (ACCOUNT_PROFILE_USERNAMES.get(account) or {}).items():
+    for identity, names in account_profile_usernames(account).items():
         if username in {normalize_profile_username(name) for name in names}:
             return identity
     return "__other__"
@@ -3013,7 +3057,12 @@ def is_avatar_log_entry(entry):
     if identity and identity != "主魂":
         return True
     text = entry.get("text") or "\n".join(entry.get("lines") or [])
-    return any(name in text for name in ALL_AVATARS) or "[Avatar:" in text
+    dynamic = set(ALL_AVATARS)
+    try:
+        dynamic.update(account_profile_usernames(entry.get("account") or "").keys())
+    except Exception:
+        pass
+    return any(name in text for name in dynamic) or "[Avatar:" in text
 
 def can_inherit_related_command(entry):
     """判断日志条目是否可以继承上一条关联指令（编辑/提及上下文）"""
@@ -5037,8 +5086,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
     <div class="brand"><h1>凡人修仙监控台</h1><p class="subtitle">登录后将在此设备保持会话</p></div>
     <form id="login-form">
         <input type="hidden" name="next_path" value="__NEXT_PATH__">
-        <label>账号<input name="username" autocomplete="username" value="__USERNAME__" required autofocus></label>
-        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <label>访问密码<input name="access_token" type="password" autocomplete="current-password" required autofocus></label>
         <p class="error" id="login-error" role="alert">__ERROR__</p>
         <button type="submit">登录</button>
     </form>
@@ -5097,8 +5145,8 @@ async def login_page(request: Request, next: str = "/"):
 
 @app.post("/login")
 async def login(payload: dict = Body(...)):
-    username = str(payload.get("username") or "")
-    password = str(payload.get("password") or "")
+    username = str(payload.get("username") or (USER_NAMES[0] if USER_NAMES else "admin"))
+    password = str(payload.get("access_token") or payload.get("password") or "")
     next_path = str(payload.get("next_path") or "/")
     if not DASHBOARD_PASSWORD:
         raise HTTPException(status_code=503, detail="Dashboard 认证尚未配置")
@@ -5313,6 +5361,39 @@ def duels(date: str = "", limit: int = 200, username: str = Depends(authenticate
     return duel_dashboard_payload(date=date, limit=safe_limit)
 
 
+@app.get("/api/surprise-raids")
+def surprise_raids(username: str = Depends(authenticate)):
+    """Return the shared surprise-raid configuration and runtime state."""
+    return surprise_raid_dashboard_payload()
+
+
+@app.post("/api/surprise-raids")
+async def surprise_raid_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Update surprise-raid participants, cadence, and enabled state."""
+    try:
+        state = set_surprise_raid_config(
+            enabled=bool(payload.get("enabled")),
+            interval_seconds=payload.get("interval_seconds"),
+            raider_account=str(payload.get("raider_account") or ""),
+            raider_identity=str(payload.get("raider_identity") or ""),
+            target_account=str(payload.get("target_account") or ""),
+            target_identity=str(payload.get("target_identity") or ""),
+            updated_by=username,
+        )
+    except ValueError as exc:
+        message = "循环间隔必须是 10 分钟到 7 天"
+        if str(exc) != "invalid surprise raid interval":
+            message = "奇袭夺宝设置无效"
+        return {"success": False, "msg": message}
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "state": state,
+        "updated_by": username,
+    }
+
+
 @app.get("/api/red-packets")
 def red_packets(username: str = Depends(authenticate)):
     """Return shared red-packet settings and per-account listener status."""
@@ -5334,6 +5415,8 @@ def automation_settings_dashboard(username: str = Depends(authenticate)):
             "detail": "共享垂钓状态暂时不可用",
             "participant_labels": [],
             "current_label": "",
+            "account_current_labels": {},
+            "account_schedules": [],
             "rod_holder_label": "",
             "transfer": {},
         }

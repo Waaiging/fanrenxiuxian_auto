@@ -276,6 +276,12 @@ class MiniAppCommandRouter:
             miniapp_route_identities=known,
         )
         await self.sync_all_profiles(known)
+        reconcile = getattr(self.actor, "reconcile_miniapp_star_palace_tasks", None)
+        if callable(reconcile):
+            try:
+                reconcile(known)
+            except Exception:
+                self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
         # Overview sync is authoritative for sect membership. Select Star
         # Palace identities only after it has corrected stale local mappings.
         star_identities = self.star_farm_identities(known) if self.start_background_tasks else []
@@ -459,6 +465,12 @@ class MiniAppCommandRouter:
             if not getattr(self.actor, "is_running", True):
                 return
             await self.sync_all_profiles()
+            reconcile = getattr(self.actor, "reconcile_miniapp_star_palace_tasks", None)
+            if callable(reconcile):
+                try:
+                    reconcile()
+                except Exception:
+                    self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
 
     def star_farm_identities(self, identities: list[str] | None = None) -> list[str]:
         """Return routable identities whose configured sect is Star Palace."""
@@ -721,11 +733,17 @@ class MiniAppCommandRouter:
         match = re.search(r"\d+", str(value))
         return max(0, int(match.group(0))) if match else None
 
-    def _save_star_palace_identity_state(self, **updates: Any) -> None:
-        state = getattr(self.actor, "state", None)
+    def _save_star_palace_identity_state(self, identity: str = "主魂", **updates: Any) -> None:
+        state = identity_state(self.actor, identity)
         if isinstance(state, dict):
             state.update(updates)
             state["miniapp_star_palace_updated_at"] = _now_text()
+            root = getattr(self.actor, "state", None)
+            if isinstance(root, dict):
+                # Keep a compact root-level summary for older Dashboard code;
+                # authoritative done/error fields remain identity-scoped.
+                root["miniapp_star_palace_last_identity"] = identity
+                root["miniapp_star_palace_updated_at"] = state["miniapp_star_palace_updated_at"]
         try:
             self.actor.save_state()
         except Exception:
@@ -764,10 +782,7 @@ class MiniAppCommandRouter:
                         continue
 
                 today = datetime.now().strftime("%Y-%m-%d")
-                if (
-                    getattr(self.actor, "state", {}).get("miniapp_star_palace_done_date")
-                    == today
-                ):
+                if identity_state(self.actor, identity).get("miniapp_star_palace_done_date") == today:
                     next_boundary = self._next_star_boundary()
                     if next_boundary.date() == datetime.now().date():
                         wait = max(60, (next_boundary + timedelta(seconds=5) - datetime.now()).total_seconds())
@@ -806,7 +821,7 @@ class MiniAppCommandRouter:
                 raise
             except Exception as exc:
                 code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
-                self._save_star_palace_identity_state(
+                self._save_star_palace_identity_state(identity,
                     miniapp_star_palace_last_error=code,
                     miniapp_star_palace_last_error_time=_now_text(),
                 )
@@ -862,7 +877,7 @@ class MiniAppCommandRouter:
             raise
         except MiniAppBeastError as exc:
             message = ""
-            self._save_star_palace_identity_state(
+            self._save_star_palace_identity_state(identity,
                 miniapp_star_palace_last_error=exc.code,
                 miniapp_star_palace_last_error_time=_now_text(),
                 miniapp_star_palace_last_manifest=manifest_key,
@@ -888,7 +903,7 @@ class MiniAppCommandRouter:
         active = self._star_action_mapping(divination, "active")
         remaining = self._star_remaining_seconds(active.get("remainingSeconds"))
         message = command_result_text(payload) or miniapp_operation_result_text(payload) or "完成"
-        self._save_star_palace_identity_state(
+        self._save_star_palace_identity_state(identity,
             miniapp_star_palace_last_error="",
             miniapp_star_palace_last_error_time="",
             miniapp_star_palace_last_success_time=_now_text(),
@@ -953,7 +968,7 @@ class MiniAppCommandRouter:
                 updates["miniapp_star_palace_done_date"] = datetime.now().strftime(
                     "%Y-%m-%d"
                 )
-            self._save_star_palace_identity_state(**updates)
+            self._save_star_palace_identity_state(identity, **updates)
             self.log.info(
                 "Mini App star palace [%s]: 改换星移 -> %s; result=%s",
                 identity,
@@ -963,7 +978,7 @@ class MiniAppCommandRouter:
         except MiniAppCircuitOpenError:
             raise
         except MiniAppBeastError as exc:
-            self._save_star_palace_identity_state(
+            self._save_star_palace_identity_state(identity,
                 miniapp_star_palace_last_error=exc.code,
                 miniapp_star_palace_last_error_time=_now_text(),
                 miniapp_star_palace_last_shift_target=target_username,
