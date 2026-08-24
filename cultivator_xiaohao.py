@@ -855,6 +855,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         # 检测切换到分身
         if "切换" in text or "当前操控" in text:
             for avatar in self.avatars:
+                avatar = self.resolve_avatar_identity(avatar)
                 if avatar in text and ("成功" in text or "已切换" in text or "当前操控" in text):
                     if self.current_identity != avatar:
                         log.info(f"🔄 Identity passively updated: {self.current_identity} → {avatar}")
@@ -1804,6 +1805,12 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            # Re-resolve after waits/lock contention so a long-lived avatar
+            # task cannot send a switch command using a pre-rebirth Dao name.
+            latest_identity = self.resolve_avatar_identity(identity)
+            if latest_identity != identity:
+                log.info("Avatar identity refreshed while waiting: %s -> %s", identity, latest_identity)
+                identity = latest_identity
             if not await wait_for_bot_activity_before_send(self, message, log):
                 return None
             should_yield = False
@@ -1811,6 +1818,10 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             switched_this_iteration = False
             lock_wait_start = time.monotonic()
             async with self.avatar_send_lock:
+                latest_identity = self.resolve_avatar_identity(identity)
+                if latest_identity != identity:
+                    log.info("Avatar identity refreshed after lock acquisition: %s -> %s", identity, latest_identity)
+                    identity = latest_identity
                 _lock_wait = time.monotonic() - lock_wait_start
                 if _lock_wait > 5:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired after {_lock_wait:.1f}s (long wait)")
@@ -7131,6 +7142,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             await asyncio.sleep(initial_delay)
 
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 await self.maybe_run_avatar_star_cycle(avatar)
                 wait_sec = self.next_avatar_star_wait_seconds(avatar)
@@ -7304,6 +7316,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             await asyncio.sleep(initial_delay)
 
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 a_state = self.get_avatar_state(avatar)
 
@@ -7491,6 +7504,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             return resp, forced_exit
             
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 forced_exit = False  # 初始化：用于异常时判断是否需要恢复深度闭关
                 log.info(f"DEBUG: run_avatar_star_palace_loop iteration for {avatar}")

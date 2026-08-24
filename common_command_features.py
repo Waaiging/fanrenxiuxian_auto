@@ -480,6 +480,56 @@ class CommonCommandMixin:
                 if player_key:
                     break
 
+        # The dwelling identity list can lag one request behind a rebirth.  A
+        # player ID is authoritative, so never let a previously confirmed
+        # name be renamed back to an alias returned by that stale list.
+        dao_names = state.setdefault("avatar_dao_names_by_player_id", {}) if isinstance(state, dict) else {}
+        if isinstance(state, dict) and not dao_names:
+            legacy_names = state.get("avatar_dao_names_by_tgid")
+            if isinstance(legacy_names, dict):
+                dao_names.update(legacy_names)
+        authoritative_name = str(dao_names.get(player_key) or "").strip() if player_key else ""
+        aliases = state.get("avatar_dao_name_aliases") if isinstance(state, dict) else None
+        if authoritative_name and authoritative_name != dao_name:
+            alias_target = ""
+            if isinstance(aliases, dict):
+                alias_target = str(aliases.get(dao_name) or "").strip()
+                seen = set()
+                while alias_target and alias_target not in seen:
+                    seen.add(alias_target)
+                    mapped = str(aliases.get(alias_target) or "").strip()
+                    if not mapped or mapped == alias_target:
+                        break
+                    alias_target = mapped
+            if alias_target == authoritative_name:
+                miniapp_router = getattr(self, "_miniapp_command_router", None)
+                miniapp_transport = getattr(miniapp_router, "transport", None)
+                miniapp_player_ids = getattr(miniapp_transport, "identity_player_ids", None)
+                if isinstance(miniapp_player_ids, dict):
+                    for route_key, route_player_id in tuple(miniapp_player_ids.items()):
+                        if str(route_player_id) == player_key and route_key != "主魂":
+                            miniapp_player_ids.pop(route_key, None)
+                    try:
+                        numeric_player_id = int(player_key)
+                    except (TypeError, ValueError):
+                        numeric_player_id = player_key
+                    miniapp_player_ids[authoritative_name] = numeric_player_id
+                    miniapp_player_ids[authoritative_name.casefold()] = numeric_player_id
+                choices = getattr(miniapp_transport, "identity_choices", None)
+                if isinstance(choices, list):
+                    for choice in choices:
+                        if isinstance(choice, dict) and str(choice.get("playerId")) == player_key:
+                            choice["daoName"] = authoritative_name
+                            if choice.get("displayName") == dao_name:
+                                choice["displayName"] = authoritative_name
+                self.common_command_logger().warning(
+                    "Ignored stale Dao name for player %s: %s (current %s).",
+                    player_key,
+                    dao_name,
+                    authoritative_name,
+                )
+                return authoritative_name
+
         if old_name == dao_name:
             return old_name
         if dao_name in known_avatars:
@@ -492,11 +542,6 @@ class CommonCommandMixin:
 
         # ``playerId`` comes from the dwelling identity selection and remains
         # stable through rebirth.  It is not the Telegram group/chat ID.
-        dao_names = state.setdefault("avatar_dao_names_by_player_id", {}) if isinstance(state, dict) else {}
-        if isinstance(state, dict) and not dao_names:
-            legacy_names = state.get("avatar_dao_names_by_tgid")
-            if isinstance(legacy_names, dict):
-                dao_names.update(legacy_names)
         previous_player_dao_name = str(dao_names.get(player_key) or "").strip() if player_key else ""
         if player_key and isinstance(dao_names, dict):
             dao_names[player_key] = dao_name
@@ -524,8 +569,22 @@ class CommonCommandMixin:
                 numeric_player_id = int(player_key)
             except (TypeError, ValueError):
                 numeric_player_id = player_key
+            # Remove every stale display-name key for this player before
+            # registering the canonical Dao name.
+            for route_key, route_player_id in tuple(miniapp_player_ids.items()):
+                if str(route_player_id) == str(numeric_player_id) and route_key not in {"主魂"}:
+                    miniapp_player_ids.pop(route_key, None)
             miniapp_player_ids[dao_name] = numeric_player_id
             miniapp_player_ids[dao_name.casefold()] = numeric_player_id
+        if player_key and miniapp_transport is not None:
+            choices = getattr(miniapp_transport, "identity_choices", None)
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict) or str(choice.get("playerId")) != player_key:
+                        continue
+                    choice["daoName"] = dao_name
+                    if choice.get("displayName") in {old_name, previous_player_dao_name}:
+                        choice["displayName"] = dao_name
         for mapping_name in ("avatar_nicknames", "avatar_features"):
             mapping = getattr(self, mapping_name, None)
             if isinstance(mapping, dict) and old_name in mapping:
@@ -591,6 +650,13 @@ class CommonCommandMixin:
                     state[key] = [dao_name if name == old_name else name for name in state[key]]
             if state.get("miniapp_route_last_identity") == old_name:
                 state["miniapp_route_last_identity"] = dao_name
+            for key, value in tuple(state.items()):
+                # Keep alias keys intact: old loop closures and persisted
+                # dashboard selections still need old_name -> dao_name.
+                if key == "avatar_dao_name_aliases":
+                    continue
+                if isinstance(value, dict) and old_name in value:
+                    value[dao_name] = value.pop(old_name)
             history = state.setdefault("avatar_dao_name_history", [])
             if isinstance(history, list):
                 history.append({

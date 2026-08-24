@@ -1854,6 +1854,12 @@ def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) 
     refresh_dao_name = getattr(actor, "refresh_avatar_dao_name", None)
     if identity != "主魂" and dao_name and callable(refresh_dao_name):
         identity = refresh_dao_name(identity, dao_name, player_id=player_id) or identity
+        # refresh_avatar_dao_name may reject a stale overview name and return
+        # the already-confirmed canonical Dao name.  All fields below must use
+        # that canonical value as well, otherwise the snapshot writes the old
+        # name back into the dashboard state immediately afterward.
+        if identity != "主魂":
+            dao_name = str(identity).strip()
     container = identity_state(actor, identity)
     profile = _snapshot_mapping(account.get("profile"))
     cultivation = _snapshot_mapping(profile.get("cultivation"))

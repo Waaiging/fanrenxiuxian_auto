@@ -1654,6 +1654,10 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         urgent_yield_attempts = 0
         urgent_defer_started_at = None
         while True:
+            latest_identity = self.resolve_avatar_identity(identity)
+            if latest_identity != identity:
+                log.info("Avatar identity refreshed while waiting: %s -> %s", identity, latest_identity)
+                identity = latest_identity
             if not await wait_for_bot_activity_before_send(self, message, log):
                 return None
             should_yield = False
@@ -1661,6 +1665,10 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             switched_this_iteration = False
             lock_wait_start = time.monotonic()
             async with self.avatar_send_lock:
+                latest_identity = self.resolve_avatar_identity(identity)
+                if latest_identity != identity:
+                    log.info("Avatar identity refreshed after lock acquisition: %s -> %s", identity, latest_identity)
+                    identity = latest_identity
                 _lock_wait = time.monotonic() - lock_wait_start
                 if _lock_wait > 5:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired after {_lock_wait:.1f}s (long wait)")
@@ -5696,6 +5704,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         self._avatar_loop_count += 1
 
         while self.is_running:
+            avatar = self.resolve_avatar_identity(avatar)
             try:
                 a_state = self.get_avatar_state(avatar)
 
