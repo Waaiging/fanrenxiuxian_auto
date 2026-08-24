@@ -929,6 +929,12 @@ class CommonCommandMixin:
 
     def tianxing_identity_state(self, identity="主魂"):
         identity = str(identity or "主魂").strip() or "主魂"
+        # A time-critical task can wait across a rebirth.  Resolve the name
+        # immediately before doing any pause/precheck work so its switch
+        # anchor cannot use a stale Dao name retained by the task closure.
+        resolver = getattr(self, "resolve_avatar_identity", None)
+        if callable(resolver):
+            identity = resolver(identity)
         if identity == "主魂":
             return self.state
         getter = getattr(self, "get_avatar_state", None)
@@ -3022,7 +3028,14 @@ class CommonCommandMixin:
             return prepared(False)
 
         async with lock:
+            # The rename can happen while waiting for the lock.  Re-resolve
+            # again at the actual send boundary; this is the last point at
+            # which we can prevent an obsolete `.切换 <old-name>` message.
+            if callable(resolver):
+                identity = resolver(identity)
             current = getattr(self, "current_identity", "主魂") or "主魂"
+            if callable(resolver):
+                current = resolver(current)
             main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
             if not force_fresh and current == identity and (identity != "主魂" or main_confirmed):
                 return prepared(True)

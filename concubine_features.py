@@ -1525,6 +1525,30 @@ class ConcubineMixin:
             **kwargs,
         )
 
+    async def _send_heart_trial_telegram_command(self, identity, command, **kwargs):
+        """Send a heart-trial command through Telegram, preserving reply anchors.
+
+        Mini App responses are plain payloads and use synthetic id ``0``.  The
+        heart-trial protocol is group-message based: `.共历心劫` must reply to
+        the `.我的侍妾` message, and every `.稳` must reply to that same
+        `.共历心劫` response.  The router keeps the original bound methods so
+        this bypasses Mini App routing only for this protocol.
+        """
+        identity = identity or "主魂"
+        resolver = getattr(self, "resolve_avatar_identity", None)
+        if callable(resolver):
+            identity = resolver(identity)
+        router = getattr(self, "_miniapp_command_router", None)
+        if identity == "主魂":
+            sender = getattr(router, "_orig_send", None)
+            if sender is not None:
+                return await sender(command, **kwargs)
+            return await self.send_and_wait_feedback(command, **kwargs)
+        sender = getattr(router, "_orig_send_identity", None)
+        if sender is not None:
+            return await sender(identity, command, **kwargs)
+        return await self.send_and_wait_feedback_identity(identity, command, **kwargs)
+
     def _concubine_task_due(self, task_key, identity="主魂"):
         state = self._concubine_state_container(identity or "主魂")
         next_time = state.get(CONCUBINE_TASKS[task_key]["state_key"], "")
@@ -1725,7 +1749,7 @@ class ConcubineMixin:
             return False
         if not self._concubine_task_due("heart_trial", avatar):
             return True
-        status_msg = await self.send_and_wait_feedback_identity(
+        status_msg = await self._send_heart_trial_telegram_command(
             avatar,
             ".我的侍妾",
             timeout=60,
@@ -1867,8 +1891,8 @@ class ConcubineMixin:
         if self.has_concubine_status_cache():
             return
         log.info("Concubine: cache missing, querying .我的侍妾")
-        status_msg = await self.send_and_wait_feedback(
-            ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
+        status_msg = await self._send_heart_trial_telegram_command(
+            "主魂", ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
         )
         status_text = (status_msg.text or "") if status_msg else ""
         if status_msg and hasattr(status_msg, "id"):
@@ -1882,8 +1906,8 @@ class ConcubineMixin:
         """不确定状态下重新查询侍妾状态，确认共历心劫的冷却"""
         task = CONCUBINE_TASKS["heart_trial"]
         log.info(f"Concubine 共历心劫: uncertain {context}, querying .我的侍妾 before alert.")
-        status_msg = await self.send_and_wait_feedback(
-            ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
+        status_msg = await self._send_heart_trial_telegram_command(
+            "主魂", ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
         )
         status_text = (status_msg.text or "") if status_msg else ""
         if status_msg and hasattr(status_msg, "id"):
@@ -1913,7 +1937,8 @@ class ConcubineMixin:
             return False
         if hasattr(self, "switch_back_to_main"):
             await self.switch_back_to_main()
-        status_msg = await self.send_and_wait_feedback(
+        status_msg = await self._send_heart_trial_telegram_command(
+            "主魂",
             ".我的侍妾",
             timeout=60,
             return_response_msg=True,
@@ -1943,7 +1968,8 @@ class ConcubineMixin:
         for attempt in range(1, 4):
             if hasattr(self, "switch_back_to_main"):
                 await self.switch_back_to_main()
-            trial_msg = await self.send_and_wait_feedback(
+            trial_msg = await self._send_heart_trial_telegram_command(
+                "主魂",
                 task["command"],
                 reply_to=getattr(status_msg, "id", None),
                 timeout=90,
@@ -1954,7 +1980,8 @@ class ConcubineMixin:
             if not self.heart_trial_requires_reply_target(trial_text):
                 break
             if attempt < 3:
-                status_msg = await self.send_and_wait_feedback(
+                status_msg = await self._send_heart_trial_telegram_command(
+                    "主魂",
                     ".我的侍妾",
                     timeout=60,
                     return_response_msg=True,
@@ -1989,7 +2016,9 @@ class ConcubineMixin:
             notify_unrecognized_response(self, task["command"], trial_text, log, "共历心劫")
             self.defer_concubine_task("heart_trial")
             return False
-        current_msg = trial_msg
+        # The game keeps one heart-trial response as the protocol anchor.
+        # Every `.稳` must quote this same `.共历心劫` response.
+        anchor_msg = trial_msg
         if hasattr(self, "switch_back_to_main"):
             await self.switch_back_to_main()
         async with _ConcubineAtomicTask(self, "HeartTrial-主魂"):
@@ -2013,7 +2042,7 @@ class ConcubineMixin:
                             sent = await self.client.send_message(
                                 self.target_chat_id,
                                 ".稳",
-                                reply_to=current_msg.id,
+                                reply_to=anchor_msg.id,
                             )
                             remember_script_sent_message(self, sent)
                             record_command_sent(
@@ -2022,7 +2051,7 @@ class ConcubineMixin:
                                 ".稳",
                                 identity=getattr(self, "current_identity", "主魂"),
                                 source="auto",
-                                reply_to=current_msg.id,
+                                reply_to=anchor_msg.id,
                                 logger=log,
                             )
                             schedule_command_auto_delete(self, sent, text=".稳", logger=log)
@@ -2033,14 +2062,13 @@ class ConcubineMixin:
                             return False
 
                         result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
-                            current_msg,
+                            anchor_msg,
                             sent,
                             idx,
                             timeout_sec=90,
                             poll_sec=3,
                         )
                         if result_msg:
-                            current_msg = result_msg
                             await log_incoming_message(
                                 self,
                                 f".稳 {idx}/3 try {round_attempt}/3",
@@ -2339,7 +2367,7 @@ class ConcubineMixin:
         if not hasattr(self, "send_and_wait_feedback_identity") or not hasattr(self, "set_avatar_state"):
             return False
         log.warning(f"Avatar [{avatar}] heart trial aborted: {reason}; syncing .我的侍妾 cooldown.")
-        status_msg = await self.send_and_wait_feedback_identity(
+        status_msg = await self._send_heart_trial_telegram_command(
             avatar, ".我的侍妾", timeout=60, return_response_msg=True, delete_after=False,
         )
         status_text = (
@@ -2386,6 +2414,9 @@ class ConcubineMixin:
         send_with_cultivation_check=None,
     ):
         """Run an avatar heart trial from its status anchor through three ``.稳`` rounds."""
+        resolver = getattr(self, "resolve_avatar_identity", None)
+        if callable(resolver):
+            avatar = resolver(avatar)
         task = CONCUBINE_TASKS["heart_trial"]
         forced_exit = False
         async with _ConcubineAtomicTask(self, f"HeartTrial-{avatar}"):
@@ -2407,22 +2438,23 @@ class ConcubineMixin:
                         f"Avatar [{avatar}] heart trial: replying .共历心劫 to status "
                         f"({start_attempt}/2)."
                     )
-                    trial_resp, trial_text, step_forced_exit = await self._send_concubine_identity_command(
+                    trial_resp = await self._send_heart_trial_telegram_command(
                         avatar,
                         task["command"],
-                        send_with_cultivation_check=send_with_cultivation_check,
                         reply_to=status_msg.id,
                         timeout=90,
                         max_retries=1,
                         return_response_msg=True,
                         delete_after=False,
                     )
+                    trial_text = self._concubine_response_text(trial_resp)
+                    step_forced_exit = False
                     forced_exit = forced_exit or step_forced_exit
                     if not self.heart_trial_requires_reply_target(trial_text):
                         break
                     if start_attempt >= 2:
                         break
-                    status_msg = await self.send_and_wait_feedback_identity(
+                    status_msg = await self._send_heart_trial_telegram_command(
                         avatar,
                         ".我的侍妾",
                         timeout=60,
@@ -2440,7 +2472,7 @@ class ConcubineMixin:
                     retry_holder = {"response": None}
 
                     async def retry_heart_trial():
-                        fresh_status = await self.send_and_wait_feedback_identity(
+                        fresh_status = await self._send_heart_trial_telegram_command(
                             avatar,
                             ".我的侍妾",
                             timeout=60,
@@ -2449,7 +2481,7 @@ class ConcubineMixin:
                         )
                         if not fresh_status or not hasattr(fresh_status, "id"):
                             return None
-                        retry_holder["response"] = await self.send_and_wait_feedback_identity(
+                        retry_holder["response"] = await self._send_heart_trial_telegram_command(
                             avatar,
                             task["command"],
                             reply_to=fresh_status.id,
@@ -2513,19 +2545,36 @@ class ConcubineMixin:
                     )
                     self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
                     return False
-                current_msg = trial_resp
+                # Keep the `.共历心劫` response as the single reply anchor for
+                # all three `.稳` commands.
+                anchor_msg = trial_resp
+                anchor_owner_changed = False
                 current_text = trial_text
                 for round_num in range(1, 4):
                     confirmed = False
                     for attempt in range(1, 4):
-                        if not current_msg or not hasattr(current_msg, "id"):
+                        if not anchor_msg or not hasattr(anchor_msg, "id"):
                             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
                             return False
                         if self._concubine_command_paused(".稳", avatar):
                             self.set_avatar_state(avatar, task["state_key"], add_seconds_str(now_str(), 600))
                             return False
                         current_identity = getattr(self, "current_identity", avatar)
-                        if current_identity != avatar and hasattr(self, "send_and_wait_feedback"):
+                        resolver = getattr(self, "resolve_avatar_identity", None)
+                        if callable(resolver):
+                            current_identity = resolver(current_identity)
+                            avatar_now = resolver(avatar)
+                            if avatar_now != avatar:
+                                avatar = avatar_now
+                                anchor_owner_changed = True
+                                log.warning(
+                                    f"Avatar heart trial identity refreshed during rounds: -> {avatar}."
+                                )
+                        if (
+                            current_identity != avatar
+                            and hasattr(self, "send_and_wait_feedback")
+                            and not anchor_owner_changed
+                        ):
                             log.warning(
                                 f"Avatar [{avatar}] heart trial: identity drifted to "
                                 f"{current_identity}; switching back."
@@ -2550,7 +2599,7 @@ class ConcubineMixin:
                             sent = await self.client.send_message(
                                 self.target_chat_id,
                                 ".稳",
-                                reply_to=current_msg.id,
+                                reply_to=anchor_msg.id,
                             )
                             remember_script_sent_message(self, sent)
                             record_command_sent(
@@ -2559,7 +2608,7 @@ class ConcubineMixin:
                                 ".稳",
                                 identity=avatar,
                                 source="auto",
-                                reply_to=current_msg.id,
+                                reply_to=anchor_msg.id,
                                 logger=log,
                             )
                             schedule_command_auto_delete(self, sent, text=".稳", logger=log)
@@ -2574,14 +2623,13 @@ class ConcubineMixin:
                             return False
 
                         result_msg, current_text, confirmed = await self.wait_for_heart_trial_round_result_safe(
-                            current_msg,
+                            anchor_msg,
                             sent,
                             round_num,
                             timeout_sec=90,
                             poll_sec=3,
                         )
                         if result_msg:
-                            current_msg = result_msg
                             await log_incoming_message(
                                 self,
                                 f".稳 {round_num}/3 try {attempt}/3 ({avatar})",
