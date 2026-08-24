@@ -2493,7 +2493,14 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             (TAIYI_GUIDE_AVATAR, "next_taiyi_guide_time", TAIYI_GUIDE_COMMAND),
         )
         for identity, key, command in avatar_specs:
+            identity = self.resolve_avatar_identity(identity)
             if identity not in (getattr(self, "avatars", []) or []):
+                continue
+            # A reborn avatar may retain the old Taiyi cooldown timestamp in
+            # state after changing sects.  It is not a stale scheduler item
+            # unless the identity is currently a Taiyi disciple; otherwise
+            # the watchdog would restart the process forever.
+            if self.identity_sect_name(identity) != "太一门":
                 continue
             if self.identity_pause_seconds(identity) > 0:
                 continue
