@@ -9,6 +9,7 @@ import intelligent_cultivator
 from command_modules import DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND
 from cultivator_waaiging import WaaigingCultivator
 from dashboard_server import build_command_panels
+from miniapp_command_routing import MiniAppCommandRouter
 
 
 class WaaigingAccountTests(unittest.TestCase):
@@ -33,6 +34,7 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertEqual(actor.identity_sect_names, {"主魂": "天星宗"})
         self.assertEqual(actor.avatars, [])
         self.assertFalse(actor.enable_avatar_tasks)
+        self.assertFalse(actor.enable_miniapp_star_palace)
         self.assertFalse(actor.enable_main_beasts)
         self.assertFalse(actor.enable_treasure_touch)
         self.assertFalse(actor.enable_nurture_spirit)
@@ -47,6 +49,111 @@ class WaaigingAccountTests(unittest.TestCase):
             self.assertEqual(actor._tianxing_meditation_switch_id("deep"), "waaiging:deep")
         self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "deep")
         self.assertEqual(actor.state["tianxing_meditation_prepared_switch_id"], "waaiging:deep")
+
+    def test_stale_star_palace_assignment_is_cleared_for_single_soul_account(self):
+        saved = []
+
+        def fake_base_init(actor, session_name):
+            actor.mc = {}
+            actor.state = {
+                "sect_join_confirmed": True,
+                "star_gazing_assigned_avatar": "素缘子",
+                "star_gazing_claimed_avatar": "素缘子",
+                "pending_star_shift_msg_id": 123,
+                "miniapp_star_farm_identities": ["素缘子"],
+            }
+            actor.xiaohao_visibility_control_enabled = True
+            actor.save_state = lambda: saved.append(dict(actor.state))
+
+        with patch.object(intelligent_cultivator, "configure_runtime_files"), patch.object(
+            intelligent_cultivator.Cultivator,
+            "__init__",
+            fake_base_init,
+        ):
+            actor = WaaigingCultivator()
+
+        self.assertEqual(actor.state["star_gazing_assigned_avatar"], "")
+        self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
+        self.assertEqual(actor.state["pending_star_shift_msg_id"], 0)
+        self.assertEqual(actor.state["miniapp_star_farm_identities"], [])
+        self.assertTrue(saved)
+
+    def test_identity_sect_name_ignores_stale_non_tianxing_mapping(self):
+        actor = WaaigingCultivator.__new__(WaaigingCultivator)
+        actor.state = {"sect_join_confirmed": True, "sect_name": "天星宗"}
+        actor.sect_name = "天星宗"
+        actor.identity_sect_names = {"主魂": "星宫", "素缘子": "星宫"}
+
+        self.assertEqual(actor.identity_sect_name("主魂"), "天星宗")
+        self.assertEqual(actor.identity_sect_name("素缘子"), "")
+
+    def test_identity_guard_blocks_nonexistent_avatar(self):
+        actor = WaaigingCultivator.__new__(WaaigingCultivator)
+        sent = []
+
+        async def base_send(_actor, identity, message, *args, **kwargs):
+            sent.append((identity, message))
+            return "ok"
+
+        with patch.object(
+            intelligent_cultivator.Cultivator,
+            "send_and_wait_feedback_identity",
+            base_send,
+        ):
+            self.assertIsNone(asyncio.run(actor.send_and_wait_feedback_identity("素缘子", ".观星")))
+            self.assertEqual(
+                asyncio.run(actor.send_and_wait_feedback_identity("主魂", ".查看闭关")),
+                "ok",
+            )
+
+        self.assertEqual(sent, [("主魂", ".查看闭关")])
+
+    def test_time_critical_pre_switch_guard_blocks_nonexistent_avatar(self):
+        actor = WaaigingCultivator.__new__(WaaigingCultivator)
+        sent = []
+
+        async def base_prepare(_actor, identity, *args, **kwargs):
+            sent.append(identity)
+            return True
+
+        with patch.object(
+            intelligent_cultivator.Cultivator,
+            "prepare_identity_for_time_critical_command",
+            base_prepare,
+        ):
+            self.assertFalse(
+                asyncio.run(
+                    actor.prepare_identity_for_time_critical_command("素缘子", ".观星")
+                )
+            )
+            self.assertTrue(
+                asyncio.run(
+                    actor.prepare_identity_for_time_critical_command("主魂", ".查看闭关")
+                )
+            )
+
+        self.assertEqual(sent, ["主魂"])
+
+    def test_router_does_not_start_star_palace_worker_for_waaiging(self):
+        actor = SimpleNamespace(
+            account_key="waaiging",
+            enable_miniapp_star_palace=False,
+            is_running=True,
+            avatars=[],
+            save_state=lambda: None,
+        )
+        router = MiniAppCommandRouter.__new__(MiniAppCommandRouter)
+        router.actor = actor
+        router.start_background_tasks = True
+        router.enabled = True
+        router._star_palace_tasks = {}
+        router.log = intelligent_cultivator.log
+        router.routable_identities = lambda: ["主魂"]
+        router.star_farm_identities = lambda identities=None: ["主魂"]
+
+        router._reconcile_star_palace_tasks(["主魂"])
+
+        self.assertEqual(router._star_palace_tasks, {})
 
     def test_stale_avatars_are_removed_and_persisted(self):
         saved = []

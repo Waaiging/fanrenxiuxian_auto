@@ -391,7 +391,13 @@ class MiniAppCommandRouter:
                 self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
             return
 
-        desired = set(self.star_farm_identities(candidates))
+        # Some accounts share the same Mini App settings but must never run
+        # Star Palace automation.  Respect the actor-level capability before
+        # looking at persisted sect mappings or stale route state.
+        if getattr(self.actor, "enable_miniapp_star_palace", True) is False:
+            desired = set()
+        else:
+            desired = set(self.star_farm_identities(candidates))
         for identity in desired:
             task = self._star_palace_tasks.get(identity)
             if task is None or task.done():

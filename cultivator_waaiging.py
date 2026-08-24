@@ -55,6 +55,33 @@ class WaaigingCultivator(core.Cultivator):
         self.state["sect_name"] = self.sect_name
         self.state["identity_sect_names"] = dict(self.identity_sect_names)
         avatars_removed = self.state.pop("avatars", None) is not None
+        # Remove stale account-level Star Palace cursors left by older builds.
+        # They must not be able to resurrect a `.切换 素缘子` task on restart.
+        star_state_changed = False
+        for key in (
+            "star_gazing_assigned_manifest_time",
+            "star_gazing_assigned_avatar",
+            "star_gazing_assigned_time",
+            "star_gazing_claimed_manifest_time",
+            "star_gazing_claimed_avatar",
+            "pending_star_gazing_manifest_time",
+            "pending_star_gazing_fate_type",
+            "pending_star_gazing_date",
+            "pending_star_gazing_target_time",
+            "pending_star_gazing_scheduled_time",
+            "pending_star_gazing_time",
+            "next_star_gazing_time",
+            "next_star_manifest_time",
+            "pending_star_shift_date",
+            "pending_star_shift_target_time",
+            "pending_star_shift_msg_id",
+        ):
+            if self.state.get(key):
+                self.state[key] = 0 if key == "pending_star_shift_msg_id" else ""
+                star_state_changed = True
+        if self.state.get("miniapp_star_farm_identities"):
+            self.state["miniapp_star_farm_identities"] = []
+            star_state_changed = True
         self.state.setdefault("sect_join_confirmed", False)
         self.state.setdefault("sect_join_status", "pending")
         self.state.setdefault("next_sect_join_time", "")
@@ -77,6 +104,9 @@ class WaaigingCultivator(core.Cultivator):
         self.manage_restricted_accounts = False
         self.xiaohao_visibility_control_enabled = False
         self.enable_avatar_tasks = False
+        # The shared Mini App configuration enables Star Palace workers for
+        # other accounts; this account is always a single Tianxing main soul.
+        self.enable_miniapp_star_palace = False
         self.enable_spirit_tree = False
         self.enable_main_beasts = False
         self.enable_soul_curse = False
@@ -100,7 +130,7 @@ class WaaigingCultivator(core.Cultivator):
         if self.state.get("small_world_calamity_pending"):
             self.state["small_world_calamity_pending"] = False
             disabled_state_changed = True
-        if disabled_state_changed or avatars_removed or meditation_scope_changed:
+        if disabled_state_changed or avatars_removed or meditation_scope_changed or star_state_changed:
             self.save_state()
 
         # Match the existing restricted xiaohao send protection exactly.
@@ -120,6 +150,36 @@ class WaaigingCultivator(core.Cultivator):
         my_id = getattr(getattr(self, "my_info", None), "id", None)
         return "主魂" if sender_id and my_id and int(sender_id) == int(my_id) else None
 
+    async def send_and_wait_feedback_identity(self, identity, message, *args, **kwargs):
+        """Reject any inherited/shared task that targets a nonexistent avatar."""
+        target = str(identity or "主魂").strip() or "主魂"
+        if target != "主魂":
+            core.log.warning(
+                "Waaiging identity guard blocked non-main target %s for %s.",
+                target,
+                str(message or "").strip(),
+            )
+            return None
+        return await super().send_and_wait_feedback_identity(
+            "主魂", message, *args, **kwargs
+        )
+
+    async def prepare_identity_for_time_critical_command(
+        self, identity, command=".观星", *args, **kwargs
+    ):
+        """Protect the direct pre-switch path used by legacy star tasks too."""
+        target = str(identity or "主魂").strip() or "主魂"
+        if target != "主魂":
+            core.log.warning(
+                "Waaiging pre-switch guard blocked non-main target %s for %s.",
+                target,
+                str(command or "").strip(),
+            )
+            return False
+        return await super().prepare_identity_for_time_critical_command(
+            "主魂", command=command, *args, **kwargs
+        )
+
     def tianxing_meditation_mode(self):
         """Keep the @Waaiging account independent from the main-account setting."""
         return WAAIGING_MEDITATION_MODE
@@ -137,9 +197,9 @@ class WaaigingCultivator(core.Cultivator):
         ).strip()
 
     def identity_sect_name(self, identity="主魂"):
-        if str(identity or "主魂") == "主魂" and not self.state.get("sect_join_confirmed"):
+        if str(identity or "主魂").strip() != "主魂":
             return ""
-        return super().identity_sect_name(identity)
+        return self.account_sect_name()
 
     def stale_scheduler_due_items(self, overdue_seconds=core.SCHEDULER_STALE_DUE_SECONDS):
         stale = super().stale_scheduler_due_items(overdue_seconds=overdue_seconds)
