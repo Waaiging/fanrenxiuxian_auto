@@ -1342,8 +1342,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                     self.maybe_record_avatar_passive_states(msg)
                 await self.maybe_record_fishing_rod_message(msg, text, sender_cache)
 
-                # 星宫化身专属：全天候被动截获好星相
-                await self.maybe_handle_star_gazing_opportunity(msg, text, sender_cache)
+                # 星宫观星/改换星移已迁移到 Mini App。群消息仅用于被动
+                # 记录显化与结算，不再触发旧的群指令调度器。
                 if self.is_target_formation_invite(text):
                     asyncio.create_task(self.maybe_assist_target_formation_invite(msg))
 
@@ -6349,7 +6349,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         # ---- 化身系统 ----
         if self.enable_avatar_tasks and self.avatars:
             self.create_scheduler_task("all_avatars_sequential", lambda: self.run_all_avatars_sequential())
-            self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
             for i, avatar_name in enumerate(self.avatars):
                 if avatar_name in STAR_ATTRACTION_AVATARS:
                     self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))

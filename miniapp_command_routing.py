@@ -173,6 +173,11 @@ class MiniAppCommandRouter:
         self._recovery_task: asyncio.Task[Any] | None = None
         self._profile_task: asyncio.Task[Any] | None = None
         self._star_farm_tasks: list[asyncio.Task[Any]] = []
+        # Star Palace has its own Mini App endpoint and must not be routed
+        # through the legacy group-command scheduler.  Keep these tasks
+        # account-local so main/sub accounts can run the same flow as the
+        # restricted XiaoHao account without duplicate workers.
+        self._star_palace_tasks: dict[str, asyncio.Task[Any]] = {}
         self._daily_activity_tasks: list[asyncio.Task[Any]] = []
 
     def _record(self, **updates: Any) -> None:
@@ -276,12 +281,7 @@ class MiniAppCommandRouter:
             miniapp_route_identities=known,
         )
         await self.sync_all_profiles(known)
-        reconcile = getattr(self.actor, "reconcile_miniapp_star_palace_tasks", None)
-        if callable(reconcile):
-            try:
-                reconcile(known)
-            except Exception:
-                self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
+        self._reconcile_star_palace_tasks(known)
         # Overview sync is authoritative for sect membership. Select Star
         # Palace identities only after it has corrected stale local mappings.
         star_identities = self.star_farm_identities(known) if self.start_background_tasks else []
@@ -370,6 +370,40 @@ class MiniAppCommandRouter:
             self.account,
             known,
         )
+
+    def _reconcile_star_palace_tasks(self, identities: list[str] | None = None) -> None:
+        """Ensure every current 星宫 identity has exactly one Mini App worker.
+
+        XiaoHao already exposes an account-level reconciliation hook because
+        its restricted worker has additional task bookkeeping.  Main/sub use
+        this router-owned registry directly.  In both cases, a sect change
+        cancels the old identity's worker before any group command can be
+        attempted.
+        """
+        if not self.start_background_tasks or not self.enabled:
+            return
+        candidates = list(identities) if identities is not None else self.routable_identities()
+        actor_reconcile = getattr(self.actor, "reconcile_miniapp_star_palace_tasks", None)
+        if callable(actor_reconcile):
+            try:
+                actor_reconcile(candidates)
+            except Exception:
+                self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
+            return
+
+        desired = set(self.star_farm_identities(candidates))
+        for identity in desired:
+            task = self._star_palace_tasks.get(identity)
+            if task is None or task.done():
+                self._star_palace_tasks[identity] = asyncio.create_task(
+                    self.run_star_palace_divine_loop(identity),
+                    name=f"miniapp_{self.account}_star_palace_{identity}",
+                )
+        for identity, task in list(self._star_palace_tasks.items()):
+            if identity not in desired:
+                if task is not None and not task.done():
+                    task.cancel()
+                self._star_palace_tasks.pop(identity, None)
 
     def _start_recovery_task(self) -> None:
         if not self.start_background_tasks or not self.enabled:
@@ -465,12 +499,7 @@ class MiniAppCommandRouter:
             if not getattr(self.actor, "is_running", True):
                 return
             await self.sync_all_profiles()
-            reconcile = getattr(self.actor, "reconcile_miniapp_star_palace_tasks", None)
-            if callable(reconcile):
-                try:
-                    reconcile()
-                except Exception:
-                    self.log.warning("Mini App Star Palace task reconciliation failed", exc_info=True)
+            self._reconcile_star_palace_tasks()
 
     def star_farm_identities(self, identities: list[str] | None = None) -> list[str]:
         """Return routable identities whose configured sect is Star Palace."""

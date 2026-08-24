@@ -5572,9 +5572,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             if is_game_bot_sender(self, sender) and self.is_target_formation_invite(text):
                 asyncio.create_task(self.handle_global_formation_invite(msg))
                     
-            # --- 观星显化拦截（轮换派发：每次只派一个化身） ---
-            if is_game_bot_sender(self, sender) and ("【Good -" in text or "【星盘显化】" in text):
-                asyncio.create_task(self.avatar_handle_star_gazing_opportunity(None, msg, text, sender))
+            # 星宫观星/改换星移已迁移到 Mini App；群显化消息不再触发
+            # 旧的 .观星/.改换星移 调度器。
 
             # ---- 控制指令：止/启（仅管理员可触发） ----
             # 必须在 log_manual_outgoing_if_needed 之前，否则手动发的"止"会被拦截
@@ -7526,63 +7525,71 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
     def start_miniapp_scheduler_tasks(self):
         """Register Mini App-backed background loops used by the XiaoHao account."""
         miniapp_router = getattr(self, "_miniapp_command_router", None)
+        registry = getattr(self, "_scheduler_task_registry", {})
+
+        def register_once(name, factory):
+            existing = registry.get(name) if isinstance(registry, dict) else None
+            if existing is not None and not existing.done():
+                return
+            self.create_scheduler_task(name, factory)
+
         if miniapp_router is not None:
             if callable(getattr(miniapp_router, "run_profile_sync_loop", None)):
-                self.create_scheduler_task(
+                register_once(
                     "miniapp_profiles",
                     lambda: miniapp_router.run_profile_sync_loop(),
                 )
             star_identities = miniapp_router.star_farm_identities()
             for identity in star_identities:
-                self.create_scheduler_task(
+                register_once(
                     f"miniapp_star_farm_{identity}",
                     lambda identity=identity: miniapp_router.run_star_farm_loop(identity),
                 )
-                self.create_scheduler_task(
+                register_once(
                     f"miniapp_star_palace_{identity}",
                     lambda identity=identity: miniapp_router.run_star_palace_divine_loop(identity),
                 )
         if getattr(self, "_miniapp_inventory", None) is not None:
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_inventory",
                 lambda: self._miniapp_inventory.run_loop(),
             )
         if getattr(self, "_miniapp_fishing", None) is not None and self._miniapp_fishing.supported:
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_fishing",
                 lambda: self._miniapp_fishing.run_loop(),
             )
         if self._miniapp_beast_contract.enabled:
-            self.create_scheduler_task(
+            register_once(
                 "beast_contract",
                 lambda: self._miniapp_beast_contract.run(),
             )
         if self._miniapp_beast_abyss.enabled:
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_beast_abyss",
                 lambda: self._miniapp_beast_abyss.run_loop(),
             )
         if self._miniapp_beast_seek.enabled:
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_beast_seek",
                 lambda: self._miniapp_beast_seek.run_loop(),
             )
         if self._miniapp_daily_activities is not None:
             if self._miniapp_daily_activities.pagoda_enabled:
-                self.create_scheduler_task(
+                register_once(
                     "miniapp_pagoda",
                     lambda: self._miniapp_daily_activities.run_pagoda_loop(),
                 )
             if self._miniapp_daily_activities.hunt_enabled:
-                self.create_scheduler_task(
+                register_once(
                     "miniapp_hunt",
                     lambda: self._miniapp_daily_activities.run_hunt_loop(),
                 )
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_tianji_trial",
                 lambda: self._miniapp_daily_activities.run_tianji_trial_loop(),
             )
-            self.create_scheduler_task(
+            register_once(
                 "miniapp_fate_cards",
                 lambda: self._miniapp_daily_activities.run_fate_cards_loop(),
             )
@@ -7788,7 +7795,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             self.save_state(); self.startup_done.set(); log.info("Startup Sync: Finished. All loops released.")
         asyncio.create_task(startup_sync())
         asyncio.create_task(resume_pending_exchange_events(self))
-        asyncio.create_task(self.restore_pending_star_gazing_after_startup())
         asyncio.create_task(periodic_log_prune(LOG_FILE))
         asyncio.create_task(self.run_telegram_write_permission_monitor())
         asyncio.create_task(self.run_health_watchdog_loop())
@@ -7810,7 +7816,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         self.create_scheduler_task("treasure_touch", lambda: self.run_treasure_touch_loop())
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
-        self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=100, sleep_func=scheduler_sleep_seconds))
 
         # 身外化身：为每个分身启动独立闭关及宗门能力循环。

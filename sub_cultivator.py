@@ -3142,9 +3142,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
 
             # ---- 第 4 步：非回复消息处理 ----
             if not is_matched:
-                # 星盘显化事件
-                if await self.maybe_handle_star_gazing_opportunity(msg, text, sender):
-                    return
+                # 星宫观星/改换星移已迁移到 Mini App。群消息仅用于被动
+                # 记录，不再触发旧的 .观星/.改换星移 调度器。
                 if not sender_id:
                     return
                 # @ 提醒记录
@@ -6140,7 +6139,6 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         # 启动所有后台循环
         self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
-        self.create_scheduler_task("star_gazing", lambda: self.run_star_gazing_loop())      # 全天观星监听
         if self.main_star_palace_enabled:
             self.create_scheduler_task("star_attraction", lambda: self.run_star_attraction_loop())  # 星辰牵引/安抚/收集
         self.create_scheduler_task("formation_meditation", lambda: self.run_formation_meditation_loop())  # 阵法 & 深度闭关
