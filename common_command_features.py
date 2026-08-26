@@ -3018,6 +3018,8 @@ class CommonCommandMixin:
         while hasattr(self, "should_wait_for_atomic_task") and self.should_wait_for_atomic_task(command):
             await asyncio.sleep(0.5)
 
+        resolver = getattr(self, "resolve_avatar_identity", None)
+
         current = getattr(self, "current_identity", "主魂") or "主魂"
         main_confirmed = bool(getattr(self, "_main_confirmed", current == "主魂"))
         if not force_fresh and current == identity and (identity != "主魂" or main_confirmed):

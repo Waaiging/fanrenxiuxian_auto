@@ -12,6 +12,8 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
+from automation_settings import wind_thunder_identities_for_account
+
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 WIND_THUNDER_HOLD_SECONDS = 30 * 60
 WIND_THUNDER_COOLDOWNS = {
@@ -60,25 +62,17 @@ def _identity_state(actor: Any, identity: str) -> dict[str, Any]:
 
 
 def wind_thunder_enabled(actor: Any, identity: str = "主魂") -> bool:
-    account = str(getattr(actor, "account_key", "") or "").strip()
-    identity = _text(identity) or "主魂"
-    config = getattr(actor, "config", {}) or {}
-    settings = config.get("wind_thunder") if isinstance(config, dict) else None
-    configured = None
-    if isinstance(settings, dict):
-        configured = settings.get("identities")
-    if configured is None and isinstance(config, dict):
-        configured = config.get("wind_thunder_identities")
-    if isinstance(configured, (list, tuple, set)):
-        values = set()
-        for item in configured:
-            text = _text(item)
-            if "|" in text:
-                values.add(tuple(part.strip() for part in text.split("|", 1)))
-            elif text:
-                values.add((account, text))
-        return (account, identity) in values
-    return (account, identity) in WIND_THUNDER_IDENTITIES
+    account = str(
+        getattr(actor, "account_key", "")
+        or ("main" if str(getattr(actor, "state_file", "")).endswith("state_main.json") else "")
+    ).strip()
+    if account not in {"main", "sub", "xiaohao", "waaiging"}:
+        return False
+    normalized_identity = _text(identity) or "主魂"
+    try:
+        return normalized_identity in wind_thunder_identities_for_account(account)
+    except Exception:
+        return False
 
 
 def wind_thunder_target_cooldown(command: str, fallback_seconds: int) -> int:

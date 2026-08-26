@@ -251,20 +251,6 @@ MIRACLE_PREACH_COMMAND = ".神迹 布道"
 MIRACLE_PREACH_CD_SECONDS = 3 * 3600
 SMALL_WORLD_RETRY_SECONDS = 10 * 60
 SMALL_WORLD_CALAMITY_RETRY_SECONDS = 5 * 60
-SPIRIT_TREE_AVATAR = "缘生子"
-SPIRIT_TREE_IRRIGATION_COMMAND = ".灵树灌溉"
-SPIRIT_TREE_STATUS_COMMAND = ".灵树状态"
-SPIRIT_TREE_HARVEST_COMMAND = ".采摘灵果"
-SPIRIT_TREE_GUARD_COMMAND = ".协同守山"
-SPIRIT_TREE_SECT_NAME = "落云宗"
-SPIRIT_TREE_IRRIGATION_STATUS = "灌溉期"
-SPIRIT_TREE_MATURE_STATUS = "成熟采摘期"
-SPIRIT_TREE_MATURE_SECONDS = 24 * 3600
-SPIRIT_TREE_HARVEST_LOCK_SECONDS = 48 * 3600
-SPIRIT_TREE_MATURE_KEYWORDS = ("灵果已完全成熟", "采摘期开启", "成熟采摘期")
-SPIRIT_TREE_GUARD_CD_SECONDS = 5 * 3600
-SPIRIT_TREE_GUARD_SUCCESS_RETRY_SECONDS = 5 * 60
-SPIRIT_TREE_GUARD_ERROR_BLOCK_SECONDS = 60 * 60
 
 
 def parse_small_world_calamity_event(text):
@@ -284,37 +270,6 @@ def parse_small_world_calamity_event(text):
         "text": re.sub(r"\s+", " ", clean).strip()[:700],
     }
 
-
-def spirit_tree_default_state():
-    """灵树玩法默认状态。
-
-    缘生子负责灵树灌溉、成熟采摘和古剑门来袭守山；这些字段既供主号
-    自己调度，也供 dashboard 展示。成熟期/守山状态需要保守记录，避免
-    重复采摘或在无需守山时连续刷 `.协同守山`。
-    """
-    return {
-        "next_spirit_tree_irrigation_time": "",
-        "spirit_tree_status": SPIRIT_TREE_IRRIGATION_STATUS,
-        "spirit_tree_mature_until": "",
-        "spirit_tree_harvested_in_mature_period": False,
-        "spirit_tree_harvest_attempted_in_mature_period": False,
-        "spirit_tree_harvest_pending": False,
-        "spirit_tree_last_harvest_time": "",
-        "spirit_tree_last_harvest_attempt_time": "",
-        "next_spirit_tree_harvest_time": "",
-        "spirit_tree_irrigation_times": {},
-        "spirit_tree_last_mature_detected_time": "",
-        "spirit_tree_last_mature_msg_id": 0,
-        "spirit_tree_last_status_time": "",
-        "spirit_tree_invasion_status": "",
-        "spirit_tree_guard_pending": False,
-        "next_spirit_tree_guard_time": "",
-        "last_spirit_tree_guard_time": "",
-        "spirit_tree_guard_times": {},
-        "spirit_tree_guard_last_times": {},
-        "spirit_tree_last_invasion_time": "",
-        "spirit_tree_last_invasion_msg_id": 0,
-    }
 
 
 # =====================================================================
@@ -435,6 +390,10 @@ def configure_runtime_files(config_file, log_file, state_file):
     LOG_FILE = os.path.abspath(log_file)
     STATE_FILE = os.path.abspath(state_file)
     prune_log_file(LOG_FILE)
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        handler.close()
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(message)s',
@@ -444,6 +403,10 @@ def configure_runtime_files(config_file, log_file, state_file):
         ],
         force=True,
     )
+    for handler in root.handlers:
+        handler.addFilter(ConnectionFilter())
+        if isinstance(handler, logging.FileHandler):
+            handler.addFilter(CommandLogFilter())
     logging.getLogger('telethon').setLevel(logging.WARNING)
     logging.getLogger('asyncio').setLevel(logging.WARNING)
 
@@ -484,7 +447,7 @@ logging.getLogger('telethon').addFilter(ConnectionFilter())  # Telethon 自身�
 class AtomicTaskContext:
     """脚本级原子任务锁。
 
-    用于共历心劫、灵树采摘、宗门战等多步骤流程。持有期间普通指令会等待，
+    用于共历心劫、宗门战等多步骤流程。持有期间普通指令会等待，
     但观星/改换星移等高优先级时机类指令有单独的绕行逻辑，避免错过窗口。
     """
     def __init__(self, cultivator, name="Task"):
@@ -577,7 +540,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.enable_small_world = True
         self.enable_concubine = True
         self.enable_avatar_tasks = True
-        self.enable_spirit_tree = False
         # Tianxing does not use the Wanling beast schedulers.
         self.enable_main_beasts = False
         self.enable_soul_curse = True
@@ -612,7 +574,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             "kulipabp": "缘生子",
             "OldEinstein": "素缘子",
         }
-        self.spirit_tree_avatar = SPIRIT_TREE_AVATAR
         self.identity_usernames = {
             "主魂": ["Weeguu"],
         }
@@ -715,8 +676,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self._scheduler_task_registry = {}         # 关键后台循环名 -> asyncio.Task，供 watchdog 发现意外退出
         self.pending_formation_invite_msg = None   # 待回复的阵法邀请消息（化身助阵用）
         self.formation_assist_in_progress = False  # 实时助阵并发保护
-        self._spirit_tree_harvest_tasks = {}       # 身份级灵树成熟后的一次性采摘任务
-        self._spirit_tree_guard_tasks = {}         # 身份级古剑门来袭后的一次性守山任务
         self.small_world_calamity_event = asyncio.Event()
         if self.state.get("small_world_calamity_pending"):
             self.small_world_calamity_event.set()
@@ -799,7 +758,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         # 合并继承的默认状态
         default_state.update(common_command_default_state())
         default_state.update(concubine_default_state())
-        default_state.update(spirit_tree_default_state())
         default_state.update(main_beast_default_state())
 
         if os.path.exists(self.state_file) or os.path.exists(f"{self.state_file}.bak"):
@@ -1193,12 +1151,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             ))
         if main_beast_feedback_candidate(command, text):
             return True
-        if command in {SPIRIT_TREE_IRRIGATION_COMMAND, SPIRIT_TREE_STATUS_COMMAND, SPIRIT_TREE_HARVEST_COMMAND, SPIRIT_TREE_GUARD_COMMAND}:
-            return any(k in text for k in [
-                "灵树", "灵果", "采摘期", "成熟采摘期", "造化青莲果",
-                "灵眼之树", "成熟度", "灌溉", "采摘", "修为增长",
-                "协同守山", "守山", "护山", "古剑门", "加固",
-            ])
         if command in {".启阵", ".助阵"}:
             formation_keywords = [
                 "冷却", "再次启阵", "心神消耗", "参与过布阵",
@@ -1337,8 +1289,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 if text_targets_current_account(self, msg, text):
                     self.record_main_pasture_return(text)
                 self.record_star_shift_attempt_if_needed(msg, text, source="new message")
-                if not manual_reply or not manual_processed:
-                    self.maybe_record_spirit_tree_passive_message(msg, text, source="new message")
                 if not manual_reply:
                     self.maybe_record_avatar_passive_states(msg)
                 await self.maybe_record_fishing_rod_message(msg, text, sender_cache)
@@ -4118,820 +4068,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             return not end_time or not is_future(end_time)
         return not a_state.get("deep_meditation_end_time")
 
-        # 以下是被动状态检测方法（从万灵宗移植）
-        # 用于监控手动发送指令的结果，及时同步到 state
-
-    def clean_spirit_tree_text(self, text):
-        return str(text or "").replace("**", "").strip()
-
-    def spirit_tree_text_is_guide_text(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        return bool(
-            clean
-            and (
-                "灵眼之树要诀" in clean
-                or ("采摘期开启后" in clean and ".采摘灵果" in clean)
-                or ("采摘期开启后" in clean and "采摘灵果" in clean)
-            )
-        )
-
-    def spirit_tree_text_indicates_mature(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        if self.spirit_tree_text_is_guide_text(clean):
-            return False
-        if any(k in clean for k in SPIRIT_TREE_MATURE_KEYWORDS):
-            return True
-        if "灵眼之树已然成熟" in clean:
-            return True
-        if "落云宗" in clean and "灵眼之树" in clean and "状态" in clean and "成熟采摘期" in clean:
-            return True
-        return (
-            "采摘期" in clean
-            and any(k in clean for k in ["剩余", "结束", "已开启", "开启中", "可采摘"])
-            and "可查看神树成熟进度" not in clean
-            and not self.spirit_tree_text_is_guide_text(clean)
-        )
-
-    def spirit_tree_text_is_global_state(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        return (
-            "落云宗" in clean
-            and "灵眼之树" in clean
-            and any(k in clean for k in [
-                "状态", "成熟采摘期", "成熟度", "剩余", "当前玩法",
-                "进度", "警报", "三派异动", "护山底蕴", "守山次数",
-            ])
-        )
-
-    def spirit_tree_text_indicates_invasion(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        if not clean or "古剑门" not in clean:
-            return False
-        if any(k in clean for k in ["当前并无外敌", "无需加固", "无需守山"]):
-            return False
-        if any(k in clean for k in ["暂息旧隙", "试剑修枝", "顺手替灵树斩去乱枝"]):
-            return False
-        if "三派异动" in clean and not any(k in clean for k in [
-            "警报", "入侵中", "请速用", "大阵耐久",
-        ]):
-            return False
-        return any(k in clean for k in [
-            "古剑门来袭", "古剑门入侵", "古剑门入侵中",
-            "请速用 `.协同守山`", "请速用 .协同守山", "大阵耐久",
-        ])
-
-    def spirit_tree_text_indicates_irrigation_state(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        if not clean or self.spirit_tree_text_indicates_mature(clean):
-            return False
-        if "灵树灌溉" in clean and "成熟度" in clean:
-            return True
-        return (
-            "灵眼之树" in clean
-            and "进度" in clean
-            and any(k in clean for k in ["阶段", "环境", "成熟度"])
-        )
-
-    def spirit_tree_text_is_irrigation_cooldown(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        return bool(
-            clean
-            and "灌溉" in clean
-            and any(k in clean for k in ["地脉灵气尚未恢复", "后再来灌溉", "灌溉冷却", "尚未恢复"])
-        )
-
-    def spirit_tree_text_is_no_irrigation_response(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        return (
-            "无需灌溉" in clean
-            and ("已然成熟" in clean or "正遭劫难" in clean or "遭劫难" in clean)
-        )
-
-    def parse_spirit_tree_mature_seconds(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        if self.spirit_tree_text_is_no_irrigation_response(clean):
-            return 0, False
-        for line in clean.splitlines():
-            if "采摘期" in line or "灵果已完全成熟" in line:
-                cd = self.parse_wait_time(line)
-                if cd > 0:
-                    return cd, True
-        cd = self.parse_wait_time(clean)
-        if cd > 0 and any(k in clean for k in ["采摘期剩余", "采摘期结束", "成熟采摘期"]):
-            return cd, True
-        return SPIRIT_TREE_MATURE_SECONDS, False
-
-    def spirit_tree_state_for_identity(self, identity=SPIRIT_TREE_AVATAR):
-        # 灵眼之树是落云宗世界事件；成熟期/灌溉期/守山状态全账号共享。
-        state = self.state
-        changed = False
-        for key, value in spirit_tree_default_state().items():
-            if key not in state:
-                state[key] = value
-                changed = True
-        if changed:
-            self.save_state()
-        return state
-
-    def spirit_tree_identity_key(self, identity):
-        identity = str(identity or "主魂").strip() or "主魂"
-        return identity
-
-    def spirit_tree_irrigation_times(self):
-        state = self.spirit_tree_state_for_identity("主魂")
-        changed = False
-        times = state.get("spirit_tree_irrigation_times")
-        if not isinstance(times, dict):
-            times = {}
-            state["spirit_tree_irrigation_times"] = times
-            changed = True
-        legacy_main = state.get("next_spirit_tree_irrigation_time", "")
-        if legacy_main and not times.get("主魂"):
-            times["主魂"] = legacy_main
-            changed = True
-        avatar_states = state.get("avatars", {}) if isinstance(state.get("avatars", {}), dict) else {}
-        for avatar, a_state in avatar_states.items():
-            if not isinstance(a_state, dict):
-                continue
-            legacy_avatar = a_state.get("next_spirit_tree_irrigation_time", "")
-            if legacy_avatar and not times.get(avatar):
-                times[avatar] = legacy_avatar
-                changed = True
-        if changed:
-            self.save_state()
-        return times
-
-    def get_spirit_tree_irrigation_time(self, identity="主魂"):
-        identity = self.spirit_tree_identity_key(identity)
-        times = self.spirit_tree_irrigation_times()
-        value = times.get(identity, "")
-        if not value and identity == "主魂":
-            value = self.state.get("next_spirit_tree_irrigation_time", "")
-        return value or ""
-
-    def set_spirit_tree_irrigation_time(self, identity="主魂", value=""):
-        identity = self.spirit_tree_identity_key(identity)
-        state = self.spirit_tree_state_for_identity(identity)
-        times = self.spirit_tree_irrigation_times()
-        if value:
-            times[identity] = value
-        else:
-            times.pop(identity, None)
-        if identity == "主魂":
-            state["next_spirit_tree_irrigation_time"] = value or ""
-        self.save_state()
-
-    def spirit_tree_guard_times(self):
-        state = self.spirit_tree_state_for_identity("主魂")
-        changed = False
-        times = state.get("spirit_tree_guard_times")
-        if not isinstance(times, dict):
-            times = {}
-            state["spirit_tree_guard_times"] = times
-            changed = True
-        legacy_main = state.get("next_spirit_tree_guard_time", "")
-        if legacy_main and not times.get("主魂"):
-            times["主魂"] = legacy_main
-            changed = True
-        if changed:
-            self.save_state()
-        return times
-
-    def spirit_tree_guard_last_times(self):
-        state = self.spirit_tree_state_for_identity("主魂")
-        changed = False
-        times = state.get("spirit_tree_guard_last_times")
-        if not isinstance(times, dict):
-            times = {}
-            state["spirit_tree_guard_last_times"] = times
-            changed = True
-        legacy_main = state.get("last_spirit_tree_guard_time", "")
-        if legacy_main and not times.get("主魂"):
-            times["主魂"] = legacy_main
-            changed = True
-        if changed:
-            self.save_state()
-        return times
-
-    def get_spirit_tree_guard_time(self, identity="主魂"):
-        identity = self.spirit_tree_identity_key(identity)
-        times = self.spirit_tree_guard_times()
-        value = times.get(identity, "")
-        if not value and identity == "主魂":
-            value = self.state.get("next_spirit_tree_guard_time", "")
-        return value or ""
-
-    def set_spirit_tree_guard_time(self, identity="主魂", value=""):
-        identity = self.spirit_tree_identity_key(identity)
-        state = self.spirit_tree_state_for_identity(identity)
-        times = self.spirit_tree_guard_times()
-        if value:
-            times[identity] = value
-        else:
-            times.pop(identity, None)
-        if identity == "主魂":
-            state["next_spirit_tree_guard_time"] = value or ""
-        self.save_state()
-
-    def set_spirit_tree_last_guard_time(self, identity="主魂", value=""):
-        identity = self.spirit_tree_identity_key(identity)
-        state = self.spirit_tree_state_for_identity(identity)
-        times = self.spirit_tree_guard_last_times()
-        if value:
-            times[identity] = value
-        else:
-            times.pop(identity, None)
-        if identity == "主魂":
-            state["last_spirit_tree_guard_time"] = value or ""
-        self.save_state()
-
-    def clear_spirit_tree_guard_times(self):
-        state = self.spirit_tree_state_for_identity("主魂")
-        state["spirit_tree_guard_times"] = {}
-        state["next_spirit_tree_guard_time"] = ""
-        self.save_state()
-
-    def normalize_spirit_tree_state(self, identity=SPIRIT_TREE_AVATAR):
-        a_state = self.spirit_tree_state_for_identity(identity)
-        changed = False
-        if not a_state.get("spirit_tree_status"):
-            a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
-            changed = True
-        if a_state.get("spirit_tree_status") == SPIRIT_TREE_MATURE_STATUS:
-            mature_until = a_state.get("spirit_tree_mature_until", "")
-            if not mature_until:
-                a_state["spirit_tree_mature_until"] = add_seconds_str(now_str(), SPIRIT_TREE_MATURE_SECONDS)
-                mature_until = a_state["spirit_tree_mature_until"]
-                changed = True
-            if mature_until and not is_future(mature_until):
-                a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
-                a_state["spirit_tree_mature_until"] = ""
-                a_state["spirit_tree_harvested_in_mature_period"] = False
-                a_state["spirit_tree_harvest_attempted_in_mature_period"] = False
-                a_state["spirit_tree_harvest_pending"] = False
-                a_state["next_spirit_tree_irrigation_time"] = ""
-                changed = True
-            log.info(f"[{identity}] spirit tree mature period ended; resume irrigation.")
-        if changed:
-            self.save_state()
-        return a_state
-
-    def spirit_tree_harvest_lock_until(self, identity=SPIRIT_TREE_AVATAR):
-        a_state = self.spirit_tree_state_for_identity(identity)
-        value = a_state.get("next_spirit_tree_harvest_time", "")
-        if value and is_future(value):
-            return value
-        if value:
-            a_state["next_spirit_tree_harvest_time"] = ""
-        return ""
-
-    def spirit_tree_harvest_locked(self, identity=SPIRIT_TREE_AVATAR):
-        return bool(self.spirit_tree_harvest_lock_until(identity))
-
-    def spirit_tree_harvest_block_reason(self, identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        sect = self.identity_sect_name(identity)
-        if sect and sect != SPIRIT_TREE_SECT_NAME:
-            return f"{identity} belongs to {sect}, not {SPIRIT_TREE_SECT_NAME}"
-        if self.dashboard_command_paused(SPIRIT_TREE_HARVEST_COMMAND, identity):
-            return f"{SPIRIT_TREE_HARVEST_COMMAND} paused by dashboard"
-        if self.dashboard_command_paused(SPIRIT_TREE_IRRIGATION_COMMAND, identity):
-            return f"{SPIRIT_TREE_IRRIGATION_COMMAND} paused by dashboard"
-        return ""
-
-    def spirit_tree_harvest_auto_paused(self, identity=SPIRIT_TREE_AVATAR):
-        """Treat harvest as part of spirit-tree automation when dashboard-paused."""
-        return bool(self.spirit_tree_harvest_block_reason(identity))
-
-    def record_spirit_tree_harvest_attempt(self, identity=SPIRIT_TREE_AVATAR, source=""):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        a_state = self.spirit_tree_state_for_identity(identity)
-        now = now_str()
-        next_time = add_seconds_str(now, SPIRIT_TREE_HARVEST_LOCK_SECONDS)
-        a_state["spirit_tree_last_harvest_attempt_time"] = now
-        a_state["next_spirit_tree_harvest_time"] = next_time
-        a_state["spirit_tree_harvest_attempted_in_mature_period"] = True
-        a_state["spirit_tree_harvest_pending"] = False
-        self.save_state()
-        log.info(f"[{identity}] spirit tree harvest attempt recorded ({source}); locked until {next_time}.")
-        return next_time
-
-    def record_spirit_tree_mature_state(self, text, msg=None, source="", identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        raw_state = self.spirit_tree_state_for_identity(identity)
-        old_status = raw_state.get("spirit_tree_status", "")
-        old_until = raw_state.get("spirit_tree_mature_until", "")
-        old_harvested = bool(raw_state.get("spirit_tree_harvested_in_mature_period"))
-        old_attempted = bool(raw_state.get("spirit_tree_harvest_attempted_in_mature_period"))
-        a_state = self.normalize_spirit_tree_state(identity)
-        seconds, parsed_from_status = self.parse_spirit_tree_mature_seconds(text)
-        no_irrigation_only = self.spirit_tree_text_is_no_irrigation_response(text)
-        msg_id = getattr(msg, "id", None) or 0
-        same_msg = bool(msg_id and a_state.get("spirit_tree_last_mature_msg_id") == msg_id)
-        already_mature = old_status == SPIRIT_TREE_MATURE_STATUS and old_until and is_future(old_until)
-        recently_expired_mature = False
-        if old_status == SPIRIT_TREE_MATURE_STATUS and old_until and not is_future(old_until):
-            try:
-                recently_expired_mature = 0 <= (datetime.now() - str_to_dt(old_until)).total_seconds() <= 2 * 3600
-            except Exception:
-                recently_expired_mature = False
-        preserve_handled_flags = (
-            old_status == SPIRIT_TREE_MATURE_STATUS
-            and (old_harvested or old_attempted)
-            and parsed_from_status
-            and seconds > 0
-            and (already_mature or recently_expired_mature)
-        )
-        fallback_until = old_until if old_until and is_future(old_until) else self.get_spirit_tree_irrigation_time(identity)
-        if not (fallback_until and is_future(fallback_until)):
-            fallback_until = ""
-        candidate_until = add_seconds_str(now_str(), seconds) if seconds > 0 else fallback_until
-
-        if seconds <= 0 and fallback_until:
-            mature_until = fallback_until
-        elif seconds <= 0:
-            mature_until = add_seconds_str(now_str(), 600)
-        elif already_mature and same_msg:
-            mature_until = old_until
-        elif already_mature and parsed_from_status:
-            mature_until = candidate_until
-        elif already_mature:
-            mature_until = old_until
-        else:
-            mature_until = candidate_until
-            if preserve_handled_flags:
-                a_state["spirit_tree_harvested_in_mature_period"] = old_harvested
-                a_state["spirit_tree_harvest_attempted_in_mature_period"] = old_attempted
-            else:
-                a_state["spirit_tree_harvested_in_mature_period"] = False
-                a_state["spirit_tree_harvest_attempted_in_mature_period"] = False
-
-        a_state["spirit_tree_status"] = SPIRIT_TREE_MATURE_STATUS
-        a_state["spirit_tree_mature_until"] = mature_until
-        if identity == "主魂":
-            a_state["next_spirit_tree_irrigation_time"] = mature_until
-        a_state["spirit_tree_last_mature_detected_time"] = now_str()
-        a_state["spirit_tree_last_mature_msg_id"] = msg_id
-        if SPIRIT_TREE_STATUS_COMMAND in self.clean_spirit_tree_text(text) or "采摘期" in self.clean_spirit_tree_text(text):
-            a_state["spirit_tree_last_status_time"] = now_str()
-
-        needs_harvest = not (
-            a_state.get("spirit_tree_harvested_in_mature_period")
-            or a_state.get("spirit_tree_harvest_attempted_in_mature_period")
-            or no_irrigation_only
-            or self.spirit_tree_harvest_locked(identity)
-            or self.spirit_tree_harvest_auto_paused(identity)
-        )
-        a_state["spirit_tree_harvest_pending"] = needs_harvest
-        self.save_state()
-        log.info(f"[{identity}] spirit tree status -> {SPIRIT_TREE_MATURE_STATUS} until {mature_until} ({source}).")
-        if not needs_harvest:
-            block_reason = self.spirit_tree_harvest_block_reason(identity)
-            if block_reason:
-                log.info(f"[{identity}] spirit tree harvest skipped: {block_reason}.")
-        return needs_harvest
-
-    def record_spirit_tree_invasion_state(self, text, msg=None, source="", identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        a_state = self.spirit_tree_state_for_identity(identity)
-        now = now_str()
-        a_state["spirit_tree_invasion_status"] = "古剑门来袭"
-        a_state["spirit_tree_guard_pending"] = True
-        a_state["spirit_tree_last_invasion_time"] = now
-        a_state["spirit_tree_last_invasion_msg_id"] = getattr(msg, "id", None) or 0
-        clear_command_guard_block(
-            self, SPIRIT_TREE_GUARD_COMMAND, log,
-            reason="new spirit tree invasion",
-        )
-        self.save_state()
-        log.info(f"[{identity}] 古剑门来袭 detected ({source}); scheduling {SPIRIT_TREE_GUARD_COMMAND}.")
-        return True
-
-    def record_spirit_tree_harvest_response(self, text, identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        a_state = self.spirit_tree_state_for_identity(identity)
-        clean = self.clean_spirit_tree_text(text)
-        if any(k in clean for k in ["灵果入腹", "摘下一枚", "采摘成功", "获得", "修为增长", "已经采摘", "已采摘", "本轮已采"]):
-            a_state["spirit_tree_harvested_in_mature_period"] = True
-            a_state["spirit_tree_harvest_pending"] = False
-            a_state["spirit_tree_last_harvest_time"] = now_str()
-            if not (a_state.get("next_spirit_tree_harvest_time", "") and is_future(a_state.get("next_spirit_tree_harvest_time", ""))):
-                a_state["next_spirit_tree_harvest_time"] = add_seconds_str(now_str(), SPIRIT_TREE_HARVEST_LOCK_SECONDS)
-            self.save_state()
-            log.info(f"[{identity}] spirit tree harvest recorded.")
-            return True
-        if any(k in clean for k in [
-            "尚未成熟", "还未成熟", "未成熟", "采摘期未开启", "尚未进入采摘期",
-            "未曾为灵树灌溉", "无功不受禄", "非本宗弟子", "不得靠近灵眼之树",
-        ]):
-            existing_irrigation = self.get_spirit_tree_irrigation_time(identity)
-            a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
-            a_state["spirit_tree_mature_until"] = ""
-            a_state["spirit_tree_harvested_in_mature_period"] = False
-            a_state["spirit_tree_harvest_pending"] = False
-            if not (existing_irrigation and is_future(existing_irrigation)):
-                self.set_spirit_tree_irrigation_time(identity, add_seconds_str(now_str(), 600))
-            self.save_state()
-            log.info(f"[{identity}] spirit tree harvest rejected as not mature; resume irrigation checks.")
-            return True
-        if any(k in clean for k in ["核对天道榜单", "拿出宗门贡献令"]):
-            log.info(f"[{identity}] spirit tree harvest settlement pending edited result.")
-            return False
-        if clean:
-            notify_unrecognized_response(self, SPIRIT_TREE_HARVEST_COMMAND, clean, log, "灵树采摘")
-        return False
-
-    def record_spirit_tree_irrigation_state(self, text, source="", identity=SPIRIT_TREE_AVATAR, success_base_time=""):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        a_state = self.spirit_tree_state_for_identity(identity)
-        clean = self.clean_spirit_tree_text(text)
-        previous_status = a_state.get("spirit_tree_status", "")
-        is_status_text = (
-            ("灵眼之树" in clean or "灵树状态" in clean)
-            and any(k in clean for k in ["进度", "阶段", "环境", "成熟度", "当前状态"])
-        )
-        is_success_text = "灵树灌溉" in clean and "成熟度" in clean
-        is_cooldown_text = self.spirit_tree_text_is_irrigation_cooldown(clean)
-        if not (is_status_text or is_success_text or is_cooldown_text):
-            if clean:
-                notify_unrecognized_response(self, SPIRIT_TREE_IRRIGATION_COMMAND, clean, log, "灵树灌溉")
-            return False
-        a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
-        a_state["spirit_tree_mature_until"] = ""
-        a_state["spirit_tree_harvested_in_mature_period"] = False
-        a_state["spirit_tree_harvest_attempted_in_mature_period"] = False
-        a_state["spirit_tree_harvest_pending"] = False
-        if is_status_text:
-            a_state["spirit_tree_last_status_time"] = now_str()
-
-        if is_cooldown_text:
-            cd = self.parse_wait_time(clean)
-            self.set_spirit_tree_irrigation_time(identity, add_seconds_str(now_str(), cd if cd > 0 else 600))
-        elif is_success_text:
-            base_time = success_base_time or now_str()
-            try:
-                str_to_dt(base_time)
-            except Exception:
-                base_time = now_str()
-            self.set_spirit_tree_irrigation_time(identity, add_seconds_str(base_time, 2 * 3600))
-        elif previous_status == SPIRIT_TREE_MATURE_STATUS:
-            self.set_spirit_tree_irrigation_time(identity, "")
-
-        self.save_state()
-        log.info(f"[{identity}] spirit tree status -> {SPIRIT_TREE_IRRIGATION_STATUS} ({source}).")
-        return True
-
-    def classify_spirit_tree_guard_response(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        cd = self.parse_wait_time(clean)
-        if not clean:
-            return "", 0
-        if any(k in clean for k in ["当前并无外敌入侵", "并无外敌入侵", "无需加固大阵", "无需加固", "无需守山"]):
-            return "no_invasion", 0
-        if "三派异动" in clean and "古剑门" in clean and not self.spirit_tree_text_indicates_invasion(clean):
-            return "no_invasion", 0
-        if any(k in clean for k in ["守山成功", "大阵修复", "为护山大阵注入"]):
-            return "success", SPIRIT_TREE_GUARD_SUCCESS_RETRY_SECONDS
-        if any(k in clean for k in ["经脉尚需调息", "后再来守山", "刚刚注入过灵力", "已协同", "冷却"]):
-            return "cooldown", max(1, cd)
-        return "", 0
-
-    def record_spirit_tree_guard_response(self, text, identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        a_state = self.spirit_tree_state_for_identity(identity)
-        clean = self.clean_spirit_tree_text(text)
-        outcome, cd_seconds = self.classify_spirit_tree_guard_response(clean)
-        now = now_str()
-        if outcome == "no_invasion":
-            a_state["spirit_tree_invasion_status"] = ""
-            a_state["spirit_tree_guard_pending"] = False
-            self.clear_spirit_tree_guard_times()
-            force_command_guard_block(
-                self,
-                SPIRIT_TREE_GUARD_COMMAND,
-                SPIRIT_TREE_GUARD_ERROR_BLOCK_SECONDS,
-                log,
-                reason="spirit_tree_no_invasion_response",
-                alert=True,
-                reason_text=(
-                    f"返回信息表示当前无需守山，已暂停该命令 "
-                    f"{SPIRIT_TREE_GUARD_ERROR_BLOCK_SECONDS // 60} 分钟。"
-                ),
-            )
-            log.info(f"[{identity}] spirit tree guard stopped: no invasion.")
-            return outcome
-        if outcome in {"success", "cooldown"}:
-            if outcome == "success":
-                self.set_spirit_tree_last_guard_time(identity, now)
-            self.set_spirit_tree_guard_time(identity, add_seconds_str(now, cd_seconds))
-            a_state["spirit_tree_invasion_status"] = "古剑门来袭"
-            a_state["spirit_tree_guard_pending"] = True
-            self.save_state()
-            log.info(
-                f"[{identity}] spirit tree guard {outcome}; "
-                f"next attempt after {self.get_spirit_tree_guard_time(identity)}."
-            )
-            return outcome
-        if clean and not any(k in clean for k in ["协同守山", "护山", "古剑门", "冷却", "已协同", "加固", "守山"]):
-            notify_unrecognized_response(self, SPIRIT_TREE_GUARD_COMMAND, clean, log, "协同守山")
-        return ""
-
-    def schedule_spirit_tree_harvest_once(self, reason="mature", identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        block_reason = self.spirit_tree_harvest_block_reason(identity)
-        if block_reason:
-            state = self.spirit_tree_state_for_identity(identity)
-            state["spirit_tree_harvest_pending"] = False
-            self.save_state()
-            log.info(f"[{identity}] spirit tree harvest schedule skipped: {block_reason} ({reason}).")
-            return
-        locked_until = self.spirit_tree_harvest_lock_until(identity)
-        if locked_until:
-            log.info(f"[{identity}] spirit tree harvest schedule skipped: locked until {locked_until} ({reason}).")
-            return
-        tasks = getattr(self, "_spirit_tree_harvest_tasks", None)
-        if tasks is None:
-            tasks = {}
-            self._spirit_tree_harvest_tasks = tasks
-        task = tasks.get(identity)
-        if task and not task.done():
-            return
-        tasks[identity] = asyncio.create_task(self.execute_spirit_tree_harvest_once(reason, identity=identity))
-
-    def spirit_tree_guard_identities(self, preferred_identity=None):
-        identities = []
-
-        def add(identity):
-            identity = str(identity or "").strip()
-            if identity and identity not in identities:
-                identities.append(identity)
-
-        add(preferred_identity)
-        add("主魂")
-        if SPIRIT_TREE_AVATAR in getattr(self, "avatars", []):
-            features = (getattr(self, "avatar_features", {}) or {}).get(SPIRIT_TREE_AVATAR, {})
-            if features.get("spirit_tree_irrigation"):
-                add(SPIRIT_TREE_AVATAR)
-        return identities
-
-    def schedule_spirit_tree_guard_opportunities(self, reason="invasion", preferred_identity=None):
-        for identity in self.spirit_tree_guard_identities(preferred_identity):
-            next_guard = self.get_spirit_tree_guard_time(identity)
-            delay = seconds_until(next_guard) if next_guard and is_future(next_guard) else 0
-            self.schedule_spirit_tree_guard_once(reason, identity=identity, delay_seconds=max(0, int(delay)))
-
-    def schedule_spirit_tree_guard_once(self, reason="invasion", identity=SPIRIT_TREE_AVATAR, delay_seconds=0):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        tasks = getattr(self, "_spirit_tree_guard_tasks", None)
-        if tasks is None:
-            tasks = {}
-            self._spirit_tree_guard_tasks = tasks
-        task = tasks.get(identity)
-        current = None
-        try:
-            current = asyncio.current_task()
-        except RuntimeError:
-            current = None
-        if task and not task.done() and task is not current:
-            return
-        tasks[identity] = asyncio.create_task(
-            self.execute_spirit_tree_guard_once(reason, identity=identity, delay_seconds=delay_seconds)
-        )
-
-    def maybe_record_spirit_tree_passive_message(self, msg, text, source="passive", identity=None, irrigation_success_base_time=""):
-        global_tree_state = self.spirit_tree_text_is_global_state(text)
-        target_identity = str(identity or "").strip()
-        if not target_identity:
-            target_identity = self.spirit_tree_identity_from_message(msg, text) or "主魂"
-        if is_reply_to_untracked_message(self, msg) and not global_tree_state:
-            return False
-        indicates_mature = self.spirit_tree_text_indicates_mature(text)
-        indicates_irrigation = self.spirit_tree_text_indicates_irrigation_state(text)
-        indicates_invasion = self.spirit_tree_text_indicates_invasion(text)
-        if (
-            indicates_irrigation
-            and not global_tree_state
-            and not self.spirit_tree_irrigation_message_is_trusted(target_identity, msg, text, source=source)
-        ):
-            log.info(f"[{target_identity}] spirit tree irrigation sync skipped ({source}): untrusted ownership.")
-            return False
-        if (
-            (indicates_mature or indicates_irrigation or indicates_invasion)
-            and not global_tree_state
-            and not self.spirit_tree_message_targets_identity(target_identity, msg, text, source=source)
-        ):
-            log.info(f"[{target_identity}] spirit tree sync skipped ({source}): message is not targeted to this identity.")
-            return False
-
-        matched = False
-        if indicates_mature:
-            needs_harvest = self.record_spirit_tree_mature_state(text, msg=msg, source=source, identity=target_identity)
-            if needs_harvest:
-                self.schedule_spirit_tree_harvest_once(source, identity=target_identity)
-            matched = True
-        elif indicates_irrigation:
-            self.record_spirit_tree_irrigation_state(
-                text,
-                source=source,
-                identity=target_identity,
-                success_base_time=irrigation_success_base_time,
-            )
-            matched = True
-        if indicates_invasion:
-            needs_guard = self.record_spirit_tree_invasion_state(text, msg=msg, source=source, identity=target_identity)
-            if needs_guard:
-                self.schedule_spirit_tree_guard_opportunities(source, preferred_identity=target_identity)
-            matched = True
-        if not matched:
-            self.normalize_spirit_tree_state(target_identity)
-        return matched
-
-    async def refresh_spirit_tree_status_after_no_irrigation(self, identity, source="irrigation response"):
-        """When irrigation says no action is needed, query status to get the real mature timer."""
-        identity = str(identity or "主魂").strip() or "主魂"
-        log.info(
-            f"[{identity}] {SPIRIT_TREE_IRRIGATION_COMMAND} returned no-irrigation; "
-            f"querying {SPIRIT_TREE_STATUS_COMMAND}."
-        )
-        status_resp = await self.send_and_wait_feedback_identity(
-            identity,
-            SPIRIT_TREE_STATUS_COMMAND,
-            timeout=60,
-            max_retries=1,
-        )
-        status_text = self.response_text(status_resp)
-        if status_text and self.maybe_record_spirit_tree_passive_message(
-            None,
-            status_text,
-            source=f"{source} status follow-up",
-            identity=identity,
-        ):
-            return True
-        log.warning(f"[{identity}] {SPIRIT_TREE_STATUS_COMMAND} follow-up did not return recognizable status.")
-        return False
-
-    def spirit_tree_identity_from_message(self, msg, text):
-        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", str(text or ""))
-        if marker:
-            return marker.group(1).strip()
-
-        reply_identity = tracked_command_identity_for_reply(self, msg)
-        if reply_identity:
-            return reply_identity
-
-        lower_text = str(text or "").lower()
-        for identity, usernames in (getattr(self, "identity_usernames", None) or {}).items():
-            for username in usernames or []:
-                name = str(username or "").lower().lstrip("@").strip()
-                if name and f"@{name}" in lower_text:
-                    return identity
-        for username, identity in (getattr(self, "avatar_usernames", None) or {}).items():
-            name = str(username or "").lower().lstrip("@").strip()
-            if name and f"@{name}" in lower_text:
-                return identity
-        return ""
-
-    def spirit_tree_irrigation_message_is_trusted(self, identity, msg, text, source=""):
-        """Irrigation success/cooldown is per identity; do not consume stray group replies."""
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        if msg is None:
-            return True
-        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", str(text or ""))
-        if marker:
-            return marker.group(1).strip() == identity
-        reply_identity = tracked_command_identity_for_reply(self, msg)
-        if reply_identity:
-            return reply_identity == identity
-
-        lower_text = str(text or "").lower()
-        if identity == "主魂":
-            for username in (getattr(self, "identity_usernames", None) or {}).get("主魂", []):
-                name = str(username or "").lower().lstrip("@").strip()
-                if name and (f"@{name}" in lower_text or f"【{name}】" in lower_text):
-                    return True
-        for username, avatar_identity in (getattr(self, "avatar_usernames", None) or {}).items():
-            if avatar_identity != identity:
-                continue
-            name = str(username or "").lower().lstrip("@").strip()
-            if name and (f"@{name}" in lower_text or f"【{name}】" in lower_text):
-                return True
-        return False
-
-    def spirit_tree_message_targets_identity(self, identity, msg, text, source=""):
-        """Only accept spirit-tree bot text that can be attributed to the expected identity."""
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        marker = re.search(r"\[Avatar:\s*([^\]\r\n]+)\]", str(text or ""))
-        if marker:
-            return marker.group(1).strip() == identity
-        if msg is None:
-            return True
-
-        reply_identity = tracked_command_identity_for_reply(self, msg)
-        if reply_identity:
-            return reply_identity == identity
-
-        if mentions_other_user_for_identity(self, msg, text, identity):
-            return False
-
-        if identity == "主魂":
-            return True
-
-        lower_text = str(text or "").lower()
-        for username, avatar_identity in (self.avatar_usernames or {}).items():
-            if avatar_identity != identity:
-                continue
-            name = str(username or "").lower().lstrip("@").strip()
-            if not name:
-                continue
-            if f"@{name}" in lower_text or f"【{name}】" in lower_text:
-                return True
-            if re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", lower_text):
-                return True
-
-        return False
-
-    def spirit_tree_message_targets_avatar(self, msg, text, source=""):
-        return self.spirit_tree_message_targets_identity(SPIRIT_TREE_AVATAR, msg, text, source=source)
-
-    async def execute_spirit_tree_harvest_once(self, reason="mature", identity=SPIRIT_TREE_AVATAR):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        await self.startup_done.wait()
-        await self.pause_event.wait()
-        async with AtomicTaskContext(self, f"SpiritTreeHarvest-{identity}"):
-            a_state = self.normalize_spirit_tree_state(identity)
-            block_reason = self.spirit_tree_harvest_block_reason(identity)
-            if block_reason:
-                a_state["spirit_tree_harvest_pending"] = False
-                self.save_state()
-                log.info(f"[{identity}] spirit tree harvest skipped: {block_reason} ({reason}).")
-                return
-            mature_until = a_state.get("spirit_tree_mature_until", "")
-            if a_state.get("spirit_tree_status") != SPIRIT_TREE_MATURE_STATUS or not (mature_until and is_future(mature_until)):
-                return
-            locked_until = self.spirit_tree_harvest_lock_until(identity)
-            if locked_until:
-                log.info(f"[{identity}] spirit tree harvest skipped: locked until {locked_until} ({reason}).")
-                a_state["spirit_tree_harvest_pending"] = False
-                self.save_state()
-                return
-            if a_state.get("spirit_tree_harvested_in_mature_period") or a_state.get("spirit_tree_harvest_attempted_in_mature_period"):
-                return
-            if not command_send_precheck(self, SPIRIT_TREE_HARVEST_COMMAND, log, identity=identity):
-                log.info(f"[{identity}] spirit tree harvest skipped: command is not sendable now.")
-                return
-            self.record_spirit_tree_harvest_attempt(identity, reason)
-            log.info(f"[{identity}] spirit tree mature detected ({reason}); sending {SPIRIT_TREE_HARVEST_COMMAND} once.")
-            resp = await self.send_and_wait_feedback_identity(identity, SPIRIT_TREE_HARVEST_COMMAND, timeout=90, max_retries=0)
-            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-            if self.record_spirit_tree_harvest_response(resp_text, identity=identity):
-                return
-            resp_id = getattr(resp, "id", None)
-            if not resp_id:
-                return
-            for _ in range(15):
-                await asyncio.sleep(1)
-                try:
-                    updated_msg = await self.client.get_messages(self.target_chat_id, ids=resp_id)
-                except Exception as e:
-                    log.info(f"[{identity}] spirit tree harvest edit poll failed: {e}")
-                    return
-                updated_text = (updated_msg.text or "") if updated_msg else ""
-                if updated_text and updated_text != resp_text:
-                    resp_text = updated_text
-                    if self.record_spirit_tree_harvest_response(resp_text, identity=identity):
-                        return
-
-    async def execute_spirit_tree_guard_once(self, reason="invasion", identity=SPIRIT_TREE_AVATAR, delay_seconds=0):
-        identity = str(identity or SPIRIT_TREE_AVATAR).strip() or SPIRIT_TREE_AVATAR
-        await self.startup_done.wait()
-        await self.pause_event.wait()
-        if delay_seconds and delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
-            await self.pause_event.wait()
-        async with AtomicTaskContext(self, f"SpiritTreeGuard-{identity}"):
-            a_state = self.spirit_tree_state_for_identity(identity)
-            if self.identity_pause_seconds(identity) > 0:
-                log.info(f"[{identity}] spirit tree guard skipped: identity paused.")
-                return
-            next_guard = self.get_spirit_tree_guard_time(identity)
-            if next_guard and is_future(next_guard):
-                delay = max(1, int(seconds_until(next_guard)))
-                self.schedule_spirit_tree_guard_once(reason, identity=identity, delay_seconds=delay)
-                return
-            if not a_state.get("spirit_tree_guard_pending") and a_state.get("spirit_tree_invasion_status") != "古剑门来袭":
-                return
-            if not command_send_precheck(self, SPIRIT_TREE_GUARD_COMMAND, log, identity=identity):
-                log.info(f"[{identity}] spirit tree guard skipped: command is not sendable now.")
-                return
-            log.info(f"[{identity}] 古剑门来袭 detected ({reason}); sending {SPIRIT_TREE_GUARD_COMMAND} once.")
-            resp = await self.send_and_wait_feedback_identity(identity, SPIRIT_TREE_GUARD_COMMAND, timeout=90, max_retries=1)
-            resp_text = getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else ""
-            outcome = self.record_spirit_tree_guard_response(resp_text, identity=identity)
-            if outcome in {"success", "cooldown"}:
-                next_retry = self.get_spirit_tree_guard_time(identity)
-                delay = max(1, int(seconds_until(next_retry))) if next_retry and is_future(next_retry) else 1
-                self.schedule_spirit_tree_guard_once(f"{reason} retry", identity=identity, delay_seconds=delay)
-
     def text_targets_self(self, msg, text):
         """判断消息是否针对本账号"""
         if mentions_self(self, msg, text): return True
@@ -5188,7 +4324,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         return self.avatar_identities.get(str(msg.sender_id))
 
     def on_avatar_dao_name_changed(self, old_name, new_name):
-        global DESTINY_AVATAR, SPIRIT_TREE_AVATAR
+        global DESTINY_AVATAR
         for configured in (
             STAR_GAZING_ROTATING_AVATARS,
             FORMATION_ASSIST_AVATARS,
@@ -5199,10 +4335,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             STAR_ATTRACTION_AVATARS.add(new_name)
         if DESTINY_AVATAR == old_name:
             DESTINY_AVATAR = new_name
-        if SPIRIT_TREE_AVATAR == old_name:
-            SPIRIT_TREE_AVATAR = new_name
-        if getattr(self, "spirit_tree_avatar", "") == old_name:
-            self.spirit_tree_avatar = new_name
 
     def _state_impending_command_wait(self, state, identity=""):
         """Return seconds until the next command-worthy timestamp for an identity, or -1."""
@@ -5875,166 +5007,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             await asyncio.sleep(3)
             await self.send_and_wait_feedback_identity(avatar, ".拼图", timeout=60)
 
-    def spirit_tree_irrigation_response_is_actionable(self, text):
-        clean = self.clean_spirit_tree_text(text)
-        return bool(
-            clean
-            and (
-                self.spirit_tree_text_is_no_irrigation_response(clean)
-                or self.spirit_tree_text_indicates_irrigation_state(clean)
-                or self.spirit_tree_text_is_irrigation_cooldown(clean)
-            )
-        )
-
-    async def send_spirit_tree_irrigation_once(self, identity, attempt=1, total=1, suppress_no_response_alert=False):
-        sent_at_hint = now_str()
-        if total > 1:
-            log.info(f"[{identity}] spirit tree irrigation attempt {attempt}/{total}: sending {SPIRIT_TREE_IRRIGATION_COMMAND}.")
-        resp = await self.send_and_wait_feedback_identity(
-            identity,
-            SPIRIT_TREE_IRRIGATION_COMMAND,
-            timeout=60,
-            max_retries=0 if total > 1 else 2,
-            suppress_no_response_alert=suppress_no_response_alert,
-        )
-        cached_sent_at = self.latest_command_sent_at(identity, SPIRIT_TREE_IRRIGATION_COMMAND)
-        sent_at = cached_sent_at if cached_sent_at and cached_sent_at >= sent_at_hint else sent_at_hint
-        return {
-            "resp": resp,
-            "text": self.response_text(resp),
-            "sent_at": sent_at,
-        }
-
-    async def _identity_spirit_tree_irrigation_check(self, identity):
-        """身份级灵树灌溉检查（每2小时一次）。"""
-        identity = str(identity or "主魂").strip() or "主魂"
-        if self.identity_pause_seconds(identity) > 0:
-            return
-        if self.dashboard_command_paused(SPIRIT_TREE_IRRIGATION_COMMAND, identity):
-            return
-        a_state = self.spirit_tree_state_for_identity(identity)
-        if a_state.get("spirit_tree_status") == SPIRIT_TREE_MATURE_STATUS:
-            mature_until = a_state.get("spirit_tree_mature_until", "")
-            if mature_until and is_future(mature_until):
-                if not (
-                    a_state.get("spirit_tree_harvested_in_mature_period")
-                    or a_state.get("spirit_tree_harvest_attempted_in_mature_period")
-                    or self.spirit_tree_harvest_locked(identity)
-                ):
-                    if identity == SPIRIT_TREE_AVATAR:
-                        self.schedule_spirit_tree_harvest_once("irrigation check")
-                    else:
-                        self.schedule_spirit_tree_harvest_once("irrigation check", identity=identity)
-                log.info(f"[{identity}] 灵树处于成熟采摘期，暂停灌溉至 {mature_until}。")
-                return
-            if mature_until:
-                log.info(f"[{identity}] 灵树成熟期缓存到期，发送灌溉并按回复校准状态。")
-        else:
-            a_state = self.normalize_spirit_tree_state(identity)
-        nt = self.get_spirit_tree_irrigation_time(identity)
-        if nt and is_future(nt):
-            remaining = seconds_until(nt)
-            if remaining > SWITCH_COMMAND_LEAD_SECONDS or self.current_identity == identity:
-                return
-            log.info(
-                f"[{identity}] spirit tree irrigation due in {remaining:.1f}s; "
-                "switch lead active, sending irrigation chain now."
-            )
-        max_attempts = 2 if identity == "主魂" else 1
-        attempts = []
-        for attempt in range(1, max_attempts + 1):
-            has_actionable_response = any(
-                self.spirit_tree_irrigation_response_is_actionable(item.get("text", ""))
-                for item in attempts
-            )
-            item = await self.send_spirit_tree_irrigation_once(
-                identity,
-                attempt=attempt,
-                total=max_attempts,
-                suppress_no_response_alert=max_attempts > 1 and (attempt < max_attempts or has_actionable_response),
-            )
-            attempts.append(item)
-            resp_text = item.get("text", "")
-            if self.spirit_tree_text_is_no_irrigation_response(resp_text) or self.spirit_tree_text_is_irrigation_cooldown(resp_text):
-                break
-
-        selected = None
-        for item in reversed(attempts):
-            if self.spirit_tree_irrigation_response_is_actionable(item.get("text", "")):
-                selected = item
-                break
-        if selected is None and attempts:
-            selected = next((item for item in reversed(attempts) if item.get("text")), attempts[-1])
-        selected = selected or {"text": "", "sent_at": now_str()}
-        resp_text = selected.get("text", "")
-        sent_at = selected.get("sent_at", now_str())
-        if self.spirit_tree_text_is_no_irrigation_response(resp_text):
-            if await self.refresh_spirit_tree_status_after_no_irrigation(identity, source="irrigation response"):
-                return
-        if self.maybe_record_spirit_tree_passive_message(
-            None,
-            resp_text,
-            source="irrigation response",
-            identity=identity,
-            irrigation_success_base_time=sent_at,
-        ):
-            return
-        a_state = self.spirit_tree_state_for_identity(identity)
-        a_state["spirit_tree_status"] = SPIRIT_TREE_IRRIGATION_STATUS
-        # 处理冷却时间（从响应中解析或使用默认值）
-        cd = self.parse_wait_time(resp_text)
-        self.set_spirit_tree_irrigation_time(
-            identity,
-            add_seconds_str(now_str() if cd > 0 else sent_at, cd if cd > 0 else 2 * 3600),
-        )
-        self.save_state()
-
-    async def _avatar_spirit_tree_irrigation_check(self, avatar):
-        """化身灵树灌溉检查（每2小时一次）。"""
-        await self._identity_spirit_tree_irrigation_check(avatar)
-
-    def spirit_tree_next_wait_seconds(self, identity="主魂"):
-        state = self.spirit_tree_state_for_identity(identity)
-        waits = []
-        if state.get("spirit_tree_guard_pending") or state.get("spirit_tree_invasion_status"):
-            waits.append(60)
-        if state.get("spirit_tree_status") == SPIRIT_TREE_MATURE_STATUS:
-            mature_until = state.get("spirit_tree_mature_until", "")
-            if mature_until and is_future(mature_until):
-                waits.append(seconds_until(mature_until))
-        irrigation_time = self.get_spirit_tree_irrigation_time(identity)
-        if irrigation_time and is_future(irrigation_time):
-            remaining = seconds_until(irrigation_time)
-            if self.current_identity != identity:
-                remaining = max(1, remaining - SWITCH_COMMAND_LEAD_SECONDS)
-            waits.append(remaining)
-        for value in self.spirit_tree_guard_times().values():
-            if value and is_future(value):
-                waits.append(seconds_until(value))
-        if not waits:
-            return 5
-        return max(1, min(int(w) for w in waits if w is not None))
-
-    async def run_main_spirit_tree_loop(self):
-        """主魂落云宗灵树循环。"""
-        await self.startup_done.wait()
-        while self.is_running:
-            try:
-                pause = self.identity_pause_seconds("主魂")
-                if pause > 0:
-                    await asyncio.sleep(scheduler_sleep_seconds(pause, minimum=60))
-                    continue
-                state = self.spirit_tree_state_for_identity("主魂")
-                if state.get("spirit_tree_guard_pending") or state.get("spirit_tree_invasion_status"):
-                    self.schedule_spirit_tree_guard_opportunities("main spirit tree loop")
-                await self._identity_spirit_tree_irrigation_check("主魂")
-            except Exception as e:
-                log.error(f"Main spirit tree loop error: {e}", exc_info=True)
-            wait = self.spirit_tree_next_wait_seconds("主魂")
-            log.info(f"Main spirit tree loop sleeping {wait}s.")
-            await asyncio.sleep(scheduler_sleep_seconds(wait, minimum=1))
-
-
     async def _avatar_yuanying_out_check(self, avatar):
         """化身元婴出窍检查。无咎子目前启用，状态写入化身自己的 state。"""
         return await self.common_avatar_yuanying_out_check(avatar, require_meditation_ready=False)
@@ -6344,9 +5316,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 f"restricted_account_visibility_{index}",
                 lambda controller=controller: controller.run(lambda: self.is_running),
             )
-        if self.enable_spirit_tree and not self.lingxiao_enabled:
-            self.create_scheduler_task("main_spirit_tree", lambda: self.run_main_spirit_tree_loop())
-
         # ---- 化身系统 ----
         if self.enable_avatar_tasks and self.avatars:
             self.create_scheduler_task("all_avatars_sequential", lambda: self.run_all_avatars_sequential())
@@ -6526,8 +5495,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                     manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender, log)
                     if text_targets_current_account(self, msg, text):
                         self.record_main_pasture_return(text)
-                    if not manual_reply or not manual_processed:
-                        self.maybe_record_spirit_tree_passive_message(msg, text, source="edited message")
                     # 编辑消息也能触发 feedback_events（bot 通过编辑回复指令）
                     is_matched = match_pending_feedback_by_reply(
                         self, msg, text, self.is_loose_feedback_candidate, log,

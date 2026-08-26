@@ -1519,11 +1519,54 @@
             </div>
             <div class="automation-settings-grid">
                 <div class="automation-card">
+                    <div class="automation-card-title">奇袭夺宝</div>
+                    <div class="automation-card-hint">
+                        夺宝者先取下并装备风雷翅；被夺宝者发送新鲜“.切换”锚点后，夺宝者引用该消息使用“.奇袭 夺宝”，最后散念并归还风雷翅。若夺宝者没有风雷翅则自动跳过。
+                    </div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="surprise-raid-enabled" type="checkbox" onchange="markSurpriseRaidDirty()">
+                            启用奇袭夺宝
+                        </label>
+                    </div>
+                    <label class="record-field">
+                        夺宝者
+                        <select id="surprise-raid-raider" class="record-select" onchange="markSurpriseRaidDirty()"></select>
+                    </label>
+                    <label class="record-field">
+                        被夺宝者
+                        <select id="surprise-raid-target" class="record-select" onchange="markSurpriseRaidDirty()"></select>
+                    </label>
+                    <label class="record-field">
+                        循环间隔（分钟）
+                        <input id="surprise-raid-interval-minutes" class="record-input" type="number" min="10" max="10080" step="1" value="120" oninput="markSurpriseRaidDirty()">
+                    </label>
+                    <div class="automation-card-hint" id="surprise-raid-runtime">等待运行状态...</div>
+                    <button class="red-packet-save automation-save" id="surprise-raid-save" type="button" onclick="saveSurpriseRaidSettings()"><i data-lucide="save" aria-hidden="true"></i>保存奇袭</button>
+                </div>
+                <div class="automation-card">
                     <div class="automation-card-title">青元子世界 Boss 参战身份</div>
                     <div class="automation-card-hint">每个账号最多选择一个身份；选“关闭”即可跳过该账号。设置保存后下一场 Boss 生效。</div>
                     <div class="automation-account-grid" id="world-boss-identity-controls">
                         <div class="record-empty">加载中...</div>
                     </div>
+                </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">使用风雷翅加速</div>
+                    <div class="automation-card-hint">
+                        启用后，所选身份执行 .寻觅灵兽 / .问道 / .探寻裂缝 时自动取下、装备并保留风雷翅以缩短冷却；默认关闭。
+                    </div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option">
+                            <input id="wind-thunder-enabled" type="checkbox" onchange="syncWindThunderControls(); markAutomationSettingsDirty()">
+                            启用风雷翅加速
+                        </label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="wind-thunder-participant-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                    <div class="automation-card-hint" id="wind-thunder-runtime">等待运行状态...</div>
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">慕兰支援参数</div>
@@ -1579,7 +1622,7 @@
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">灵溪自动垂钓</div>
-                    <div class="automation-card-hint">所选身份按每竿轮转。自动模式以 Mini App 返回的实际竿型为准；指定竿型时只使用所选鱼竿。转移挂单会自动匹配同一种鱼竿，并在 Mini App 验竿后继续。</div>
+                    <div class="automation-card-hint">所选身份分别使用自己的钓竿。没有匹配钓竿的身份会自动跳过，不会在身份之间转移钓竿。</div>
                     <div class="automation-mode-options">
                         <label class="automation-option">
                             <input id="miniapp-fishing-enabled" type="checkbox" onchange="markAutomationSettingsDirty()">
@@ -1593,10 +1636,6 @@
                     <label class="record-field">
                         使用鱼竿
                         <select id="miniapp-fishing-rod" class="record-select" onchange="markAutomationSettingsDirty()"></select>
-                    </label>
-                    <label class="record-field">
-                        当前钓竿持有者
-                        <select id="miniapp-fishing-rod-owner" class="record-select" onchange="markAutomationSettingsDirty()"></select>
                     </label>
                     <label class="record-field">
                         钓鱼地点
@@ -1761,6 +1800,7 @@
             automation: 15000,
             redPackets: 10000,
             inventory: 5000
+            ,surpriseRaids: 15000
         };
         const pollBusy = {
             status: false,
@@ -1771,6 +1811,7 @@
             automation: false,
             redPackets: false,
             inventory: false
+            ,surpriseRaids: false
         };
         let logState = {
             lines: [],
@@ -1807,7 +1848,10 @@
         let inventorySelectedTotalNames = new Set();
         let inventorySelectedNonTradableNames = new Set();
         let inventoryNonTradablePending = false;
-        let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, tianxing: {}};
+        let automationDashboardData = {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, wind_thunder: {}, miniapp_fishing: {}, tianxing: {}};
+        let surpriseRaidDashboardData = {};
+        let surpriseRaidSettingsDirty = false;
+        let surpriseRaidSavePending = false;
         let automationSettingsDirty = false;
         let automationSavePending = false;
         let miniappFishingForceRetryPending = false;
@@ -4198,18 +4242,27 @@
             });
         }
 
+        function syncWindThunderControls() {
+            const enabled = Boolean(document.getElementById('wind-thunder-enabled')?.checked);
+            document.querySelectorAll('#wind-thunder-participant-controls input[type="checkbox"]').forEach(input => {
+                input.disabled = !enabled;
+            });
+        }
+
         function renderAutomationDashboard(data) {
-            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
+            automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, wind_thunder: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
             const abyss = automationDashboardData.miniapp_beast_abyss || {};
+            const windThunder = automationDashboardData.wind_thunder || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
             const journey = automationDashboardData.miniapp_journey || {};
             const trial = automationDashboardData.miniapp_tianji_trial || {};
             const fateCards = automationDashboardData.miniapp_fate_cards || {};
             const tianxing = automationDashboardData.tianxing || {};
             const abyssSettings = settings.miniapp_beast_abyss || {};
+            const windThunderSettings = settings.wind_thunder || {};
             const fishingSettings = settings.miniapp_fishing || {};
             const journeySettings = settings.miniapp_journey || {};
             const trialSettings = settings.miniapp_tianji_trial || {};
@@ -4223,10 +4276,12 @@
             const abyssRangeText = (abyssPowerMin > 0 || abyssPowerMax > 0)
                 ? `${abyssPowerMin || 0}-${abyssPowerMax || '∞'}`
                 : '不限';
+            const windThunderEnabled = Boolean(windThunder.enabled ?? windThunderSettings.enabled ?? false);
+            const windThunderParticipants = new Set(windThunder.participants || windThunderSettings.participants || []);
+            const windThunderAccounts = Array.isArray(windThunder.accounts) ? windThunder.accounts : [];
             const fishingEnabled = Boolean(fishing.enabled ?? fishingSettings.enabled ?? true);
             const fishingParticipants = new Set(fishing.participants || fishingSettings.participants || []);
             const fishingRod = String(fishing.rod || fishingSettings.rod || 'auto');
-            const fishingRodOwner = String(fishing.rod_owner || fishingSettings.rod_owner || 'auto');
             const fishingPond = String(fishing.pond || fishingSettings.pond || 'qingxi');
             const fishingBait = String(fishing.bait || fishingSettings.bait || 'demon_blood');
             const fishingChum = String(fishing.chum || fishingSettings.chum || 'none');
@@ -4254,7 +4309,7 @@
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'} · 命脉 ${fateCardsEnabled ? `${fateCardsParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 风雷翅 ${windThunderEnabled ? `${windThunderParticipants.size} 个身份` : '关闭'} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'} · 命脉 ${fateCardsEnabled ? `${fateCardsParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -4282,6 +4337,25 @@
                         `;
                     }).join('') || '<div class="record-empty">暂无可配置身份。</div>';
                 }
+                const windThunderEnabledControl = document.getElementById('wind-thunder-enabled');
+                if (windThunderEnabledControl) windThunderEnabledControl.checked = windThunderEnabled;
+                const windThunderParticipantControls = document.getElementById('wind-thunder-participant-controls');
+                if (windThunderParticipantControls) {
+                    windThunderParticipantControls.innerHTML = windThunderAccounts.map(account => `
+                        <div class="automation-account">
+                            <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                            <div class="automation-identity-options">
+                                ${(account.identities || []).map(item => `
+                                    <label class="automation-option">
+                                        <input type="checkbox" value="${escapeHtml(item.key || '')}" ${windThunderParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                        ${escapeHtml(item.name || item.key || '')}
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+                }
+                syncWindThunderControls();
                 const modeControls = document.getElementById('mulan-support-mode-controls');
                 if (modeControls) {
                     modeControls.innerHTML = (mulan.modes || []).map(item => `
@@ -4402,18 +4476,6 @@
                         </div>
                     `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
                 }
-                const fishingRodOwnerControl = document.getElementById('miniapp-fishing-rod-owner');
-                if (fishingRodOwnerControl) {
-                    const ownerOptions = fishingAccounts.flatMap(account => (account.identities || []).map(item => ({
-                        key: item.key,
-                        name: `${account.name || account.key}｜${item.name || item.key}`
-                    })));
-                    fishingRodOwnerControl.innerHTML = [
-                        '<option value="auto">自动识别</option>',
-                        ...ownerOptions.map(item => `<option value="${escapeHtml(item.key || '')}">${escapeHtml(item.name || item.key || '')}</option>`)
-                    ].join('');
-                    fishingRodOwnerControl.value = fishingRodOwner;
-                }
                 const renderFishingSelect = (id, options, value) => {
                     const select = document.getElementById(id);
                     if (!select) return;
@@ -4437,16 +4499,30 @@
             }
             const fishingRuntimeControl = document.getElementById('miniapp-fishing-runtime');
             if (fishingRuntimeControl) {
+                const schedules = Array.isArray(fishingRuntime.account_schedules)
+                    ? fishingRuntime.account_schedules
+                    : [];
+                const scheduleText = schedules.length
+                    ? schedules.map((item) => {
+                        const currentLabel = item.current_label || '已完成/待定';
+                        const statusText = item.status === 'waiting_force_retry'
+                            ? '等待其他账号'
+                            : (item.status || '等待');
+                        return `${item.account_name || item.account}：${currentLabel} · ${statusText}`;
+                    }).join('；')
+                    : `下一位：${fishingRuntime.current_label || '待定'}`;
                 const runtimeParts = [
-                    `状态：${fishingRuntime.detail || fishingRuntime.status || '等待启动'}`,
                     `目标鱼竿：${fishingOptionName(fishing.rods, fishingRod)}`,
-                    `当前持竿：${fishingRuntime.rod_holder_label || '尚未识别'}${fishingRuntime.rod_name ? `（${fishingRuntime.rod_name}）` : ''}`,
-                    `下一位：${fishingRuntime.current_label || '待定'}`
+                    '各账号独立排队，各身份分别检查自有钓竿',
+                    scheduleText
                 ];
-                if (fishingRuntime.transfer_from_label || fishingRuntime.transfer_to_label) {
-                    runtimeParts.push(`转移：${fishingRuntime.transfer_from_label || '?'} → ${fishingRuntime.transfer_to_label || '?'}${fishingRuntime.transfer?.listing_id ? `（挂单 ${fishingRuntime.transfer.listing_id}）` : ''}`);
-                }
                 fishingRuntimeControl.innerText = runtimeParts.join(' · ');
+            }
+            const windThunderRuntimeControl = document.getElementById('wind-thunder-runtime');
+            if (windThunderRuntimeControl) {
+                windThunderRuntimeControl.innerText = windThunderEnabled
+                    ? `${windThunderParticipants.size} 个身份的冷却指令自动装备风雷翅`
+                    : '风雷翅加速已关闭';
             }
             const tianxingRuntimeControl = document.getElementById('tianxing-runtime');
             if (tianxingRuntimeControl) {
@@ -4515,6 +4591,135 @@
             }
         }
 
+        function surpriseRaidOptionValue(item) {
+            return `${item.account}|${item.identity}`;
+        }
+
+        function markSurpriseRaidDirty() {
+            surpriseRaidSettingsDirty = true;
+            const save = document.getElementById('surprise-raid-save');
+            if (save && !surpriseRaidSavePending) save.innerHTML = '<i data-lucide="save" aria-hidden="true"></i>保存修改';
+        }
+
+        function renderSurpriseRaidDashboard(data) {
+            surpriseRaidDashboardData = data || {};
+            const options = Array.isArray(data.identity_options) ? data.identity_options : [];
+            const raiderSelect = document.getElementById('surprise-raid-raider');
+            const targetSelect = document.getElementById('surprise-raid-target');
+            if (raiderSelect) {
+                raiderSelect.innerHTML = options.map(item => `
+                    <option value="${escapeHtml(surpriseRaidOptionValue(item))}">
+                        ${escapeHtml(`${item.name || item.account} · ${item.label || item.identity}`)}
+                    </option>
+                `).join('') || '<option value="">暂无可配置身份</option>';
+            }
+            if (targetSelect) {
+                targetSelect.innerHTML = options.map(item => `
+                    <option value="${escapeHtml(surpriseRaidOptionValue(item))}">
+                        ${escapeHtml(`${item.name || item.account} · ${item.label || item.identity}`)}
+                    </option>
+                `).join('') || '<option value="">暂无可配置身份</option>';
+            }
+            if (!surpriseRaidSettingsDirty) {
+                const enabled = Boolean(data.enabled);
+                document.getElementById('surprise-raid-enabled').checked = enabled;
+                const raiderValue = `${data.raider_account || ''}|${data.raider_identity || ''}`;
+                const targetValue = `${data.target_account || ''}|${data.target_identity || ''}`;
+                if (raiderSelect) raiderSelect.value = raiderValue;
+                if (targetSelect) targetSelect.value = targetValue;
+                const intervalInput = document.getElementById('surprise-raid-interval-minutes');
+                const intervalMinutes = Math.max(0, Math.round(Number(data.interval_seconds || 7200) / 60));
+                if (intervalInput) intervalInput.value = String(intervalMinutes);
+                Array.from([raiderSelect, targetSelect]).forEach(select => {
+                    if (!select) return;
+                    const matched = Array.from(select.options).some(option => option.value === select.value);
+                    if (!matched) select.value = '';
+                });
+            }
+            const runtime = document.getElementById('surprise-raid-runtime');
+            if (runtime) {
+                const phaseMap = {idle: '空闲', target_prepare: '目标切换中', execution: '夺宝执行中'};
+                const pieces = [Boolean(data.enabled) ? '已启用' : '已暂停'];
+                pieces.push(phaseMap[data.phase] || data.phase || '--');
+                pieces.push(data.next_run_at ? `下次 ${data.next_run_at}` : '未排期');
+                if (data.last_result) pieces.push(escapeHtml(data.last_result));
+                if (data.last_error) pieces.push(`错误：${escapeHtml(data.last_error)}`);
+                runtime.textContent = pieces.join(' · ');
+            }
+            const saveButton = document.getElementById('surprise-raid-save');
+            if (saveButton) {
+                saveButton.disabled = surpriseRaidSavePending;
+                saveButton.innerHTML = surpriseRaidSavePending
+                    ? '<i data-lucide="loader-circle" aria-hidden="true"></i>处理中'
+                    : (surpriseRaidSettingsDirty
+                        ? '<i data-lucide="save" aria-hidden="true"></i>保存修改'
+                        : '<i data-lucide="save" aria-hidden="true"></i>保存奇袭');
+            }
+            refreshIcons();
+        }
+
+        async function updateSurpriseRaidDashboard(force = false) {
+            if (document.hidden || pollBusy.surpriseRaids) return;
+            const view = document.querySelector('[data-workspace-view="automation"]');
+            if (!force && view && !view.classList.contains('is-active')) return;
+            pollBusy.surpriseRaids = true;
+            try {
+                const response = await fetch(apiUrl('/api/surprise-raids'), {cache: 'no-store'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+                renderSurpriseRaidDashboard(data);
+            } catch (error) {
+                console.error('Surprise raid dashboard update failed:', error);
+                const runtime = document.getElementById('surprise-raid-runtime');
+                if (runtime) runtime.textContent = '加载失败';
+            } finally {
+                pollBusy.surpriseRaids = false;
+            }
+        }
+
+        async function saveSurpriseRaidSettings() {
+            if (surpriseRaidSavePending) return;
+            const raiderKey = document.getElementById('surprise-raid-raider')?.value || '';
+            const targetKey = document.getElementById('surprise-raid-target')?.value || '';
+            const intervalSeconds = Math.round(Number(document.getElementById('surprise-raid-interval-minutes')?.value || 0) * 60);
+            const [raiderAccount, raiderIdentity] = raiderKey.split('|');
+            const [targetAccount, targetIdentity] = targetKey.split('|');
+            if (!Number.isFinite(intervalSeconds) || intervalSeconds < 600 || intervalSeconds > 604800) {
+                alert('循环间隔必须是 10 分钟到 7 天。');
+                return;
+            }
+            if (!raiderIdentity || !targetIdentity) {
+                alert('请选择夺宝者和被夺宝者身份。');
+                return;
+            }
+            surpriseRaidSavePending = true;
+            renderSurpriseRaidDashboard(surpriseRaidDashboardData);
+            try {
+                const response = await fetch(apiUrl('/api/surprise-raids'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        enabled: Boolean(document.getElementById('surprise-raid-enabled')?.checked),
+                        interval_seconds: intervalSeconds,
+                        raider_account: raiderAccount,
+                        raider_identity: raiderIdentity,
+                        target_account: targetAccount,
+                        target_identity: targetIdentity,
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                surpriseRaidSettingsDirty = false;
+                renderSurpriseRaidDashboard(data.state || data);
+            } catch (error) {
+                console.error('Surprise raid settings save failed:', error);
+                alert(`奇袭夺宝保存失败：${error.message || error}`);
+            } finally {
+                surpriseRaidSavePending = false;
+                await updateSurpriseRaidDashboard(true);
+            }
+        }
+
         async function forceRetryMiniappFishing() {
             if (miniappFishingForceRetryPending) return;
             if (automationSettingsDirty) {
@@ -4555,7 +4760,6 @@
                 .map(input => input.value)
                 .filter(Boolean);
             const fishingRod = document.getElementById('miniapp-fishing-rod')?.value || 'auto';
-            const fishingRodOwner = document.getElementById('miniapp-fishing-rod-owner')?.value || 'auto';
             const fishingPond = document.getElementById('miniapp-fishing-pond')?.value || '';
             const fishingBait = document.getElementById('miniapp-fishing-bait')?.value || '';
             const fishingChum = document.getElementById('miniapp-fishing-chum')?.value || '';
@@ -4570,6 +4774,10 @@
                 .filter(Boolean);
             const journeyEnabled = Boolean(document.getElementById('miniapp-journey-enabled')?.checked);
             const journeyParticipants = Array.from(document.querySelectorAll('#miniapp-journey-participant-controls input[type="checkbox"]:checked'))
+                .map(input => input.value)
+                .filter(Boolean);
+            const windThunderEnabled = Boolean(document.getElementById('wind-thunder-enabled')?.checked);
+            const windThunderParticipants = Array.from(document.querySelectorAll('#wind-thunder-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
             const tianxingMeditationMode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || '';
@@ -4603,6 +4811,10 @@
                 alert('启用野外深入历练时至少选择一个参与身份。');
                 return;
             }
+            if (windThunderEnabled && !windThunderParticipants.length) {
+                alert('启用风雷翅加速时至少选择一个参与身份。');
+                return;
+            }
             if (!tianxingMeditationMode) {
                 alert('请选择天星宗闭关模式。');
                 return;
@@ -4632,7 +4844,6 @@
                             enabled: fishingEnabled,
                             participants: fishingParticipants,
                             rod: fishingRod,
-                            rod_owner: fishingRodOwner,
                             pond: fishingPond,
                             bait: fishingBait,
                             chum: fishingChum,
@@ -4649,6 +4860,10 @@
                         miniapp_journey: {
                             enabled: journeyEnabled,
                             participants: journeyParticipants
+                        },
+                        wind_thunder: {
+                            enabled: windThunderEnabled,
+                            participants: windThunderParticipants
                         },
                         tianxing: {
                             meditation_mode: tianxingMeditationMode,
@@ -5764,6 +5979,7 @@
         setInterval(updateDailyRewardLog, POLL_INTERVALS.dailyRewards);
         setInterval(updateDuelDashboard, POLL_INTERVALS.duels);
         setInterval(updateAutomationDashboard, POLL_INTERVALS.automation);
+        setInterval(updateSurpriseRaidDashboard, POLL_INTERVALS.surpriseRaids);
         setInterval(updateRedPacketDashboard, POLL_INTERVALS.redPackets);
         setInterval(updateInventoryDashboard, POLL_INTERVALS.inventory);
         document.getElementById('log-search-input').addEventListener('keydown', (ev) => {
@@ -5780,6 +5996,7 @@
             updateDailyRewardLog(true);
             updateDuelDashboard(true);
             updateAutomationDashboard(true);
+            updateSurpriseRaidDashboard(true);
             updateRedPacketDashboard(true);
             updateInventoryDashboard(true);
             updateLogs(true);
@@ -5791,6 +6008,7 @@
         updateDailyRewardLog();
         updateDuelDashboard();
         updateAutomationDashboard();
+        updateSurpriseRaidDashboard();
         updateRedPacketDashboard();
         updateInventoryDashboard();
         updateLogKindButtons();

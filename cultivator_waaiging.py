@@ -107,7 +107,6 @@ class WaaigingCultivator(core.Cultivator):
         # The shared Mini App configuration enables Star Palace workers for
         # other accounts; this account is always a single Tianxing main soul.
         self.enable_miniapp_star_palace = False
-        self.enable_spirit_tree = False
         self.enable_main_beasts = False
         self.enable_soul_curse = False
 

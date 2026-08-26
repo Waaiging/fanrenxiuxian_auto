@@ -2697,6 +2697,13 @@ def lingxiao_avatar_commands(name, state, root_state=None):
             manual_command(".推命 闭关", "推命闭关", group="推命"),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(
+                state,
+                "next_treasure_touch_time",
+                ".抚摸法宝 风雷翅",
+                "抚摸法宝",
+                group="法宝",
+            ),
             daily_done_command(
                 state,
                 ".观命",
@@ -5433,6 +5440,8 @@ async def automation_settings_control(
     mode = payload.get("mulan_support_mode")
     abyss = payload.get("miniapp_beast_abyss")
     abyss = abyss if isinstance(abyss, dict) else {}
+    wind_thunder = payload.get("wind_thunder")
+    wind_thunder = wind_thunder if isinstance(wind_thunder, dict) else {}
     fishing = payload.get("miniapp_fishing")
     fishing = fishing if isinstance(fishing, dict) else {}
     journey = payload.get("miniapp_journey")
@@ -5450,6 +5459,8 @@ async def automation_settings_control(
                 mulan_support_mode=mode,
                 miniapp_beast_abyss_power_min=abyss.get("power_min"),
                 miniapp_beast_abyss_power_max=abyss.get("power_max"),
+                wind_thunder_enabled=wind_thunder.get("enabled"),
+                wind_thunder_participants=wind_thunder.get("participants"),
                 miniapp_fishing_enabled=fishing.get("enabled"),
                 miniapp_fishing_pond=fishing.get("pond"),
                 miniapp_fishing_bait=fishing.get("bait"),
@@ -5496,6 +5507,9 @@ async def automation_settings_control(
             "Mini App Fate Cards participants must be a list": "天机命脉参与身份列表格式错误",
             "invalid Mini App Fate Cards participant": "天机命脉参与身份无效",
             "Mini App Fate Cards participants required": "启用天机命脉时至少选择一个身份",
+            "Wind Thunder Wings participants must be a list": "风雷翅加速参与身份列表格式错误",
+            "invalid Wind Thunder Wings participant": "风雷翅加速参与身份无效",
+            "Wind Thunder Wings participants required": "启用风雷翅加速时至少选择一个身份",
             "Tianxing Tianji grind participants must be a list": "刷天机值参与身份列表格式错误",
             "invalid Tianxing Tianji grind participant": "刷天机值参与身份无效",
             "Tianxing Tianji grind participants required": "启用刷天机值时至少选择一个身份",

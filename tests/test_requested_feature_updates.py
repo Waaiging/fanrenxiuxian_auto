@@ -1,10 +1,14 @@
 import asyncio
+import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from common_command_features import CommonCommandMixin
 import log_utils
+import automation_settings as settings_module
 from automation_settings import current_xiaohao_taiyi_identity
 from wind_thunder_features import recover_wind_thunder_sessions, wind_thunder_send, wind_thunder_target_cooldown
 
@@ -31,6 +35,35 @@ class FeatureActor(CommonCommandMixin):
 
 
 class RequestedFeatureUpdatesTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tempdir.name) / "automation_settings.json"
+        self.file_patch = patch.object(settings_module, "AUTOMATION_SETTINGS_FILE", self.path)
+        self.file_patch.start()
+
+    def tearDown(self):
+        self.file_patch.stop()
+        self.tempdir.cleanup()
+
+    def test_wind_thunder_defaults_to_disabled_and_dashboard_can_enable_main_wujiu(self):
+        value = settings_module.load_automation_settings()
+        self.assertEqual(value["wind_thunder"], {"enabled": False, "participants": []})
+        settings_module.save_automation_settings(
+            world_boss_participants=[],
+            mulan_support_mode="护阵",
+            wind_thunder_enabled=True,
+            wind_thunder_participants=["main|无咎子"],
+        )
+        value = settings_module.load_automation_settings()
+        self.assertTrue(value["wind_thunder"]["enabled"])
+        self.assertEqual(value["wind_thunder"]["participants"], ["main|无咎子"])
+        payload = settings_module.automation_dashboard_payload()
+        accounts = {item["key"]: item for item in payload["wind_thunder"]["accounts"]}
+        self.assertEqual(
+            [item["name"] for item in accounts["main"]["identities"]],
+            ["主魂", "无咎子"],
+        )
+
     def test_sect_reply_retires_old_membership_and_enables_new_one(self):
         actor = FeatureActor()
         actor.sync_identity_sect_from_text("主魂", "已叛出宗门，斩断与【元婴宗】尘缘")
@@ -42,6 +75,12 @@ class RequestedFeatureUpdatesTests(unittest.TestCase):
     def test_wind_thunder_reuses_one_session_and_cleans_up_once(self):
         async def scenario():
             actor = FeatureActor("sub")
+            settings_module.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                wind_thunder_enabled=True,
+                wind_thunder_participants=["sub|主魂"],
+            )
             with patch("wind_thunder_features.WIND_THUNDER_HOLD_SECONDS", 60):
                 await wind_thunder_send(
                     actor,
@@ -75,6 +114,12 @@ class RequestedFeatureUpdatesTests(unittest.TestCase):
     def test_wind_thunder_second_command_keeps_fixed_hold_window(self):
         async def scenario():
             actor = FeatureActor("sub")
+            settings_module.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                wind_thunder_enabled=True,
+                wind_thunder_participants=["sub|主魂"],
+            )
             with patch("wind_thunder_features.WIND_THUNDER_HOLD_SECONDS", 60):
                 await wind_thunder_send(
                     actor,
@@ -99,6 +144,12 @@ class RequestedFeatureUpdatesTests(unittest.TestCase):
     def test_wind_thunder_recovery_schedules_future_cleanup(self):
         async def scenario():
             actor = FeatureActor("sub")
+            settings_module.save_automation_settings(
+                world_boss_participants=[],
+                mulan_support_mode="护阵",
+                wind_thunder_enabled=True,
+                wind_thunder_participants=["sub|主魂"],
+            )
             state = _state(actor, "主魂")
             state["wind_thunder_equipped"] = True
             state["wind_thunder_equipped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -193,6 +193,14 @@ TIANXING_TIANJI_SUPPORTED_IDENTITIES = {
     "waaiging": ("主魂",),
 }
 DEFAULT_TIANXING_TIANJI_GRIND_PARTICIPANTS = ("main|主魂",)
+WIND_THUNDER_SUPPORTED_IDENTITIES = {
+    "main": ("主魂", "无咎子"),
+    "sub": ("主魂",),
+    "xiaohao": (),
+    "waaiging": ("主魂",),
+}
+DEFAULT_WIND_THUNDER_ENABLED = False
+DEFAULT_WIND_THUNDER_PARTICIPANTS: tuple[str, ...] = ()
 DEFAULT_MINIAPP_FISHING_ENABLED = True
 DEFAULT_MINIAPP_FISHING_POND = "qingxi"
 DEFAULT_MINIAPP_FISHING_BAIT = "demon_blood"
@@ -347,6 +355,10 @@ def default_automation_settings() -> dict[str, Any]:
             "power_min": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN,
             "power_max": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX,
         },
+        "wind_thunder": {
+            "enabled": DEFAULT_WIND_THUNDER_ENABLED,
+            "participants": list(DEFAULT_WIND_THUNDER_PARTICIPANTS),
+        },
         "miniapp_fishing": {
             "enabled": DEFAULT_MINIAPP_FISHING_ENABLED,
             "participants": list(DEFAULT_MINIAPP_FISHING_PARTICIPANTS),
@@ -432,6 +444,27 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             power_max = DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX
         result["miniapp_beast_abyss"]["power_min"] = power_min
         result["miniapp_beast_abyss"]["power_max"] = power_max
+
+    wind_thunder = source.get("wind_thunder")
+    if isinstance(wind_thunder, dict):
+        result["wind_thunder"]["enabled"] = bool(
+            wind_thunder.get("enabled", DEFAULT_WIND_THUNDER_ENABLED)
+        )
+        if isinstance(wind_thunder.get("participants"), list):
+            participants = []
+            for item in wind_thunder["participants"]:
+                normalized = _normalize_participant(item)
+                if (
+                    normalized is None
+                    or normalized[0] not in WIND_THUNDER_SUPPORTED_IDENTITIES
+                    or normalized[1]
+                    not in WIND_THUNDER_SUPPORTED_IDENTITIES.get(normalized[0], ())
+                ):
+                    continue
+                key = automation_participant_key(*normalized)
+                if key not in participants:
+                    participants.append(key)
+            result["wind_thunder"]["participants"] = participants
 
     fishing = source.get("miniapp_fishing")
     if isinstance(fishing, dict):
@@ -608,6 +641,8 @@ def save_automation_settings(
     tianxing_use_heqi_pill: Any = None,
     tianxing_tianji_grind_enabled: Any = None,
     tianxing_tianji_grind_target: Any = None,
+    wind_thunder_enabled: Any = None,
+    wind_thunder_participants: Any = None,
     tianxing_tianji_grind_participants: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
@@ -790,6 +825,35 @@ def save_automation_settings(
     if power_max > 0 and power_min > 0 and power_max < power_min:
         raise ValueError("invalid Mini App beast abyss power range")
 
+    current_wind_thunder = current_settings.get("wind_thunder") or {}
+    wt_enabled = (
+        bool(current_wind_thunder.get("enabled", DEFAULT_WIND_THUNDER_ENABLED))
+        if wind_thunder_enabled is None
+        else bool(wind_thunder_enabled)
+    )
+    raw_wt_participants = (
+        current_wind_thunder.get("participants")
+        if wind_thunder_participants is None
+        else wind_thunder_participants
+    )
+    if not isinstance(raw_wt_participants, list):
+        raise ValueError("Wind Thunder Wings participants must be a list")
+    wt_participants = []
+    for item in raw_wt_participants:
+        normalized = _normalize_participant(item)
+        if (
+            normalized is None
+            or normalized[0] not in WIND_THUNDER_SUPPORTED_IDENTITIES
+            or normalized[1]
+            not in WIND_THUNDER_SUPPORTED_IDENTITIES.get(normalized[0], ())
+        ):
+            raise ValueError("invalid Wind Thunder Wings participant")
+        key = automation_participant_key(*normalized)
+        if key not in wt_participants:
+            wt_participants.append(key)
+    if wt_enabled and not wt_participants:
+        raise ValueError("Wind Thunder Wings participants required")
+
     current_tianxing = current_settings.get("tianxing") or {}
     meditation_mode = str(
         current_tianxing.get("meditation_mode", DEFAULT_TIANXING_MEDITATION_MODE)
@@ -867,6 +931,10 @@ def save_automation_settings(
             "miniapp_beast_abyss": {
                 "power_min": power_min,
                 "power_max": power_max,
+            },
+            "wind_thunder": {
+                "enabled": wt_enabled,
+                "participants": wt_participants,
             },
             "miniapp_fishing": {
                 "enabled": fishing_enabled,
@@ -967,6 +1035,28 @@ def miniapp_beast_abyss_power_in_range(
     if power_max > 0 and current > power_max:
         return False
     return True
+
+
+def wind_thunder_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(source.get("wind_thunder") or default_automation_settings()["wind_thunder"])
+
+
+def wind_thunder_identities_for_account(
+    account: str,
+    settings: dict[str, Any] | None = None,
+) -> list[str]:
+    account = str(account or "").strip()
+    supported = WIND_THUNDER_SUPPORTED_IDENTITIES.get(account, ())
+    if not supported:
+        return []
+    config = wind_thunder_settings(settings)
+    selected = set(config.get("participants") or [])
+    return [
+        identity
+        for identity in supported
+        if automation_participant_key(account, identity) in selected
+    ]
 
 
 def miniapp_fishing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1116,6 +1206,25 @@ def automation_dashboard_payload() -> dict[str, Any]:
         },
         "miniapp_beast_abyss": {
             **miniapp_beast_abyss_settings(settings),
+        },
+        "wind_thunder": {
+            **wind_thunder_settings(settings),
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {
+                            "key": automation_participant_key(account, identity),
+                            "name": identity,
+                            "selected": automation_participant_key(account, identity)
+                            in set(wind_thunder_identities_for_account(account, settings=settings)),
+                        }
+                        for identity in identities
+                    ],
+                }
+                for account, identities in WIND_THUNDER_SUPPORTED_IDENTITIES.items()
+            ],
         },
         "miniapp_fishing": {
             **miniapp_fishing_settings(settings),

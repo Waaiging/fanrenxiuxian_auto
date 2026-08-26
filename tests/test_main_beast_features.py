@@ -426,7 +426,6 @@ class MainBeastFeatureTests(unittest.TestCase):
             self.assertEqual(actor.sect_name, "天星宗")
             self.assertEqual(actor.identity_sect_names["主魂"], "天星宗")
             self.assertFalse(actor.lingxiao_enabled)
-            self.assertFalse(actor.enable_spirit_tree)
             self.assertFalse(actor.enable_main_beasts)
             self.assertFalse(actor._miniapp_beast_contract.enabled)
             self.assertEqual(actor.state["sect_name"], "天星宗")

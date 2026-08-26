@@ -60,6 +60,15 @@ class DashboardProcessTests(unittest.TestCase):
                 response = client.get("/api/red-packets", auth=("admin", "test-password"))
                 self.assertEqual(response.status_code, 200)
 
+    def test_dashboard_login_accepts_access_token_without_username(self):
+        with patch.object(dashboard_server, "DASHBOARD_PASSWORD", "test-token"), patch.object(
+            dashboard_server, "DASHBOARD_COOKIE_SECURE", False
+        ):
+            with TestClient(dashboard_server.app, follow_redirects=False) as client:
+                response = client.post("/login", json={"access_token": "test-token", "next_path": "/"})
+                self.assertEqual(response.status_code, 303)
+                self.assertIn(dashboard_server.DASHBOARD_SESSION_COOKIE, response.headers["set-cookie"])
+
     def test_restricted_process_matches_only_its_account(self):
         xiaohao = "/home/ubuntu/deploy/venv/bin/python red_packet_account.py --account xiaohao"
         waaiging = "/home/ubuntu/deploy/venv/bin/python red_packet_account.py --account=waaiging"

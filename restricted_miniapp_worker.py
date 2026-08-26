@@ -290,6 +290,7 @@ class RestrictedMiniAppWorker:
         elif self.account == "waaiging":
             self._spawn("destiny", self.actor.run_tianxing_destiny_loop())
 
+
         self.log.warning(
             "[%s] Restricted Mini App scheduler active; Telegram game-group sends are disabled",
             self.account,

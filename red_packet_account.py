@@ -136,6 +136,7 @@ async def run(account: str) -> None:
     miniapp_recovery_task = None
     world_boss_monitor = None
     exchange_handlers = []
+    surprise_raid_task = None
     await client.connect()
     try:
         if not await client.is_user_authorized():
@@ -147,6 +148,15 @@ async def run(account: str) -> None:
             raise RuntimeError(f"red-packet monitor for {account} was not installed")
         miniapp_worker = RestrictedMiniAppWorker(actor, account, logger=logger)
         actor._restricted_miniapp_worker = miniapp_worker
+        # The restricted worker owns the normal startup reconciliation, but a
+        # fixed-entry-token failure must not leave the group-command-only
+        # surprise raid scheduler waiting forever in standby mode.
+        actor.startup_done.set()
+        if hasattr(actor, "run_surprise_raid_scheduler"):
+            surprise_raid_task = asyncio.create_task(
+                actor.run_surprise_raid_scheduler(initial_delay=30),
+                name=f"surprise_raid_{account}",
+            )
         miniapp_started = False
         try:
             await miniapp_worker.start()
@@ -217,6 +227,9 @@ async def run(account: str) -> None:
             await world_boss_monitor.stop()
         if miniapp_worker is not None:
             await miniapp_worker.stop()
+        if surprise_raid_task is not None:
+            surprise_raid_task.cancel()
+            await asyncio.gather(surprise_raid_task, return_exceptions=True)
         if monitor is not None:
             monitor.mark_stopped("standby_stopped")
         await client.disconnect()

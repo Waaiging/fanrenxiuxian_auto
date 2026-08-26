@@ -46,6 +46,8 @@ EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
 CONCUBINE_PLACE_COMMAND = ".安置侍妾"
 CONCUBINE_RECALL_COMMAND = ".召回侍妾"
 EXCHANGE_CONCUBINE_DELAY_SECONDS = 5
+EXCHANGE_SETTLEMENT_RETRY_LIMIT = 3
+EXCHANGE_SETTLEMENT_FIRST_WAIT_SECONDS = 60
 EXCHANGE_EVENT_TTL_SECONDS = 10 * 60
 EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS = 20
 EXCHANGE_DELAY_RANGE_SECONDS = (60, 75)
@@ -773,20 +775,47 @@ async def _run_exchange_reply_sequence(actor, identity, exchange_command, reply_
             command_msg_id=getattr(sent_exchange, "id", 0),
             used_reply_to=meaningful_reply_to_msg_id(actor, sent_exchange) or 0,
         )
-        wait_seconds = max(1, int((deadline - datetime.now()).total_seconds()))
+
+        # 无回复时重发：1分钟内没收到结算回复就再发一次，最多发送3遍。
+        settlement_confirmed = False
         try:
-            await asyncio.wait_for(settlement_waiter["event"].wait(), timeout=wait_seconds)
-        except asyncio.TimeoutError:
+            for attempt in range(1, EXCHANGE_SETTLEMENT_RETRY_LIMIT + 1):
+                if attempt > 1:
+                    margin_left = int(
+                        (deadline - timedelta(seconds=EXCHANGE_EVENT_SAFETY_MARGIN_SECONDS) - datetime.now()).total_seconds()
+                    )
+                    if margin_left <= 0:
+                        break
+                    sent_exchange = await _send_direct_with_reply_fallback(
+                        actor, exchange_command, reply_to=reply_to, identity=identity
+                    )
+                    settlement_waiter["command_msg_id"] = getattr(sent_exchange, "id", 0)
+                    _update_exchange_state(
+                        actor,
+                        event_key,
+                        status="exchange_resent",
+                        command_msg_id=getattr(sent_exchange, "id", 0),
+                        resend_attempt=attempt,
+                    )
+                remaining = max(0, int((deadline - datetime.now()).total_seconds()))
+                wait_seconds = min(EXCHANGE_SETTLEMENT_FIRST_WAIT_SECONDS, max(1, remaining))
+                try:
+                    await asyncio.wait_for(settlement_waiter["event"].wait(), timeout=wait_seconds)
+                    settlement_confirmed = True
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            _exchange_waiters(actor).pop(str(event_key), None)
+        if not settlement_confirmed:
             _update_exchange_state(actor, event_key, status="exchange_unconfirmed")
             await send_text_alert(
                 actor,
                 "南陇侯交换未确认",
-                f"身份：{identity}\n指令：{exchange_command}\n事件截止前未收到南陇侯结算。",
+                f"身份：{identity}\n指令：{exchange_command}\n已重试{EXCHANGE_SETTLEMENT_RETRY_LIMIT}次仍未收到南陇侯结算。",
                 logger=_logger(actor),
             )
             return False
-        finally:
-            _exchange_waiters(actor).pop(str(event_key), None)
 
         settlement_text = settlement_waiter.get("text", "")
         _update_exchange_state(

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import automation_settings as automation_settings_module
 import dashboard_server
 import miniapp_fishing
 from miniapp_beast import MiniAppBeastError
@@ -70,10 +71,31 @@ class MiniAppFishingTests(unittest.TestCase):
             "MINIAPP_FISHING_GLOBAL_FILE",
             Path(self.tempdir.name) / "miniapp_fishing_global.json",
         )
+        self.sub_state_path = Path(self.tempdir.name) / "state_sub.json"
+        self.sub_state_patch = patch.object(
+            automation_settings_module,
+            "SUB_STATE_FILE",
+            self.sub_state_path,
+        )
+        self.sub_identity_cache_signature = automation_settings_module._SUB_IDENTITY_STATE_CACHE["signature"]
+        self.sub_identity_cache_state = automation_settings_module._SUB_IDENTITY_STATE_CACHE["state"]
+        automation_settings_module._SUB_IDENTITY_STATE_CACHE["signature"] = None
+        automation_settings_module._SUB_IDENTITY_STATE_CACHE["state"] = {}
+        self.sub_state_patch.start()
+        self.account_identities_patch = patch.object(
+            miniapp_fishing,
+            "ACCOUNT_IDENTITIES",
+            automation_settings_module.automation_account_identities(),
+        )
+        self.account_identities_patch.start()
         self.global_patch.start()
 
     def tearDown(self):
         self.global_patch.stop()
+        self.sub_state_patch.stop()
+        self.account_identities_patch.stop()
+        automation_settings_module._SUB_IDENTITY_STATE_CACHE["signature"] = self.sub_identity_cache_signature
+        automation_settings_module._SUB_IDENTITY_STATE_CACHE["state"] = self.sub_identity_cache_state
         self.tempdir.cleanup()
 
     def test_proof_keeps_multiple_challenges_stable_and_scores_full_marks(self):
@@ -367,6 +389,7 @@ class MiniAppFishingTests(unittest.TestCase):
             self.assertEqual(state["miniapp_fishing_last_error"], "")
             self.assertEqual(state["miniapp_fishing_next_run_time"], "")
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_reconcile_removes_unselected_xiaohao_scan_but_preserves_history(self):
         settings = {
             "enabled": True,
@@ -483,20 +506,12 @@ class MiniAppFishingTests(unittest.TestCase):
         miniapp_fishing._migrate_global_participant_keys(data)
         miniapp_fishing._reconcile_global_state(data, settings)
 
-        current_identity = miniapp_fishing.canonical_automation_identity(
-            "sub", "竹和生"
-        )
+        current_identity = miniapp_fishing.canonical_automation_identity("sub", "缘生子")
         self.assertEqual(data["participants"], [f"sub|{current_identity}"])
-        self.assertEqual(
-            data["completed_today"], {f"sub|{current_identity}": completed_at}
-        )
+        self.assertEqual(data["completed_today"], {f"sub|{current_identity}": completed_at})
         self.assertEqual(data["current_key"], "")
         self.assertEqual(data["force_retry"], {})
         self.assertEqual(data["force_retry_request_id"], "manual-request-already-finished")
-        self.assertEqual(
-            miniapp_fishing.fishing_participant_label("sub|缘生子"),
-            f"副号｜{current_identity}",
-        )
 
     def test_reconcile_changed_fishing_options_preserves_completion_without_force_retry(self):
         completed_at = miniapp_fishing._now_text()
@@ -1684,6 +1699,7 @@ class MiniAppFishingTests(unittest.TestCase):
                 )
                 self.assertTrue(worker.supported)
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_manual_holder_is_scanned_first_and_verified(self):
         class Actor:
             def __init__(self):
@@ -1734,6 +1750,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["rod_holder_source"], "manual")
         self.assertEqual(runtime["scans"]["sub|主魂"]["rod_name"], "银竹钓竿")
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_cross_account_transfer_lists_purchases_and_verifies(self):
         class Actor:
             def __init__(self, response):
@@ -1911,6 +1928,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertTrue(info["active"])
         self.assertEqual(info["phase"], "settling")
 
+    @unittest.skip("shared-rod marketplace transfers are disabled")
     def test_auto_rod_uses_detected_type_for_transfer_listing(self):
         actor = SimpleNamespace(
             state={},
@@ -1962,6 +1980,7 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(transfer["rod_name"], "金雷竹钓竿")
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_legacy_hardcoded_transfer_is_stopped_when_actual_rod_differs(self):
         settings = {
             "enabled": True,
@@ -2001,6 +2020,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["last_transfer"]["status"], "superseded_rod_mismatch")
         self.assertIn("停止错误重试", runtime["detail"])
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_active_round_blocks_transfer_listing(self):
         actor = SimpleNamespace(
             state={},
@@ -2044,6 +2064,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["status"], "active_round")
         self.assertEqual(runtime["transfer"], {})
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_failed_transfer_waits_until_scheduled_retry(self):
         actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
         worker = MiniAppFishingAutomation(
@@ -2085,6 +2106,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertIn("自动补跑", runtime["detail"])
         self.assertEqual(runtime["transfer"]["next_retry_at"], retry_at)
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_due_listing_unknown_recreates_listing_hourly(self):
         class Actor:
             def __init__(self, response):
@@ -2158,6 +2180,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["transfer"]["listing_id"], "29999")
         self.assertEqual(runtime["transfer"]["from"], "sub|寻真子")
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_due_purchase_unknown_retries_purchase_hourly(self):
         class Actor:
             def __init__(self, response):
@@ -2226,6 +2249,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(runtime["transfer"]["status"], "purchased")
         self.assertEqual(runtime["status"], "verifying_transfer")
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_empty_purchase_response_retries_in_one_minute(self):
         class Actor:
             def __init__(self):
@@ -2283,6 +2307,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertGreaterEqual((retry_at - before).total_seconds(), 59)
         self.assertLessEqual((retry_at - before).total_seconds(), 61)
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_unrelated_worker_keeps_failed_transfer_retry_short(self):
         settings = {
             "enabled": True,
@@ -2327,6 +2352,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertGreaterEqual((retry_at - before).total_seconds(), 59)
         self.assertLessEqual((retry_at - before).total_seconds(), 61)
 
+    @unittest.skip("legacy shared-rod transfer flow disabled")
     def test_wrong_cached_holder_recovers_with_verified_holder_on_same_listing(self):
         class Actor:
             def __init__(self):
@@ -2419,8 +2445,9 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertIn("继续垂钓", runtime["detail"])
 
         runtime = worker._mark_daily_done(settings, "main|主魂")
-        self.assertEqual(runtime["current_key"], "sub|主魂")
-        self.assertIn("今日竿数已尽", runtime["detail"])
+        self.assertEqual(runtime["account_current_keys"]["main"], "")
+        self.assertEqual(runtime["account_statuses"]["main"]["status"], "daily_done")
+        self.assertIn("所选身份今日垂钓均已完成", runtime["account_statuses"]["main"]["detail"])
 
     def test_force_retry_ignores_completion_once_then_restores_it(self):
         settings = {
@@ -2557,6 +2584,96 @@ class MiniAppFishingTests(unittest.TestCase):
 
         self.assertEqual(waits, [1])
         runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        self.assertEqual(runtime["force_retry"]["pending"], ["main|无咎子"])
+
+    def test_reconcile_creates_one_independent_queue_per_account(self):
+        settings = {
+            "enabled": True,
+            "participants": [
+                "main|主魂", "main|无咎子",
+                "sub|主魂",
+                "xiaohao|主魂",
+                "waaiging|主魂",
+            ],
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        data = miniapp_fishing._global_default_state()
+        data["completed_today"] = {"main|主魂": miniapp_fishing._now_text()}
+        data["no_rod_today"] = {"main|主魂": miniapp_fishing._now_text()}
+
+        miniapp_fishing._reconcile_global_state(data, settings)
+
+        self.assertEqual(
+            data["account_current_keys"],
+            {
+                "main": "main|无咎子",
+                "sub": "sub|主魂",
+                "xiaohao": "xiaohao|主魂",
+                "waaiging": "waaiging|主魂",
+            },
+        )
+
+    def test_main_daily_done_does_not_mutate_other_account_queues(self):
+        worker = MiniAppFishingAutomation(
+            SimpleNamespace(config={}, state={}, save_state=lambda: None),
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "sub|主魂"],
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        seed = miniapp_fishing._global_default_state()
+        seed["account_current_keys"] = {
+            "main": "main|主魂",
+            "sub": "sub|主魂",
+        }
+        miniapp_fishing.save_json_state(
+            str(miniapp_fishing.MINIAPP_FISHING_GLOBAL_FILE),
+            seed,
+        )
+        runtime = worker._mark_daily_done(settings, "main|主魂")
+        self.assertEqual(runtime["account_current_keys"]["sub"], "sub|主魂")
+
+    def test_force_retry_progresses_accounts_independently(self):
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "main|无咎子", "sub|主魂"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        main_worker = MiniAppFishingAutomation(
+            SimpleNamespace(config={}, state={}, save_state=lambda: None),
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        sub_worker = MiniAppFishingAutomation(
+            SimpleNamespace(config={}, state={}, save_state=lambda: None),
+            SimpleNamespace(),
+            "sub",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        request_miniapp_fishing_force_retry(settings, requested_by="test")
+        runtime = main_worker._complete_round(settings, "main|主魂")
+        self.assertEqual(runtime["account_current_keys"]["main"], "main|无咎子")
+        self.assertEqual(runtime["force_retry"]["pending"], ["main|无咎子", "sub|主魂"])
+
+        runtime = sub_worker._mark_daily_done(settings, "sub|主魂")
+        self.assertEqual(runtime["account_current_keys"]["main"], "main|无咎子")
+        self.assertEqual(runtime["account_current_keys"]["sub"], "")
+        self.assertEqual(runtime["account_statuses"]["main"]["status"], "force_retry")
         self.assertEqual(runtime["force_retry"]["pending"], ["main|无咎子"])
 
     def test_dashboard_force_retry_endpoint_returns_runtime(self):

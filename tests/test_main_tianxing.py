@@ -254,6 +254,54 @@ class MainTianxingTests(unittest.TestCase):
         )
         self.assertEqual(actor.state["tianxing_fate_success_count"], 3)
 
+    def test_fate_meditation_success_with_failure_loss_buff_counts(self):
+        actor = self.actor()
+        actor.startup_done = asyncio.Event()
+        actor.startup_done.set()
+        actor.is_running = True
+        actor.state.update(
+            {
+                "last_destiny_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_destiny_choice": "紫微",
+                "last_destiny_observation_date": datetime.now().strftime("%Y-%m-%d"),
+                "tianxing_destiny_options": ["紫微", "贪狼", "太阴"],
+                "tianxing_destiny_options_date": datetime.now().strftime("%Y-%m-%d"),
+                "tianxing_fate_success_count": 1265,
+                "tianxing_meditation_prepared_mode": "fate",
+                "tianxing_meditation_prepared_switch_id": "test-fate-switch",
+            }
+        )
+        actor.tianxing_meditation_mode = lambda: "fate"
+        actor._wait_for_main_identity = AsyncMock()
+        actor.ensure_tianxing_destiny_for_action = AsyncMock(return_value=True)
+        sent = []
+
+        async def send(command, **kwargs):
+            sent.append(command)
+            if command == ".推命 闭关":
+                return "你已有一道关于【探索】的推命尚未应验，还需等待 5 分钟。"
+            return (
+                "【闭关成功】 五子同心魔: 斗法战力 +5%，闭关失败损失降低 5%。"
+                "本次闭关，你的修为最终增加了 1586 点。"
+                "你感到一阵疲惫，需要打坐调息 11 分钟方可再次闭关。"
+            )
+
+        actor.send_and_wait_feedback = send
+
+        async def stop_after_sleep(*args, **kwargs):
+            actor.is_running = False
+
+        with patch("intelligent_cultivator.tianxing_settings", return_value={
+            "meditation_mode": "fate",
+            "meditation_switch_id": "test-fate-switch",
+            "use_heqi_pill": False,
+        }), patch("intelligent_cultivator.asyncio.sleep", new=stop_after_sleep):
+            asyncio.run(actor.run_tianxing_fate_meditation_loop())
+
+        self.assertEqual(sent, [".推命 闭关", ".闭关修炼"])
+        self.assertEqual(actor.state["tianxing_fate_success_count"], 1266)
+        self.assertIn("闭关成功", actor.state["tianxing_fate_last_result"])
+
     def test_post_pill_prefix_failure_blocks_followup_cultivation(self):
         actor = self.actor()
         actor.startup_done = asyncio.Event()

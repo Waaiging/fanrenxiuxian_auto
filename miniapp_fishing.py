@@ -168,22 +168,12 @@ def fishing_rod_name_in_text(value: Any) -> str:
 
 
 def fishing_scan_keys(settings: dict[str, Any]) -> list[str]:
-    """Identities the automation is allowed to inspect or use for the shared rod."""
+    """Return only selected identities; rods are no longer transferred."""
     keys = []
     for item in settings.get("participants") or []:
         account, identity = fishing_participant_parts(item)
         if account and identity:
             keys.append(automation_participant_key(account, identity))
-    owner = str(settings.get("rod_owner") or "auto").strip()
-    owner_account, owner_identity = fishing_participant_parts(owner)
-    if owner != "auto" and owner_account and owner_identity:
-        # A transfer interrupted mid-flight can leave the configured owner's rod
-        # on another identity of the same Telegram account.  Keep that account
-        # searchable for recovery without re-enabling unrelated accounts.
-        keys.extend(
-            automation_participant_key(owner_account, identity)
-            for identity in ACCOUNT_IDENTITIES.get(owner_account, ())
-        )
     return list(dict.fromkeys(keys))
 
 
@@ -193,6 +183,8 @@ def _global_default_state() -> dict[str, Any]:
         "date": _today_text(),
         "participants": [],
         "current_key": "",
+        "account_current_keys": {},
+        "account_statuses": {},
         "rod_holder": "",
         "rod_name": "",
         "configured_rod": "",
@@ -200,6 +192,7 @@ def _global_default_state() -> dict[str, Any]:
         "rod_holder_verified_at": "",
         "scans": {},
         "completed_today": {},
+        "no_rod_today": {},
         "round_records": {},
         "summary_emitted_ids": {},
         "transfer": {},
@@ -232,7 +225,15 @@ def _migrate_global_participant_keys(data: dict[str, Any]) -> None:
         if data.get(field):
             data[field] = _canonical_fishing_key(data[field])
 
-    for field in ("scans", "completed_today", "round_records", "summary_emitted_ids"):
+    values = data.get("account_current_keys")
+    if isinstance(values, dict):
+        data["account_current_keys"] = {
+            str(account): _canonical_fishing_key(key)
+            for account, key in values.items()
+            if str(account or "").strip()
+        }
+
+    for field in ("scans", "completed_today", "no_rod_today", "round_records", "summary_emitted_ids"):
         values = data.get(field)
         if not isinstance(values, dict):
             continue
@@ -277,14 +278,17 @@ def _normalize_global_state(data: Any) -> dict[str, Any]:
     if str(data.get("date") or "") != _today_text():
         data["date"] = _today_text()
         data["completed_today"] = {}
+        data["no_rod_today"] = {}
         data["round_records"] = {}
         data["summary_emitted_ids"] = {}
         data["last_round"] = {}
+        data["account_current_keys"] = {}
         if not _mapping(data.get("transfer")):
             data["current_key"] = ""
     for key in (
         "scans",
         "completed_today",
+        "no_rod_today",
         "round_records",
         "summary_emitted_ids",
         "transfer",
@@ -292,6 +296,8 @@ def _normalize_global_state(data: Any) -> dict[str, Any]:
         "last_round",
         "force_retry",
         "last_force_retry",
+        "account_current_keys",
+        "account_statuses",
     ):
         if not isinstance(data.get(key), dict):
             data[key] = {}
@@ -364,6 +370,17 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
         data["detail"] = "鱼竿设置已变更，等待重新扫描"
     data["configured_rod"] = configured_rod
 
+    # The old shared-rod implementation used marketplace listings to move a
+    # rod between identities.  Keep the legacy fields readable for migration,
+    # but never resume or create those operations.
+    if _mapping(data.get("transfer")):
+        data["last_transfer"] = {
+            **_mapping(data.get("transfer")),
+            "status": "cancelled_transfer_disabled",
+            "cancelled_at": _now_text(),
+        }
+        data["transfer"] = {}
+
     participants = []
     for item in settings.get("participants") or []:
         account, identity = fishing_participant_parts(item)
@@ -376,6 +393,15 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
     old_participants = [str(item) for item in data.get("participants") or []]
     data["participants"] = participants
 
+    account_participants: dict[str, list[str]] = {}
+    for item in participants:
+        item_account, _ = fishing_participant_parts(item)
+        account_participants.setdefault(item_account, []).append(item)
+    account_current_keys = data.setdefault("account_current_keys", {})
+    for item_account in list(account_current_keys):
+        if item_account not in account_participants:
+            account_current_keys.pop(item_account, None)
+
     # Keep today's completion journals even when a participant is temporarily
     # absent from a settings snapshot.  Workers can observe a partially loaded
     # settings file during a dashboard update; filtering these maps by the
@@ -386,6 +412,12 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
     data["completed_today"] = {
         str(key): value
         for key, value in completed.items()
+        if fishing_participant_parts(key) != ("", "")
+    }
+    no_rod_today = _mapping(data.get("no_rod_today"))
+    data["no_rod_today"] = {
+        str(key): value
+        for key, value in no_rod_today.items()
         if fishing_participant_parts(key) != ("", "")
     }
     round_records = _mapping(data.get("round_records"))
@@ -400,6 +432,15 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
         for key, value in emitted_ids.items()
         if fishing_participant_parts(key) != ("", "") and isinstance(value, list)
     }
+    for item_account, item_keys in account_participants.items():
+        current = str(account_current_keys.get(item_account) or "")
+        gates = {**data["completed_today"], **data["no_rod_today"]}
+        # A valid active identity stays active until an explicit completion
+        # path advances it.  Reconciling settings must not rotate the queue
+        # while a multi-account force-retry transaction is still in progress.
+        if not current or current not in item_keys or gates.get(current):
+            current = _next_participant(item_keys, current, gates)
+        account_current_keys[item_account] = current
 
     scans = {
         str(key): value
@@ -418,71 +459,23 @@ def _reconcile_global_state(data: dict[str, Any], settings: dict[str, Any]) -> N
         data["status"] = "scanning"
         data["detail"] = "原持竿身份已取消勾选，等待在当前参与身份中重新识别"
 
-    transfer = _mapping(data.get("transfer"))
+    transfer = {}
     holder_scan = _mapping(scans.get(holder_key))
     holder_rod = str(holder_scan.get("rod_name") or "").strip()
-    if transfer and not str(transfer.get("rod_name") or "").strip():
-        inferred_rod = fishing_rod_name_in_text(transfer.get("response"))
-        if not inferred_rod:
-            inferred_rod = str(_mapping(scans.get(transfer.get("from"))).get("rod_name") or "")
-        if inferred_rod in FISHING_ROD_ITEMS:
-            transfer["rod_name"] = inferred_rod
-    transfer_rod = str(transfer.get("rod_name") or "").strip()
-    if (
-        not previous_rod
-        and transfer
-        and transfer_rod
-        and holder_rod
-        and transfer_rod != holder_rod
-    ):
-        superseded_transfer = dict(transfer)
-        superseded_transfer.update(
-            status="superseded_rod_mismatch",
-            superseded_at=_now_text(),
-        )
-        data["last_transfer"] = superseded_transfer
-        data["transfer"] = {}
-        transfer = {}
-        data["status"] = "scanning"
-        data["detail"] = (
-            f"旧挂单索要{transfer_rod}，但持竿者实际使用{holder_rod}；"
-            "已停止错误重试并重新识别"
-        )
-    if transfer:
-        transfer_from = str(transfer.get("from") or "").strip()
-        transfer_to = str(transfer.get("to") or "").strip()
-        if transfer_from not in scan_key_set or transfer_to not in participant_set:
-            cancelled = dict(transfer)
-            cancelled.update(
-                status="cancelled_participant_removed",
-                cancelled_at=_now_text(),
-            )
-            data["last_transfer"] = cancelled
-            data["transfer"] = {}
-            transfer = {}
-            data["status"] = "scanning"
-            data["detail"] = "转竿涉及已取消勾选的身份，已停止旧流程并重新识别"
     if holder_rod and fishing_rod_matches(settings, holder_rod):
         data["rod_name"] = holder_rod
-    current = str(data.get("current_key") or "")
-    if old_participants != participants or current not in participants:
-        holder = str(data.get("rod_holder") or "")
-        if holder in participants and not data["completed_today"].get(holder):
-            current = holder
-        else:
-            current = _next_participant(participants, "", data["completed_today"])
-    elif data["completed_today"].get(current):
-        current = _next_participant(participants, current, data["completed_today"])
-    data["current_key"] = current
+    active_keys = [key for key in account_current_keys.values() if key]
+    representative_key = next((key for key in participants if key in set(active_keys)), "")
+    data["current_key"] = representative_key
     if not participants:
         data["status"] = "no_participants"
         data["detail"] = "尚未选择垂钓身份"
-    elif not current:
+    elif not representative_key:
         data["status"] = "daily_done"
         data["detail"] = "所选身份今日垂钓均已完成"
     elif str(data.get("status") or "") in {"no_participants", "daily_done"}:
         data["status"] = "ready"
-        data["detail"] = f"下一位 {fishing_participant_label(current)}"
+        data["detail"] = f"下一位 {fishing_participant_label(representative_key)}"
 
 
 def _update_global_state(
@@ -523,7 +516,24 @@ def miniapp_fishing_global_snapshot(
     data = _update_global_state(settings=fishing_settings)
     result = dict(data)
     result["current_label"] = fishing_participant_label(data.get("current_key"))
+    result["account_current_labels"] = {
+        account: fishing_participant_label(key)
+        for account, key in _mapping(data.get("account_current_keys")).items()
+    }
+    account_statuses = _mapping(data.get("account_statuses"))
+    result["account_schedules"] = [
+        {
+            "account": account,
+            "account_name": ACCOUNT_NAMES.get(account, account),
+            "current_label": fishing_participant_label(key),
+            "status": str(_mapping(account_statuses.get(account)).get("status") or ""),
+            "detail": str(_mapping(account_statuses.get(account)).get("detail") or ""),
+        }
+        for account, key in _mapping(data.get("account_current_keys")).items()
+    ]
     result["rod_holder_label"] = fishing_participant_label(data.get("rod_holder"))
+    # Retained for legacy dashboard/API consumers; scheduling uses each
+    # participant's own scan entry and never treats this as a shared rod.
     result["rod_name"] = str(data.get("rod_name") or "")
     transfer = _mapping(data.get("transfer"))
     result["transfer_from_label"] = fishing_participant_label(transfer.get("from"))
@@ -560,17 +570,22 @@ def request_miniapp_fishing_force_retry(
     request_id = f"{time.time_ns()}-{os.getpid()}"
 
     def reset(data: dict[str, Any]) -> None:
-        transfer = _mapping(data.get("transfer"))
         active_force = _mapping(data.get("force_retry"))
         completed_before = dict(
             _mapping(active_force.get("completed_before"))
             if active_force.get("pending")
             else _mapping(data.get("completed_today"))
         )
-        if str(transfer.get("status") or "") in FISHING_TRANSFER_FAILURE_STATUSES:
-            transfer["next_retry_at"] = ""
-            transfer["force_retry_requested_at"] = requested_at
-        data["current_key"] = participants[0]
+        data["transfer"] = {}
+        data["last_transfer"] = {}
+        account_current_keys = {}
+        for item in participants:
+            item_account, _ = fishing_participant_parts(item)
+            if item_account not in account_current_keys:
+                account_current_keys[item_account] = item
+        data["account_current_keys"] = account_current_keys
+        representative_key = next((key for key in participants if key in set(account_current_keys.values())), "")
+        data["current_key"] = representative_key
         data["status"] = "force_retry"
         data["detail"] = "已忽略今日完成与错误冷却记录，正在强制重试"
         data["force_retry_request_id"] = request_id
@@ -584,6 +599,7 @@ def request_miniapp_fishing_force_retry(
             "confirmed_daily_done": {},
         }
         data["completed_today"] = {}
+        data["no_rod_today"] = {}
 
     _update_global_state(reset, settings=fishing_settings)
     return miniapp_fishing_global_snapshot(fishing_settings)
@@ -871,7 +887,7 @@ def fishing_rounds_summary(records: Any, *, daily_limit_reached: bool = False) -
 
 
 class MiniAppFishingAutomation:
-    """Coordinate server-verified fishing and one shared rod across accounts."""
+    """Coordinate server-verified fishing with one rod per selected identity."""
 
     def __init__(self, actor: Any, transport: Any, account: str, logger: Any) -> None:
         self.actor = actor
@@ -2026,6 +2042,8 @@ class MiniAppFishingAutomation:
             return await self._finish_challenge(identity, token, session, challenge)
         phase = str(session.get("phase") or "").strip().lower()
         if phase == "lobby":
+            if not rod_name:
+                raise MiniAppBeastError("fishing_rod_missing")
             if not fishing_rod_matches(settings, rod_name):
                 raise MiniAppBeastError("fishing_rod_type_mismatch")
             return await self._start_cast(identity, token, shop, settings)
@@ -2122,15 +2140,9 @@ class MiniAppFishingAutomation:
                 if identity in transport_ids or identity.casefold() in transport_ids
             ]
         allowed_keys = set(fishing_scan_keys(settings))
-        transfer = _mapping(runtime.get("transfer"))
-        priority_keys = [
-            str(settings.get("rod_owner") or ""),
-            str(runtime.get("rod_holder") or ""),
-            str(runtime.get("current_key") or ""),
-            str(transfer.get("from") or ""),
-            str(transfer.get("to") or ""),
-            *(str(item) for item in settings.get("participants") or []),
-        ]
+        # Every selected identity must own a rod.  Do not inspect unselected
+        # identities as a way to recover or transfer a shared rod.
+        priority_keys = [*(str(item) for item in settings.get("participants") or [])]
         result = []
         for key in priority_keys:
             account, identity = fishing_participant_parts(key)
@@ -2203,48 +2215,15 @@ class MiniAppFishingAutomation:
             if key not in set(fishing_scan_keys(settings)):
                 data.setdefault("scans", {}).pop(key, None)
                 return
-            transfer = _mapping(data.get("transfer"))
-            transfer_rod = str(transfer.get("rod_name") or "").strip()
-            if transfer_rod and str(info.get("rod_name") or "") != transfer_rod:
-                info["has_rod"] = False
-                info["rod_matches"] = False
             scans = data.setdefault("scans", {})
             scans[key] = dict(info)
             if info.get("has_rod"):
                 data["rod_holder"] = key
                 data["rod_name"] = str(info.get("rod_name") or "")
                 data["rod_holder_source"] = (
-                    "manual" if str(settings.get("rod_owner") or "") == key else "auto"
+                    "individual"
                 )
                 data["rod_holder_verified_at"] = info["updated_at"]
-                if (
-                    transfer.get("status") == "purchase_failed"
-                    and transfer.get("failure_code") == "missing_required_rod"
-                    and transfer.get("listing_id")
-                    and transfer.get("from") != key
-                ):
-                    transfer["from"] = key
-                    transfer.setdefault("rod_name", str(info.get("rod_name") or ""))
-                    transfer["status"] = "listed"
-                    transfer["updated_at"] = info["updated_at"]
-                    data["status"] = "transferring"
-                    data["detail"] = (
-                        f"已重新识别持竿者 {fishing_participant_label(key)}；"
-                        f"继续购买原挂单 {transfer.get('listing_id')}"
-                    )
-                if transfer and transfer.get("to") == key:
-                    completed_transfer = dict(transfer)
-                    completed_transfer.update(
-                        status="verified",
-                        verified_at=info["updated_at"],
-                    )
-                    data["last_transfer"] = completed_transfer
-                    data["transfer"] = {}
-                    data["status"] = "ready"
-                    data["detail"] = (
-                        f"转竿后已由 Mini App 验证 {fishing_participant_label(key)} "
-                        f"持有{info.get('rod_name')}"
-                    )
             elif info.get("definitive") and str(data.get("rod_holder") or "") == key:
                 data["rod_holder"] = ""
                 data["rod_name"] = ""
@@ -2278,8 +2257,95 @@ class MiniAppFishingAutomation:
         detail: str,
     ) -> dict[str, Any]:
         def update(data: dict[str, Any]) -> None:
+            account = self.account
+            statuses = data.setdefault("account_statuses", {})
+            previous = _mapping(statuses.get(account))
+            statuses[account] = {
+                "status": str(status or "waiting"),
+                "detail": str(detail or "")[:500],
+                "updated_at": _now_text(),
+                "updated_by": account,
+            }
+            if not previous or str(previous.get("status") or "") != str(status or "waiting"):
+                data["status"] = str(status or "waiting")
+                data["detail"] = f"{ACCOUNT_NAMES.get(account, account)}：{detail}"[:500]
+
+        return _update_global_state(update, settings=settings)
+
+    @staticmethod
+    def _set_account_status_in_state(data: dict[str, Any], account: str, status: str, detail: str) -> None:
+        statuses = data.setdefault("account_statuses", {})
+        previous = _mapping(statuses.get(account))
+        statuses[account] = {
+            "status": str(status or "waiting"),
+            "detail": str(detail or "")[:500],
+            "updated_at": _now_text(),
+            "updated_by": account,
+        }
+        if not previous or str(previous.get("status") or "") != str(status or "waiting"):
             data["status"] = str(status or "waiting")
-            data["detail"] = str(detail or "")[:500]
+            data["detail"] = f"{ACCOUNT_NAMES.get(account, account)}：{detail}"[:500]
+
+    @staticmethod
+    def _set_account_queue(data: dict[str, Any], account: str, participant_key: str) -> None:
+        data.setdefault("account_current_keys", {})[account] = str(participant_key or "")
+
+    @staticmethod
+    def _recompute_account_queues(data: dict[str, Any]) -> None:
+        """Rebuild every account's queue without crossing account boundaries."""
+        participants = [str(item) for item in data.get("participants") or []]
+        account_participants: dict[str, list[str]] = {}
+        for item in participants:
+            item_account, _ = fishing_participant_parts(item)
+            account_participants.setdefault(item_account, []).append(item)
+        gates = {
+            **_mapping(data.get("completed_today")),
+            **_mapping(data.get("no_rod_today")),
+        }
+        queues = data.setdefault("account_current_keys", {})
+        for account, item_keys in account_participants.items():
+            queues[account] = _next_participant(
+                item_keys,
+                str(queues.get(account) or ""),
+                gates,
+            )
+
+    def _mark_no_rod(self, settings: dict[str, Any], participant_key: str) -> dict[str, Any]:
+        """Skip a selected identity for today when its own rod is absent."""
+        account, _ = fishing_participant_parts(participant_key)
+
+        def update(data: dict[str, Any]) -> None:
+            no_rod = data.setdefault("no_rod_today", {})
+            no_rod[participant_key] = _now_text()
+            force = _mapping(data.get("force_retry"))
+            if force.get("pending") and participant_key in force.get("pending", []):
+                # A forced retry must attempt every selected identity exactly
+                # once, including identities that currently have no rod.
+                self._finish_force_retry_in_state(self, data, participant_key)
+                return
+            participants = [str(item) for item in data.get("participants") or []]
+            local_participants = [
+                item for item in participants
+                if fishing_participant_parts(item)[0] == account
+            ]
+            completed = {
+                **_mapping(data.get("completed_today")),
+                **no_rod,
+            }
+            current = _next_participant(local_participants, participant_key, completed)
+            self._set_account_queue(data, account, current)
+            status_detail = (
+                f"{fishing_participant_label(participant_key)} 未持有匹配鱼竿，已跳过；"
+                f"下一位 {fishing_participant_label(current)}"
+                if current
+                else f"{ACCOUNT_NAMES.get(account, account)} 所选身份均无自有鱼竿"
+            )
+            self._set_account_status_in_state(
+                data,
+                account,
+                "no_rod" if current else "daily_done",
+                status_detail,
+            )
 
         return _update_global_state(update, settings=settings)
 
@@ -2353,38 +2419,63 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
         participant_key: str,
     ) -> dict[str, Any]:
+        account, _ = fishing_participant_parts(participant_key)
         def update(data: dict[str, Any]) -> None:
             force = _mapping(data.get("force_retry"))
             if force.get("pending") and participant_key in force.get("pending", []):
-                self._finish_force_retry_in_state(data, participant_key)
+                self._finish_force_retry_in_state(self, data, participant_key)
+                updated_queues = _mapping(data.get("account_current_keys"))
+                data["current_key"] = next(
+                    (
+                        key for key in [str(item) for item in data.get("participants") or []]
+                        if key in set(value for value in updated_queues.values() if value)
+                    ),
+                    "",
+                )
                 return
             participants = [str(item) for item in data.get("participants") or []]
+            local_participants = [
+                item for item in participants
+                if fishing_participant_parts(item)[0] == account
+            ]
             data["last_round"] = {
                 "participant": participant_key,
                 "completed_at": _now_text(),
             }
-            if participant_key in participants:
-                # Keep the rod on this identity until the Mini App confirms its daily
-                # cast limit. Rotating after every single catch creates dozens of
-                # unnecessary market transfers and prevents one complete daily summary.
-                data["current_key"] = participant_key
-            data["status"] = "fishing"
-            data["detail"] = (
-                f"{fishing_participant_label(participant_key)} 本竿完成；"
-                "继续垂钓至今日竿数耗尽"
+            if participant_key in local_participants:
+                # Keep this identity active until the Mini App confirms its
+                # daily cast limit; each account rotates independently.
+                self._set_account_queue(data, account, participant_key)
+            self._set_account_status_in_state(
+                data,
+                account,
+                "fishing",
+                f"{fishing_participant_label(participant_key)} 本竿完成；继续垂钓至今日竿数耗尽",
             )
 
         return _update_global_state(update, settings=settings)
 
     @staticmethod
     def _finish_force_retry_in_state(
+        cls,
         data: dict[str, Any],
         participant_key: str,
         *,
         daily_done: bool = False,
     ) -> None:
+        account, _ = fishing_participant_parts(participant_key)
+        participants = [str(item) for item in data.get("participants") or []]
         force = _mapping(data.get("force_retry"))
-        pending = [str(item) for item in force.get("pending") or [] if str(item) != participant_key]
+        pending = [str(item) for item in force.get("pending") or []]
+        pending.remove(participant_key)
+        other_remaining = [
+            item for item in pending
+            if fishing_participant_parts(item)[0] != account
+        ]
+        local_remaining = [
+            item for item in pending
+            if fishing_participant_parts(item)[0] == account
+        ]
         attempted = [str(item) for item in force.get("attempted") or []]
         if participant_key not in attempted:
             attempted.append(participant_key)
@@ -2394,39 +2485,79 @@ class MiniAppFishingAutomation:
         if daily_done:
             confirmed[participant_key] = _now_text()
         force["confirmed_daily_done"] = confirmed
-        if pending:
-            data["force_retry"] = force
-            data["current_key"] = pending[0]
-            data["status"] = "force_retry"
-            data["detail"] = (
-                f"强制重试已完成 {fishing_participant_label(participant_key)}；"
-                f"下一位 {fishing_participant_label(pending[0])}"
+        all_force_done = not pending and not other_remaining
+        if local_remaining:
+            cls._set_account_queue(data, account, local_remaining[0])
+            account_queues = _mapping(data.get("account_current_keys"))
+            representative_key = next(
+                (
+                    key for key in participants
+                    if key in {str(value) for value in account_queues.values() if value}
+                ),
+                "",
+            )
+            data["current_key"] = representative_key
+            cls._set_account_status_in_state(
+                data,
+                account,
+                "force_retry",
+                f"强制重试已完成 {fishing_participant_label(participant_key)}；下一位 {fishing_participant_label(local_remaining[0])}",
             )
             return
         restored = dict(_mapping(force.get("completed_before")))
         restored.update(confirmed)
-        data["completed_today"] = restored
-        finished = dict(force)
-        finished["completed_at"] = _now_text()
-        data["last_force_retry"] = finished
-        data["force_retry"] = {}
-        data["current_key"] = _next_participant(
-            [str(item) for item in data.get("participants") or []],
-            "",
-            restored,
+        completed = data.setdefault("completed_today", {})
+        completed.update({
+            key: value for key, value in restored.items()
+            if fishing_participant_parts(key)[0] == account
+        })
+        if all_force_done:
+            completed.update(restored)
+            finished = dict(force)
+            finished["completed_at"] = _now_text()
+            data["last_force_retry"] = finished
+            data["force_retry"] = {}
+            cls._recompute_account_queues(data)
+            final_current = str(
+                _mapping(data.get("account_current_keys")).get(account) or ""
+            )
+            representative_key = next(
+                (
+                    key for key in participants
+                    if key in set(
+                        value for value in _mapping(data.get("account_current_keys")).values()
+                        if value
+                    )
+                ),
+                "",
+            )
+            data["current_key"] = representative_key
+            cls._set_account_status_in_state(
+                data,
+                account,
+                "ready" if final_current else "daily_done",
+                "强制重试已完成，所选身份均已尝试" if final_current else "强制重试完成，本账号身份均已尝试",
+            )
+            return
+        cls._set_account_queue(data, account, "")
+        cls._set_account_status_in_state(
+            data,
+            account,
+            "ready" if completed else "daily_done",
+            f"强制重试完成，{ACCOUNT_NAMES.get(account, account)} 身份均已尝试",
         )
-        data["status"] = "ready" if data["current_key"] else "daily_done"
-        data["detail"] = "强制重试已完成，所选身份均已尝试"
 
     def _mark_daily_done(
         self,
         settings: dict[str, Any],
         participant_key: str,
     ) -> dict[str, Any]:
+        account, _ = fishing_participant_parts(participant_key)
         def update(data: dict[str, Any]) -> None:
             force = _mapping(data.get("force_retry"))
             if force.get("pending") and participant_key in force.get("pending", []):
                 self._finish_force_retry_in_state(
+                    self,
                     data,
                     participant_key,
                     daily_done=True,
@@ -2435,20 +2566,36 @@ class MiniAppFishingAutomation:
             completed = data.setdefault("completed_today", {})
             completed[participant_key] = _now_text()
             participants = [str(item) for item in data.get("participants") or []]
-            data["current_key"] = _next_participant(
-                participants,
+            local_participants = [
+                item for item in participants
+                if fishing_participant_parts(item)[0] == account
+            ]
+            current = _next_participant(
+                local_participants,
                 participant_key,
-                completed,
+                {**completed, **_mapping(data.get("no_rod_today"))},
             )
-            if data["current_key"]:
-                data["status"] = "ready"
-                data["detail"] = (
+            self._set_account_queue(data, account, current)
+            account_queues = _mapping(data.get("account_current_keys"))
+            representative_key = next(
+                (
+                    key for key in participants
+                    if key in {str(value) for value in account_queues.values() if value}
+                ),
+                "",
+            )
+            data["current_key"] = representative_key
+            self._set_account_status_in_state(
+                data,
+                account,
+                "ready" if current else "daily_done",
+                (
                     f"{fishing_participant_label(participant_key)} 今日竿数已尽；"
-                    f"下一位 {fishing_participant_label(data['current_key'])}"
-                )
-            else:
-                data["status"] = "daily_done"
-                data["detail"] = "所选身份今日垂钓均已完成"
+                    f"下一位 {fishing_participant_label(current)}"
+                    if current
+                    else f"{ACCOUNT_NAMES.get(account, account)} 所选身份今日垂钓均已完成"
+                ),
+            )
 
         return _update_global_state(update, settings=settings)
 
@@ -2460,7 +2607,7 @@ class MiniAppFishingAutomation:
         def update(data: dict[str, Any]) -> None:
             force = _mapping(data.get("force_retry"))
             if force.get("pending") and participant_key in force.get("pending", []):
-                self._finish_force_retry_in_state(data, participant_key)
+                self._finish_force_retry_in_state(self, data, participant_key)
 
         _update_global_state(update, settings=settings)
 
@@ -2498,6 +2645,7 @@ class MiniAppFishingAutomation:
         *,
         reuse_request_id: str = "",
     ) -> bool:
+        raise MiniAppBeastError("fishing_transfer_disabled")
         target_account, target_identity = fishing_participant_parts(target_key)
         if target_account != self.account:
             return False
@@ -2618,6 +2766,7 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
         transfer: dict[str, Any],
     ) -> bool:
+        raise MiniAppBeastError("fishing_transfer_disabled")
         holder_key = str(transfer.get("from") or "")
         holder_account, holder_identity = fishing_participant_parts(holder_key)
         listing_id = str(transfer.get("listing_id") or "").strip()
@@ -2693,6 +2842,7 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
         transfer: dict[str, Any],
     ) -> int:
+        raise MiniAppBeastError("fishing_transfer_disabled")
         request_id = str(transfer.get("id") or "").strip()
         if not request_id:
             return FISHING_TRANSFER_RETRY_SECONDS
@@ -2780,6 +2930,7 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
         transfer: dict[str, Any],
     ) -> int:
+        raise MiniAppBeastError("fishing_transfer_disabled")
         status = str(transfer.get("status") or "")
         from_account, _ = fishing_participant_parts(transfer.get("from"))
         to_account, to_identity = fishing_participant_parts(transfer.get("to"))
@@ -2854,91 +3005,83 @@ class MiniAppFishingAutomation:
     async def _drive_once(self, settings: dict[str, Any]) -> int:
         await self._scan_local(settings, force=not self._scan_started)
         runtime = miniapp_fishing_global_snapshot(settings)
-        transfer = _mapping(runtime.get("transfer"))
         scans = _mapping(runtime.get("scans"))
+        participants = [str(item) for item in runtime.get("participants") or []]
+        completed = _mapping(runtime.get("completed_today"))
+        no_rod_today = _mapping(runtime.get("no_rod_today"))
+        local_participants = [
+            item for item in participants
+            if fishing_participant_parts(item)[0] == self.account
+        ]
+        target_key = str(_mapping(runtime.get("account_current_keys")).get(self.account) or "")
+        force_retry = _mapping(runtime.get("force_retry"))
+        force_pending = [str(item) for item in force_retry.get("pending") or []]
+        local_force_pending = [
+            item for item in force_pending
+            if fishing_participant_parts(item)[0] == self.account
+            and item in local_participants
+        ]
+        if force_pending and not local_force_pending:
+            self._set_global_status(
+                settings,
+                "waiting_force_retry",
+                "本账号身份已尝试完成，等待其他账号强制重试结束",
+            )
+            return 5
+        if local_force_pending:
+            target_key = local_force_pending[0]
 
-        active_key = str(runtime.get("rod_holder") or transfer.get("from") or "")
-        active_scan = _mapping(scans.get(active_key))
-        if active_key and self._scan_fresh(active_scan, 90) and active_scan.get("active"):
-            active_account, _ = fishing_participant_parts(active_key)
+        # Advance stale queue entries without ever searching another identity
+        # for a rod or creating a marketplace transfer.
+        invalid_or_done = (
+            not target_key
+            or target_key not in local_participants
+            or completed.get(target_key)
+            or no_rod_today.get(target_key)
+        )
+        if invalid_or_done:
+            target_key = _next_participant(
+                local_participants,
+                target_key,
+                {**completed, **no_rod_today},
+            )
+            if target_key:
+                def update(data: dict[str, Any]) -> None:
+                    self._set_account_queue(data, self.account, target_key)
+                _update_global_state(update, settings=settings)
+            else:
+                self._set_global_status(settings, "daily_done", "所选身份今日垂钓均已完成或无自有鱼竿")
+                return 300
+
+        target_account, target_identity = fishing_participant_parts(target_key)
+        scan = _mapping(scans.get(target_key))
+        if not self._scan_fresh(scan, 90):
+            scan = await self._scan_identity(target_identity, settings)
+        if not scan.get("has_rod"):
+            self._mark_no_rod(settings, target_key)
+            if target_account == self.account:
+                self._record(
+                    target_identity,
+                    miniapp_fishing_status="no_rod",
+                    miniapp_fishing_last_error="fishing_rod_missing",
+                    miniapp_fishing_next_run_time="",
+                )
+            return 2
+
+        if scan.get("active"):
             self._set_global_status(
                 settings,
                 "active_round",
-                f"{fishing_participant_label(active_key)} 尚有鱼讯，先完成收线再转竿",
+                f"{fishing_participant_label(target_key)} 尚有鱼讯，先完成收线",
             )
-            if active_account == self.account:
-                return await self._run_holder_cycle(settings, active_key)
-            return 5
+            return await self._run_holder_cycle(settings, target_key)
 
-        if transfer:
-            return await self._handle_transfer(settings, transfer)
-
-        holder_key = str(runtime.get("rod_holder") or "")
-        if not holder_key:
-            expected = fishing_scan_keys(settings)
-            all_scanned = all(self._scan_fresh(scans.get(key)) for key in expected)
-            configured_rod = configured_fishing_rod(settings)
-            detected_rods = sorted(
-                {
-                    str(_mapping(scan).get("rod_name") or "").strip()
-                    for scan in scans.values()
-                    if str(_mapping(scan).get("rod_name") or "").strip()
-                }
-            )
-            if configured_rod == "auto":
-                missing_detail = "未在全部账号身份中找到支持的鱼竿"
-            else:
-                missing_detail = f"未找到所选鱼竿{configured_rod}"
-                if detected_rods:
-                    missing_detail += f"；已识别：{'、'.join(detected_rods)}"
-            self._set_global_status(
-                settings,
-                "no_rod" if all_scanned else "scanning",
-                missing_detail if all_scanned else "正在扫描鱼竿所在身份及类型",
-            )
-            force = _mapping(runtime.get("force_retry"))
-            target_key = str(runtime.get("current_key") or "")
-            if all_scanned and target_key in (force.get("pending") or []):
-                self._finish_force_retry_after_error(settings, target_key)
-                return 1
-            return 300 if all_scanned else 5
-
-        holder_scan = _mapping(scans.get(holder_key))
-        if not self._scan_fresh(holder_scan, 90):
-            holder_account, holder_identity = fishing_participant_parts(holder_key)
-            if holder_account == self.account:
-                await self._scan_identity(holder_identity, settings)
-            self._set_global_status(
-                settings,
-                "scanning",
-                f"正在复核 {fishing_participant_label(holder_key)} 的持竿状态",
-            )
-            return 5
-
-        target_key = str(runtime.get("current_key") or "")
-        if not target_key:
-            return 300
-        if holder_key != target_key:
-            target_account, _ = fishing_participant_parts(target_key)
-            if target_account == self.account:
-                await self._create_listing(settings, holder_key, target_key)
-                return 5
-            self._set_global_status(
-                settings,
-                "waiting_transfer",
-                f"等待 {fishing_participant_label(target_key)} 创建换竿挂单",
-            )
-            return 5
-
-        holder_account, _ = fishing_participant_parts(holder_key)
-        if holder_account == self.account:
-            self._set_global_status(
-                settings,
-                "fishing",
-                f"当前由 {fishing_participant_label(holder_key)} 自动垂钓",
-            )
-            return await self._run_holder_cycle(settings, holder_key)
-        return 5
+        self._set_global_status(
+            settings,
+            "fishing",
+            f"当前由 {fishing_participant_label(target_key)} 使用自有鱼竿垂钓",
+        )
+        return await self._run_holder_cycle(settings, target_key)
 
     async def run_loop(self) -> None:
         if not self.supported:
@@ -3095,6 +3238,7 @@ class MiniAppFishingAutomation:
                         )
 
                     _update_global_state(clear_holder, settings=settings)
+                    self._mark_no_rod(settings, participant_key)
                     self._scan_started = False
                 elif code in {"fishing_auth_refreshed", "hash_mismatch", "auth_date_expired"}:
                     status = "auth_refresh"
