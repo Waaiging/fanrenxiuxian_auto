@@ -44,11 +44,6 @@ DEFAULT_DISABLED_SECONDS = 30
 DEFAULT_RESULT_ATTEMPTS = 18
 BAIT_PURCHASE_QUANTITY = 10
 FISHING_DAILY_CAST_LIMIT = 10
-FISHING_POND_RECOMMENDED_BAITS = {
-    "qingxi": "plain",
-    "hantan": "spirit_worm",
-    "luanxing": "demon_blood",
-}
 FISHING_ROD_LISTING_MATERIAL = "凝血草"
 FISHING_ROD_ITEMS = frozenset(key for key, _ in MINIAPP_FISHING_RODS if key != "auto")
 FISHING_ROD_SCAN_SECONDS = 300
@@ -630,12 +625,12 @@ def fishing_bait_key_for_pond(
     pond_key: Any,
     configured_key: Any,
 ) -> tuple[str, str]:
-    """Use the shop's pond-matched bait instead of forcing one bait everywhere."""
+    """Always use the user-configured bait regardless of pond recommendations.
+
+    The game does not restrict which bait can be used at each pond, so the
+    dashboard setting must be followed exactly without any automatic override.
+    """
     configured = str(configured_key or "demon_blood").strip() or "demon_blood"
-    recommended = FISHING_POND_RECOMMENDED_BAITS.get(str(pond_key or "").strip(), "")
-    bait = fishing_option(_mapping(shop).get("baits"), recommended)
-    if recommended and bait and bait.get("unlocked"):
-        return recommended, ("configured" if recommended == configured else "pond_match")
     return configured, "configured"
 
 
@@ -3317,3 +3312,5 @@ class MiniAppFishingAutomation:
                     self._finish_force_retry_after_error(settings, participant_key)
                     wait = 1
             await self._sleep_until_next_cycle(wait, settings)
+
+

@@ -588,7 +588,8 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertIn("银须灵鲢", summary)
         self.assertIn("灵石x8", summary)
 
-    def test_pond_matched_bait_overrides_incompatible_global_preference(self):
+    def test_configured_bait_is_always_used_regardless_of_pond(self):
+        """The game allows any bait at any pond; the setting must be followed."""
         shop = {
             "baits": [
                 {"key": "plain", "unlocked": True},
@@ -597,47 +598,23 @@ class MiniAppFishingTests(unittest.TestCase):
             ]
         }
 
-        self.assertEqual(
-            miniapp_fishing.fishing_bait_key_for_pond(
-                shop,
-                "qingxi",
-                "demon_blood",
-            ),
-            ("plain", "pond_match"),
-        )
-        self.assertEqual(
-            miniapp_fishing.fishing_bait_key_for_pond(
-                shop,
-                "hantan",
-                "demon_blood",
-            ),
-            ("spirit_worm", "pond_match"),
-        )
-        self.assertEqual(
-            miniapp_fishing.fishing_bait_key_for_pond(
-                shop,
-                "luanxing",
-                "demon_blood",
-            ),
-            ("demon_blood", "configured"),
-        )
-
-    def test_pond_matched_bait_falls_back_to_configured_when_recommendation_locked(self):
-        shop = {
-            "baits": [
-                {"key": "plain", "unlocked": False},
-                {"key": "demon_blood", "unlocked": True},
-            ]
-        }
-
-        self.assertEqual(
-            miniapp_fishing.fishing_bait_key_for_pond(
-                shop,
-                "qingxi",
-                "demon_blood",
-            ),
-            ("demon_blood", "configured"),
-        )
+        for pond in ("qingxi", "hantan", "luanxing"):
+            self.assertEqual(
+                miniapp_fishing.fishing_bait_key_for_pond(
+                    shop,
+                    pond,
+                    "demon_blood",
+                ),
+                ("demon_blood", "configured"),
+            )
+            self.assertEqual(
+                miniapp_fishing.fishing_bait_key_for_pond(
+                    shop,
+                    pond,
+                    "plain",
+                ),
+                ("plain", "configured"),
+            )
 
     def test_lobby_buys_ten_selected_baits_before_casting(self):
         class Actor:
@@ -894,7 +871,7 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         self.assertEqual(
             worker.actor.state["miniapp_fishing_bait_selection_reason"],
-            "pond_match",
+            "configured",
         )
 
     def test_lobby_purchase_is_limited_by_available_cost_materials(self):
@@ -2699,3 +2676,5 @@ class MiniAppFishingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
