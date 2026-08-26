@@ -5310,6 +5310,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 )
             self.create_scheduler_task("main_beast_action", lambda: self.run_main_beast_action_timer())
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
+        self.create_scheduler_task("second_soul", lambda: self.run_second_soul_loop())
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
         for index, controller in enumerate(self.group_visibility_controllers):
             self.create_scheduler_task(
@@ -5339,6 +5340,57 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
     # ------------------------------------------------------------------
     # 启动入口
     # ------------------------------------------------------------------
+
+    async def run_second_soul_loop(self):
+        """Send `.元神修炼` every 24h; parse cooldown from `.第二元神` on failure."""
+        interval_seconds = 24 * 3600
+        await self.startup_done.wait()
+        while self.is_running:
+            next_time = str(self.state.get("next_second_soul_time") or "")
+            now = datetime.now()
+            if not next_time:
+                next_dt = now + timedelta(seconds=interval_seconds)
+                self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+                self.save_state()
+            else:
+                try:
+                    next_dt = datetime.strptime(next_time, TIME_FORMAT)
+                except (ValueError, TypeError):
+                    next_dt = now + timedelta(seconds=interval_seconds)
+                    self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+                    self.save_state()
+                wait = (next_dt - now).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 300))
+                    continue
+
+            log.info("Second soul cultivation due: sending .元神修炼.")
+            response = await self.send_and_wait_feedback(
+                ".元神修炼", timeout=45, max_retries=1,
+            )
+            text = (getattr(response, "text", "") or "") if response else ""
+            if "无法分心修炼" in text:
+                log.info("Second soul busy; querying .第二元神 for remaining cooldown.")
+                check_response = await self.send_and_wait_feedback(
+                    ".第二元神", timeout=45, max_retries=1,
+                )
+                check_text = (getattr(check_response, "text", "") or "") if check_response else ""
+                cooldown_match = re.search(r"(\d+)\s*小时(?:\s*(\d+)\s*分钟?)?", check_text)
+                if cooldown_match:
+                    hours = int(cooldown_match.group(1))
+                    minutes = int(cooldown_match.group(2) or 0)
+                    remaining = hours * 3600 + minutes * 60 + 300
+                else:
+                    remaining = interval_seconds
+                next_dt = datetime.now() + timedelta(seconds=remaining)
+            else:
+                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
+
+            self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+            self.save_state()
+            log.info("Second soul cultivation done; next at %s.",
+                     next_dt.strftime(TIME_FORMAT))
+            await asyncio.sleep(5)
 
     def restricted_account_specs(self):
         """Return enabled private-group-only account process definitions."""
@@ -7389,3 +7441,5 @@ if __name__ == '__main__':
     except Exception as e:
         import traceback
         traceback.print_exc()
+
+

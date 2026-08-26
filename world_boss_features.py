@@ -1099,16 +1099,29 @@ class WorldBossMonitor:
 
     @staticmethod
     def _windows(challenge: dict[str, Any]) -> list[dict[str, Any]]:
+        """Parse attack windows from both the legacy ``windows`` and the new
+        ``attacks`` challenge format introduced by the 2026-08 server update."""
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for raw in challenge.get("windows") or []:
+        raw_windows = challenge.get("windows") or challenge.get("attacks") or []
+        for raw in raw_windows:
             if not isinstance(raw, dict):
                 continue
-            window_id = str(raw.get("id") or "").strip()
+            window_id = str(raw.get("id") or raw.get("attackId") or raw.get("index") or "").strip()
+            if not window_id:
+                window_id = str(len(seen))
             try:
-                center_ms = int(raw.get("centerMs") or 0)
-                hit_ms = max(1, int(raw.get("hitMs") or 460))
-                perfect_ms = max(1, int(raw.get("perfectMs") or 150))
+                # New format may use offsetMs / durationMs instead of centerMs / hitMs.
+                if "centerMs" in raw:
+                    center_ms = int(raw["centerMs"] or 0)
+                elif "offsetMs" in raw:
+                    center_ms = int(raw["offsetMs"] or 0)
+                elif "startMs" in raw:
+                    center_ms = int(raw["startMs"] or 0)
+                else:
+                    continue
+                hit_ms = max(1, int(raw.get("hitMs") or raw.get("durationMs") or raw.get("windowMs") or 460))
+                perfect_ms = max(1, int(raw.get("perfectMs") or raw.get("grazeMs") or hit_ms // 3))
             except (TypeError, ValueError):
                 continue
             if (
@@ -1633,3 +1646,4 @@ async def install_world_boss_monitor(
     await monitor.install()
     setattr(actor, "_world_boss_monitor", monitor)
     return monitor
+

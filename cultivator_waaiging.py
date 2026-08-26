@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import re
 from datetime import datetime, timedelta
 
 import intelligent_cultivator as core
@@ -427,8 +428,131 @@ class WaaigingCultivator(core.Cultivator):
     async def run_cultivation_loop(self):
         self.create_scheduler_task("sect_join", lambda: self.run_sect_join_loop())
         self.create_scheduler_task("tianxing_destiny", lambda: self.run_tianxing_destiny_loop())
+        self.create_scheduler_task("dual_cultivation", lambda: self.run_dual_cultivation_loop())
+        self.create_scheduler_task("second_soul", lambda: self.run_second_soul_loop())
         return await super().run_cultivation_loop()
 
+
+    async def _find_main_soul_recent_message(self):
+        """Find a recent message from the main account's 主魂 identity."""
+        main_usernames = ["Weeguu"]
+        try:
+            messages = await self.client.get_messages(
+                self.target_chat_id, limit=30
+            )
+            for msg in reversed(messages or []):
+                sender = getattr(msg, "sender", None)
+                if sender is None:
+                    try:
+                        sender = await msg.get_sender()
+                    except Exception:
+                        continue
+                username = str(getattr(sender, "username", "") or "").strip().lstrip("@")
+                if username and username in main_usernames:
+                    return msg
+        except Exception as exc:
+            core.log.warning("Dual cultivation: failed to scan recent messages: %s", exc)
+        return None
+
+    async def run_dual_cultivation_loop(self):
+        """Send `.双修 温养` every hour by replying to the main soul's message."""
+        interval_seconds = 60 * 60
+        await self.startup_done.wait()
+        while self.is_running:
+            next_time = str(self.state.get("next_dual_cultivation_time") or "")
+            now = datetime.now()
+            if not next_time:
+                next_dt = now + timedelta(seconds=interval_seconds)
+                self.state["next_dual_cultivation_time"] = next_dt.strftime(core.TIME_FORMAT)
+                self.save_state()
+            else:
+                try:
+                    next_dt = datetime.strptime(next_time, core.TIME_FORMAT)
+                except (ValueError, TypeError):
+                    next_dt = now + timedelta(seconds=interval_seconds)
+                    self.state["next_dual_cultivation_time"] = next_dt.strftime(core.TIME_FORMAT)
+                    self.save_state()
+                wait = (next_dt - now).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 300))
+                    continue
+
+            target_msg = await self._find_main_soul_recent_message()
+            if target_msg is None:
+                core.log.warning("Dual cultivation 温养: no recent main-soul message found; retry in 5m.")
+                retry = datetime.now() + timedelta(seconds=300)
+                self.state["next_dual_cultivation_time"] = retry.strftime(core.TIME_FORMAT)
+                self.save_state()
+                continue
+
+            core.log.info("Dual cultivation 温养 due; replying to main-soul msg %s.", target_msg.id)
+            response = await self.send_and_wait_feedback(
+                ".双修 温养",
+                timeout=45,
+                max_retries=1,
+                reply_to=target_msg.id,
+            )
+            next_dt = datetime.now() + timedelta(seconds=interval_seconds)
+            self.state["next_dual_cultivation_time"] = next_dt.strftime(core.TIME_FORMAT)
+            self.save_state()
+            if response:
+                core.log.info("Dual cultivation 温养 sent successfully; next at %s.",
+                              next_dt.strftime(core.TIME_FORMAT))
+            else:
+                core.log.warning("Dual cultivation 温养 no response; still scheduled at %s.",
+                                 next_dt.strftime(core.TIME_FORMAT))
+            await asyncio.sleep(5)
+
+    async def run_second_soul_loop(self):
+        """Send `.元神修炼` every 24h; parse cooldown from `.第二元神` on failure."""
+        interval_seconds = 24 * 3600
+        await self.startup_done.wait()
+        while self.is_running:
+            next_time = str(self.state.get("next_second_soul_time") or "")
+            now = datetime.now()
+            if not next_time:
+                next_dt = now + timedelta(seconds=interval_seconds)
+                self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
+                self.save_state()
+            else:
+                try:
+                    next_dt = datetime.strptime(next_time, core.TIME_FORMAT)
+                except (ValueError, TypeError):
+                    next_dt = now + timedelta(seconds=interval_seconds)
+                    self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
+                    self.save_state()
+                wait = (next_dt - now).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 300))
+                    continue
+
+            core.log.info("Second soul cultivation due: sending .元神修炼.")
+            response = await self.send_and_wait_feedback(
+                ".元神修炼", timeout=45, max_retries=1,
+            )
+            text = (getattr(response, "text", "") or "") if response else ""
+            if "无法分心修炼" in text:
+                core.log.info("Second soul busy; querying .第二元神 for remaining cooldown.")
+                check_response = await self.send_and_wait_feedback(
+                    ".第二元神", timeout=45, max_retries=1,
+                )
+                check_text = (getattr(check_response, "text", "") or "") if check_response else ""
+                cooldown_match = re.search(r"(\d+)\s*小时(?:\s*(\d+)\s*分钟?)?", check_text)
+                if cooldown_match:
+                    hours = int(cooldown_match.group(1))
+                    minutes = int(cooldown_match.group(2) or 0)
+                    remaining = hours * 3600 + minutes * 60 + 300
+                else:
+                    remaining = interval_seconds
+                next_dt = datetime.now() + timedelta(seconds=remaining)
+            else:
+                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
+
+            self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
+            self.save_state()
+            core.log.info("Second soul cultivation done; next at %s.",
+                          next_dt.strftime(core.TIME_FORMAT))
+            await asyncio.sleep(5)
     async def run_telegram_write_permission_monitor(self):
         await run_telegram_write_permission_monitor(self, core.log)
 
@@ -441,3 +565,7 @@ if __name__ == "__main__":
         pass
     except Exception as exc:
         core.log.error("Waaiging cultivator fatal error: %s", exc, exc_info=True)
+
+
+
+
