@@ -1116,12 +1116,25 @@ class WorldBossMonitor:
                     center_ms = int(raw["centerMs"] or 0)
                 elif "offsetMs" in raw:
                     center_ms = int(raw["offsetMs"] or 0)
+                elif "impactMs" in raw:
+                    center_ms = int(raw["impactMs"] or 0)
                 elif "startMs" in raw:
                     center_ms = int(raw["startMs"] or 0)
                 else:
                     continue
                 hit_ms = max(1, int(raw.get("hitMs") or raw.get("durationMs") or raw.get("windowMs") or 460))
-                perfect_ms = max(1, int(raw.get("perfectMs") or raw.get("grazeMs") or hit_ms // 3))
+                width_ms = int(raw.get("width") or 0)
+                if width_ms > 0:
+                    perfect_ms = max(1, width_ms)
+                else:
+                    perfect_ms = max(1, int(raw.get("perfectMs") or raw.get("grazeMs") or hit_ms // 3))
+                danger_start = int(float(raw.get("dangerStart", 0)))
+                danger_end = int(float(raw.get("dangerEnd", 0)))
+                danger_width = danger_end - danger_start
+                if danger_width > 0:
+                    center_ms += int(round((danger_start + danger_end) / 2))
+                    hit_ms = danger_width
+                    perfect_ms = danger_width
             except (TypeError, ValueError):
                 continue
             if (
@@ -1136,6 +1149,9 @@ class WorldBossMonitor:
                 {
                     "id": window_id,
                     "centerMs": center_ms,
+                    "impactMs": int(raw.get("impactMs") or center_ms),
+                    "dangerStartMs": danger_start,
+                    "dangerEndMs": danger_end,
                     "hitMs": hit_ms,
                     "perfectMs": perfect_ms,
                 }
@@ -1146,10 +1162,10 @@ class WorldBossMonitor:
         return normalized
 
     def _hit_offset_ms(self, window: dict[str, Any]) -> int:
-        """Stagger accounts early so network latency does not push hits past center."""
+        """Stagger requests while keeping arrival inside the server window."""
         slot = int(WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0))
         perfect_ms = max(1, int(window.get("perfectMs") or 1))
-        step = min(40, max(0, (perfect_ms - 10) // 4))
+        step = min(5, max(0, (perfect_ms - 10) // 8))
         return slot * step
 
     async def _hit_window(
@@ -1161,14 +1177,16 @@ class WorldBossMonitor:
         battle_start: float,
         window: dict[str, Any],
         window_index: int = 0,
+        request_lead_ms: int = 0,
     ) -> dict[str, Any]:
         offset_ms = self._hit_offset_ms(window)
-        target_ms = max(0, int(window["centerMs"]) + offset_ms)
+        target_ms = max(0, int(window["centerMs"]) + offset_ms - request_lead_ms)
         target = battle_start + target_ms / 1000.0
         wait = target - self.monotonic()
         if wait > 0:
             await self.sleep(wait)
-        elapsed_ms = max(0, int((self.monotonic() - battle_start) * 1000))
+        sent_elapsed_ms = max(0, int(round((self.monotonic() - battle_start) * 1000)))
+        elapsed_ms = max(0, sent_elapsed_ms + request_lead_ms)
         signed_delta_ms = elapsed_ms - int(window["centerMs"])
         delta_ms = abs(signed_delta_ms)
         action = {
@@ -1185,7 +1203,9 @@ class WorldBossMonitor:
             "hit_ms": int(window["hitMs"]),
             "perfect_ms": int(window["perfectMs"]),
             "account_offset_ms": offset_ms,
+            "request_lead_ms": request_lead_ms,
             "target_ms": target_ms,
+            "sent_elapsed_ms": sent_elapsed_ms,
             "actual_elapsed_ms": elapsed_ms,
             "signed_delta_ms": signed_delta_ms,
             "wake_lateness_ms": elapsed_ms - target_ms,
@@ -1315,6 +1335,7 @@ class WorldBossMonitor:
         server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))
         starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
         battle_start = response_at + starts_in
+        request_lead_ms = int(round(round_trip * 500))
 
         tasks = [
             asyncio.create_task(
@@ -1326,6 +1347,7 @@ class WorldBossMonitor:
                     battle_start,
                     window,
                     index,
+                    request_lead_ms,
                 )
             )
             for index, window in enumerate(windows, start=1)

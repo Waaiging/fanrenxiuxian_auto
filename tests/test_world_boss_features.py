@@ -94,7 +94,83 @@ class WorldBossFeatureTests(unittest.TestCase):
 
         self.assertEqual(
             offsets,
-            {"main": -160, "sub": -120, "xiaohao": -80, "waaiging": -40},
+            {"main": -20, "sub": -15, "xiaohao": -10, "waaiging": -5},
+        )
+
+    def test_tight_attack_width_uses_safe_arrival_offsets(self):
+        window = {"perfectMs": 58}
+
+        offsets = {
+            account: WorldBossMonitor(FakeActor(), account)._hit_offset_ms(window)
+            for account in ("main", "sub", "xiaohao", "waaiging")
+        }
+
+        self.assertEqual(
+            offsets,
+            {"main": -20, "sub": -15, "xiaohao": -10, "waaiging": -5},
+        )
+
+    def test_attack_format_uses_impact_and_width(self):
+        windows = WorldBossMonitor._windows(
+            {
+                "attacks": [
+                    {"id": "a_1", "impactMs": 2100, "width": 58},
+                    {"id": "a_2", "impactMs": 7813, "width": 66},
+                ]
+            }
+        )
+
+        self.assertEqual(
+            windows,
+            [
+                {
+                    "id": "a_1",
+                    "centerMs": 2100,
+                    "impactMs": 2100,
+                    "dangerStartMs": 0,
+                    "dangerEndMs": 0,
+                    "hitMs": 460,
+                    "perfectMs": 58,
+                },
+                {
+                    "id": "a_2",
+                    "centerMs": 7813,
+                    "impactMs": 7813,
+                    "dangerStartMs": 0,
+                    "dangerEndMs": 0,
+                    "hitMs": 460,
+                    "perfectMs": 66,
+                },
+            ],
+        )
+
+    def test_attack_format_uses_rotated_danger_window(self):
+        windows = WorldBossMonitor._windows(
+            {
+                "attacks": [
+                    {
+                        "id": "a_1",
+                        "impactMs": 2100,
+                        "dangerStart": -27.0,
+                        "dangerEnd": 31.0,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            windows,
+            [
+                {
+                    "id": "a_1",
+                    "centerMs": 2102,
+                    "impactMs": 2100,
+                    "dangerStartMs": -27,
+                    "dangerEndMs": 31,
+                    "hitMs": 58,
+                    "perfectMs": 58,
+                }
+            ],
         )
 
     def test_extracts_only_matching_trusted_entry_shape(self):
@@ -296,9 +372,53 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["perfect"])
             elapsed = calls[0][1]["elapsedMs"]
-            self.assertGreaterEqual(elapsed, 855)
-            self.assertLessEqual(elapsed, 865)
+            self.assertGreaterEqual(elapsed, 975)
+            self.assertLessEqual(elapsed, 985)
             self.assertEqual(result["action"]["t"], elapsed)
+
+        asyncio.run(run())
+
+    def test_realtime_hit_compensates_begin_round_trip(self):
+        async def run():
+            clock = [100.0]
+            calls = []
+
+            async def sleep(seconds):
+                clock[0] += seconds
+
+            async def post_json(origin, path, payload, timeout):
+                calls.append((path, dict(payload)))
+                return {"hit": {"damageYi": 9}}
+
+            monitor = WorldBossMonitor(
+                FakeActor(),
+                "main",
+                post_json=post_json,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+            )
+            result = await monitor._hit_window(
+                extract_world_boss_entry(DummyMessage()),
+                "signed_init_data",
+                "session_fixture",
+                "challenge_fixture",
+                100.0,
+                {
+                    "id": "w1",
+                    "centerMs": 1000,
+                    "hitMs": 460,
+                    "perfectMs": 150,
+                },
+                1,
+                100,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["perfect"])
+            self.assertEqual(calls[0][1]["elapsedMs"], 980)
+            self.assertEqual(result["diagnostic"]["sent_elapsed_ms"], 880)
+            self.assertEqual(result["diagnostic"]["actual_elapsed_ms"], 980)
+            self.assertEqual(result["diagnostic"]["signed_delta_ms"], -20)
 
         asyncio.run(run())
 
@@ -346,9 +466,9 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertFalse(result["accepted_perfect"])
             diagnostic = result["diagnostic"]
             self.assertEqual(diagnostic["sequence"], 14)
-            self.assertEqual(diagnostic["account_offset_ms"], -70)
-            self.assertEqual(diagnostic["actual_elapsed_ms"], 930)
-            self.assertEqual(diagnostic["signed_delta_ms"], -70)
+            self.assertEqual(diagnostic["account_offset_ms"], -10)
+            self.assertEqual(diagnostic["actual_elapsed_ms"], 990)
+            self.assertEqual(diagnostic["signed_delta_ms"], -10)
             self.assertEqual(diagnostic["request"]["total_duration_ms"], 480)
             self.assertEqual(diagnostic["http_status"], 409)
             self.assertEqual(
