@@ -582,6 +582,24 @@ class WorldBossFeatureTests(unittest.TestCase):
                 "/two",
             ))
 
+    def test_world_boss_requests_bypass_open_shared_circuit(self):
+        async def run():
+            monitor = WorldBossMonitor(FakeActor(), "main")
+            with patch(
+                "world_boss_features._post_json",
+                new=AsyncMock(return_value={"ok": True}),
+            ) as post_json:
+                await monitor._request(
+                    "https://asc.aiopenai.app",
+                    "/api/miniapp/xianxia-world-boss/start",
+                    {},
+                )
+
+            self.assertEqual(post_json.await_count, 1)
+            self.assertTrue(post_json.await_args.kwargs["time_critical"])
+
+        asyncio.run(run())
+
         asyncio.run(run())
 
     def test_identity_fallback_uses_personal_event_choice(self):

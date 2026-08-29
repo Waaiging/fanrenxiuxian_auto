@@ -668,10 +668,6 @@ class WorldBossMonitor:
                 )
                 return
             try:
-                if self.post_json is None:
-                    circuit_error = miniapp_circuit_preflight(entry.origin)
-                    if circuit_error is not None:
-                        raise circuit_error
                 self._record(
                     entry,
                     "running",
@@ -879,13 +875,14 @@ class WorldBossMonitor:
             try:
                 request_timeout = int(timeout or self.timeout)
                 if self.post_json is None:
-                    # Use the shared Mini App transport so upstream outages obey
-                    # the same cross-process circuit breaker as every other task.
+                    # World-boss events are one-shot and time-critical, so the
+                    # first request must bypass a stale shared outage circuit.
                     result = await _post_json(
                         origin,
                         path,
                         payload,
                         request_timeout,
+                        time_critical=True,
                     )
                 else:
                     result = await _post_json(
