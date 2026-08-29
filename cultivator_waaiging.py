@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import intelligent_cultivator as core
 from command_modules import DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND
 from group_visibility_control import run_telegram_write_permission_monitor
+from command_feedback import second_soul_busy, second_soul_cooldown_seconds
 
 
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))

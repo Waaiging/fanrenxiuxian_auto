@@ -46,6 +46,14 @@ from log_utils import (
 # 这里集中执行，覆盖各业务计划中遗留的 max_retries=0/2 配置。
 NO_RESPONSE_TIMEOUT_SECONDS = 60
 NO_RESPONSE_RETRY_COUNT = 1
+
+SECOND_SOUL_BUSY_MARKERS = ("无法分心修炼", "无法分心")
+SECOND_SOUL_COOLDOWN_PATTERN = re.compile(
+    r"(?:剩余|还需等待|冷却)[^\n\d]*"
+    r"(?:(\d+)\s*(?:小时|时|h)[\s,，]*)?"
+    r"(?:(\d+)\s*(?:分钟|分|m)[\s,，]*)?"
+    r"(?:(\d+)\s*(?:秒|s))?"
+)
 RETIRED_AUTO_COMMAND_PREFIXES = (
     ".闯塔",
     ".寻觅灵兽",
@@ -654,3 +662,25 @@ async def send_and_wait_feedback_common(
         if return_msg:
             return final_resp_msg if return_msg_role == "response" else final_sent_msg
         return resp_text
+
+
+def command_response_text(response):
+    """Return text from either a response message object or a plain string."""
+    if isinstance(response, str):
+        return response
+    return str(getattr(response, "text", "") or getattr(response, "raw_text", "") or "")
+
+
+def second_soul_busy(response):
+    text = command_response_text(response)
+    return any(marker in text for marker in SECOND_SOUL_BUSY_MARKERS)
+
+
+def second_soul_cooldown_seconds(response, default_seconds=None):
+    """Parse the remaining cultivation time from a `.第二元神` response."""
+    text = command_response_text(response)
+    match = SECOND_SOUL_COOLDOWN_PATTERN.search(text)
+    if not match:
+        return default_seconds
+    hours, minutes, seconds = match.groups(default="0")
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds)

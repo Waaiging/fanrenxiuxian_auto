@@ -22,6 +22,7 @@ import miniapp_dwelling
 import restricted_miniapp_worker
 import star_gazing_collector
 import sub_cultivator
+from command_feedback import command_response_text, second_soul_busy, second_soul_cooldown_seconds
 from command_modules import (
     ask_dao_plan,
     field_training_plan_from_features,
@@ -205,6 +206,16 @@ class FakeClearClient:
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_second_soul_cooldown_parsing(self):
+        status = "**状态**: 修炼中 (剩余: 5小时50分钟52秒)"
+
+        self.assertEqual(command_response_text(status), status)
+        self.assertTrue(second_soul_busy("你的第二元神正在(修炼中)，无法分心修炼。"))
+        self.assertEqual(second_soul_cooldown_seconds(status), 21052)
+        self.assertEqual(second_soul_cooldown_seconds("剩余: 43分钟12秒"), 2592)
+        self.assertEqual(second_soul_cooldown_seconds("剩余: 20秒"), 20)
+        self.assertEqual(second_soul_cooldown_seconds("无时间", default_seconds=3600), 3600)
+
     def test_incoming_telemetry_failure_does_not_interrupt_workflow(self):
         actor = IncomingTelemetryFailureActor()
         msg = SimpleNamespace(id=14731, sender_id=12345, text="坠魔心劫·第2轮")

@@ -124,6 +124,8 @@ from command_feedback import (
     _handle_telegram_send_protection,
     is_retired_auto_command,
     record_telegram_send_success,
+    second_soul_busy,
+    second_soul_cooldown_seconds,
     send_and_wait_feedback_common,
 )
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
