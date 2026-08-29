@@ -2762,7 +2762,7 @@ def star_avatar_commands(name, state, root_state=None):
     if is_yinluo:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state))
-    if is_yinluo:
+    if is_yinluo or name == "寻真子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),

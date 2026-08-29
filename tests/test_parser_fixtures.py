@@ -5871,6 +5871,25 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(row["remaining"], "等结算")
         self.assertNotIn("next_seconds", row)
 
+    def test_dashboard_sub_xunzhen_shows_yuanying_rift_commands(self):
+        state = {
+            "avatars": {
+                "寻真子": {
+                    "next_yuanying_out_time": "2099-01-01 08:00:00",
+                    "next_rift_search_time": "2099-01-01 20:00:00",
+                }
+            }
+        }
+
+        panels = build_command_panels("sub", state)
+        panel = next(p for p in panels if p.get("identity") == "寻真子")
+        rows = {row["command"]: row for row in panel.get("commands", [])}
+
+        self.assertIn(".元婴出窍", rows)
+        self.assertIn(".探寻裂缝", rows)
+        self.assertGreater(rows[".元婴出窍"]["next_seconds"], 86400)
+        self.assertGreater(rows[".探寻裂缝"]["next_seconds"], 86400)
+
     def test_clear_history_command_is_admin_plain_c_only(self):
         actor = SimpleNamespace(
             target_chat_id=-100123456,
