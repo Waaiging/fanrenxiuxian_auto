@@ -251,7 +251,7 @@ YUANYING_RETREAT_COMMAND = ".元婴闭关"              # 副号主魂改用元�
 
 # -- 探寻裂缝 --
 RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小时
-AVATAR_YUANYING_RIFT_AVATARS = {SUB_YINLUO_IDENTITY}  # 启用化身元婴出窍/探寻裂缝
+AVATAR_YUANYING_RIFT_AVATARS = {SUB_YINLUO_IDENTITY, "寻真子"}  # 启用化身元婴出窍/探寻裂缝
 
 # -- 抚摸法宝 --
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"      # 抚摸本命法宝指令

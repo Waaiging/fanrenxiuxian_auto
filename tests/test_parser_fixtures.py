@@ -8385,6 +8385,13 @@ class ParserFixtureTests(unittest.TestCase):
             ("rift", "缘生子", False),
         ])
 
+    def test_sub_xunzhen_avatar_runs_yuanying_rift_loop(self):
+        self.assertIn("寻真子", sub_cultivator.AVATAR_YUANYING_RIFT_AVATARS)
+        self.assertIn(
+            sub_cultivator.SUB_YINLUO_IDENTITY,
+            sub_cultivator.AVATAR_YUANYING_RIFT_AVATARS,
+        )
+
     def test_sub_impending_wait_resolves_mulan_support_constant(self):
         actor = SubCultivator.__new__(SubCultivator)
         actor.avatars = []
