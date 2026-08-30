@@ -149,10 +149,96 @@ def _cleanup_backoff_seconds(response_text: str) -> int:
     return 5 * 60
 
 
+def _wind_thunder_notify(actor: Any, message: str) -> None:
+    """Best-effort private alert to the owner for hunt-risk exposure."""
+    client = getattr(actor, "client", None)
+    if client is None:
+        return
+
+    async def _send() -> None:
+        try:
+            await client.send_message(8219248252, f"[风雷翅] {message}")
+        except Exception:
+            pass
+
+    try:
+        asyncio.get_running_loop().create_task(_send())
+    except RuntimeError:
+        pass
+
+
+def _listing_backoff_seconds(state: dict[str, Any]) -> int:
+    """Escalating backoff for repeated listing failures: 5m → 15m → 30m."""
+    try:
+        fails = int(state.get("wind_thunder_list_fail_count") or 0)
+    except (TypeError, ValueError):
+        fails = 0
+    if fails >= 2:
+        return 30 * 60
+    if fails == 1:
+        return 15 * 60
+    return 5 * 60
+
+
+async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bool:
+    """Retry the market listing for an already-san-nian'd wing (exposure state)."""
+    try:
+        list_resp = await _send_internal(
+            actor,
+            identity,
+            ".上架至万宝阁 风雷翅",
+            timeout=60,
+            max_retries=0,
+            force_identity_check=True,
+            suppress_no_response_alert=True,
+        )
+        list_text = str(list_resp or "") if isinstance(list_resp, str) else (
+            (getattr(list_resp, "text", "") or "") if list_resp else ""
+        )
+        if "放置失败" in list_text:
+            try:
+                fails = int(state.get("wind_thunder_list_fail_count") or 0) + 1
+            except (TypeError, ValueError):
+                fails = 1
+            state["wind_thunder_list_fail_count"] = fails
+            state["wind_thunder_last_cleanup_error"] = "list_failed"
+            state["wind_thunder_list_pending"] = True
+            state["wind_thunder_cleanup_due_at"] = (
+                _now() + timedelta(seconds=_listing_backoff_seconds(state))
+            ).strftime(TIME_FORMAT)
+            _save(actor)
+            _schedule_cleanup(actor, identity)
+            _wind_thunder_notify(
+                actor,
+                f"[{identity}] 风雷翅上架失败（第{fails}次），已散念未上架，"
+                f"处于追杀暴露状态，{_listing_backoff_seconds(state) // 60}分钟后重试。",
+            )
+            return False
+        state.update({
+            "wind_thunder_equipped": False,
+            "wind_thunder_cleanup_due_at": "",
+            "wind_thunder_last_cleanup_time": _now().strftime(TIME_FORMAT),
+            "wind_thunder_last_cleanup_error": "",
+            "wind_thunder_last_defer_reason": "",
+            "wind_thunder_list_pending": False,
+            "wind_thunder_list_fail_count": 0,
+        })
+        _save(actor)
+        return True
+    except Exception as exc:
+        state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
+        state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
+        _save(actor)
+        return False
+
+
 async def _cleanup(actor: Any, identity: str) -> bool:
     if not wind_thunder_enabled(actor, identity):
         return False
     state = _identity_state(actor, identity)
+    if state.get("wind_thunder_list_pending"):
+        # 散念已成功、上架失败的补挂路径：跳过散念，直接重试上架。
+        return await _retry_listing(actor, identity, state)
     if not state.get("wind_thunder_equipped"):
         return True
     # 规划检查：半小时内还有可加速指令待执行 → 续期，不收摊
@@ -188,37 +274,8 @@ async def _cleanup(actor: Any, identity: str) -> bool:
             _save(actor)
             _schedule_cleanup(actor, identity)
             return False
-        list_resp = await _send_internal(
-            actor,
-            identity,
-            ".上架至万宝阁 风雷翅",
-            timeout=60,
-            max_retries=0,
-            force_identity_check=True,
-            suppress_no_response_alert=True,
-        )
-        list_text = str(list_resp or "") if isinstance(list_resp, str) else (
-            (getattr(list_resp, "text", "") or "") if list_resp else ""
-        )
-        if "放置失败" in list_text:
-            # 游戏侧业务失败（因果牵连）——保持装备态，短退避后重试上架。
-            # 绝不重复发送上架指令；当前持有窗口顺延。
-            state["wind_thunder_last_cleanup_error"] = "list_failed"
-            state["wind_thunder_cleanup_due_at"] = (
-                _now() + timedelta(seconds=_cleanup_backoff_seconds(list_text))
-            ).strftime(TIME_FORMAT)
-            _save(actor)
-            _schedule_cleanup(actor, identity)
-            return False
-        state.update({
-            "wind_thunder_equipped": False,
-            "wind_thunder_cleanup_due_at": "",
-            "wind_thunder_last_cleanup_time": _now().strftime(TIME_FORMAT),
-            "wind_thunder_last_cleanup_error": "",
-            "wind_thunder_last_defer_reason": "",
-        })
-        _save(actor)
-        return True
+        # 散念已确认成功，上架（含失败退避与通知）统一走 _retry_listing。
+        return await _retry_listing(actor, identity, state)
     except Exception as exc:
         state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
         state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
@@ -321,6 +378,15 @@ async def wind_thunder_send(
         if state.get("wind_thunder_equipped") and due and due <= now:
             await _cleanup(actor, identity)
             state = _identity_state(actor, identity)
+        if state.get("wind_thunder_list_pending"):
+            # 上架失败的翅膀还滞留储物袋（追杀暴露态）——不重新装备，
+            # 优先把上架补上；本次指令按普通冷却执行。
+            _wind_thunder_notify(
+                actor,
+                f"[{identity}] 风雷翅仍在待上架状态（此前上架失败），本次 {command} 不启用加速，"
+                f"优先补上架以脱离追杀暴露。",
+            )
+            return await sender()
         if not state.get("wind_thunder_equipped"):
             await _send_internal(actor, identity, ".从万宝阁取下 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
             await _send_internal(actor, identity, ".装备 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
