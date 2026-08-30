@@ -790,7 +790,7 @@ def command_response_family(command):
         return "miracle"
     if cmd.startswith(".神迹"):
         return "miracle"
-    if cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰") or cmd.startswith(".掌天瓶"):
+    if cmd in {".观星台", ".安抚星辰", ".收集精华"} or cmd.startswith(".牵引星辰"):
         return "star"
     if cmd in {".天阶状态", ".登天阶", ".引九天罡风", ".问心台"}:
         return "cloud_stairs"
@@ -859,6 +859,8 @@ def command_response_family(command):
         or cmd.startswith(".剥离咒源")
     ):
         return "soul_curse"
+    if cmd.startswith(".掌天瓶"):
+        return "sky_bottle"
     return ""
 
 
@@ -989,6 +991,11 @@ def text_response_family(text):
         "咒契协定", "辨认咒纹", "借幡镇魂", "剥离咒源", "咒源",
     ]):
         return "soul_curse"
+    if any(k in clean for k in [
+        "掌天瓶·凝液", "掌天瓶·养树", "掌天绿液", "当前绿液",
+        "月华尚未再度圆满", "尚无绿液", "尚未重聚【掌天瓶】",
+    ]):
+        return "sky_bottle"
     return ""
 
 
@@ -1016,6 +1023,12 @@ def feedback_response_matches_command(command, text):
         ]) or ("仍在远航" in clean and "寻图" in clean)
     if expected == "heart_trial":
         return any(k in clean for k in ["共历心劫", "坠魔心劫", "心劫", "侍妾/道侣", "道侣内容"])
+    if expected == "sky_bottle":
+        return any(k in clean for k in [
+            "掌天瓶·凝液", "掌天瓶·养树", "掌天绿液", "当前绿液",
+            "月华尚未再度圆满", "尚无绿液", "尚未重聚【掌天瓶】",
+            "天道禁制", "炼成了",
+        ])
     if expected == "formation":
         return any(k in clean for k in [
             "周天星斗大阵", "布设大阵", "启阵冷却",

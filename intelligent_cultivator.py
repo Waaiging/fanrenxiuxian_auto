@@ -1153,6 +1153,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             ))
         if main_beast_feedback_candidate(command, text):
             return True
+        if command.startswith(".掌天瓶"):
+            return any(k in text for k in (
+                "掌天瓶·凝液", "掌天瓶·养树", "掌天绿液", "当前绿液",
+                "月华尚未再度圆满", "尚无绿液", "尚未重聚",
+                "天道禁制", "炼成了", "后再", "冷却",
+            ))
         if command in {".启阵", ".助阵"}:
             formation_keywords = [
                 "冷却", "再次启阵", "心神消耗", "参与过布阵",
