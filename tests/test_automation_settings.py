@@ -52,7 +52,7 @@ class AutomationSettingsTests(unittest.TestCase):
     def test_sub_identity_state_is_parsed_once_per_file_version(self):
         self.sub_state_path.write_text(json.dumps({
             "avatar_dao_names_by_player_id": {"-1003885521329": "锋脉子"},
-            "avatar_dao_name_aliases": {"竹和生": "锋脉子"},
+            "avatar_dao_name_aliases": {"玄续玄": "锋脉子"},
         }, ensure_ascii=False), encoding="utf-8")
         settings._SUB_IDENTITY_STATE_CACHE["signature"] = None
         settings._SUB_IDENTITY_STATE_CACHE["state"] = {}
@@ -69,23 +69,23 @@ class AutomationSettingsTests(unittest.TestCase):
             "keys": (),
         }):
             value = settings.normalize_automation_settings({
-                "world_boss": {"participants": ["sub|竹和生"]},
+                "world_boss": {"participants": ["sub|玄续玄"]},
                 "miniapp_fishing": {
                     "enabled": True,
-                    "participants": ["sub|竹和生"],
-                    "rod_owner": "sub|竹和生",
+                    "participants": ["sub|玄续玄"],
+                    "rod_owner": "sub|玄续玄",
                 },
                 "miniapp_journey": {
                     "enabled": True,
-                    "participants": ["sub|竹和生"],
+                    "participants": ["sub|玄续玄"],
                 },
                 "miniapp_tianji_trial": {
                     "enabled": True,
-                    "participants": ["sub|竹和生"],
+                    "participants": ["sub|玄续玄"],
                 },
                 "miniapp_fate_cards": {
                     "enabled": True,
-                    "participants": ["sub|竹和生"],
+                    "participants": ["sub|玄续玄"],
                 },
             })
 
@@ -211,7 +211,7 @@ class AutomationSettingsTests(unittest.TestCase):
             miniapp_fishing_pond="hantan",
             miniapp_fishing_bait="spirit_worm",
             miniapp_fishing_chum="grass",
-            miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土", "sub|竹和生", "xiaohao|缘生子", "waaiging|主魂"],
+            miniapp_fishing_participants=["main|无咎子", "sub|主魂", "sub|厚土", "sub|玄续玄", "xiaohao|缘生子", "waaiging|主魂"],
             miniapp_fishing_rod="金雷竹钓竿",
             miniapp_fishing_rod_owner="xiaohao|缘生子",
             miniapp_fishing_start_time="06:30",
@@ -221,7 +221,7 @@ class AutomationSettingsTests(unittest.TestCase):
             value["miniapp_fishing"],
             {
                 "enabled": False,
-                "participants": ["main|无咎子", "sub|主魂", "sub|厚土", "sub|竹和生", "xiaohao|缘生子", "waaiging|主魂"],
+                "participants": ["main|无咎子", "sub|主魂", "sub|厚土", "sub|玄续玄", "xiaohao|缘生子", "waaiging|主魂"],
                 "rod": "金雷竹钓竿",
                 "rod_owner": "xiaohao|缘生子",
                 "pond": "hantan",
@@ -263,47 +263,47 @@ class AutomationSettingsTests(unittest.TestCase):
 
         self.assertEqual(
             value["world_boss"]["participants"],
-            ["main|缘生子", "sub|竹和生"],
+            ["main|缘生子", "sub|玄续玄"],
         )
         self.assertEqual(
             value["miniapp_fishing"]["participants"],
-            ["sub|竹和生", "xiaohao|缘生子"],
+            ["sub|玄续玄", "xiaohao|缘生子"],
         )
-        self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|竹和生")
+        self.assertEqual(value["miniapp_fishing"]["rod_owner"], "sub|玄续玄")
         self.assertEqual(
             value["miniapp_tianji_trial"]["participants"],
-            ["sub|竹和生", "main|缘生子"],
+            ["sub|玄续玄", "main|缘生子"],
         )
         self.assertEqual(
             value["miniapp_fate_cards"]["participants"],
-            ["sub|竹和生", "main|缘生子"],
+            ["sub|玄续玄", "main|缘生子"],
         )
         self.assertEqual(
             value["miniapp_journey"]["participants"],
-            ["sub|竹和生", "main|无咎子"],
+            ["sub|玄续玄", "main|无咎子"],
         )
 
     def test_reborn_sub_dao_name_migrates_saved_participants_and_dashboard_options(self):
         self.sub_state_path.write_text(json.dumps({
             "avatar_dao_names_by_player_id": {"-1003885521329": "锋脉子"},
-            "avatar_dao_name_aliases": {"缘生子": "锋脉子", "竹和生": "锋脉子"},
+            "avatar_dao_name_aliases": {"缘生子": "锋脉子", "玄续玄": "锋脉子"},
             "identity_sect_names": {"锋脉子": "阴罗宗"},
         }, ensure_ascii=False), encoding="utf-8")
 
         value = settings.normalize_automation_settings({
-            "world_boss": {"participants": ["sub|竹和生"]},
+            "world_boss": {"participants": ["sub|玄续玄"]},
             "miniapp_fishing": {
                 "enabled": True,
-                "participants": ["sub|竹和生"],
-                "rod_owner": "sub|竹和生",
+                "participants": ["sub|玄续玄"],
+                "rod_owner": "sub|玄续玄",
             },
             "miniapp_tianji_trial": {
                 "enabled": True,
-                "participants": ["sub|竹和生"],
+                "participants": ["sub|玄续玄"],
             },
             "miniapp_fate_cards": {
                 "enabled": True,
-                "participants": ["sub|竹和生"],
+                "participants": ["sub|玄续玄"],
             },
         })
         payload = settings.automation_dashboard_payload()
@@ -325,7 +325,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_tianji_trial"]["participants"], ["sub|锋脉子"])
         self.assertEqual(value["miniapp_fate_cards"]["participants"], ["sub|锋脉子"])
         self.assertIn("锋脉子", [item["name"] for item in sub_account["identities"]])
-        self.assertNotIn("竹和生", [item["name"] for item in sub_account["identities"]])
+        self.assertNotIn("玄续玄", [item["name"] for item in sub_account["identities"]])
 
     def test_save_updates_tianxing_round_settings(self):
         self.main_state_path.write_text(json.dumps({
@@ -531,7 +531,7 @@ class AutomationSettingsTests(unittest.TestCase):
             item for item in payload["miniapp_fishing"]["accounts"] if item["key"] == "sub"
         )
         sub_names = [item["name"] for item in sub_fishing["identities"]]
-        self.assertIn("竹和生", sub_names)
+        self.assertIn("玄续玄", sub_names)
         self.assertNotIn("缘生子", sub_names)
         self.assertTrue(payload["miniapp_tianji_trial"]["enabled"])
         self.assertEqual(len(payload["miniapp_tianji_trial"]["accounts"]), 4)
@@ -560,7 +560,7 @@ class AutomationSettingsTests(unittest.TestCase):
                 "main|素缘子",
                 "sub|主魂",
                 "sub|厚土",
-                "sub|竹和生",
+                "sub|玄续玄",
                 "sub|寻真子",
                 "xiaohao|主魂",
                 "xiaohao|问心子",

@@ -495,7 +495,7 @@ class MiniAppFishingTests(unittest.TestCase):
         )
         settings = {
             "enabled": True,
-            "participants": ["sub|竹和生"],
+            "participants": ["sub|玄续玄"],
             "rod": "auto",
             "rod_owner": "auto",
             "pond": "qingxi",

@@ -21,7 +21,7 @@ INVENTORY_TYPES = ("法宝", "物品", "材料")
 INVENTORY_TYPE_ORDER = {name: index for index, name in enumerate(INVENTORY_TYPES)}
 INVENTORY_ACCOUNT_IDENTITIES = {
     "main": ("主魂", "无咎子", "缘生子", "素缘子"),
-    "sub": ("主魂", "厚土", "竹和生", "寻真子"),
+    "sub": ("主魂", "厚土", "玄续玄", "寻真子"),
     "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
     "waaiging": ("主魂",),
 }

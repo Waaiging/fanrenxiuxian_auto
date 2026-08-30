@@ -208,7 +208,7 @@ class MiniAppInventoryTests(unittest.TestCase):
             state_path = Path(tmpdir) / "state_sub.json"
             state_path.write_text(json.dumps({
                 "avatar_dao_names_by_player_id": {
-                    automation_settings.SUB_YINLUO_PLAYER_ID: "竹和生",
+                    automation_settings.SUB_YINLUO_PLAYER_ID: "玄续玄",
                 },
             }), encoding="utf-8")
             with (
@@ -240,7 +240,7 @@ class MiniAppInventoryTests(unittest.TestCase):
                 self.assertEqual(dashboard["summary"]["match_count"], 2)
                 self.assertEqual(dashboard["summary"]["match_quantity"], 2400)
                 self.assertIn(
-                    "竹和生",
+                    "玄续玄",
                     {row["identity"] for row in dashboard["search_results"]},
                 )
                 self.assertNotIn(
@@ -248,8 +248,8 @@ class MiniAppInventoryTests(unittest.TestCase):
                     {row["identity"] for row in dashboard["search_results"]},
                 )
                 self.assertEqual(
-                    dashboard["accounts"][1]["snapshots"]["竹和生"]["identity"],
-                    "竹和生",
+                    dashboard["accounts"][1]["snapshots"]["玄续玄"]["identity"],
+                    "玄续玄",
                 )
                 self.assertEqual(dashboard["search_results"][0]["identity"], "厚土")
                 total_lingshi = next(row for row in dashboard["inventory_totals"] if row["name"] == "灵石")
@@ -277,15 +277,15 @@ class MiniAppInventoryTests(unittest.TestCase):
                 migrated_request = write_inventory_request(
                     "sub", "缘生子", requested_by="tester", base_dir=tmpdir
                 )
-                self.assertEqual(migrated_request["identity"], "竹和生")
-                self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "竹和生")
+                self.assertEqual(migrated_request["identity"], "玄续玄")
+                self.assertEqual(read_inventory_request("sub", tmpdir)["identity"], "玄续玄")
 
     def test_sub_inventory_follows_dao_name_change_without_module_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "state_sub.json"
             state_path.write_text(json.dumps({
                 "avatar_dao_names_by_player_id": {
-                    automation_settings.SUB_YINLUO_PLAYER_ID: "竹和生",
+                    automation_settings.SUB_YINLUO_PLAYER_ID: "玄续玄",
                 },
             }), encoding="utf-8")
             with (
@@ -293,9 +293,9 @@ class MiniAppInventoryTests(unittest.TestCase):
                 patch.object(dashboard_server, "CONFIG_DIR", tmpdir),
             ):
                 cache = read_inventory_cache("sub", tmpdir)
-                cache["snapshots"]["竹和生"] = inventory_snapshot(
+                cache["snapshots"]["玄续玄"] = inventory_snapshot(
                     "sub",
-                    "竹和生",
+                    "玄续玄",
                     section_payload()["inventory"],
                 )
                 write_inventory_cache("sub", cache, tmpdir)
@@ -306,7 +306,7 @@ class MiniAppInventoryTests(unittest.TestCase):
                     },
                     "avatar_dao_name_aliases": {
                         "缘生子": "松风子",
-                        "竹和生": "松风子",
+                        "玄续玄": "松风子",
                     },
                 }), encoding="utf-8")
 
@@ -315,7 +315,7 @@ class MiniAppInventoryTests(unittest.TestCase):
                     row for row in dashboard["accounts"] if row["account"] == "sub"
                 )
                 self.assertIn("松风子", sub_account["identities"])
-                self.assertNotIn("竹和生", sub_account["identities"])
+                self.assertNotIn("玄续玄", sub_account["identities"])
                 self.assertEqual(sub_account["snapshots"]["松风子"]["identity"], "松风子")
                 self.assertEqual(dashboard["search_results"][0]["identity"], "松风子")
 
@@ -329,14 +329,14 @@ class MiniAppInventoryTests(unittest.TestCase):
                 )
                 result = asyncio.run(worker.process_request({
                     "request_id": "renamed-selected",
-                    "identity": "竹和生",
+                    "identity": "玄续玄",
                     "requested_by": "tester",
                 }))
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(transport.calls, ["松风子"])
 
                 response = dashboard_server.refresh_miniapp_inventory(
-                    {"account": "sub", "identity": "竹和生"},
+                    {"account": "sub", "identity": "玄续玄"},
                     username="wg",
                 )
                 self.assertTrue(response["success"])

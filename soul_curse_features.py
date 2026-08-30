@@ -3,7 +3,7 @@
 
 主号、副号和小号主魂负责南宫婉、封魂咒推演、护持神魂和发布解咒委托；
 各自配置的阴罗宗身份负责接取委托并执行辨认、借幡、剥离三步。
-小号发布的委托仍由副号竹和生接取，因此竹和生会为副号与小号分别保存状态，
+小号发布的委托仍由副号玄续玄接取，因此玄续玄会为副号与小号分别保存状态，
 并通过共享 JSON 接收小号委托 ID。
 """
 import asyncio
@@ -42,25 +42,25 @@ SOUL_CURSE_PUBLISHERS = {
     "main": {
         "owner_account": "main",
         "target_username": "@Weeguu",
-        "assistant_account": "main",
-        "assistant_identity": YINLUO_IDENTITY,
+        "assistant_account": "",
+        "assistant_identity": "",
         "visit_minute": 0,
         "wanying_greeting_enabled": True,
-        "shared": False,
+        "shared": True,
     },
     "sub": {
         "owner_account": "sub",
         "target_username": "@Gamling33",
-        "assistant_account": "sub",
-        "assistant_identity": SUB_YINLUO_IDENTITY,
+        "assistant_account": "",
+        "assistant_identity": "",
         "visit_minute": 3,
-        "shared": False,
+        "shared": True,
     },
     "xiaohao": {
         "owner_account": "xiaohao",
         "target_username": "@TitanCreeper",
-        "assistant_account": "sub",
-        "assistant_identity": SUB_YINLUO_IDENTITY,
+        "assistant_account": "",
+        "assistant_identity": "",
         "visit_minute": 6,
         "shared": True,
     },
@@ -81,12 +81,15 @@ SOUL_CURSE_ASSISTANTS = {
 }
 
 SOUL_CURSE_SHARED_ASSISTANTS = {
-    "sub": ({
-        "owner_account": "xiaohao",
-        "target_username": "@TitanCreeper",
-        "assistant_identity": SUB_YINLUO_IDENTITY,
-        "shared": True,
-    },),
+    # 三个账号的委托全部进共享池；主号缘生子和副号玄续玄都按各自链路冷却竞争认领。
+    "main": (
+        {"owner_account": "sub", "target_username": "@Gamling33", "assistant_identity": YINLUO_IDENTITY, "shared": True},
+        {"owner_account": "xiaohao", "target_username": "@TitanCreeper", "assistant_identity": YINLUO_IDENTITY, "shared": True},
+    ),
+    "sub": (
+        {"owner_account": "main", "target_username": "@Weeguu", "assistant_identity": SUB_YINLUO_IDENTITY, "shared": True},
+        {"owner_account": "xiaohao", "target_username": "@TitanCreeper", "assistant_identity": SUB_YINLUO_IDENTITY, "shared": True},
+    ),
 }
 
 
@@ -435,7 +438,23 @@ class SoulCurseMixin:
         return SOUL_CURSE_ASSISTANTS.get(self.soul_curse_account_key())
 
     def soul_curse_shared_assistant_profiles(self):
-        return list(SOUL_CURSE_SHARED_ASSISTANTS.get(self.soul_curse_account_key(), ()))
+        """共享池竞争者监听所有账号的委托（含本账号）。"""
+        profiles = list(SOUL_CURSE_SHARED_ASSISTANTS.get(self.soul_curse_account_key(), ()))
+        publisher = SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
+        if publisher and publisher.get("shared"):
+            own = {
+                "owner_account": publisher.get("owner_account"),
+                "target_username": publisher.get("target_username"),
+                "assistant_identity": (
+                    YINLUO_IDENTITY
+                    if self.soul_curse_account_key() == "main"
+                    else SUB_YINLUO_IDENTITY
+                ),
+                "shared": True,
+            }
+            if not any(p.get("owner_account") == own["owner_account"] for p in profiles):
+                profiles.append(own)
+        return profiles
 
     def soul_curse_assistant_profiles(self):
         profiles = []
@@ -740,8 +759,9 @@ class SoulCurseMixin:
                 upsert_soul_curse_shared_commission(profile.get("owner_account"), {
                     "commission_id": commission_id,
                     "target_username": target,
-                    "assistant_account": profile.get("assistant_account"),
-                    "assistant_identity": profile.get("assistant_identity") or YINLUO_IDENTITY,
+                    # 认领留空：由就绪的阴罗身份在 assist tick 中按冷却竞争接取
+                    "assistant_account": "",
+                    "assistant_identity": "",
                     "status": "pending_accept",
                     "published_at": now,
                     "last_detail": detail,
@@ -1204,11 +1224,36 @@ class SoulCurseMixin:
         status = str(item.get("status") or "")
         if status in {"completed", "gone", "blocked", "no_contract"}:
             return 600
+        identity = profile.get("assistant_identity") or YINLUO_IDENTITY
         if item.get("assistant_account") and item.get("assistant_account") != self.soul_curse_account_key():
+            # 已被其他阴罗身份认领——它冷却中就等它，不抢。
+            other_next = str(item.get("next_action_at") or "")
+            if other_next and is_future(other_next):
+                return max(30, min(int(seconds_until(other_next)), 3600))
             return 600
+        # 未认领（assistant_account 为空）：本身份链路冷却就绪才能认领。
+        # 冷却未到的时间戳以本身份 assist 状态为准（认领前共享池无归属）。
+        if not item.get("assistant_account"):
+            state = self.get_soul_curse_assist_state(identity, owner)
+            if is_future(state.get("next_action_at", "")):
+                return max(30, min(int(seconds_until(state.get("next_action_at", ""))), 3600))
+            if self.identity_pause_seconds(identity) > 0:
+                return 300
+            # 认领：原子写入自己账号，抢到即锁定
+            upsert_soul_curse_shared_commission(owner, {
+                "assistant_account": self.soul_curse_account_key(),
+                "assistant_identity": identity,
+                "claimed_at": now_str(),
+            })
+            item = read_soul_curse_shared_state().get(owner, {})
+            if not isinstance(item, dict) or (
+                item.get("assistant_account") and item.get("assistant_account") != self.soul_curse_account_key()
+            ):
+                # 并发竞争中没抢到
+                return 600
         item.setdefault("owner_account", owner)
         item.setdefault("target_username", profile.get("target_username"))
-        item.setdefault("assistant_identity", profile.get("assistant_identity") or YINLUO_IDENTITY)
+        item.setdefault("assistant_identity", identity)
         return await self.soul_curse_process_assist_commission(item, source="shared")
 
     async def soul_curse_tick(self):

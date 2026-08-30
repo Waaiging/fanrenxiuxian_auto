@@ -49,7 +49,7 @@ FISHING_AUTO_LEGACY_CONTROL_COMMANDS = tuple(f".全自动钓鱼 {bait}" for bait
 FISHING_AUTO_CONTROL_ACCOUNTS = ("main", "sub", "xiaohao")
 FISHING_AUTO_ACCOUNT_IDENTITIES = {
     "main": ("主魂", "无咎子", "缘生子", "素缘子"),
-    "sub": ("主魂", "厚土", "竹和生", "寻真子"),
+    "sub": ("主魂", "厚土", "玄续玄", "寻真子"),
     "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
 }
 FISHING_ACCOUNT_SENDER_IDS = {

@@ -55,6 +55,10 @@ class DummySoulCurseActor(SoulCurseMixin):
     def identity_pause_seconds(self, identity):
         return 0
 
+    def soul_curse_identity_enabled(self, account=None, identity="主魂"):
+        # 流程测试：身份开关默认视为开启（开关行为由专门测试覆盖）
+        return True
+
     def dashboard_command_paused(self, command, identity=""):
         return False
 
@@ -159,7 +163,13 @@ class SoulCurseFlowTests(unittest.TestCase):
             },
         )
 
-        asyncio.run(actor.soul_curse_run_publisher_chain(SOUL_CURSE_PUBLISHERS["main"]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_file = os.path.join(tmpdir, "soul_curse_commissions.json")
+            with patch.object(soul_curse_features, "SOUL_CURSE_SHARED_FILE", shared_file):
+                asyncio.run(actor.soul_curse_run_publisher_chain(SOUL_CURSE_PUBLISHERS["main"]))
+                # 共享池设计：发布后同进程的阴罗身份竞争认领并完成接取链
+                for profile in actor.soul_curse_shared_assistant_profiles():
+                    asyncio.run(actor.soul_curse_shared_assist_tick(profile))
 
         self.assertEqual(actor.main_sent, [
             SOUL_CURSE_INFER_COMMAND,
@@ -195,7 +205,13 @@ class SoulCurseFlowTests(unittest.TestCase):
             },
         )
 
-        asyncio.run(actor.soul_curse_run_publisher_chain(SOUL_CURSE_PUBLISHERS["sub"]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_file = os.path.join(tmpdir, "soul_curse_commissions.json")
+            with patch.object(soul_curse_features, "SOUL_CURSE_SHARED_FILE", shared_file):
+                asyncio.run(actor.soul_curse_run_publisher_chain(SOUL_CURSE_PUBLISHERS["sub"]))
+                # 共享池设计：发布后同进程的阴罗身份竞争认领并完成接取链
+                for profile in actor.soul_curse_shared_assistant_profiles():
+                    asyncio.run(actor.soul_curse_shared_assist_tick(profile))
 
         self.assertEqual(actor.main_sent, [
             SOUL_CURSE_INFER_COMMAND,
@@ -271,7 +287,8 @@ class SoulCurseFlowTests(unittest.TestCase):
 
         self.assertEqual(data["xiaohao"]["commission_id"], "20")
         self.assertEqual(data["xiaohao"]["target_username"], "@TitanCreeper")
-        self.assertEqual(data["xiaohao"]["assistant_account"], "sub")
+        # 新设计：发布时认领留空，由就绪的阴罗身份按冷却竞争认领
+        self.assertEqual(data["xiaohao"]["assistant_account"], "")
         self.assertEqual(data["xiaohao"]["status"], "pending_accept")
         self.assertEqual(actor.identity_sent, [])
 
@@ -299,7 +316,8 @@ class SoulCurseFlowTests(unittest.TestCase):
                     }
                 }, f)
             with patch.object(soul_curse_features, "SOUL_CURSE_SHARED_FILE", shared_file):
-                asyncio.run(actor.soul_curse_shared_assist_tick(SOUL_CURSE_SHARED_ASSISTANTS["sub"][0]))
+                for profile in actor.soul_curse_shared_assistant_profiles():
+                    asyncio.run(actor.soul_curse_shared_assist_tick(profile))
                 with open(shared_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
 

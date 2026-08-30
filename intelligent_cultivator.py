@@ -57,7 +57,7 @@ STAR_INSUFFICIENT_RETRY_SECONDS = 60 * 60
 STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 miniapp，脚本不再发送
 FORMATION_TARGET_INITIATORS = {
     "crayonxxin": "副号-厚土",
-    "lvdoumiao": "副号-竹和生",
+    "lvdoumiao": "副号-玄续玄",
     "ding303": "副号-寻真子",
 }
 FORMATION_ASSIST_AVATARS = ["素缘子"]

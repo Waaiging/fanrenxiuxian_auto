@@ -339,7 +339,7 @@ ACCOUNT_SHORT_NAMES = {
     "xiaohao": "小号",
     "waaiging": "Waaiging",
 }
-ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "竹和生", SUB_YINLUO_IDENTITY, "寻真子"]
+ALL_AVATARS = ["问心子", "素心子", "缘生子", "无咎子", "素缘子", "厚土", "玄续玄", SUB_YINLUO_IDENTITY, "寻真子"]
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
     "sub": {"厚土", SUB_YINLUO_IDENTITY, "寻真子"},

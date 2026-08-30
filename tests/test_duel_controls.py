@@ -587,7 +587,7 @@ class DuelControlTests(unittest.TestCase):
     def test_target_preparation_skips_paused_identity(self):
         class Actor(duel_features.DuelMixin):
             account_key = "sub"
-            avatars = ["竹和生"]
+            avatars = ["玄续玄"]
 
             def __init__(self):
                 self.calls = []
@@ -602,7 +602,7 @@ class DuelControlTests(unittest.TestCase):
         actor = Actor()
         success, detail, message_id = asyncio.run(actor.prepare_duel_target_identity({
             "owner": "sub",
-            "target_identity": "竹和生",
+            "target_identity": "玄续玄",
             "target_username": "Lvdoumiao",
         }))
 
@@ -622,9 +622,9 @@ class DuelControlTests(unittest.TestCase):
         reservation = {
             "queue_key": ROTATION,
             "run_id": "paused-run",
-            "participant_key": "sub|竹和生",
+            "participant_key": "sub|玄续玄",
             "account": "sub",
-            "identity": "竹和生",
+            "identity": "玄续玄",
             "challenger_username": "Lvdoumiao",
             "target_username": "Weeguu",
             "command": ".斗法 @Weeguu",

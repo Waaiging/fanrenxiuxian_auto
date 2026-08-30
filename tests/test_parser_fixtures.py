@@ -237,7 +237,7 @@ class ParserFixtureTests(unittest.TestCase):
             ),
             (
                 "Gamling33",
-                {"crayonxxin": "厚土", "lvdoumiao": "竹和生", "ding303": "寻真子"},
+                {"crayonxxin": "厚土", "lvdoumiao": "玄续玄", "ding303": "寻真子"},
             ),
             (
                 "TitanCreeper",
@@ -4117,7 +4117,7 @@ class ParserFixtureTests(unittest.TestCase):
                         "fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5},
                         "avatars": {
                             name: {"fishing": {"last_sync_date": today, "today_count": 5, "daily_limit": 5}}
-                            for name in ("厚土", "竹和生", "寻真子", "问心子", "素心子", "缘生子")
+                            for name in ("厚土", "玄续玄", "寻真子", "问心子", "素心子", "缘生子")
                         },
                     }, f, ensure_ascii=False)
             with open(os.path.join(tmpdir, "fishing_auto_global.json"), "w", encoding="utf-8") as f:
@@ -6385,14 +6385,14 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_star_shift_success_broadcast_marks_claimed_avatar(self):
         actor = SubCultivator.__new__(SubCultivator)
-        actor.avatars = ["竹和生"]
-        actor.avatar_usernames = {"lvdoumiao": "竹和生"}
+        actor.avatars = ["玄续玄"]
+        actor.avatar_usernames = {"lvdoumiao": "玄续玄"}
         actor.state = {
-            "avatars": {"竹和生": {}},
+            "avatars": {"玄续玄": {}},
             "pending_star_shift_target_time": now_str(),
             "pending_star_shift_msg_id": 9001,
             "pending_star_gazing_manifest_time": now_str(),
-            "star_gazing_claimed_avatar": "竹和生",
+            "star_gazing_claimed_avatar": "玄续玄",
             "star_gazing_claimed_manifest_time": now_str(),
         }
         actor.feedback_commands = {}
@@ -6403,7 +6403,7 @@ class ParserFixtureTests(unittest.TestCase):
         actor.set_avatar_state = lambda name, key, value: actor.state["avatars"].setdefault(name, {}).__setitem__(key, value)
 
         text = """
-[Avatar: 竹和生]
+[Avatar: 玄续玄]
 **【天机异动】**
 星盘光芒大作！【星宫】弟子 @Lvdoumiao 强行施展【改换星移】之术，竟成功扭转了天机！
 
@@ -6412,7 +6412,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertTrue(actor.record_star_shift_attempt_if_needed(DummyMessage(9002, text=text), text, source="fixture"))
         today = datetime.now().strftime("%Y-%m-%d")
-        self.assertEqual(actor.state["avatars"]["竹和生"]["last_star_shift_date"], today)
+        self.assertEqual(actor.state["avatars"]["玄续玄"]["last_star_shift_date"], today)
         self.assertEqual(actor.state["pending_star_shift_target_time"], "")
         self.assertEqual(actor.state["star_gazing_claimed_avatar"], "")
 
@@ -6595,15 +6595,15 @@ class ParserFixtureTests(unittest.TestCase):
             today = datetime.now().strftime("%Y-%m-%d")
             actor = SubCultivator.__new__(SubCultivator)
             actor.mc = {}
-            actor.avatars = ["厚土", "竹和生", "寻真子"]
-            actor.avatar_nicknames = {"厚土": "", "竹和生": "", "寻真子": ""}
+            actor.avatars = ["厚土", "玄续玄", "寻真子"]
+            actor.avatar_nicknames = {"厚土": "", "玄续玄": "", "寻真子": ""}
             actor.state = {
                 "last_gazing_date": today,
                 "last_gazing_time": now_str(),
                 "star_gazing_avatar_index": 0,
                 "avatars": {
                     "厚土": {"last_gazing_date": ""},
-                    "竹和生": {"last_gazing_date": ""},
+                    "玄续玄": {"last_gazing_date": ""},
                     "寻真子": {"last_gazing_date": today},
                 },
             }
@@ -11142,7 +11142,7 @@ class ParserFixtureTests(unittest.TestCase):
     def test_concubine_voyage_only_main_main_uses_moon_route(self):
         identities = {
             "main": ["主魂", "无咎子", "缘生子", "素缘子"],
-            "sub": ["主魂", "厚土", "竹和生", "寻真子"],
+            "sub": ["主魂", "厚土", "玄续玄", "寻真子"],
             "xiaohao": ["主魂", "问心子", "素心子", "缘生子"],
         }
         for account, names in identities.items():
@@ -11960,7 +11960,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_sub_star_gazing_rejects_untracked_passive_result(self):
         actor = SubCultivator.__new__(SubCultivator)
-        actor.avatar_usernames = {"lvdoumiao": "竹和生"}
+        actor.avatar_usernames = {"lvdoumiao": "玄续玄"}
         actor.feedback_commands = {}
         actor.feedback_identities = {}
         actor.command_avatar_map = {}
@@ -11970,21 +11970,21 @@ class ParserFixtureTests(unittest.TestCase):
             reply_to_msg_id=2001,
         )
 
-        self.assertEqual(actor.claimed_star_gazing_reply_msg_id("竹和生", msg, msg.text), 0)
+        self.assertEqual(actor.claimed_star_gazing_reply_msg_id("玄续玄", msg, msg.text), 0)
 
     def test_sub_star_gazing_accepts_tracked_avatar_result(self):
         actor = SubCultivator.__new__(SubCultivator)
-        actor.avatar_usernames = {"lvdoumiao": "竹和生"}
+        actor.avatar_usernames = {"lvdoumiao": "玄续玄"}
         actor.feedback_commands = {3001: ".观星"}
-        actor.feedback_identities = {3001: "竹和生"}
-        actor.command_avatar_map = {3001: "竹和生"}
+        actor.feedback_identities = {3001: "玄续玄"}
+        actor.command_avatar_map = {3001: "玄续玄"}
         msg = DummyMessage(
             3002,
             text="**【星盘显化】**\n@Lvdoumiao 闭目凝神，推演天机...\n**下一次天道演化将是**: **【Good - 地磁暴动】**",
             reply_to_msg_id=3001,
         )
 
-        self.assertEqual(actor.claimed_star_gazing_reply_msg_id("竹和生", msg, msg.text), 3002)
+        self.assertEqual(actor.claimed_star_gazing_reply_msg_id("玄续玄", msg, msg.text), 3002)
 
 
 if __name__ == "__main__":

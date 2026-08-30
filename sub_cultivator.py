@@ -490,7 +490,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         self.pause_event.set()    # 默认运行中
         self.pause_control_event = asyncio.Event()  # 唤醒长睡眠调度器检查暂停/恢复
         # 止/启管理员名单（只有这些人发"止"才生效）
-        self.pause_admins = set(self.mc.get("pause_admins", [8615886738, -1004237793558, -1003885521329, -1003340352216]))  # 主魂(Gamling33)+厚土+竹和生+寻真子
+        self.pause_admins = set(self.mc.get("pause_admins", [8615886738, -1004237793558, -1003885521329, -1003340352216]))  # 主魂(Gamling33)+厚土+玄续玄+寻真子
         self.pause_notify_user_id = 8219248252
         self.my_info = None       # 自身账号信息（启动后填充）
         self.notify_users = [u.lower() for u in self.mc.get('notify_users', [])]  # 要监控的用户
