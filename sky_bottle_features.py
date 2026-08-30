@@ -306,6 +306,11 @@ class SkyBottleMixin:
 
     async def sky_bottle_tick(self):
         state = self.get_sky_bottle_state()
+        # 绿液在手且未缺货：立即养树（不等凝液冷却——养树只耗树胚+绿液）
+        if not state.get("embryo_depleted") and int(state.get("liquid_count") or 0) > 0:
+            nurture_wait = await self.sky_bottle_nurture()
+            if nurture_wait is not None:
+                return nurture_wait
         next_time = str(state.get("next_condense_time") or "")
         if next_time and is_future(next_time):
             return seconds_until(next_time)
