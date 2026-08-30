@@ -945,7 +945,9 @@ def text_response_family(text):
         return "divination"
     if "天机代卜" in clean or "天机链路" in clean:
         return "divination"
-    if "万宝阁" in clean and any(k in clean for k in ["放置", "收回", "陈列", "展台", "下架"]):
+    if "万宝阁" in clean and any(k in clean for k in ["放置", "收回", "陈列", "展台", "下架", "放置失败"]):
+        return "market"
+    if "放置失败" in clean and "储物袋" in clean:
         return "market"
     if any(k in clean for k in ["异界商人", "查看货品", "购买商品", "掌天瓶的仿制品", "九天息壤", "储物袋"]):
         return "merchant"
@@ -1107,6 +1109,7 @@ def feedback_response_matches_command(command, text):
         return any(k in clean for k in [
             "放置在万宝阁", "收回储物袋", "并未陈列",
             "储物袋中没有", "展台", "已上架", "上架成功",
+            "放置失败", "因果牵连过深",
         ])
     if expected == "merchant":
         return any(k in clean for k in [

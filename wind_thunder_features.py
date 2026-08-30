@@ -1,9 +1,15 @@
 """Shared Wind-Thunder Wings acceleration session.
 
-The item is deliberately managed as a short-lived per-identity session.  A
-second accelerated command within thirty minutes reuses the equipped item;
-the cleanup task is moved forward after every command and finally performs
-``.散念 风雷翅`` followed by ``.上架至万宝阁 风雷翅``.
+The item is deliberately managed as a per-identity session:
+
+1. When an accelerated command runs, the wings are taken off the market and
+   equipped once.
+2. The cleanup timer is *planning-aware*: when it fires it checks whether any
+   other accelerated command for this identity becomes due within the next
+   half hour. If so the session is extended to cover it, so a burst of
+   accelerated commands shares one equip/list cycle.
+3. Only when nothing else is coming does the cleanup perform
+   ``.散念 风雷翅`` followed by ``.上架至万宝阁 风雷翅``.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from automation_settings import wind_thunder_identities_for_account
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 WIND_THUNDER_HOLD_SECONDS = 30 * 60
+WIND_THUNDER_PLANNING_WINDOW_SECONDS = 30 * 60
 WIND_THUNDER_COOLDOWNS = {
     # Round before converting so 0.70 does not produce an off-by-one second
     # result due to binary floating-point representation.
@@ -28,6 +35,12 @@ WIND_THUNDER_IDENTITIES = {
     ("main", "无咎子"),
     ("sub", "主魂"),
     ("waaiging", "主魂"),
+}
+# 排期状态键 → 对应可加速指令；用于持有窗口规划（“还有指令要做就别收摊”）
+WIND_THUNDER_SCHEDULE_KEYS = {
+    ".探寻裂缝": "next_rift_search_time",
+    ".问道": "next_ask_dao_time",
+    ".寻觅灵兽": "next_hunt_time",
 }
 
 
@@ -100,6 +113,25 @@ def _save(actor: Any) -> None:
             pass
 
 
+def _next_due_command(actor: Any, identity: str) -> str:
+    """Return the accelerated command due within the planning window, if any.
+
+    Reads each command's persisted schedule key. An empty/missing schedule
+    value means "not scheduled / unknown"; skip it (conservative) unless the
+    schedule is in the past, in which case the command is ready right now and
+    keeps the session alive.
+    """
+    state = _identity_state(actor, identity)
+    now = _now()
+    for command, key in WIND_THUNDER_SCHEDULE_KEYS.items():
+        due = _parse_dt(state.get(key))
+        if due is None:
+            continue
+        if due <= now or (due - now).total_seconds() <= WIND_THUNDER_PLANNING_WINDOW_SECONDS:
+            return command
+    return ""
+
+
 async def _send_internal(actor: Any, identity: str, command: str, **kwargs: Any) -> Any:
     depth = int(getattr(actor, "_wind_thunder_internal_depth", 0) or 0)
     setattr(actor, "_wind_thunder_internal_depth", depth + 1)
@@ -111,14 +143,30 @@ async def _send_internal(actor: Any, identity: str, command: str, **kwargs: Any)
         setattr(actor, "_wind_thunder_internal_depth", depth)
 
 
+def _cleanup_backoff_seconds(response_text: str) -> int:
+    """Short backoff after a failed listing; the reply rarely carries a duration."""
+    _ = response_text
+    return 5 * 60
+
+
 async def _cleanup(actor: Any, identity: str) -> bool:
     if not wind_thunder_enabled(actor, identity):
         return False
     state = _identity_state(actor, identity)
     if not state.get("wind_thunder_equipped"):
         return True
+    # 规划检查：半小时内还有可加速指令待执行 → 续期，不收摊
+    upcoming = _next_due_command(actor, identity)
+    if upcoming:
+        state["wind_thunder_cleanup_due_at"] = (
+            _now() + timedelta(seconds=WIND_THUNDER_HOLD_SECONDS)
+        ).strftime(TIME_FORMAT)
+        state["wind_thunder_last_defer_reason"] = f"upcoming:{upcoming}"
+        _save(actor)
+        _schedule_cleanup(actor, identity)
+        return True
     try:
-        await _send_internal(
+        san_resp = await _send_internal(
             actor,
             identity,
             ".散念 风雷翅",
@@ -127,7 +175,20 @@ async def _cleanup(actor: Any, identity: str) -> bool:
             force_identity_check=True,
             suppress_no_response_alert=True,
         )
-        await _send_internal(
+        san_text = str(san_resp or "") if isinstance(san_resp, str) else (
+            (getattr(san_resp, "text", "") or "") if san_resp else ""
+        )
+        if "散去" not in san_text and "散念" not in san_text:
+            # 散念未确认成功（可能未装备或响应未匹配）——不盲目继续上架，
+            # 短退避后重试整个收尾流程。
+            state["wind_thunder_last_cleanup_error"] = "san_nian_unconfirmed"
+            state["wind_thunder_cleanup_due_at"] = (
+                _now() + timedelta(seconds=_cleanup_backoff_seconds(san_text))
+            ).strftime(TIME_FORMAT)
+            _save(actor)
+            _schedule_cleanup(actor, identity)
+            return False
+        list_resp = await _send_internal(
             actor,
             identity,
             ".上架至万宝阁 风雷翅",
@@ -136,11 +197,25 @@ async def _cleanup(actor: Any, identity: str) -> bool:
             force_identity_check=True,
             suppress_no_response_alert=True,
         )
+        list_text = str(list_resp or "") if isinstance(list_resp, str) else (
+            (getattr(list_resp, "text", "") or "") if list_resp else ""
+        )
+        if "放置失败" in list_text:
+            # 游戏侧业务失败（因果牵连）——保持装备态，短退避后重试上架。
+            # 绝不重复发送上架指令；当前持有窗口顺延。
+            state["wind_thunder_last_cleanup_error"] = "list_failed"
+            state["wind_thunder_cleanup_due_at"] = (
+                _now() + timedelta(seconds=_cleanup_backoff_seconds(list_text))
+            ).strftime(TIME_FORMAT)
+            _save(actor)
+            _schedule_cleanup(actor, identity)
+            return False
         state.update({
             "wind_thunder_equipped": False,
             "wind_thunder_cleanup_due_at": "",
             "wind_thunder_last_cleanup_time": _now().strftime(TIME_FORMAT),
             "wind_thunder_last_cleanup_error": "",
+            "wind_thunder_last_defer_reason": "",
         })
         _save(actor)
         return True
