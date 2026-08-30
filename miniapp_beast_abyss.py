@@ -116,13 +116,25 @@ def choose_abyss_beast(
     *,
     power_min: int = 0,
     power_max: int = 0,
+    include_active: bool = False,
 ) -> dict[str, Any] | None:
-    """Choose the strongest beast that the Mini App explicitly enables."""
+    """Choose the strongest beast that the Mini App explicitly enables.
+
+    ``include_active`` also considers beasts currently out on duty (出战中).
+    The caller must rest them via the Wan Beast Valley Mini App before
+    entering the abyss; the choice function only ranks candidates.
+    """
     candidates = []
     filter_active = int(power_min or 0) > 0 or int(power_max or 0) > 0
     for beast in beasts if isinstance(beasts, list) else []:
         if not isinstance(beast, dict) or not beast.get("can_explore_abyss"):
-            continue
+            if not (
+                include_active
+                and isinstance(beast, dict)
+                and _nonnegative_int(beast.get("id")) > 0
+                and str(beast.get("status") or "").strip() == "出战中"
+            ):
+                continue
         if _nonnegative_int(beast.get("id")) <= 0:
             continue
         power = _nonnegative_int(beast.get("power"))
@@ -340,15 +352,63 @@ class MiniAppBeastAbyssWorker:
             power_max=power_max,
         )
         if beast is None:
-            self._record_error(identity, "beast_abyss_no_available_beast")
-            self.log.warning(
-                "Mini App abyss has no eligible beast for [%s] in power range %s-%s; retrying in %ss",
-                identity,
-                power_min or 0,
-                power_max or "inf",
-                self.retry_seconds,
+            # No idle eligible beast. Check whether a power-qualified beast is
+            # merely out on duty (出战中): rest it via the Wan Beast Valley
+            # Mini App, refresh the roster, then retry the selection once.
+            resting = choose_abyss_beast(
+                snapshot.get("beasts"),
+                power_min=power_min,
+                power_max=power_max,
+                include_active=True,
             )
-            return self.retry_seconds
+            if resting is None or not getattr(self.actor, "rest_beast_for_abyss", None):
+                self._record_error(identity, "beast_abyss_no_available_beast")
+                self.log.warning(
+                    "Mini App abyss has no eligible beast for [%s] in power range %s-%s; retrying in %ss",
+                    identity,
+                    power_min or 0,
+                    power_max or "inf",
+                    self.retry_seconds,
+                )
+                return self.retry_seconds
+            rest_name = str(resting.get("full_name") or "").strip()
+            self.log.info(
+                "Mini App abyss: [%s] resting out-on-duty beast %s before entering",
+                identity,
+                rest_name,
+            )
+            try:
+                rest_status, rest_resp = await self.actor.rest_beast_for_abyss(rest_name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log.warning(
+                    "Mini App abyss: rest %s failed (%s); retry later",
+                    rest_name,
+                    type(exc).__name__,
+                )
+                return self.retry_seconds
+            if "休息" not in str(rest_status or ""):
+                self.log.warning(
+                    "Mini App abyss: rest %s unconfirmed (%s); retry later",
+                    rest_name,
+                    str(rest_resp or "")[:80],
+                )
+                return self.retry_seconds
+            snapshot = await self._snapshot(identity)
+            if not snapshot:
+                return self.retry_seconds
+            beast = choose_abyss_beast(
+                snapshot.get("beasts"),
+                power_min=power_min,
+                power_max=power_max,
+            )
+            if beast is None:
+                self.log.warning(
+                    "Mini App abyss: %s rested but roster still lacks an eligible beast; retry later",
+                    rest_name,
+                )
+                return self.retry_seconds
 
         pause = getattr(self.actor, "pause_event", None)
         if pause is not None:

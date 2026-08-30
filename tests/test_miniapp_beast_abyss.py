@@ -29,11 +29,12 @@ def beast(
     *,
     can_explore=True,
     stamina=100,
+    status="休息中",
 ):
     return {
         "id": beast_id,
         "full_name": name,
-        "status": "休息中",
+        "status": status,
         "species": "1阶灵兽",
         "beast_type": "灵兽",
         "tier": 1,
@@ -221,6 +222,79 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
                 self.assertEqual(actor.rewards[0][0:2], ("主魂", ".探渊 高战力"))
                 next_time = datetime.strptime(actor.state["next_abyss_time"], "%Y-%m-%d %H:%M:%S")
                 self.assertGreater((next_time - datetime.now()).total_seconds(), 5 * 3600)
+
+    def test_out_on_duty_qualified_beast_is_rested_then_entered(self):
+        """出战中但战力达标的灵兽：先召回休息，再探渊。"""
+        actor = FakeActor()
+        rested = []
+
+        async def rest(name):
+            rested.append(name)
+            return "休息中", "万兽谷灵兽休息完成"
+
+        actor.rest_beast_for_abyss = rest
+        action = {
+            "ok": True,
+            "message": "探渊胜利",
+            "result": {"won": True, "title": "万兽渊激战"},
+            "abyss": {"cooldownHours": 6, "ready": False, "remainingSeconds": 21600},
+        }
+        # 第一次快照：唯一战力达标者是出战中；休息后重新快照：已休息可探渊
+        transport = FakeTransport([
+            snapshot([beast(1, "六翼霜蚣", 59150, can_explore=False, status="出战中")]),
+            snapshot([beast(1, "六翼霜蚣", 59150, can_explore=True, status="休息中")]),
+        ], action_payload=action)
+        worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
+
+        wait = asyncio.run(worker.run_once())
+
+        self.assertEqual(rested, ["六翼霜蚣"])
+        self.assertEqual(transport.enter_calls, [("主魂", 1, "六翼霜蚣")])
+        self.assertEqual(actor.state["beast_abyss_miniapp_last_error"], "")
+        self.assertEqual(actor.state["beast_abyss_miniapp_last_beast"], "六翼霜蚣")
+
+    def test_rest_unconfirmed_backs_off_without_entering(self):
+        """召回休息未确认成功（如响应异常）→ 不探渊，退避重试。"""
+        actor = FakeActor()
+
+        async def rest(name):
+            return "", "万兽谷灵兽休息失败"
+
+        actor.rest_beast_for_abyss = rest
+        transport = FakeTransport([
+            snapshot([beast(1, "六翼霜蚣", 59150, can_explore=False, status="出战中")]),
+        ])
+        worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
+
+        wait = asyncio.run(worker.run_once())
+
+        self.assertEqual(transport.enter_calls, [])
+        self.assertEqual(wait, 900)
+
+    def test_qualified_but_beyond_power_max_not_rested(self):
+        """战力超上限的出战灵兽不会被召回（召回只针对范围内的）。"""
+        actor = FakeActor()
+        rested = []
+
+        async def rest(name):
+            rested.append(name)
+            return "休息中", "ok"
+
+        actor.rest_beast_for_abyss = rest
+        transport = FakeTransport([
+            snapshot([beast(1, "巨兽", 99999, can_explore=False, status="出战中")]),
+        ])
+        worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
+        worker.retry_seconds = 900
+        # power_max 限 1000：巨兽 99999 超范围，不在召回之列
+        with patch(
+            "miniapp_beast_abyss.miniapp_beast_abyss_settings",
+            return_value={"power_min": 0, "power_max": 1000},
+        ):
+            wait = asyncio.run(worker.run_once())
+
+        self.assertEqual(rested, [])
+        self.assertEqual(transport.enter_calls, [])
 
     def test_no_available_beast_retries_without_entering(self):
         actor = FakeActor()

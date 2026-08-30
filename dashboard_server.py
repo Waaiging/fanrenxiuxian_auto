@@ -132,6 +132,7 @@ from soul_curse_features import (
     SOUL_CURSE_PROTECT_COMMAND,
     SOUL_CURSE_PUBLISH_COMMAND,
     SOUL_CURSE_PUBLISHERS,
+    SOUL_CURSE_SETTINGS_FILE,
     SOUL_CURSE_STRIP_COMMAND,
     SOUL_CURSE_SUPPRESS_COMMAND,
     SOUL_CURSE_VISIT_COMMAND,
@@ -2101,10 +2102,49 @@ def yinluo_commands(state):
     return rows
 
 
-def soul_curse_publisher_commands(state, account=None):
+def soul_curse_identity_enabled_for_dashboard(account, identity):
+    """Dashboard 侧读运行时同一份 soul_curse_settings.json 开关。"""
+    import json
+
+    try:
+        with open(SOUL_CURSE_SETTINGS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return False
+    if not isinstance(data, dict) or not data.get("enabled", True):
+        return False
+    identities = data.get("identities")
+    if not isinstance(identities, dict):
+        return False
+    account_map = identities.get(str(account or ""))
+    if isinstance(account_map, dict):
+        return bool(account_map.get(str(identity or "主魂")))
+    return False
+
+
+def soul_curse_switch_row(identity, enabled, group="南宫婉"):
+    """封魂咒链路的身份开关状态行（关闭时显示，点开 instructions）。"""
+    return command_row(
+        f"封魂咒链路 [{identity}]",
+        f"封魂咒链路 · {identity}",
+        "已关闭" if not enabled else "已启用",
+        "done" if not enabled else "ready",
+        detail=(
+            "soul_curse_settings.json 中将该身份设为 true 即启用"
+            if not enabled
+            else "整条链（探望→推演→护持→委托）按排期自动执行"
+        ),
+        group=group,
+        actionable=False,
+    )
+
+
+def soul_curse_publisher_commands(state, account=None, identity="主魂"):
     curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
     if not isinstance(curse, dict):
         curse = {}
+    if account and not soul_curse_identity_enabled_for_dashboard(account, identity):
+        return [soul_curse_switch_row(identity, False)]
     detail = clean_custom_text(curse.get("last_detail") or "", 120)
     commission_id = str(curse.get("commission_id") or "").strip()
     target = str(curse.get("commission_target") or "").strip()
@@ -2222,10 +2262,12 @@ def soul_curse_publisher_commands(state, account=None):
     return rows
 
 
-def soul_curse_assist_commands(state):
+def soul_curse_assist_commands(state, account=None, identity=None):
     assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
     if not isinstance(assist, dict):
         assist = {}
+    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity):
+        return [soul_curse_switch_row(identity, False, group="阴罗宗")]
     commission_id = str(assist.get("commission_id") or "").strip()
     target = str(assist.get("target_username") or "").strip()
     detail = clean_custom_text(assist.get("last_detail") or "", 120)
@@ -2684,14 +2726,14 @@ def main_soul_panel(account, state):
     return {"identity": "主魂", "role": "主魂", "commands": rows}
 
 
-def lingxiao_avatar_commands(name, state, root_state=None):
+def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
     rows = []
     root_state = root_state or {}
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
     if name == YINLUO_IDENTITY:
         rows.extend(yinluo_commands(state))
-        rows.extend(soul_curse_assist_commands(state))
+        rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
@@ -2750,7 +2792,7 @@ def lingxiao_avatar_commands(name, state, root_state=None):
     return rows
 
 
-def star_avatar_commands(name, state, root_state=None):
+def star_avatar_commands(name, state, root_state=None, account="sub"):
     rows = []
     rows.extend(global_sync_commands())
     root_state = root_state if isinstance(root_state, dict) else {}
@@ -2761,7 +2803,7 @@ def star_avatar_commands(name, state, root_state=None):
     )
     if is_yinluo:
         rows.extend(yinluo_commands(state))
-        rows.extend(soul_curse_assist_commands(state))
+        rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
     if is_yinluo or name == "寻真子":
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -2828,9 +2870,9 @@ def xiaohao_avatar_commands(name, state, root_state=None):
 
 def avatar_commands(account, name, state, root_state=None):
     if account == "main":
-        rows = lingxiao_avatar_commands(name, state, root_state=root_state)
+        rows = lingxiao_avatar_commands(name, state, root_state=root_state, account=account)
     elif account == "sub":
-        rows = star_avatar_commands(name, state, root_state=root_state)
+        rows = star_avatar_commands(name, state, root_state=root_state, account=account)
     elif account == "xiaohao":
         rows = xiaohao_avatar_commands(name, state, root_state=root_state)
     else:
