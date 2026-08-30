@@ -456,8 +456,15 @@ class WaaigingCultivator(core.Cultivator):
         return None
 
     async def run_dual_cultivation_loop(self):
-        """Send `.双修 温养` every hour by replying to the main soul's message."""
-        interval_seconds = 60 * 60
+        """Send `.双修 温养` hourly by replying to the main soul's message.
+
+        The game's cooldown counts from the settlement (edited) response, so
+        schedule the next attempt at 1h + buffer to avoid landing seconds
+        before expiry. On an explicit cooldown reply ("心神尚未恢复"), retry
+        after a short backoff instead of waiting a full hour.
+        """
+        interval_seconds = 60 * 60 + 300  # 1h cooldown + 5min safety buffer
+        cooldown_retry_seconds = 10 * 60
         await self.startup_done.wait()
         while self.is_running:
             next_time = str(self.state.get("next_dual_cultivation_time") or "")
@@ -493,12 +500,25 @@ class WaaigingCultivator(core.Cultivator):
                 max_retries=1,
                 reply_to=target_msg.id,
             )
-            next_dt = datetime.now() + timedelta(seconds=interval_seconds)
+            response_text = str(response or "") if isinstance(response, str) else (
+                (getattr(response, "text", "") or "") if response else ""
+            )
+            if any(k in response_text for k in ("心神尚未恢复", "无法进行双修", "冷却中")):
+                # 冷却响应不带剩余时间：短退避后补发，不浪费一整个小时
+                next_dt = datetime.now() + timedelta(seconds=cooldown_retry_seconds)
+                core.log.info(
+                    "Dual cultivation 温养 on cooldown; retrying at %s.",
+                    next_dt.strftime(core.TIME_FORMAT),
+                )
+            else:
+                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
             self.state["next_dual_cultivation_time"] = next_dt.strftime(core.TIME_FORMAT)
             self.save_state()
-            if response:
+            if response and not any(k in response_text for k in ("心神尚未恢复", "无法进行双修", "冷却中")):
                 core.log.info("Dual cultivation 温养 sent successfully; next at %s.",
                               next_dt.strftime(core.TIME_FORMAT))
+            elif response:
+                core.log.warning("Dual cultivation 温养 cooldown response: %s", response_text[:120])
             else:
                 core.log.warning("Dual cultivation 温养 no response; still scheduled at %s.",
                                  next_dt.strftime(core.TIME_FORMAT))
