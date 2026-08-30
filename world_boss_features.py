@@ -1327,7 +1327,17 @@ class WorldBossMonitor:
         challenge_id = str(challenge.get("challengeId") or "").strip()
         if not challenge_id:
             raise MiniAppBeastError("boss_challenge_missing")
-        windows = self._windows(challenge)
+
+        # New server format (2026-08-26+): /start returns attacks without any
+        # timing fields and an empty windows list. The authoritative window
+        # timings arrive in the /begin response instead. Parse defensively:
+        # try the challenge first, fall back to /begin, and attach full
+        # diagnostics when neither carries timings.
+        windows: list[dict[str, Any]] = []
+        try:
+            windows = self._windows(challenge)
+        except MiniAppBeastError as parse_exc:
+            windows = []
 
         begin_trace: dict[str, Any] = {}
         started_request_at = self.monotonic()
@@ -1349,6 +1359,17 @@ class WorldBossMonitor:
         starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
         battle_start = response_at + starts_in
         request_lead_ms = int(round(round_trip * 500))
+
+        if not windows:
+            try:
+                windows = self._windows(sync)
+            except MiniAppBeastError as parse_exc:
+                error = MiniAppBeastError("boss_windows_invalid")
+                error.details = {
+                    "challenge": _diagnostic_value(challenge),
+                    "begin_response": _diagnostic_value(sync),
+                }
+                raise error
 
         tasks = [
             asyncio.create_task(
