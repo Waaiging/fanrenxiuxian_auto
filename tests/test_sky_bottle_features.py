@@ -20,6 +20,7 @@ class _Actor(SkyBottleMixin):
         self.expected_username = "Weeguu"
         self.saved = 0
         self.sent = []
+        self.responses = []
 
     def parse_wait_time(self, text, find_min=False, line_identifier=None):
         # 与 intelligent_cultivator.Cultivator.parse_wait_time 同构的最小实现：
@@ -46,7 +47,10 @@ class _Actor(SkyBottleMixin):
     async def send_and_wait_feedback(self, command, **kwargs):
         self.sent.append(command)
         resp = MagicMock()
-        resp.text = self.next_response
+        if self.responses:
+            resp.text = self.responses.pop(0)
+        else:
+            resp.text = self.next_response
         return resp
 
 
@@ -99,15 +103,38 @@ class SkyBottleCondenseTests(unittest.TestCase):
         )
         wait = self._run(actor, actor.sky_bottle_nurture())
         state = actor.get_sky_bottle_state()
-        self.assertFalse(state["has_tree_embryo"])
+        # 新逻辑：储物袋默认有存货，养树成功后不清标记（可能还有多个树胚）
+        self.assertTrue(state["has_tree_embryo"])
+        self.assertFalse(state["embryo_depleted"])
         self.assertEqual(state["liquid_count"], 0)
         self.assertEqual(state["last_status"], "nurture_success")
 
-    def test_nurture_skipped_without_embryo(self):
+    def test_nurture_skipped_when_depleted(self):
         actor = _Actor()
+        state = actor.get_sky_bottle_state()
+        state["embryo_depleted"] = True
         result = self._run(actor, actor.sky_bottle_nurture())
         self.assertIsNone(result)
         self.assertEqual(actor.sent, [])
+
+    def test_nurture_depleted_response_marks_and_notifies(self):
+        actor = _Actor()
+        state = actor.get_sky_bottle_state()
+        state["liquid_count"] = 1
+        actor.next_response = "你储物袋中没有灵眼树胚，无法养树。"
+        notified = []
+
+        async def _notify(msg):
+            notified.append(msg)
+
+        actor.sky_bottle_notify_user = _notify
+        result = self._run(actor, actor.sky_bottle_nurture())
+        state = actor.get_sky_bottle_state()
+        self.assertTrue(state["embryo_depleted"])
+        self.assertFalse(state["has_tree_embryo"])
+        self.assertEqual(state["last_status"], "embryo_depleted")
+        self.assertTrue(notified)
+        self.assertIsNone(result)
 
     def test_embryo_passive_capture(self):
         actor = _Actor()
@@ -125,11 +152,17 @@ class SkyBottleCondenseTests(unittest.TestCase):
 
     def test_tick_condenses_when_due(self):
         actor = _Actor()
-        actor.next_response = "**【掌天瓶·凝液】**\n当前绿液：**1/1**"
-        wait = self._run(actor, actor.sky_bottle_tick())
-        self.assertEqual(actor.sent, [SKY_BOTTLE_CONDENSE_COMMAND])
         state = actor.get_sky_bottle_state()
-        self.assertEqual(state["liquid_count"], 1)
+        # 凝液成功后立即养树（储物袋默认有存货）
+        actor.responses = [
+            "**【掌天瓶·凝液】**\n当前绿液：**1/1**",
+            "**【掌天瓶·养树】**\n炼成了 **【一截灵眼之树】**！\n当前绿液：**0/1**",
+        ]
+        wait = self._run(actor, actor.sky_bottle_tick())
+        self.assertEqual(actor.sent, [SKY_BOTTLE_CONDENSE_COMMAND, SKY_BOTTLE_NURTURE_COMMAND])
+        state = actor.get_sky_bottle_state()
+        self.assertEqual(state["liquid_count"], 0)
+        self.assertEqual(state["last_status"], "nurture_success")
 
     def test_tick_nurture_first_with_embryo(self):
         actor = _Actor()

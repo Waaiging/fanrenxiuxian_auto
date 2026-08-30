@@ -2122,21 +2122,26 @@ def soul_curse_identity_enabled_for_dashboard(account, identity):
     return False
 
 
-def soul_curse_switch_row(identity, enabled, group="南宫婉"):
-    """封魂咒链路的身份开关状态行（关闭时显示，点开 instructions）。"""
-    return command_row(
+def soul_curse_switch_row(identity, enabled, group="南宫婉", account=None):
+    """封魂咒链路的身份开关状态行（dashboard 一键启停）。"""
+    row = command_row(
         f"封魂咒链路 [{identity}]",
         f"封魂咒链路 · {identity}",
-        "已关闭" if not enabled else "已启用",
-        "done" if not enabled else "ready",
+        "已启用" if enabled else "已关闭",
+        "ready" if enabled else "done",
         detail=(
-            "soul_curse_settings.json 中将该身份设为 true 即启用"
-            if not enabled
-            else "整条链（探望→推演→护持→委托）按排期自动执行"
+            "整条链（探望→推演→护持→委托/接取）按排期自动执行"
+            if enabled
+            else "点击右侧按钮启用：探望→推演→护持→委托/接取整链自动化"
         ),
         group=group,
+        schedule_type="daily",
         actionable=False,
     )
+    row["dashboard_action"] = "soul-curse-toggle"
+    row["soul_curse_enabled"] = bool(enabled)
+    row["soul_curse_identity"] = identity
+    return row
 
 
 def soul_curse_publisher_commands(state, account=None, identity="主魂"):
@@ -5802,6 +5807,53 @@ async def refresh_beast_miniapp(payload: dict = Body(default={}), username: str 
         "msg": "已提交万兽谷同步，主号将在 30 秒内处理",
         "request_id": request.get("request_id"),
         "requested_at": request.get("requested_at"),
+    }
+
+
+@app.post("/api/soul-curse-control")
+async def set_soul_curse_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Dashboard 一键开关某账号某身份的封魂咒链路（写 soul_curse_settings.json，热生效）。"""
+    import json as _json
+
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "主魂").strip() or "主魂"
+    enabled = bool(payload.get("enabled"))
+    if account not in WINDOW_MAP:
+        return {"success": False, "msg": "未知账号"}
+
+    path = SOUL_CURSE_SETTINGS_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = _json.load(fh)
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("enabled", True)
+    identities = data.get("identities")
+    if not isinstance(identities, dict):
+        identities = {}
+        data["identities"] = identities
+    account_map = identities.get(account)
+    if not isinstance(account_map, dict):
+        account_map = {}
+        identities[account] = account_map
+    account_map[identity] = enabled
+    data["updated_at"] = datetime.now().strftime(TIME_FORMAT)
+    data["updated_by"] = username
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    temp = f"{path}.{os.getpid()}.tmp"
+    with open(temp, "w", encoding="utf-8") as fh:
+        _json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(temp, path)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {
+        "success": True,
+        "account": account,
+        "identity": identity,
+        "enabled": enabled,
+        "msg": f"封魂咒链路 [{account}/{identity}] 已{'启用' if enabled else '关闭'}，下一轮检测即生效",
     }
 
 

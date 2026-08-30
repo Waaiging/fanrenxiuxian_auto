@@ -68,14 +68,20 @@ class SkyBottleMixin:
         if "灵眼树胚" not in text:
             return False
         state = self.get_sky_bottle_state()
-        gained = re.search(r"树胚机缘[：:]\s*\*\*?@?(\S+?)\*?\*?\s*获得\s*\*\*?【灵眼树胚】x?(\d+)\*?\*?", text)
+        # 真实消息格式：树胚机缘：**@Weeguu** 获得 **【灵眼树胚】x1**。
+        gained = re.search(
+            r"树胚机缘[：:]\s*\**@?(\S+?)\**\s*获得\s*\**【灵眼树胚】x?(\d+)\**",
+            text,
+        )
         if gained:
             username = gained.group(1)
             count = int(gained.group(2) or 1)
             my_username = str(getattr(self, "expected_username", "") or "").lstrip("@").casefold()
             if my_username and username.lstrip("@").casefold() == my_username:
                 state["has_tree_embryo"] = True
+                state["embryo_depleted"] = False
                 state["embryo_source_text"] = text[:200]
+                state["embryo_count"] = int(state.get("embryo_count") or 0) + count
                 state["last_action_at"] = now_str()
                 self.save_state()
                 return True
@@ -191,10 +197,10 @@ class SkyBottleMixin:
         return SKY_BOTTLE_UNKNOWN_RETRY_SECONDS
 
     async def sky_bottle_nurture(self):
-        """发送 .掌天瓶 养树（仅有树胚+有绿液时）。返回等待秒数。"""
+        """发送 .掌天瓶 养树（储物袋默认有树胚存货；缺货时游戏会明确回复）。返回等待秒数。"""
         state = self.get_sky_bottle_state()
         log = self._sky_bottle_logger()
-        if not state.get("has_tree_embryo"):
+        if state.get("embryo_depleted"):
             return None
         if int(state.get("liquid_count") or 0) <= 0:
             # 无绿液：需要先凝液
@@ -210,7 +216,8 @@ class SkyBottleMixin:
             m = re.search(r"当前绿液[：:]\s*\*{0,2}(\d+)\s*/\s*(\d+)", resp_text)
             if m:
                 state["liquid_count"] = int(m.group(1))
-            state["has_tree_embryo"] = False
+            state["has_tree_embryo"] = True
+            state["embryo_depleted"] = False
             state["last_nurture_time"] = now_str()
             state["last_nurture_response"] = resp_text[:200]
             state["last_status"] = "nurture_success"
@@ -218,6 +225,18 @@ class SkyBottleMixin:
             state["last_action_at"] = now_str()
             self.save_state()
             return 5
+        if any(marker in resp_text for marker in ("没有灵眼树胚", "尚无树胚", "树胚不足", "没有足够的树胚")):
+            # 储物袋树胚用尽——标记缺货，只凝液存绿液，直到再次捕获获得事件
+            state["embryo_depleted"] = True
+            state["has_tree_embryo"] = False
+            state["last_status"] = "embryo_depleted"
+            state["last_detail"] = resp_text[:200]
+            state["last_action_at"] = now_str()
+            self.save_state()
+            await self.sky_bottle_notify_user(
+                "储物袋灵眼树胚已用尽，掌天瓶转入只凝液模式（绿液留存，等树胚补充）。"
+            )
+            return None
         if "尚无绿液" in resp_text:
             # 绿液意外为 0（消耗后状态未同步）——重置并先凝液
             state["liquid_count"] = 0
@@ -290,14 +309,16 @@ class SkyBottleMixin:
         next_time = str(state.get("next_condense_time") or "")
         if next_time and is_future(next_time):
             return seconds_until(next_time)
-        # 到点：先养树（若有树胚+绿液），否则凝液
-        if state.get("has_tree_embryo") and int(state.get("liquid_count") or 0) > 0:
+        # 到点：先养树（储物袋默认有树胚存货+有绿液），否则凝液。
+        # has_tree_embryo 仅在游戏明确回复"无树胚"类错误时置 False（缺货标记）。
+        out_of_embryo = state.get("embryo_depleted")
+        if not out_of_embryo and int(state.get("liquid_count") or 0) > 0:
             wait = await self.sky_bottle_nurture()
             if wait is not None:
                 return wait
         wait = await self.sky_bottle_condense()
-        if wait <= 10 and state.get("has_tree_embryo") and int(state.get("liquid_count") or 0) > 0:
-            # 凝液刚成功且手上有树胚：立刻补一次养树，不等下一轮
+        if wait <= 10 and not state.get("embryo_depleted") and int(state.get("liquid_count") or 0) > 0:
+            # 凝液刚成功且储物袋可能还有树胚：立刻补一次养树，不等下一轮
             nurture_wait = await self.sky_bottle_nurture()
             if nurture_wait is not None:
                 return nurture_wait
