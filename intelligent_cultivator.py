@@ -124,8 +124,6 @@ from command_feedback import (
     _handle_telegram_send_protection,
     is_retired_auto_command,
     record_telegram_send_success,
-    second_soul_busy,
-    second_soul_cooldown_seconds,
     send_and_wait_feedback_common,
 )
 from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_default_state
@@ -135,6 +133,7 @@ from group_visibility_control import (
     TmuxXiaohaoProcessManager,
 )
 from soul_curse_features import SoulCurseMixin
+from sky_bottle_features import SkyBottleMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
 from yinluo_features import YinluoMixin, YINLUO_IDENTITY
 from state_io import load_json_state, save_json_state
@@ -474,7 +473,7 @@ class AtomicTaskContext:
 # 主类：Cultivator
 # =====================================================================
 
-class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
+class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin, SkyBottleMixin):
     """
     主号修仙主控类。
     继承自:
@@ -1286,6 +1285,11 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
                 # 被动身份自愈 + 手动指令状态同步
                 self.update_identity_passively(msg)
+                # 掌天瓶：被动捕获树胚获得事件
+                try:
+                    self.sky_bottle_set_embryo(msg.text or "")
+                except Exception:
+                    pass
                 manual_reply = is_reply_to_manual_command(self, msg)
                 manual_processed = await record_manual_command_reply_state_if_needed(self, msg, text, sender_cache, log)
                 if text_targets_current_account(self, msg, text):
@@ -5331,6 +5335,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             log.info("Avatar scheduler disabled for this account.")
         if self.enable_soul_curse:
             self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
+        self.create_scheduler_task("sky_bottle", lambda: self.run_sky_bottle_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
 
 
         recover_wind_thunder_sessions(self)
@@ -5342,57 +5347,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
     # ------------------------------------------------------------------
     # 启动入口
     # ------------------------------------------------------------------
-
-    async def run_second_soul_loop(self):
-        """Send `.元神修炼` every 24h; parse cooldown from `.第二元神` on failure."""
-        interval_seconds = 24 * 3600
-        await self.startup_done.wait()
-        while self.is_running:
-            next_time = str(self.state.get("next_second_soul_time") or "")
-            now = datetime.now()
-            if not next_time:
-                next_dt = now + timedelta(seconds=interval_seconds)
-                self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
-                self.save_state()
-            else:
-                try:
-                    next_dt = datetime.strptime(next_time, TIME_FORMAT)
-                except (ValueError, TypeError):
-                    next_dt = now + timedelta(seconds=interval_seconds)
-                    self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
-                    self.save_state()
-                wait = (next_dt - now).total_seconds()
-                if wait > 0:
-                    await asyncio.sleep(min(wait, 300))
-                    continue
-
-            log.info("Second soul cultivation due: sending .元神修炼.")
-            response = await self.send_and_wait_feedback(
-                ".元神修炼", timeout=45, max_retries=1,
-            )
-            text = (getattr(response, "text", "") or "") if response else ""
-            if "无法分心修炼" in text:
-                log.info("Second soul busy; querying .第二元神 for remaining cooldown.")
-                check_response = await self.send_and_wait_feedback(
-                    ".第二元神", timeout=45, max_retries=1,
-                )
-                check_text = (getattr(check_response, "text", "") or "") if check_response else ""
-                cooldown_match = re.search(r"(\d+)\s*小时(?:\s*(\d+)\s*分钟?)?", check_text)
-                if cooldown_match:
-                    hours = int(cooldown_match.group(1))
-                    minutes = int(cooldown_match.group(2) or 0)
-                    remaining = hours * 3600 + minutes * 60 + 300
-                else:
-                    remaining = interval_seconds
-                next_dt = datetime.now() + timedelta(seconds=remaining)
-            else:
-                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
-
-            self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
-            self.save_state()
-            log.info("Second soul cultivation done; next at %s.",
-                     next_dt.strftime(TIME_FORMAT))
-            await asyncio.sleep(5)
 
     def restricted_account_specs(self):
         """Return enabled private-group-only account process definitions."""
@@ -5537,6 +5491,11 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                     self.maybe_queue_small_world_calamity(msg, text, source="edited message")
                     record_star_gazing_event(self.account_key, msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
+                    # 掌天瓶：被动捕获树胚获得事件（编辑消息）
+                    try:
+                        self.sky_bottle_set_embryo(text)
+                    except Exception:
+                        pass
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
                     self.maybe_record_daily_reward_from_edited_message(msg, text, source="edited message")
                     # 编辑后出现元婴遁逃·虚弱 → 立刻告警并停止脚本（防漏检补丁）

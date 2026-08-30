@@ -28,6 +28,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from logging import getLogger
 
 from log_utils import (
     MESSAGE_EVENTS_DB_FILE,
@@ -67,8 +68,22 @@ from command_modules import (
     yuanying_command_for_identity,
     yuanying_out_plan,
 )
-from command_feedback import is_retired_auto_command
-from automation_settings import mulan_support_command as configured_mulan_support_command
+from command_feedback import (
+    is_retired_auto_command,
+    second_soul_busy,
+    second_soul_cooldown_seconds,
+)
+from automation_settings import (
+    mulan_support_command as configured_mulan_support_command,
+    tianxing_settings,
+    tianxing_tianji_identities_for_account,
+)
+from miniapp_beast import (
+    MiniAppBeastError,
+    MiniAppCircuitOpenError,
+    miniapp_circuit_wait_seconds,
+)
+from miniapp_dwelling import apply_dwelling_snapshot, command_result_text
 from wind_thunder_features import wind_thunder_enabled, wind_thunder_send, wind_thunder_target_cooldown
 from reward_parsing import (
     clean_reward_text as shared_clean_reward_text,
@@ -82,6 +97,8 @@ from reward_parsing import (
     trust_empty_reward_reparse,
 )
 
+log = getLogger(__name__)
+
 
 # =====================================================================
 # 常量定义
@@ -90,6 +107,10 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 COMMAND_CONTROL_FILE = os.path.join(CONFIG_DIR, "command_controls.json")
 CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
+SECOND_SOUL_TRAIN_COMMAND = ".元神修炼"        # 第二元神修炼指令
+SECOND_SOUL_STATUS_COMMAND = ".第二元神"       # 第二元神状态查询（解析剩余冷却）
+SECOND_SOUL_INTERVAL_SECONDS = 24 * 3600       # 第二元神修炼间隔 24 小时
+SECOND_SOUL_COOLDOWN_BUFFER_SECONDS = 300      # 解析出剩余冷却后额外留 5 分钟缓冲
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
 FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 5 * 60  # 空回复短退避，避免 dashboard 长时间显示 0 秒到期
@@ -265,6 +286,9 @@ def seconds_until(value):
 # =====================================================================
 # 默认状态数据
 # =====================================================================
+
+TIANXING_TIANJI_PREFIX_COMMAND = ".推命 炼制"
+
 
 def common_command_default_state():
     """返回通用命令的默认状态字典。
@@ -953,6 +977,237 @@ class CommonCommandMixin:
             if identity not in identities:
                 identities.append(identity)
         return [identity for identity in identities if self.tianxing_identity_enabled(identity)]
+
+    def miniapp_small_world_transport(self):
+        router = getattr(self, "_miniapp_command_router", None)
+        transport = getattr(router, "transport", None)
+        if transport is None:
+            raise MiniAppBeastError("miniapp_route_unavailable")
+        return transport
+
+    async def _run_tianxing_tianji_identity_round(self, identity, target, round_id, transport):
+        """Run at most one forge round for one Tianxing identity."""
+        state = self.tianxing_identity_state(identity)
+        if state.get("tianxing_tianji_round_id") != round_id:
+            state.update(
+                {
+                    "tianxing_tianji_round_id": round_id,
+                    "tianxing_tianji_completed": 0,
+                    "tianxing_tianji_last_result": "",
+                    "tianxing_tianji_error": "",
+                    "tianxing_tianji_retry_time": "",
+                }
+            )
+            self.save_state()
+
+        retry_time = str(state.get("tianxing_tianji_retry_time") or "")
+        if retry_time and is_future(retry_time):
+            return False
+        completed = max(0, int(state.get("tianxing_tianji_completed") or 0))
+        if completed >= target:
+            return False
+        if not await self.ensure_tianxing_destiny_for_action(identity, "crafting"):
+            state["tianxing_tianji_error"] = "命星未确认"
+            retry_seconds = max(
+                300,
+                self.tianxing_destiny_retry_wait_seconds(identity),
+            )
+            state["tianxing_tianji_retry_time"] = add_seconds_str(now_str(), retry_seconds)
+            self.save_state()
+            return True
+
+        try:
+            async with self.common_atomic_task(
+                f"Tianxing-tianji-round-{identity}", log_lifecycle=False
+            ):
+                prefix = await transport.command(
+                    TIANXING_TIANJI_PREFIX_COMMAND,
+                    identity=identity,
+                    log_operation=False,
+                )
+                apply_dwelling_snapshot(self, identity, prefix.payload)
+                prefix_text = command_result_text(prefix.payload) or prefix.text
+                # The command-center may report a business response with
+                # actionResult.ok=false even when the returned text confirms
+                # that the prediction was created.  The semantic text check
+                # is authoritative here, including the pending-prediction
+                # response that the game treats as a normal continuation.
+                if not self.tianxing_prefix_response_ok(
+                    TIANXING_TIANJI_PREFIX_COMMAND, prefix_text
+                ):
+                    wait_seconds = self.tianxing_prefix_wait_seconds(prefix_text)
+                    if wait_seconds > 0:
+                        raise MiniAppBeastError(
+                            f"tianji_destiny_prefix_wait:{wait_seconds}"
+                        )
+                    raise MiniAppBeastError("tianji_destiny_prefix_failed")
+                forged = await transport.forge_treasure(
+                    identity,
+                    "treasure_001",
+                    times=1,
+                    log_operation=False,
+                )
+                apply_dwelling_snapshot(self, identity, forged)
+                result = forged.get("actionResult") if isinstance(forged, dict) else {}
+                if isinstance(result, dict) and result.get("ok") is False:
+                    raise MiniAppBeastError(
+                        str(result.get("error") or "tianji_forge_failed")
+                    )
+                state.update(
+                    {
+                        "tianxing_tianji_completed": completed + 1,
+                        "tianxing_tianji_last_time": now_str(),
+                        "tianxing_tianji_last_result": (
+                            str(result.get("rawMessage") or result.get("message") or "玄铁剑炼制完成")
+                            if isinstance(result, dict)
+                            else "玄铁剑炼制完成"
+                        )[:240],
+                        "tianxing_tianji_error": "",
+                        "tianxing_tianji_retry_time": "",
+                    }
+                )
+                self.save_state()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except MiniAppCircuitOpenError as exc:
+            retry_seconds = miniapp_circuit_wait_seconds(exc, 300)
+            state.update(
+                {
+                    "tianxing_tianji_error": exc.code,
+                    "tianxing_tianji_last_time": now_str(),
+                    "tianxing_tianji_retry_time": add_seconds_str(
+                        now_str(), retry_seconds
+                    ),
+                }
+            )
+            self.save_state()
+            self.common_command_logger().info(
+                "Tianxing Tianji grind [%s] paused by upstream circuit until %s",
+                identity,
+                exc.retry_at or f"in {retry_seconds}s",
+            )
+            return False
+        except Exception as exc:
+            error_text = str(exc)
+            match = re.fullmatch(r"tianji_destiny_prefix_wait:(\d+)", error_text)
+            if match:
+                retry_seconds = max(1, int(match.group(1)))
+                state.update(
+                    {
+                        "tianxing_tianji_error": "",
+                        "tianxing_tianji_last_result": f"推命冷却，{retry_seconds} 秒后重试",
+                        "tianxing_tianji_last_time": now_str(),
+                        "tianxing_tianji_retry_time": add_seconds_str(now_str(), retry_seconds),
+                    }
+                )
+                self.save_state()
+                self.common_command_logger().info(
+                    "Tianxing Tianji prefix [%s] is cooling down; retrying in %ss.",
+                    identity,
+                    retry_seconds,
+                )
+                return True
+            state.update(
+                {
+                    "tianxing_tianji_error": error_text[:240],
+                    "tianxing_tianji_last_time": now_str(),
+                    "tianxing_tianji_retry_time": add_seconds_str(now_str(), 300),
+                }
+            )
+            self.save_state()
+            self.common_command_logger().error(
+                "Tianxing Tianji grind [%s] error: %s",
+                identity,
+                exc,
+                exc_info=True,
+            )
+            return True
+
+    def _summarize_tianxing_tianji_round_if_complete(
+        self, identities, target, round_id
+    ):
+        """Log one total after every selected identity finishes the round."""
+        identities = [str(identity or "").strip() for identity in identities]
+        identities = [identity for identity in identities if identity]
+        if not identities or target <= 0 or not round_id:
+            return False
+        states = [self.tianxing_identity_state(identity) for identity in identities]
+        if any(
+            state.get("tianxing_tianji_round_id") != round_id
+            or max(0, int(state.get("tianxing_tianji_completed") or 0)) < target
+            for state in states
+        ):
+            return False
+        summary_key = f"{round_id}|{target}|{'|'.join(identities)}"
+        if self.state.get("tianxing_tianji_summary_key") == summary_key:
+            return False
+        total = sum(
+            min(target, max(0, int(state.get("tianxing_tianji_completed") or 0)))
+            for state in states
+        )
+        self.state.update(
+            {
+                "tianxing_tianji_summary_key": summary_key,
+                "tianxing_tianji_summary_total": total,
+                "tianxing_tianji_summary_time": now_str(),
+            }
+        )
+        self.save_state()
+        self.common_command_logger().info(
+            "刷天机值完成：总数 %s/%s，身份 %s",
+            total,
+            target,
+            "、".join(identities),
+        )
+        return True
+
+    async def run_tianxing_tianji_grind_loop(self):
+        """Run the independent Tianji-value skill for every Tianxing identity."""
+        await self.startup_done.wait()
+        while self.is_running:
+            config = tianxing_settings()
+            selected = set(
+                tianxing_tianji_identities_for_account(
+                    getattr(self, "account_key", "main") or "main",
+                    {"tianxing": config},
+                )
+            )
+            identities = [
+                identity
+                for identity in self.tianxing_identity_names()
+                if identity in selected
+            ]
+            if not config.get("tianji_grind_enabled") or not identities:
+                await asyncio.sleep(60)
+                continue
+            target = max(0, int(config.get("tianji_grind_target") or 0))
+            round_id = str(config.get("tianji_round_id") or "")
+            if target <= 0:
+                await asyncio.sleep(300)
+                continue
+            try:
+                transport = self.miniapp_small_world_transport()
+            except Exception as exc:
+                log.error("Tianxing Tianji transport unavailable: %s", exc)
+                await asyncio.sleep(300)
+                continue
+            made_progress = False
+            for identity in identities:
+                if not self.is_running:
+                    break
+                made_progress = (
+                    await self._run_tianxing_tianji_identity_round(
+                        identity, target, round_id, transport
+                    )
+                    or made_progress
+                )
+                await asyncio.sleep(3)
+            self._summarize_tianxing_tianji_round_if_complete(
+                identities, target, round_id
+            )
+            await asyncio.sleep(3 if made_progress else 60)
+
 
     def parse_tianxing_destiny_options(self, text):
         clean = str(text or "").replace("**", "")
@@ -3249,6 +3504,65 @@ class CommonCommandMixin:
         status = "responded" if resp_text else "no_response"
         self.record_custom_command_result(entry, identity, resp_text, status)
         log.info(f"Custom command done [{identity}] {command}: {status}")
+
+    async def run_second_soul_loop(self):
+        """第二元神修炼循环：每 24 小时发送 `.元神修炼`。
+
+        若返回“无法分心修炼”，再查询 `.第二元神` 解析剩余冷却时间，
+        按真实剩余时间安排下次执行，而不是固定顺延 24 小时。
+        """
+        interval_seconds = SECOND_SOUL_INTERVAL_SECONDS
+        await self.startup_done.wait()
+        log = self.common_command_logger()
+
+        while self.is_running:
+            next_time = str(self.state.get("next_second_soul_time") or "")
+            now = datetime.now()
+            if not next_time:
+                next_dt = now + timedelta(seconds=interval_seconds)
+                self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+                self.save_state()
+            else:
+                try:
+                    next_dt = datetime.strptime(next_time, TIME_FORMAT)
+                except (ValueError, TypeError):
+                    next_dt = now + timedelta(seconds=interval_seconds)
+                    self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+                    self.save_state()
+                wait = (next_dt - now).total_seconds()
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 300))
+                    continue
+
+            log.info("Second soul cultivation due: sending .元神修炼.")
+            response = await self.send_and_wait_feedback(
+                SECOND_SOUL_TRAIN_COMMAND, timeout=45, max_retries=1,
+            )
+            if second_soul_busy(response):
+                log.info("Second soul busy; querying .第二元神 for remaining cooldown.")
+                check_response = await self.send_and_wait_feedback(
+                    SECOND_SOUL_STATUS_COMMAND, timeout=45, max_retries=1,
+                )
+                remaining = second_soul_cooldown_seconds(check_response)
+                if remaining is None:
+                    remaining = interval_seconds
+                    log.info(
+                        "Second soul cooldown not parsed; falling back to %ss.",
+                        interval_seconds,
+                    )
+                else:
+                    remaining += SECOND_SOUL_COOLDOWN_BUFFER_SECONDS
+                next_dt = datetime.now() + timedelta(seconds=remaining)
+            else:
+                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
+
+            self.state["next_second_soul_time"] = next_dt.strftime(TIME_FORMAT)
+            self.save_state()
+            log.info(
+                "Second soul cultivation done; next at %s.",
+                next_dt.strftime(TIME_FORMAT),
+            )
+            await asyncio.sleep(5)
 
     async def run_custom_command_loop(self):
         """Dashboard 自定义指令调度循环。"""

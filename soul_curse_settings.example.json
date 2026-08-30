@@ -1,0 +1,27 @@
+{
+  "_doc": "封魂咒/解咒委托链路按身份开关。enabled=false 或文件缺失/格式错误时全链停用；identities 未列出的账号/身份一律默认关闭。把对应身份的值改为 true 即启用该身份的整条链（探望南宫婉→推演封魂咒→护持神魂→发布/接取解咒委托）。",
+  "enabled": true,
+  "identities": {
+    "main": {
+      "主魂": false,
+      "无咎子": false,
+      "缘生子": false,
+      "素缘子": false
+    },
+    "sub": {
+      "主魂": false,
+      "厚土": false,
+      "竹和生": false,
+      "寻真子": false
+    },
+    "xiaohao": {
+      "主魂": false,
+      "问心子": false,
+      "素心子": false,
+      "缘生子": false
+    },
+    "waaiging": {
+      "主魂": false
+    }
+  }
+}

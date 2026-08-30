@@ -25,6 +25,14 @@ _SUB_IDENTITY_STATE_CACHE: dict[str, Any] = {
 _SUB_IDENTITY_STATE_LOCK = threading.Lock()
 _XIAOHAO_IDENTITY_STATE_CACHE: dict[str, Any] = {"signature": None, "state": {}}
 _XIAOHAO_IDENTITY_STATE_LOCK = threading.Lock()
+_TIANXING_PARTICIPANT_STATE_FILES = {
+    "main": CONFIG_DIR / "state_main.json",
+    "sub": SUB_STATE_FILE,
+    "xiaohao": XIAOHAO_STATE_FILE,
+    "waaiging": CONFIG_DIR / "state_waaiging.json",
+}
+_TIANXING_PARTICIPANT_CACHE: dict[str, Any] = {"signature": None, "keys": ()}
+_TIANXING_PARTICIPANT_LOCK = threading.Lock()
 
 ACCOUNT_NAMES = {
     "main": "主号",
@@ -108,6 +116,60 @@ def _load_xiaohao_identity_state() -> dict[str, Any]:
         _XIAOHAO_IDENTITY_STATE_CACHE["signature"] = signature
         _XIAOHAO_IDENTITY_STATE_CACHE["state"] = state
         return state
+
+
+def _identity_sect_from_state(state: Any, identity: str) -> str:
+    if not isinstance(state, dict):
+        return ""
+    avatars = state.get("avatars")
+    identity_state = avatars.get(identity) if isinstance(avatars, dict) else None
+    if isinstance(identity_state, dict):
+        for key in ("miniapp_sect_name", "sect_name"):
+            value = str(identity_state.get(key) or "").strip()
+            if value:
+                return value
+    identity_sects = state.get("identity_sect_names")
+    if isinstance(identity_sects, dict):
+        value = str(identity_sects.get(identity) or "").strip()
+        if value:
+            return value
+    return str(state.get("sect_name") or "").strip() if identity == "主魂" else ""
+
+
+def _tianxing_tianji_participant_signature() -> tuple[Any, ...]:
+    signature = []
+    for path in _TIANXING_PARTICIPANT_STATE_FILES.values():
+        try:
+            stat = path.stat()
+            signature.append((str(path), int(getattr(stat, "st_mtime_ns", 0) or 0), int(stat.st_size)))
+        except OSError:
+            signature.append((str(path), None, None))
+    return tuple(signature)
+
+
+def tianxing_tianji_auto_participants() -> list[str]:
+    """Return identities currently assigned to Tianxing in live account state."""
+    signature = _tianxing_tianji_participant_signature()
+    with _TIANXING_PARTICIPANT_LOCK:
+        if _TIANXING_PARTICIPANT_CACHE.get("signature") == signature:
+            keys = _TIANXING_PARTICIPANT_CACHE.get("keys")
+            return list(keys if isinstance(keys, tuple) else ())
+
+        keys = []
+        for account, identities in automation_account_identities().items():
+            state_path = _TIANXING_PARTICIPANT_STATE_FILES.get(account)
+            state = (
+                load_json_state(str(state_path), expected_type=dict, default={}) or {}
+                if state_path is not None
+                else {}
+            )
+            for identity in identities:
+                if _identity_sect_from_state(state, identity) == "天星宗":
+                    keys.append(automation_participant_key(account, identity))
+
+        _TIANXING_PARTICIPANT_CACHE["signature"] = signature
+        _TIANXING_PARTICIPANT_CACHE["keys"] = tuple(keys)
+        return list(keys)
 
 
 def current_xiaohao_taiyi_identity(state: Any = None) -> str:
@@ -395,7 +457,10 @@ def default_automation_settings() -> dict[str, Any]:
             "use_heqi_pill": DEFAULT_TIANXING_USE_HEQI_PILL,
             "tianji_grind_enabled": DEFAULT_TIANXING_TIANJI_GRIND_ENABLED,
             "tianji_grind_target": DEFAULT_TIANXING_TIANJI_GRIND_TARGET,
-            "tianji_grind_participants": list(DEFAULT_TIANXING_TIANJI_GRIND_PARTICIPANTS),
+            "tianji_grind_participants": [
+                key for key in tianxing_tianji_auto_participants()
+                if key in DEFAULT_TIANXING_TIANJI_GRIND_PARTICIPANTS
+            ],
             "tianji_round_id": "",
         },
         "updated_at": "",
@@ -586,18 +651,17 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             tianxing.get("tianji_grind_target"),
             DEFAULT_TIANXING_TIANJI_GRIND_TARGET,
         )
-        raw_participants = tianxing.get("tianji_grind_participants")
-        if isinstance(raw_participants, list):
+        if isinstance(tianxing.get("tianji_grind_participants"), list):
+            available = set(tianxing_tianji_auto_participants())
             participants = []
-            for item in raw_participants:
+            for item in tianxing["tianji_grind_participants"]:
                 normalized = _normalize_participant(item)
-                if normalized is None:
-                    continue
-                account, identity = normalized
-                if identity not in TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ()):
-                    continue
-                key = automation_participant_key(account, identity)
-                if key not in participants:
+                key = (
+                    automation_participant_key(*normalized)
+                    if normalized is not None
+                    else ""
+                )
+                if key in available and key not in participants:
                     participants.append(key)
             result["tianxing"]["tianji_grind_participants"] = participants
         result["tianxing"]["tianji_round_id"] = str(
@@ -901,21 +965,19 @@ def save_automation_settings(
     )
     if not isinstance(raw_tianji_participants, list):
         raise ValueError("Tianxing Tianji grind participants must be a list")
+    available_tianji_participants = set(tianxing_tianji_auto_participants())
     tianji_grind_participants = []
     for item in raw_tianji_participants:
         normalized = _normalize_participant(item)
-        if normalized is None:
+        key = (
+            automation_participant_key(*normalized) if normalized is not None else ""
+        )
+        if key not in available_tianji_participants:
             raise ValueError("invalid Tianxing Tianji grind participant")
-        account, identity = normalized
-        if identity not in TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ()):
-            raise ValueError("invalid Tianxing Tianji grind participant")
-        key = automation_participant_key(account, identity)
         if key not in tianji_grind_participants:
             tianji_grind_participants.append(key)
     if tianji_grind_enabled and tianji_grind_target <= 0:
         raise ValueError("Tianxing Tianji grind target required")
-    if tianji_grind_enabled and not tianji_grind_participants:
-        raise ValueError("Tianxing Tianji grind participants required")
     tianji_round_id = str(current_tianxing.get("tianji_round_id") or "")
     if tianji_grind_enabled and (
         not bool(current_tianxing.get("tianji_grind_enabled"))
@@ -1146,11 +1208,11 @@ def tianxing_tianji_identities_for_account(
     settings: dict[str, Any] | None = None,
 ) -> list[str]:
     account = str(account or "").strip()
-    supported = TIANXING_TIANJI_SUPPORTED_IDENTITIES.get(account, ())
-    if not supported:
-        return []
-    config = tianxing_settings(settings)
-    selected = set(config.get("tianji_grind_participants") or [])
+    supported = automation_account_identities().get(account, ())
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    selected = set(
+        (source.get("tianxing") or {}).get("tianji_grind_participants") or []
+    )
     return [
         identity
         for identity in supported
@@ -1324,11 +1386,13 @@ def automation_dashboard_payload() -> dict[str, Any]:
                         {
                             "key": automation_participant_key(account, identity),
                             "name": identity,
+                            "selected": automation_participant_key(account, identity)
+                            in set(settings["tianxing"]["tianji_grind_participants"]),
                         }
                         for identity in identities
                     ],
                 }
-                for account, identities in TIANXING_TIANJI_SUPPORTED_IDENTITIES.items()
+                for account, identities in account_identities.items()
             ],
         },
         "server_time": datetime.now().strftime(TIME_FORMAT),

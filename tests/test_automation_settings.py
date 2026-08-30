@@ -13,12 +13,38 @@ class AutomationSettingsTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.path = Path(self.tempdir.name) / "automation_settings.json"
         self.sub_state_path = Path(self.tempdir.name) / "state_sub.json"
+        self.main_state_path = Path(self.tempdir.name) / "state_main.json"
+        self.xiaohao_state_path = Path(self.tempdir.name) / "state_xiaohao.json"
+        self.waaiging_state_path = Path(self.tempdir.name) / "state_waaiging.json"
         self.file_patch = patch.object(settings, "AUTOMATION_SETTINGS_FILE", self.path)
         self.sub_state_patch = patch.object(settings, "SUB_STATE_FILE", self.sub_state_path)
+        self.xiaohao_state_patch = patch.object(
+            settings, "XIAOHAO_STATE_FILE", self.xiaohao_state_path
+        )
+        self.state_files_patch = patch.object(
+            settings,
+            "_TIANXING_PARTICIPANT_STATE_FILES",
+            {
+                "main": self.main_state_path,
+                "sub": self.sub_state_path,
+                "xiaohao": self.xiaohao_state_path,
+                "waaiging": self.waaiging_state_path,
+            },
+        )
         self.file_patch.start()
         self.sub_state_patch.start()
+        self.state_files_patch.start()
+        self.xiaohao_state_patch.start()
+        settings._SUB_IDENTITY_STATE_CACHE["signature"] = None
+        settings._SUB_IDENTITY_STATE_CACHE["state"] = {}
+        settings._XIAOHAO_IDENTITY_STATE_CACHE["signature"] = None
+        settings._XIAOHAO_IDENTITY_STATE_CACHE["state"] = {}
+        settings._TIANXING_PARTICIPANT_CACHE["signature"] = None
+        settings._TIANXING_PARTICIPANT_CACHE["keys"] = ()
 
     def tearDown(self):
+        self.state_files_patch.stop()
+        self.xiaohao_state_patch.stop()
         self.sub_state_patch.stop()
         self.file_patch.stop()
         self.tempdir.cleanup()
@@ -32,7 +58,16 @@ class AutomationSettingsTests(unittest.TestCase):
         settings._SUB_IDENTITY_STATE_CACHE["state"] = {}
 
         real_load_state = settings.load_json_state
-        with patch.object(settings, "load_json_state", wraps=real_load_state) as load_mock:
+        with patch.object(
+            settings, "load_json_state", wraps=real_load_state
+        ) as load_mock, patch.object(
+            settings,
+            "_tianxing_tianji_participant_signature",
+            return_value=(("cached"),),
+        ), patch.object(settings, "_TIANXING_PARTICIPANT_CACHE", {
+            "signature": ("cached",),
+            "keys": (),
+        }):
             value = settings.normalize_automation_settings({
                 "world_boss": {"participants": ["sub|竹和生"]},
                 "miniapp_fishing": {
@@ -54,7 +89,10 @@ class AutomationSettingsTests(unittest.TestCase):
                 },
             })
 
-        self.assertEqual(load_mock.call_count, 1)
+        self.assertEqual(
+            [call.args[0] for call in load_mock.call_args_list],
+            [str(self.sub_state_path), str(self.xiaohao_state_path)],
+        )
         self.assertEqual(value["miniapp_fate_cards"]["participants"], ["sub|锋脉子"])
 
     def test_missing_file_uses_four_main_souls_and_huzhen(self):
@@ -102,7 +140,52 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["tianxing"]["meditation_switch_id"], "")
         self.assertFalse(value["tianxing"]["use_heqi_pill"])
         self.assertFalse(value["tianxing"]["tianji_grind_enabled"])
-        self.assertEqual(value["tianxing"]["tianji_grind_participants"], ["main|主魂"])
+        self.assertEqual(value["tianxing"]["tianji_grind_participants"], [])
+
+    def test_tianji_participants_follow_live_tianxing_identities(self):
+        self.main_state_path.write_text(json.dumps({
+            "sect_name": "天星宗",
+            "identity_sect_names": {"主魂": "天星宗", "无咎子": "其他宗门"},
+            "avatars": {"无咎子": {"miniapp_sect_name": "天星宗"}},
+        }, ensure_ascii=False), encoding="utf-8")
+        self.xiaohao_state_path.write_text(json.dumps({
+            "identity_sect_names": {
+                "主魂": "万灵宗",
+                "问心子": "凌霄宫",
+                "素心子": "星宫",
+                "缘生子": "天星宗",
+            },
+            "avatars": {"缘生子": {"sect_name": "天星宗"}},
+        }, ensure_ascii=False), encoding="utf-8")
+
+        value = settings.normalize_automation_settings({
+            "tianxing": {"tianji_grind_participants": ["main|无咎子", "xiaohao|缘生子"]}
+        })
+        self.assertEqual(
+            value["tianxing"]["tianji_grind_participants"],
+            ["main|无咎子", "xiaohao|缘生子"],
+        )
+
+        self.main_state_path.write_text(json.dumps({
+            "sect_name": "其他宗门",
+            "identity_sect_names": {"主魂": "其他宗门", "无咎子": "其他宗门"},
+        }, ensure_ascii=False), encoding="utf-8")
+        value = settings.normalize_automation_settings({
+            "tianxing": {"tianji_grind_participants": ["main|主魂", "xiaohao|缘生子"]}
+        })
+        self.assertEqual(value["tianxing"]["tianji_grind_participants"], ["xiaohao|缘生子"])
+        self.assertEqual(
+            settings.tianxing_tianji_identities_for_account("xiaohao", value),
+            ["缘生子"],
+        )
+        payload = settings.automation_dashboard_payload()
+        selected_keys = [
+            item["key"]
+            for account in payload["tianxing"]["tianji_accounts"]
+            for item in account["identities"]
+            if item["selected"]
+        ]
+        self.assertEqual(selected_keys, [])
 
     def test_save_accepts_one_identity_per_account_and_can_disable_account(self):
         value = settings.save_automation_settings(
@@ -224,6 +307,13 @@ class AutomationSettingsTests(unittest.TestCase):
             },
         })
         payload = settings.automation_dashboard_payload()
+        selected_keys = [
+            item["key"]
+            for account in payload["tianxing"]["tianji_accounts"]
+            for item in account["identities"]
+            if item["selected"]
+        ]
+        self.assertEqual(selected_keys, [])
         sub_account = next(
             item for item in payload["miniapp_fishing"]["accounts"]
             if item["key"] == "sub"
@@ -238,6 +328,9 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertNotIn("竹和生", [item["name"] for item in sub_account["identities"]])
 
     def test_save_updates_tianxing_round_settings(self):
+        self.main_state_path.write_text(json.dumps({
+            "identity_sect_names": {"无咎子": "天星宗"},
+        }, ensure_ascii=False), encoding="utf-8")
         value = settings.save_automation_settings(
             world_boss_participants=[],
             mulan_support_mode="护阵",
@@ -245,23 +338,20 @@ class AutomationSettingsTests(unittest.TestCase):
             tianxing_use_heqi_pill=True,
             tianxing_tianji_grind_enabled=True,
             tianxing_tianji_grind_target=12,
-            tianxing_tianji_grind_participants=["main|无咎子", "waaiging|主魂"],
+            tianxing_tianji_grind_participants=["main|无咎子"],
         )
         self.assertEqual(value["tianxing"]["meditation_mode"], "fate")
         self.assertTrue(value["tianxing"]["meditation_switch_id"])
         self.assertTrue(value["tianxing"]["use_heqi_pill"])
         self.assertEqual(value["tianxing"]["tianji_grind_target"], 12)
-        self.assertEqual(
-            value["tianxing"]["tianji_grind_participants"],
-            ["main|无咎子", "waaiging|主魂"],
-        )
+        self.assertEqual(value["tianxing"]["tianji_grind_participants"], ["main|无咎子"])
         self.assertEqual(
             settings.tianxing_tianji_identities_for_account("main", value),
             ["无咎子"],
         )
         self.assertEqual(
             settings.tianxing_tianji_identities_for_account("waaiging", value),
-            ["主魂"],
+            [],
         )
         self.assertTrue(value["tianxing"]["tianji_round_id"])
         disabled = settings.set_tianxing_heqi_pill_enabled(False, updated_by="test")
@@ -346,20 +436,6 @@ class AutomationSettingsTests(unittest.TestCase):
                 mulan_support_mode="护阵",
                 tianxing_meditation_mode="unknown",
             )
-        with self.assertRaisesRegex(ValueError, "Tianxing Tianji grind participants required"):
-            settings.save_automation_settings(
-                world_boss_participants=[],
-                mulan_support_mode="护阵",
-                tianxing_tianji_grind_enabled=True,
-                tianxing_tianji_grind_target=1,
-                tianxing_tianji_grind_participants=[],
-            )
-        with self.assertRaisesRegex(ValueError, "invalid Tianxing Tianji grind participant"):
-            settings.save_automation_settings(
-                world_boss_participants=[],
-                mulan_support_mode="护阵",
-                tianxing_tianji_grind_participants=["sub|主魂"],
-            )
 
     def test_common_command_reads_dashboard_mode_without_restart(self):
         settings.save_automation_settings(
@@ -433,6 +509,13 @@ class AutomationSettingsTests(unittest.TestCase):
             miniapp_beast_abyss_power_max=1300,
         )
         payload = settings.automation_dashboard_payload()
+        selected_keys = [
+            item["key"]
+            for account in payload["tianxing"]["tianji_accounts"]
+            for item in account["identities"]
+            if item["selected"]
+        ]
+        self.assertEqual(selected_keys, [])
         self.assertEqual(payload["mulan_support"]["command"], ".支援慕兰 斥候")
         self.assertEqual(payload["mulan_support"]["modes"], list(settings.MULAN_SUPPORT_MODES))
         self.assertEqual(len(payload["world_boss"]["accounts"]), len(settings.ACCOUNT_IDENTITIES))
@@ -463,14 +546,28 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(len(payload["miniapp_fishing"]["ponds"]), 4)
         self.assertEqual(payload["miniapp_fishing"]["ponds"][0], {"key": "auto", "name": "默认最高级"})
         self.assertEqual(len(payload["miniapp_fishing"]["baits"]), 5)
-        self.assertEqual(len(payload["tianxing"]["tianji_accounts"]), 2)
+        self.assertEqual(len(payload["tianxing"]["tianji_accounts"]), 4)
         self.assertEqual(
             [
                 item["key"]
                 for account in payload["tianxing"]["tianji_accounts"]
                 for item in account["identities"]
             ],
-            ["main|主魂", "main|无咎子", "waaiging|主魂"],
+            [
+                "main|主魂",
+                "main|无咎子",
+                "main|缘生子",
+                "main|素缘子",
+                "sub|主魂",
+                "sub|厚土",
+                "sub|竹和生",
+                "sub|寻真子",
+                "xiaohao|主魂",
+                "xiaohao|问心子",
+                "xiaohao|素心子",
+                "xiaohao|缘生子",
+                "waaiging|主魂",
+            ],
         )
         self.assertEqual(
             [item["key"] for item in payload["miniapp_fishing"]["rods"]],

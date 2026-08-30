@@ -1096,11 +1096,19 @@ class WorldBossMonitor:
 
     @staticmethod
     def _windows(challenge: dict[str, Any]) -> list[dict[str, Any]]:
-        """Parse attack windows from both the legacy ``windows`` and the new
-        ``attacks`` challenge format introduced by the 2026-08 server update."""
+        """Parse attack windows from the challenge payload.
+
+        Accepts the legacy ``windows`` list, the ``attacks`` format from the
+        2026-08 server update, and any other list/dict payload that carries
+        per-hit timing fields. On failure the raw challenge is attached to the
+        exception as diagnostics so the next server format change can be
+        diagnosed from the logs instead of blind guessing.
+        """
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
         raw_windows = challenge.get("windows") or challenge.get("attacks") or []
+        if not isinstance(raw_windows, (list, tuple)):
+            raw_windows = []
         for raw in raw_windows:
             if not isinstance(raw, dict):
                 continue
@@ -1117,6 +1125,10 @@ class WorldBossMonitor:
                     center_ms = int(raw["impactMs"] or 0)
                 elif "startMs" in raw:
                     center_ms = int(raw["startMs"] or 0)
+                elif "timeMs" in raw:
+                    center_ms = int(raw["timeMs"] or 0)
+                elif "timestampMs" in raw:
+                    center_ms = int(raw["timestampMs"] or 0)
                 else:
                     continue
                 hit_ms = max(1, int(raw.get("hitMs") or raw.get("durationMs") or raw.get("windowMs") or 460))
@@ -1155,7 +1167,11 @@ class WorldBossMonitor:
             )
         normalized.sort(key=lambda item: item["centerMs"])
         if not normalized or len(normalized) > 64:
-            raise MiniAppBeastError("boss_windows_invalid")
+            error = MiniAppBeastError("boss_windows_invalid")
+            error.details = {
+                "challenge": _diagnostic_value(challenge),
+            }
+            raise error
         return normalized
 
     def _hit_offset_ms(self, window: dict[str, Any]) -> int:

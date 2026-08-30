@@ -5470,6 +5470,9 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
 
     if cmd.startswith(".野外历练"):
         processed = _manual_record_field_training_reply(actor, text, identity, logger)
+    elif cmd.startswith(".掌天瓶"):
+        if hasattr(actor, "record_sky_bottle_manual_response"):
+            processed = bool(actor.record_sky_bottle_manual_response(cmd, text)) or processed
     elif cmd == ".探寻裂缝":
         if hasattr(actor, "is_rift_weakness_response") and actor.is_rift_weakness_response(text):
             if hasattr(actor, "stop_for_rift_weakness"):

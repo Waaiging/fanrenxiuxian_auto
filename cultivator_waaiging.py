@@ -3,13 +3,11 @@
 
 import asyncio
 import os
-import re
 from datetime import datetime, timedelta
 
 import intelligent_cultivator as core
 from command_modules import DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND
 from group_visibility_control import run_telegram_write_permission_monitor
-from command_feedback import second_soul_busy, second_soul_cooldown_seconds
 
 
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -504,56 +502,6 @@ class WaaigingCultivator(core.Cultivator):
                                  next_dt.strftime(core.TIME_FORMAT))
             await asyncio.sleep(5)
 
-    async def run_second_soul_loop(self):
-        """Send `.元神修炼` every 24h; parse cooldown from `.第二元神` on failure."""
-        interval_seconds = 24 * 3600
-        await self.startup_done.wait()
-        while self.is_running:
-            next_time = str(self.state.get("next_second_soul_time") or "")
-            now = datetime.now()
-            if not next_time:
-                next_dt = now + timedelta(seconds=interval_seconds)
-                self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
-                self.save_state()
-            else:
-                try:
-                    next_dt = datetime.strptime(next_time, core.TIME_FORMAT)
-                except (ValueError, TypeError):
-                    next_dt = now + timedelta(seconds=interval_seconds)
-                    self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
-                    self.save_state()
-                wait = (next_dt - now).total_seconds()
-                if wait > 0:
-                    await asyncio.sleep(min(wait, 300))
-                    continue
-
-            core.log.info("Second soul cultivation due: sending .元神修炼.")
-            response = await self.send_and_wait_feedback(
-                ".元神修炼", timeout=45, max_retries=1,
-            )
-            text = (getattr(response, "text", "") or "") if response else ""
-            if "无法分心修炼" in text:
-                core.log.info("Second soul busy; querying .第二元神 for remaining cooldown.")
-                check_response = await self.send_and_wait_feedback(
-                    ".第二元神", timeout=45, max_retries=1,
-                )
-                check_text = (getattr(check_response, "text", "") or "") if check_response else ""
-                cooldown_match = re.search(r"(\d+)\s*小时(?:\s*(\d+)\s*分钟?)?", check_text)
-                if cooldown_match:
-                    hours = int(cooldown_match.group(1))
-                    minutes = int(cooldown_match.group(2) or 0)
-                    remaining = hours * 3600 + minutes * 60 + 300
-                else:
-                    remaining = interval_seconds
-                next_dt = datetime.now() + timedelta(seconds=remaining)
-            else:
-                next_dt = datetime.now() + timedelta(seconds=interval_seconds)
-
-            self.state["next_second_soul_time"] = next_dt.strftime(core.TIME_FORMAT)
-            self.save_state()
-            core.log.info("Second soul cultivation done; next at %s.",
-                          next_dt.strftime(core.TIME_FORMAT))
-            await asyncio.sleep(5)
     async def run_telegram_write_permission_monitor(self):
         await run_telegram_write_permission_monitor(self, core.log)
 

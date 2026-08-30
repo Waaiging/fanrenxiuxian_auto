@@ -20,6 +20,8 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 
 `start_all.sh` 会先创建完整的 5 个固定窗口，再启动副号、小号、Waaiging、Dashboard，最后启动负责可见性控制的主号。不要再使用“窗口 3 是 Dashboard”的旧映射。
 
+上表是 `start_all.sh` 的预期布局。运维时要注意实际进程可能漂移：2026-08-29 核查线上时，`tmux list-windows -t xiuxian` 只有 `0..3` 四个窗口，`dashboard_server.py` 以裸 `nohup python3 -X utf8 dashboard_server.py` 运行在 tmux 之外（手工重启未走 `start_all.sh` 所致）。排查 Dashboard 前先用 `pgrep -af dashboard_server.py` 确认它到底在哪里，不要假定 `xiuxian:4` 一定存在。
+
 游戏群公开或账号无群发权限时，主号的可见性控制器会在固定窗口内切换小号/Waaiging 的完整脚本与 `red_packet_account.py` 待机进程。待机进程保留红包监听、受限 Mini App 排程、青元子世界 Boss 和南陇侯侍妾保护，但不会绕过权限保护向游戏群发送指令。缺失窗口会自动重建，最终 tmux session 关闭返回非零也不会被误判为部署失败。
 
 ## 项目结构
@@ -47,13 +49,25 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 | 主号 | 素缘子 | 星宫 |
 | 副号 | 主魂 | 元婴宗 |
 | 副号 | 厚土 | 星宫 |
-| 副号 | 锋脉子 | 阴罗宗 |
+| 副号 | 阴罗身份（道号随夺舍重生变化，见下） | 阴罗宗 |
 | 副号 | 寻真子 | 落云宗 |
 | 小号 | 主魂 | 万灵宗 |
 | 小号 | 问心子 | 凌霄宫 |
 | 小号 | 素心子 | 星宫 |
-| 小号 | 缘生子 | 太一门 |
+| 小号 | 太一身份（道号随夺舍重生变化，见下） | 太一门 |
 | Waaiging | 主魂 | 天星宗 |
+
+副号阴罗身份与小号太一身份的道号会在夺舍重生后改变，因此本表不写死快照值。
+两者以稳定 `playerId` 为锚（副号 `-1003885521329`、小号 `-1003996748766`），
+运行态权威值由 `automation_settings.current_sub_yinluo_identity()` 和
+`current_xiaohao_taiyi_identity()` 从 Mini App 同步结果解析：
+
+```powershell
+python -c "import automation_settings as s; print(s.current_sub_yinluo_identity(), s.current_xiaohao_taiyi_identity())"
+```
+
+代码内的默认值（副号 `竹和生`、小号 `缘生子`）只是别名迁移链的起点，不代表当前道号；
+2026-08-29 实际为副号 `玄续玄`、小号 `灵脉玄`。文档与用例都不应假定某个具体道号。
 
 特别注意：
 
@@ -149,6 +163,15 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 - 命星前置校验按身份和当前宗门生效；无法确认候选或 `.定命` 未得到成功回复时，会阻止对应动作并等待重试。
 - 推命前置若回复包含“已有推命尚未应验”，即使同一回复同时出现“还需等待”，也视为正常前置并继续后续动作；只有单独的“还需等待/冷却”回复才解析时间并延后重试。
 
+### 第二元神修炼
+
+- 主号和 Waaiging 各注册 `second_soul` 调度任务，间隔 24 小时向群内发送 `.元神修炼`。
+- 实现下沉在 `common_command_features.CommonCommandMixin.run_second_soul_loop()`，两个入口通过继承共用同一份代码，不再各自复制。
+- 回复命中"无法分心修炼"时，追加查询 `.第二元神`，用 `command_feedback.second_soul_cooldown_seconds()` 解析 `剩余: 14小时11分钟36秒` 这类文本，按真实剩余时间加 5 分钟缓冲排下一次；解析不出时才回落固定 24 小时。
+- 判定与解析统一走 `command_feedback` 的 `second_soul_busy()` / `second_soul_cooldown_seconds()`，两者都经 `command_response_text()` 兼容纯字符串和消息对象两种回复形态。`send_and_wait_feedback()` 默认返回纯字符串，直接对返回值取 `.text` 会永远得到空串。
+- 排程写在 state 的 `next_second_soul_time`。字段缺失时立即发送；时间戳损坏时先重置为 +24 小时再等待，不立即发送。
+- 回归用例见 `tests/test_second_soul_loop.py`，直接驱动循环本身；`tests/test_parser_fixtures.py` 只覆盖解析函数。
+
 ### 星宫宗门灵圃
 
 - 当前星宫身份由宗门同步动态发现，基线为主号素缘子、副号厚土、小号素心子。
@@ -171,7 +194,7 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 - 主号主魂实时监听机器人 `【小世界·天降浩劫】` 消息；仅匹配 `@Weeguu`，触发后立即通过 Mini App 执行“安抚信徒”。香火不足时会先收割待收香火；若神谕仍在冷却，则按页面返回的剩余时间重试，并优先于日常神迹布道。
 - 阴罗宗常规阴罗幡、献祭和魔影操作走 Mini App；解咒委托的辨认、借幡和剥离链仍走群指令。
 - 每次 `.召唤魔影` 成功后固定在 Mini App 天机阁连续执行：`.我的阴罗幡` → 对每个 `[精华已成]` 的凶兽戾魄槽发送 `.收取精华 <编号>` → `.一键安抚幡灵` → 对可用槽逐个发送 `.囚禁魂魄 <编号> 凶兽戾魄`。
-- 主号主魂执行探望南宫婉、婉影问安、推演封魂咒、护持神魂和发布委托；副号主魂不执行无效的婉影问安，只执行探望南宫婉、推演封魂咒、护持神魂和发布委托。之后由主号缘生子和副号当前阴罗身份（目前为锋脉子）在群内完成接取、辨认、借幡与剥离；该副号身份原有的小号共享委托状态按稳定 `playerId` 迁移并串行处理。
+- 主号主魂执行探望南宫婉、婉影问安、推演封魂咒、护持神魂和发布委托；副号主魂不执行无效的婉影问安，只执行探望南宫婉、推演封魂咒、护持神魂和发布委托。之后由主号缘生子和副号当前阴罗身份（道号随夺舍重生变化，以 `playerId` 为锚解析）在群内完成接取、辨认、借幡与剥离；该副号身份原有的小号共享委托状态按稳定 `playerId` 迁移并串行处理。
 - `.入梦寻图` 达到 `4/4` 后自动通过 Mini App 执行 `.拼图`。
 - 受限账号若旧版本曾拦截 `.拼图`，worker 会保留待恢复记录；新版本确认 Mini App 已支持后自动补发，成功后清除记录。
 
@@ -251,7 +274,7 @@ Dashboard 当前行为：
 | --- | --- |
 | 主号主魂 | `.温养器灵`、`.同参封魂`、`.探渊`、`.灵兽探渊`、`.一键放养` |
 | 副号主魂 | `.宗门战况`、`.参战`、`.安置侍妾`、`.我的侍妾` |
-| 副号阴罗身份（当前锋脉子） | `.强行出关` |
+| 副号阴罗身份（道号随夺舍重生变化） | `.强行出关` |
 | 副号寻真子 | `.启阵`、`.观星`、`.改换星移` |
 | 小号主魂 | `.寻觅灵兽`、`.灵兽偷菜`、`.探渊`、`.灵兽探渊`、`.一键放养`、`.灵兽巡游` |
 
@@ -309,7 +332,9 @@ python -m unittest tests.test_miniapp_dwelling
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-`PYTHONUTF8=1` 用于避免 Windows GBK 控制台在输出 emoji 日志时产生 `UnicodeEncodeError`。截至 2026-08-09，完整测试集为 808 项，本地全量运行约 4 分钟。
+`PYTHONUTF8=1` 用于避免 Windows GBK 控制台在输出 emoji 日志时产生 `UnicodeEncodeError`。截至 2026-08-29，完整测试集为 858 项（含 12 项 skip），本地全量运行约 4 分钟。
+
+用例不得依赖线上运行态文件。断言身份/道号时必须注入固定 state 或把 `SUB_STATE_FILE` / `XIAOHAO_STATE_FILE` 改指临时路径，否则生产改名会让用例莫名转红（参见 `tests/test_automation_settings.py` 的 `setUp`）。
 
 ## 状态快照与回滚
 
@@ -321,7 +346,7 @@ python -m unittest discover -s tests -p "test_*.py"
 ## 已知工程债
 
 - Dashboard 登录凭据由未提交的 `.env` 提供；状态变更接口尚无独立 CSRF 令牌，公网部署仍应补充请求来源保护和登录限速。
-- 四个账号的主 state 保存仍直接覆盖目标 JSON；进程在写入中断时可能产生截断文件并回落到默认状态。应统一改为临时文件、`fsync`、原子替换，并在加载失败时自动恢复最近快照。
+- ~~四个账号的主 state 保存仍直接覆盖目标 JSON。~~ 已修复：四个账号的 `save_state()` 统一走 `state_io.save_json_state()`（同目录临时文件 → `fsync` → `os.replace`，保留 `.bak`），`load_json_state()` 在解析失败时自动回落 `.bak`。
 - `requirements.txt` 尚未锁定版本，仓库也没有 CI；本地 Python 与 VPS Python 版本可能不同，当前仍依赖人工执行本地全量测试和远端定向测试。
 - 主账号脚本和解析回归文件体积较大。新增公共能力应继续下沉到共享模块，并优先拆分可独立验证的解析器和状态迁移逻辑。
 

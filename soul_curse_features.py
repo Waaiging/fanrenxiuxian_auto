@@ -36,6 +36,7 @@ SOUL_CURSE_VISIT_HOUR = 9
 SOUL_CURSE_RETRY_SECONDS = 10 * 60
 SOUL_CURSE_UNKNOWN_RETRY_SECONDS = 30 * 60
 SOUL_CURSE_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul_curse_commissions.json")
+SOUL_CURSE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul_curse_settings.json")
 
 SOUL_CURSE_PUBLISHERS = {
     "main": {
@@ -398,6 +399,34 @@ class SoulCurseMixin:
 
     def soul_curse_account_key(self):
         return str(getattr(self, "account_key", "") or "").strip()
+
+    def soul_curse_identity_enabled(self, account=None, identity="主魂"):
+        """Per-identity kill switch backed by soul_curse_settings.json.
+
+        Defaults to disabled: the whole soul-curse chain (visit / infer /
+        protect / publish) only runs for identities explicitly enabled in the
+        settings file, so the owner can opt each identity in manually.
+        """
+        account = str(account or self.soul_curse_account_key()).strip()
+        identity = str(identity or "主魂").strip() or "主魂"
+        try:
+            with open(SOUL_CURSE_SETTINGS_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        if data.get("enabled") is False:
+            return False
+        identities = data.get("identities")
+        if not isinstance(identities, dict):
+            return False
+        entry = identities.get(account)
+        if isinstance(entry, dict):
+            return bool(entry.get(identity))
+        if isinstance(entry, list):
+            return identity in {str(item) for item in entry}
+        return False
 
     def soul_curse_publisher_profile(self):
         return SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
@@ -1187,6 +1216,11 @@ class SoulCurseMixin:
         publisher = self.soul_curse_publisher_profile()
         shared_assistants = self.soul_curse_shared_assistant_profiles()
 
+        if publisher and not self.soul_curse_identity_enabled(identity="主魂"):
+            log = self.soul_curse_logger()
+            log.info("Soul curse publisher disabled for [%s] by settings.", self.soul_curse_account_key())
+            publisher = None
+
         if publisher:
             self.soul_curse_sync_shared_publisher_status(publisher)
             visit_wait = await self.soul_curse_maybe_visit(publisher)
@@ -1239,6 +1273,11 @@ class SoulCurseMixin:
                 waits.append(chain_wait)
 
         for assistant in shared_assistants:
+            if not self.soul_curse_identity_enabled(
+                account=assistant.get("owner_account"),
+                identity=assistant.get("assistant_identity") or YINLUO_IDENTITY,
+            ):
+                continue
             wait = await self.soul_curse_shared_assist_tick(assistant)
             if wait <= 10:
                 return max(5, wait)

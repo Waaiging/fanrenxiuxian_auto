@@ -28,6 +28,7 @@ dashboard_commands.json
 soul_curse_commissions.json
 bot_activity_shared.json
 red_packet_settings.json
+soul_curse_settings.json
 red_packet_status_*.json
 red_packet_claim_coordination.json
 red_packet_claim_coordination.lock
