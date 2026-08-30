@@ -544,6 +544,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         # Tianxing does not use the Wanling beast schedulers.
         self.enable_main_beasts = False
         self.enable_soul_curse = True
+        self.enable_sky_bottle = True
         self.enable_telegram_write_permission_monitor = False
 
         # ------ 5. 运行控制 ------
@@ -5335,7 +5336,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             log.info("Avatar scheduler disabled for this account.")
         if self.enable_soul_curse:
             self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=80, sleep_func=scheduler_sleep_seconds))
-        self.create_scheduler_task("sky_bottle", lambda: self.run_sky_bottle_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
+        if getattr(self, "enable_sky_bottle", False):
+            self.create_scheduler_task("sky_bottle", lambda: self.run_sky_bottle_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
 
 
         recover_wind_thunder_sessions(self)

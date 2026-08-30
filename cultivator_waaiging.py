@@ -109,6 +109,8 @@ class WaaigingCultivator(core.Cultivator):
         self.enable_miniapp_star_palace = False
         self.enable_main_beasts = False
         self.enable_soul_curse = False
+        # Waaiging has no sky bottle; keep the inherited loop off.
+        self.enable_sky_bottle = False
 
         # The account's treasure and spirit names are unknown. Do not send a
         # different account's hard-coded commands until they are configured.
