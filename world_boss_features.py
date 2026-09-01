@@ -36,7 +36,15 @@ WORLD_BOSS_BUTTON_TEXT = "进入真仙战场"
 WORLD_BOSS_TITLE_MARKERS = ("世界通告", "真仙试锋开启")
 WORLD_BOSS_TOKEN_PREFIX = "qyz_"
 WORLD_BOSS_IDENTITY = "主魂"
-WORLD_BOSS_HOLD_MS = 1200
+# The server measures the hold itself, as the gap between the charge ticket being
+# minted and the hit arriving, and judges *that* against HOLD_MIN/HOLD_MAX -- the
+# holdMs we report is not what decides the grade. Its measurement differs from ours
+# by the two requests' one-way delay difference, which on 2026-09-01 ranged from
+# -714ms to +493ms across 57 strikes. Aiming at 1200 therefore left no headroom
+# below the 1250 ceiling: only 37/57 server-side holds were legal, and ten strikes
+# lost perfect on hold alone despite landing inside the delta tolerance. 1000 is
+# the empirical optimum for that skew distribution at 51/57.
+WORLD_BOSS_HOLD_MS = 1000
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
 WORLD_BOSS_RECOVERY_WINDOW_SECONDS = 120
@@ -44,7 +52,41 @@ WORLD_BOSS_FINISH_GRACE_SECONDS = 2.2
 WORLD_BOSS_HISTORY_LIMIT = 20
 WORLD_BOSS_SCAN_LIMIT = 30
 WORLD_BOSS_TIMEOUT_SECONDS = 20
-WORLD_BOSS_DIAGNOSTIC_VERSION = 1
+WORLD_BOSS_DIAGNOSTIC_VERSION = 2
+
+# 2026-08-26 server format: /start no longer carries a window timetable. Windows
+# are revealed one at a time through /window (``afterWindowId`` paging), and every
+# /hit must carry a ``chargeTicket`` obtained from /charge-start. These mirror the
+# Mini App client's own pacing so the automation stays inside normal call rates.
+WORLD_BOSS_WINDOW_POLL_SECONDS = 0.36
+WORLD_BOSS_WINDOW_DRAIN_SECONDS = 0.05
+WORLD_BOSS_WINDOW_STALL_SECONDS = 20.0
+WORLD_BOSS_WINDOW_LIMIT = 64
+WORLD_BOSS_WINDOW_ERROR_BUDGET = 25
+WORLD_BOSS_MAX_BATTLE_SECONDS = 320.0
+# The server only credits a perfect hit while the reported hold sits in this range.
+WORLD_BOSS_HOLD_MIN_MS = 520
+WORLD_BOSS_HOLD_MAX_MS = 1250
+# The charge request's latency already counts towards the hold, because the press
+# is the moment the request is launched. On 2026-09-01 charge-start ran 100..381ms
+# at p50 but spiked to 3045..3417ms on four windows, and each spike produced a hold
+# of exactly that length, past the 1250ms ceiling, dropping the strike. No client
+# scheduling can absorb a spike larger than the hold, so this timeout only bounds
+# how long a single window may waste.
+WORLD_BOSS_CHARGE_TIMEOUT_SECONDS = 5
+# The server timestamps arrival itself and ignores our reported ``elapsedMs`` for
+# the hit verdict: on 2026-09-01 the local delta averaged -18.6ms while the server
+# reported +160.7ms for the same strikes. Every server delta was positive, so the
+# residual bias after the static RTT/2 lead is a one-way delay we can only learn
+# from the server's own ``deltaMs``. Feed it back with an EWMA and bound it so a
+# single outlier cannot push later strikes early.
+WORLD_BOSS_DRIFT_WEIGHT = 0.5
+WORLD_BOSS_DRIFT_MAX_MS = 400
+# Treated as "keep waiting", exactly as the Mini App client does.
+WORLD_BOSS_WINDOW_WAIT_ERRORS = {
+    "boss_window_not_ready",
+    "boss_battle_not_started",
+}
 WORLD_BOSS_ACCOUNT_OFFSET_SLOTS = {
     "main": -4,
     "sub": -3,
@@ -446,6 +488,11 @@ class WorldBossMonitor:
         self.enabled = bool(settings.get("enabled", True))
         self.timeout = max(5, min(60, int(settings.get("timeout_seconds") or WORLD_BOSS_TIMEOUT_SECONDS)))
         self.target_chats: list[Any] = []
+        # Server-measured lateness carried between windows of one battle. Windows
+        # are 2.8..8.6s apart, so an early strike's ``deltaMs`` can correct the
+        # ones still pending. Reset per battle: RTT is not stable across events.
+        self._drift_ms = 0.0
+        self._drift_samples = 0
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -1174,6 +1221,200 @@ class WorldBossMonitor:
             raise error
         return normalized
 
+    @staticmethod
+    def _revealed_window(raw: Any) -> dict[str, Any] | None:
+        """Normalize one window revealed by /window into the internal shape.
+
+        The 2026-08-26 client reads only ``centerMs`` / ``hitMs`` / ``perfectMs``
+        from each revealed window, so the tolerances always come from the server
+        instead of being reconstructed locally.
+        """
+        if not isinstance(raw, dict):
+            return None
+        window_id = str(raw.get("id") or raw.get("windowId") or "").strip()
+        if not window_id or len(window_id) > 120:
+            return None
+        try:
+            center_ms = int(raw.get("centerMs"))
+        except (TypeError, ValueError):
+            return None
+        if center_ms < 0 or center_ms > 600_000:
+            return None
+        try:
+            hit_ms = max(1, int(raw.get("hitMs") or 460))
+            perfect_ms = max(1, int(raw.get("perfectMs") or 150))
+        except (TypeError, ValueError):
+            return None
+        return {
+            "id": window_id,
+            "centerMs": center_ms,
+            "impactMs": center_ms,
+            "dangerStartMs": 0,
+            "dangerEndMs": 0,
+            "hitMs": hit_ms,
+            "perfectMs": min(perfect_ms, hit_ms),
+        }
+
+    async def _reveal_windows(
+        self,
+        entry: WorldBossEntry,
+        init_data: str,
+        session_token: str,
+        challenge_id: str,
+        battle_start: float,
+        queue: asyncio.Queue,
+        reveal_log: list[dict[str, Any]],
+        expected_count: int,
+    ) -> None:
+        """Page through /window until the server reports ``done``.
+
+        Mirrors the browser: poll roughly every 360ms, treat
+        ``boss_window_not_ready`` as "keep waiting", and stop once the server has
+        no more windows. Each reveal records how much lead time it arrived with,
+        which is the number needed to judge whether a full hold still fits.
+        """
+        after_window_id = ""
+        error_budget = WORLD_BOSS_WINDOW_ERROR_BUDGET
+        last_reveal_at = self.monotonic()
+        deadline = battle_start + WORLD_BOSS_MAX_BATTLE_SECONDS
+        revealed_count = 0
+        try:
+            # Bound on windows actually revealed: error entries share reveal_log but
+            # must never consume the budget of windows still to come.
+            while revealed_count < min(expected_count, WORLD_BOSS_WINDOW_LIMIT):
+                now = self.monotonic()
+                if now >= deadline:
+                    break
+                if now - last_reveal_at >= WORLD_BOSS_WINDOW_STALL_SECONDS:
+                    # No new window for several expected intervals: the round is
+                    # over or the server stopped revealing. Do not hold the worker.
+                    break
+                trace: dict[str, Any] = {}
+                requested_at = self.monotonic()
+                try:
+                    data = await self._request(
+                        entry.origin,
+                        "/api/miniapp/xianxia-world-boss/window",
+                        {
+                            "token": session_token,
+                            "initData": init_data,
+                            "challengeId": challenge_id,
+                            "afterWindowId": after_window_id,
+                        },
+                        retries=0,
+                        timeout=min(self.timeout, 5),
+                        trace=trace,
+                    )
+                except MiniAppCircuitOpenError:
+                    raise
+                except MiniAppBeastError as exc:
+                    if exc.code not in WORLD_BOSS_WINDOW_WAIT_ERRORS:
+                        error_budget -= 1
+                        reveal_log.append(
+                            {
+                                "sequence": len(reveal_log) + 1,
+                                "status": "error",
+                                "error": exc.code,
+                                "requested_elapsed_ms": max(
+                                    0, int(round((requested_at - battle_start) * 1000))
+                                ),
+                                "request": trace,
+                            }
+                        )
+                        if error_budget <= 0:
+                            break
+                    await self.sleep(WORLD_BOSS_WINDOW_POLL_SECONDS)
+                    continue
+                except Exception:
+                    error_budget -= 1
+                    if error_budget <= 0:
+                        break
+                    await self.sleep(WORLD_BOSS_WINDOW_POLL_SECONDS)
+                    continue
+
+                received_at = self.monotonic()
+                window = self._revealed_window(data.get("window"))
+                try:
+                    reported_count = int(data.get("windowCount") or 0)
+                except (TypeError, ValueError):
+                    reported_count = 0
+                if reported_count > 0:
+                    expected_count = min(
+                        max(expected_count, reported_count), WORLD_BOSS_WINDOW_LIMIT
+                    )
+                if window is not None:
+                    after_window_id = window["id"]
+                    last_reveal_at = received_at
+                    revealed_count += 1
+                    received_elapsed_ms = max(
+                        0, int(round((received_at - battle_start) * 1000))
+                    )
+                    reveal_log.append(
+                        {
+                            "sequence": revealed_count,
+                            "status": "revealed",
+                            "window_id": window["id"],
+                            "center_ms": window["centerMs"],
+                            "hit_ms": window["hitMs"],
+                            "perfect_ms": window["perfectMs"],
+                            "received_elapsed_ms": received_elapsed_ms,
+                            # Positive means the window arrived before its center,
+                            # i.e. how much room is left to charge and strike.
+                            "lead_ms": window["centerMs"] - received_elapsed_ms,
+                            "request": trace,
+                        }
+                    )
+                    await queue.put(window)
+                if bool(data.get("done")):
+                    break
+                await self.sleep(
+                    WORLD_BOSS_WINDOW_DRAIN_SECONDS
+                    if window is not None
+                    else WORLD_BOSS_WINDOW_POLL_SECONDS
+                )
+        finally:
+            await queue.put(None)
+
+    def _reset_drift(self) -> None:
+        """Forget the previous battle's lateness. RTT is not stable across events."""
+        self._drift_ms = 0.0
+        self._drift_samples = 0
+
+    def _drift_lead_ms(self) -> int:
+        """Extra lead, in ms, learned from the server's own ``deltaMs``."""
+        if self._drift_samples <= 0:
+            return 0
+        return int(round(max(0.0, min(WORLD_BOSS_DRIFT_MAX_MS, self._drift_ms))))
+
+    def _record_drift(self, server_delta_ms: Any) -> None:
+        """Calibrate the lead once, from the first strike the server accepted.
+
+        ``deltaMs`` is unsigned, so it cannot distinguish early from late. Feeding
+        every sample back would therefore diverge: once the correction overshoots,
+        the strike lands early, ``deltaMs`` grows again, and a running sum would
+        keep pushing it earlier. Calibrate from the first sample only, while the
+        lead is still the static RTT/2 and the sign is known to be late (the
+        2026-09-01 run needed a full RTT of lead on all four accounts), then hold
+        that value for the rest of the battle.
+        """
+        if self._drift_samples > 0:
+            return
+        try:
+            sample = float(server_delta_ms)
+        except (TypeError, ValueError):
+            return
+        if sample <= 0 or sample > 5000:
+            # Zero needs no correction; a wild value is a broken reading, not a
+            # measurement, and would poison every remaining window of the battle.
+            return
+        # Clamp rather than discard: the account furthest off most needs the lead.
+        # Discarding anything above the cap gave the worst-offset account (main, a
+        # first sample of 450.7ms) no correction at all, which is backwards.
+        self._drift_ms = min(
+            float(WORLD_BOSS_DRIFT_MAX_MS), sample * WORLD_BOSS_DRIFT_WEIGHT
+        )
+        self._drift_samples = 1
+
     def _hit_offset_ms(self, window: dict[str, Any]) -> int:
         """Stagger requests while keeping arrival inside the server window."""
         slot = int(WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0))
@@ -1191,24 +1432,99 @@ class WorldBossMonitor:
         window: dict[str, Any],
         window_index: int = 0,
         request_lead_ms: int = 0,
+        charge_required: bool = True,
     ) -> dict[str, Any]:
         offset_ms = self._hit_offset_ms(window)
-        target_ms = max(0, int(window["centerMs"]) + offset_ms - request_lead_ms)
+        drift_ms = self._drift_lead_ms()
+        target_ms = max(
+            0, int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms
+        )
         target = battle_start + target_ms / 1000.0
+
+        # 2026-08-26 protocol: /hit is rejected without a chargeTicket, and the
+        # ticket is issued by /charge-start when the hold begins. Start charging one
+        # hold ahead of the strike so the reported holdMs matches the ticket's age.
+        charge_ticket = ""
+        charge_error = ""
+        charge_trace: dict[str, Any] = {}
+        charge_started_elapsed_ms = -1
+        hold_ms = WORLD_BOSS_HOLD_MS
+        if charge_required:
+            charge_at = target - WORLD_BOSS_HOLD_MS / 1000.0
+            charge_wait = charge_at - self.monotonic()
+            if charge_wait > 0:
+                await self.sleep(charge_wait)
+            charge_started_at = self.monotonic()
+            charge_started_elapsed_ms = max(
+                0, int(round((charge_started_at - battle_start) * 1000))
+            )
+            try:
+                charge_payload = await self._request(
+                    entry.origin,
+                    "/api/miniapp/xianxia-world-boss/charge-start",
+                    {
+                        "token": session_token,
+                        "initData": init_data,
+                        "challengeId": challenge_id,
+                        "windowId": window["id"],
+                    },
+                    retries=0,
+                    timeout=min(self.timeout, WORLD_BOSS_CHARGE_TIMEOUT_SECONDS),
+                    trace=charge_trace,
+                )
+                charge_ticket = str(charge_payload.get("chargeTicket") or "").strip()
+                if not charge_ticket:
+                    charge_error = "boss_charge_ticket_missing"
+            except MiniAppCircuitOpenError:
+                raise
+            except Exception as exc:
+                charge_error = _error_code(exc)
+
+        strike_ms = target_ms
+        if charge_required and charge_ticket and charge_started_elapsed_ms >= 0:
+            # A late reveal cannot reach the minimum hold by the ideal strike time.
+            # Delaying the strike buys hold, but only helps while the later moment
+            # still sits inside the perfect tolerance; past that, accuracy wins.
+            min_hold_strike_ms = charge_started_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS
+            if min_hold_strike_ms > strike_ms:
+                perfect_deadline_ms = (
+                    int(window["centerMs"]) + int(window["perfectMs"]) - 40
+                )
+                if min_hold_strike_ms <= perfect_deadline_ms:
+                    strike_ms = min_hold_strike_ms
+        target = battle_start + strike_ms / 1000.0
+
         wait = target - self.monotonic()
         if wait > 0:
             await self.sleep(wait)
         sent_elapsed_ms = max(0, int(round((self.monotonic() - battle_start) * 1000)))
-        elapsed_ms = max(0, sent_elapsed_ms + request_lead_ms)
+        # Estimated arrival on the server clock. Both terms are network
+        # compensations of the same kind: request_lead_ms is half the measured
+        # /begin round trip, drift_ms is the residual one-way delay the server's
+        # own deltaMs revealed. The server judges by its own arrival stamp, so this
+        # value is what we predict it will see, not when we pressed.
+        elapsed_ms = max(0, sent_elapsed_ms + request_lead_ms + drift_ms)
+        if charge_required and charge_started_elapsed_ms >= 0:
+            # Report the hold that actually elapsed between /charge-start and the
+            # strike, measured on the local clock exactly as the browser does
+            # (press -> release, without the network compensation applied to
+            # elapsedMs). The server can compare this against the ticket's own age,
+            # so never pad it towards the perfect range: a late reveal must cost the
+            # grade, not the hit's credibility.
+            hold_ms = max(0, sent_elapsed_ms - charge_started_elapsed_ms)
         signed_delta_ms = elapsed_ms - int(window["centerMs"])
         delta_ms = abs(signed_delta_ms)
         action = {
             "t": elapsed_ms,
-            "holdMs": WORLD_BOSS_HOLD_MS,
+            "holdMs": hold_ms,
             "stance": WORLD_BOSS_STANCE,
         }
         matched = delta_ms <= int(window["hitMs"])
-        perfect = matched and delta_ms <= int(window["perfectMs"])
+        perfect = (
+            matched
+            and delta_ms <= int(window["perfectMs"])
+            and WORLD_BOSS_HOLD_MIN_MS <= hold_ms <= WORLD_BOSS_HOLD_MAX_MS
+        )
         diagnostic = {
             "sequence": max(1, int(window_index or 0)),
             "window_id": str(window.get("id") or "")[:120],
@@ -1217,15 +1533,43 @@ class WorldBossMonitor:
             "perfect_ms": int(window["perfectMs"]),
             "account_offset_ms": offset_ms,
             "request_lead_ms": request_lead_ms,
-            "target_ms": target_ms,
+            "drift_lead_ms": drift_ms,
+            "target_ms": strike_ms,
+            "ideal_target_ms": target_ms,
             "sent_elapsed_ms": sent_elapsed_ms,
             "actual_elapsed_ms": elapsed_ms,
             "signed_delta_ms": signed_delta_ms,
-            "wake_lateness_ms": elapsed_ms - target_ms,
-            "hold_ms": WORLD_BOSS_HOLD_MS,
+            "wake_lateness_ms": elapsed_ms - strike_ms,
+            "hold_ms": hold_ms,
             "local_matched": matched,
             "local_perfect": perfect,
         }
+        if charge_required:
+            diagnostic["charge"] = {
+                "requested_elapsed_ms": charge_started_elapsed_ms,
+                "granted": bool(charge_ticket),
+                "error": charge_error,
+                "request": charge_trace,
+            }
+        if charge_required and not charge_ticket:
+            # The browser never sends /hit without a ticket; neither do we.
+            diagnostic.update(
+                {
+                    "server_status": "not_sent",
+                    "error": charge_error or "boss_charge_ticket_missing",
+                    "http_status": 0,
+                }
+            )
+            return {
+                "action": action,
+                "ok": False,
+                "matched": matched,
+                "perfect": False,
+                "accepted_perfect": False,
+                "damage": 0.0,
+                "error": charge_error or "boss_charge_ticket_missing",
+                "diagnostic": diagnostic,
+            }
         if not matched:
             diagnostic.update(
                 {
@@ -1254,8 +1598,9 @@ class WorldBossMonitor:
                     "initData": init_data,
                     "challengeId": challenge_id,
                     "windowId": window["id"],
+                    **({"chargeTicket": charge_ticket} if charge_ticket else {}),
                     "elapsedMs": elapsed_ms,
-                    "holdMs": WORLD_BOSS_HOLD_MS,
+                    "holdMs": hold_ms,
                 },
                 retries=2,
                 timeout=min(self.timeout, 10),
@@ -1263,6 +1608,9 @@ class WorldBossMonitor:
             )
             hit = payload.get("hit") if isinstance(payload.get("hit"), dict) else {}
             accepted_perfect = bool(hit.get("perfect")) if "perfect" in hit else perfect
+            # The server's own measurement is the only signal that sees the real
+            # one-way delay; use it to lead the windows still pending.
+            self._record_drift(hit.get("deltaMs"))
             diagnostic.update(
                 {
                     "request_completed_elapsed_ms": max(
@@ -1359,34 +1707,93 @@ class WorldBossMonitor:
         starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
         battle_start = response_at + starts_in
         request_lead_ms = int(round(round_trip * 500))
+        self._reset_drift()
 
-        if not windows:
+        reveal_log: list[dict[str, Any]] = []
+        reveal_mode = not windows
+        if reveal_mode:
+            # 2026-08-26 protocol: no timetable up front. Windows are revealed one
+            # at a time by /window while the battle runs, so reveal and strike must
+            # run concurrently instead of precomputing every hit.
             try:
-                windows = self._windows(sync)
-            except MiniAppBeastError as parse_exc:
-                error = MiniAppBeastError("boss_windows_invalid")
-                error.details = {
-                    "challenge": _diagnostic_value(challenge),
-                    "begin_response": _diagnostic_value(sync),
-                }
-                raise error
-
-        tasks = [
-            asyncio.create_task(
-                self._hit_window(
+                expected_count = max(1, int(challenge.get("windowCount") or 0))
+            except (TypeError, ValueError):
+                expected_count = 0
+            if expected_count <= 0:
+                expected_count = WORLD_BOSS_WINDOW_LIMIT
+            queue: asyncio.Queue = asyncio.Queue()
+            reveal_task = asyncio.create_task(
+                self._reveal_windows(
                     entry,
                     init_data,
                     session_token,
                     challenge_id,
                     battle_start,
-                    window,
-                    index,
-                    request_lead_ms,
+                    queue,
+                    reveal_log,
+                    expected_count,
                 )
             )
-            for index, window in enumerate(windows, start=1)
-        ]
-        hit_results = await asyncio.gather(*tasks)
+            # Each strike owns its own schedule: one slow /hit (retries plus timeout)
+            # must never push the next window's charge past its moment.
+            hit_tasks: list[asyncio.Task] = []
+            try:
+                while True:
+                    window = await queue.get()
+                    if window is None:
+                        break
+                    windows.append(window)
+                    hit_tasks.append(
+                        asyncio.create_task(
+                            self._hit_window(
+                                entry,
+                                init_data,
+                                session_token,
+                                challenge_id,
+                                battle_start,
+                                window,
+                                len(windows),
+                                request_lead_ms,
+                            )
+                        )
+                    )
+                hit_results = list(await asyncio.gather(*hit_tasks))
+            except BaseException:
+                for task in hit_tasks:
+                    task.cancel()
+                raise
+            finally:
+                reveal_task.cancel()
+                try:
+                    await reveal_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if not windows:
+                error = MiniAppBeastError("boss_windows_invalid")
+                error.details = {
+                    "challenge": _diagnostic_value(challenge),
+                    "begin_response": _diagnostic_value(sync),
+                    "window_reveal": _diagnostic_value(reveal_log[-8:]),
+                }
+                raise error
+        else:
+            tasks = [
+                asyncio.create_task(
+                    self._hit_window(
+                        entry,
+                        init_data,
+                        session_token,
+                        challenge_id,
+                        battle_start,
+                        window,
+                        index,
+                        request_lead_ms,
+                    )
+                )
+                for index, window in enumerate(windows, start=1)
+            ]
+            hit_results = await asyncio.gather(*tasks)
+
         last_end_ms = max(item["centerMs"] + item["hitMs"] for item in windows)
         finish_at = battle_start + last_end_ms / 1000.0 + self.finish_grace_seconds
         finish_wait = finish_at - self.monotonic()
@@ -1476,6 +1883,7 @@ class WorldBossMonitor:
             "strategy": {
                 "stance": WORLD_BOSS_STANCE,
                 "hold_ms": WORLD_BOSS_HOLD_MS,
+                "drift_lead_ms": self._drift_lead_ms(),
                 "account_offset_slot": int(
                     WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0)
                 ),
@@ -1496,6 +1904,25 @@ class WorldBossMonitor:
                 "round_trip_ms": int(round(round_trip * 1000)),
                 "server_starts_in_ms": int(round(server_starts_in_ms)),
                 "applied_wait_ms": int(round(starts_in * 1000)),
+            },
+            "window_reveal": {
+                "mode": "reveal" if reveal_mode else "challenge",
+                "revealed_count": sum(
+                    1 for item in reveal_log if item.get("status") == "revealed"
+                ),
+                "error_count": sum(
+                    1 for item in reveal_log if item.get("status") == "error"
+                ),
+                # Smallest lead observed: below one hold this is why holds shrink.
+                "min_lead_ms": min(
+                    (
+                        int(item.get("lead_ms") or 0)
+                        for item in reveal_log
+                        if item.get("status") == "revealed"
+                    ),
+                    default=None,
+                ),
+                "log": _diagnostic_value(reveal_log),
             },
             "hits": [item.get("diagnostic") or {} for item in hit_results],
             "finish": {

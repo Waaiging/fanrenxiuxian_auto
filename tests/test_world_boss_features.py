@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 from miniapp_beast import MiniAppBeastError
 from world_boss_features import (
+    WORLD_BOSS_DRIFT_MAX_MS,
+    WORLD_BOSS_HOLD_MAX_MS,
+    WORLD_BOSS_HOLD_MIN_MS,
     WORLD_BOSS_HOLD_MS,
     WORLD_BOSS_STANCE,
     WorldBossMonitor,
@@ -251,17 +254,29 @@ class WorldBossFeatureTests(unittest.TestCase):
                         "challenge": {
                             "challengeId": "challenge_fixture",
                             "windows": [
-                                {"id": "w1", "centerMs": 0, "hitMs": 1, "perfectMs": 1}
+                                {
+                                    "id": "w1",
+                                    "centerMs": 2000,
+                                    "hitMs": 460,
+                                    "perfectMs": 150,
+                                }
                             ],
                         },
                     }
                 if path.endswith("/begin"):
                     return {"startsInMs": 0}
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
                 if path.endswith("/hit"):
                     return {"hit": {"damageYi": 123}}
                 if path.endswith("/finish"):
                     return {"result": {"grade": "甲等", "score": 100, "player_hp": 188}}
                 raise AssertionError(path)
+
+            clock = [100.0]
+
+            async def sleep(seconds):
+                clock[0] += max(0.0, seconds)
 
             monitor = WorldBossMonitor(
                 actor,
@@ -269,8 +284,8 @@ class WorldBossFeatureTests(unittest.TestCase):
                 logger=logging.getLogger("world-boss-test"),
                 transport=FakeTransport(42),
                 post_json=post_json,
-                sleep=AsyncMock(),
-                monotonic=lambda: 100.0,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
                 finish_grace_seconds=0,
             )
             entry = extract_world_boss_entry(DummyMessage())
@@ -282,7 +297,15 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             self.assertEqual(outcome["grade"], "甲等")
             self.assertEqual(outcome["hit_count"], 1)
-            self.assertEqual(WORLD_BOSS_HOLD_MS, 1200)
+            # The server judges its own measurement of the hold, which differed
+            # from ours by -714..+493ms on 2026-09-01, so what matters is that the
+            # target keeps headroom inside the legal band rather than its exact
+            # value. Aiming at the ceiling made 20 of 57 server-side holds illegal.
+            self.assertGreater(WORLD_BOSS_HOLD_MS, WORLD_BOSS_HOLD_MIN_MS)
+            self.assertLess(WORLD_BOSS_HOLD_MS, WORLD_BOSS_HOLD_MAX_MS)
+            self.assertGreaterEqual(
+                WORLD_BOSS_HOLD_MAX_MS - WORLD_BOSS_HOLD_MS, 200
+            )
             self.assertEqual(outcome["damage_yi_total"], 123)
             self.assertEqual(outcome["damage_yi_average"], 123)
             self.assertEqual(outcome["damage_yi_hit_count"], 1)
@@ -290,27 +313,29 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertEqual(outcome["perfect_count"], 1)
             self.assertEqual(outcome["local_perfect_count"], 1)
             diagnostics = outcome["diagnostics"]
-            self.assertEqual(diagnostics["version"], 1)
+            self.assertEqual(diagnostics["version"], 2)
             self.assertEqual(diagnostics["player"]["attackBonus"], 1.08)
             self.assertEqual(diagnostics["hits"][0]["server_status"], "accepted")
-            self.assertEqual(diagnostics["hits"][0]["account_offset_ms"], 0)
+            # main sits at slot -4 and the stagger scales with the perfect window.
+            self.assertEqual(diagnostics["hits"][0]["account_offset_ms"], -20)
             serialized = str(diagnostics)
             self.assertNotIn("signed_init_data", serialized)
             self.assertNotIn("session_fixture", serialized)
             self.assertEqual(
                 [path.rsplit("/", 1)[-1] for path, _ in calls],
-                ["start", "begin", "hit", "finish"],
+                ["start", "begin", "charge-start", "hit", "finish"],
             )
             self.assertEqual(calls[0][1]["playerId"], 42)
-            self.assertEqual(calls[2][1]["holdMs"], WORLD_BOSS_HOLD_MS)
-            proof = calls[3][1]["bossProof"]
+            self.assertEqual(calls[2][1]["windowId"], "w1")
+            self.assertEqual(calls[3][1]["chargeTicket"], "charge_fixture")
+            proof = calls[4][1]["bossProof"]
             self.assertEqual(proof["mode"], "qyz_focus_burst_v2")
             self.assertEqual(proof["stance"], WORLD_BOSS_STANCE)
             self.assertEqual(proof["playerHp"], 188)
             self.assertEqual(proof["clientStats"]["perfects"], 1)
             self.assertEqual(
                 proof["actions"],
-                [{"t": 0, "holdMs": WORLD_BOSS_HOLD_MS, "stance": WORLD_BOSS_STANCE}],
+                [{"t": 1980, "holdMs": WORLD_BOSS_HOLD_MS, "stance": WORLD_BOSS_STANCE}],
             )
 
         asyncio.run(run())
@@ -346,6 +371,8 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             async def post_json(origin, path, payload, timeout):
                 calls.append((path, dict(payload)))
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
                 return {"hit": {"damageYi": 9}}
 
             monitor = WorldBossMonitor(
@@ -363,7 +390,7 @@ class WorldBossFeatureTests(unittest.TestCase):
                 100.0,
                 {
                     "id": "w1",
-                    "centerMs": 1000,
+                    "centerMs": 2000,
                     "hitMs": 460,
                     "perfectMs": 150,
                 },
@@ -371,10 +398,17 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["perfect"])
-            elapsed = calls[0][1]["elapsedMs"]
-            self.assertGreaterEqual(elapsed, 975)
-            self.assertLessEqual(elapsed, 985)
+            self.assertEqual(
+                [path.rsplit("/", 1)[-1] for path, _ in calls],
+                ["charge-start", "hit"],
+            )
+            elapsed = calls[1][1]["elapsedMs"]
+            self.assertGreaterEqual(elapsed, 1975)
+            self.assertLessEqual(elapsed, 1985)
             self.assertEqual(result["action"]["t"], elapsed)
+            # Charging one hold ahead of the strike reports the real hold length.
+            self.assertEqual(calls[1][1]["holdMs"], WORLD_BOSS_HOLD_MS)
+            self.assertEqual(result["diagnostic"]["charge"]["granted"], True)
 
         asyncio.run(run())
 
@@ -388,6 +422,8 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             async def post_json(origin, path, payload, timeout):
                 calls.append((path, dict(payload)))
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
                 return {"hit": {"damageYi": 9}}
 
             monitor = WorldBossMonitor(
@@ -405,7 +441,7 @@ class WorldBossFeatureTests(unittest.TestCase):
                 100.0,
                 {
                     "id": "w1",
-                    "centerMs": 1000,
+                    "centerMs": 2000,
                     "hitMs": 460,
                     "perfectMs": 150,
                 },
@@ -415,10 +451,93 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["perfect"])
-            self.assertEqual(calls[0][1]["elapsedMs"], 980)
-            self.assertEqual(result["diagnostic"]["sent_elapsed_ms"], 880)
-            self.assertEqual(result["diagnostic"]["actual_elapsed_ms"], 980)
+            self.assertEqual(calls[1][1]["elapsedMs"], 1980)
+            self.assertEqual(result["diagnostic"]["sent_elapsed_ms"], 1880)
+            self.assertEqual(result["diagnostic"]["actual_elapsed_ms"], 1980)
             self.assertEqual(result["diagnostic"]["signed_delta_ms"], -20)
+
+        asyncio.run(run())
+
+    def test_server_delta_calibrates_lead_once_per_battle(self):
+        """The server's own deltaMs sets the extra lead, and only the first sample.
+
+        deltaMs is unsigned, so a running sum would diverge: after the correction
+        overshoots, the strike lands early, deltaMs grows again, and each further
+        sample would push it earlier still.
+        """
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        self.assertEqual(monitor._drift_lead_ms(), 0)
+
+        monitor._record_drift(160)
+        self.assertEqual(monitor._drift_lead_ms(), 80)
+
+        # Later samples are ignored for the rest of the battle.
+        monitor._record_drift(400)
+        monitor._record_drift(4)
+        self.assertEqual(monitor._drift_lead_ms(), 80)
+
+        # A new battle starts uncorrected: RTT is not stable across events.
+        monitor._reset_drift()
+        self.assertEqual(monitor._drift_lead_ms(), 0)
+
+    def test_drift_ignores_unusable_server_samples(self):
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        for sample in (None, "", "abc", 0, -5, 99999):
+            monitor._record_drift(sample)
+            self.assertEqual(monitor._drift_lead_ms(), 0)
+        # A sample above the cap is clamped, not discarded: the account furthest
+        # off most needs the lead.
+        monitor._record_drift(2 * WORLD_BOSS_DRIFT_MAX_MS + 100)
+        self.assertEqual(monitor._drift_lead_ms(), WORLD_BOSS_DRIFT_MAX_MS)
+        monitor._reset_drift()
+        monitor._record_drift(200)
+        self.assertEqual(monitor._drift_lead_ms(), 100)
+        # A wild reading is a broken measurement and is still refused.
+        monitor._reset_drift()
+        monitor._record_drift(99999)
+        self.assertEqual(monitor._drift_lead_ms(), 0)
+
+    def test_calibrated_drift_leads_the_next_strike(self):
+        async def run():
+            clock = [100.0]
+            sent = []
+
+            async def sleep(seconds):
+                clock[0] += seconds
+
+            async def post_json(origin, path, payload, timeout):
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
+                sent.append(dict(payload))
+                return {"hit": {"damageYi": 1, "deltaMs": 160}}
+
+            monitor = WorldBossMonitor(
+                FakeActor(),
+                "main",
+                post_json=post_json,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+            )
+            entry = extract_world_boss_entry(DummyMessage())
+            window = {"id": "w1", "centerMs": 4000, "hitMs": 620, "perfectMs": 210}
+            first = await monitor._hit_window(
+                entry, "d", "t", "c", 100.0, dict(window), 1, 0
+            )
+            self.assertEqual(first["diagnostic"]["drift_lead_ms"], 0)
+            self.assertEqual(monitor._drift_lead_ms(), 80)
+
+            clock[0] = 100.0
+            second = await monitor._hit_window(
+                entry, "d", "t", "c", 100.0, dict(window), 2, 0
+            )
+            # 80ms earlier than the uncorrected strike, and reported as the arrival
+            # the server is predicted to stamp.
+            self.assertEqual(second["diagnostic"]["drift_lead_ms"], 80)
+            self.assertEqual(
+                second["diagnostic"]["sent_elapsed_ms"],
+                first["diagnostic"]["sent_elapsed_ms"] - 80,
+            )
+            self.assertEqual(sent[-1]["elapsedMs"], sent[0]["elapsedMs"])
 
         asyncio.run(run())
 
@@ -431,6 +550,8 @@ class WorldBossFeatureTests(unittest.TestCase):
 
             async def post_json(origin, path, payload, timeout):
                 clock[0] += 0.48
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
                 error = MiniAppBeastError("boss_hit_outside_window", 409)
                 error.details = {
                     "error": "boss_hit_outside_window",
@@ -506,7 +627,7 @@ class WorldBossFeatureTests(unittest.TestCase):
                 finish_grace_seconds=0,
             )
             accepted = {
-                "action": {"t": 1000, "holdMs": 1200, "stance": "强攻"},
+                "action": {"t": 1000, "holdMs": WORLD_BOSS_HOLD_MS, "stance": "强攻"},
                 "ok": True,
                 "matched": True,
                 "perfect": True,
@@ -515,7 +636,7 @@ class WorldBossFeatureTests(unittest.TestCase):
                 "diagnostic": {"sequence": 1},
             }
             rejected = {
-                "action": {"t": 2000, "holdMs": 1200, "stance": "强攻"},
+                "action": {"t": 2000, "holdMs": WORLD_BOSS_HOLD_MS, "stance": "强攻"},
                 "ok": False,
                 "matched": True,
                 "perfect": True,
