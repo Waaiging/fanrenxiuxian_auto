@@ -42,9 +42,10 @@ WORLD_BOSS_IDENTITY = "主魂"
 # by the two requests' one-way delay difference, which on 2026-09-01 ranged from
 # -714ms to +493ms across 57 strikes. Aiming at 1200 therefore left no headroom
 # below the 1250 ceiling: only 37/57 server-side holds were legal, and ten strikes
-# lost perfect on hold alone despite landing inside the delta tolerance. 1000 is
-# the empirical optimum for that skew distribution at 51/57.
-WORLD_BOSS_HOLD_MS = 1000
+# lost perfect on hold alone despite landing inside the delta tolerance. 750 leaves
+# 500ms headroom for HTTP latency spikes; on 2026-09-02 HTTP peaked at 633ms and
+# caused hold=1403ms server-side with the old 1000ms setting, dropping perfect.
+WORLD_BOSS_HOLD_MS = 750
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
 WORLD_BOSS_RECOVERY_WINDOW_SECONDS = 120
