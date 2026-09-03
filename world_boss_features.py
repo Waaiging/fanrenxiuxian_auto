@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
 import inspect
 import json
 import logging
+import math
 import os
 import re
+import statistics
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -40,19 +43,31 @@ WORLD_BOSS_IDENTITY = "主魂"
 # minted and the hit arriving, and judges *that* against HOLD_MIN/HOLD_MAX -- the
 # holdMs we report is not what decides the grade. Its measurement differs from ours
 # by the two requests' one-way delay difference, which on 2026-09-01 ranged from
-# -714ms to +493ms across 57 strikes. Aiming at 1200 therefore left no headroom
-# below the 1250 ceiling: only 37/57 server-side holds were legal, and ten strikes
-# lost perfect on hold alone despite landing inside the delta tolerance. 750 leaves
-# 500ms headroom for HTTP latency spikes; on 2026-09-02 HTTP peaked at 633ms and
-# caused hold=1403ms server-side with the old 1000ms setting, dropping perfect.
-WORLD_BOSS_HOLD_MS = 750
+# -714ms to +493ms across 57 strikes. 2026-09-03: lowering to 750ms caused massive
+# failure with boss_event_closed errors and perfect rate collapse (62.5%/37.5% vs
+# prior 87.5%/62.5%). Rolling back to 1000ms.
+WORLD_BOSS_HOLD_MS = 1000
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
 WORLD_BOSS_RECOVERY_WINDOW_SECONDS = 120
 WORLD_BOSS_FINISH_GRACE_SECONDS = 2.2
+# Once any account reports ``bossHp <= 0`` the remaining windows are no longer
+# actionable.  Keep a tiny grace period for an in-flight response, then finish
+# immediately instead of waiting for the last (now dead) window.
+WORLD_BOSS_DEFEAT_FINISH_GRACE_SECONDS = 0.35
+# The four workers are separate processes.  A short-lived marker in their
+# shared deployment directory lets a kill observed by one worker stop future
+# charge/hit requests in the other workers too.  The event token fingerprint is
+# part of the filename, so markers from older battles cannot affect a new one.
+WORLD_BOSS_DEFEAT_MARKER_TTL_SECONDS = 15 * 60
 WORLD_BOSS_HISTORY_LIMIT = 20
 WORLD_BOSS_SCAN_LIMIT = 30
 WORLD_BOSS_TIMEOUT_SECONDS = 20
+# Keep deadline-sensitive world-boss HTTP off the process-wide asyncio pool.
+# The pool is created lazily, so tests and disabled monitors do not leave worker
+# threads behind.  A dozen workers covers the four-account burst while bounding
+# the amount of concurrent upstream pressure.
+WORLD_BOSS_HTTP_WORKERS = 12
 WORLD_BOSS_DIAGNOSTIC_VERSION = 2
 
 # 2026-08-26 server format: /start no longer carries a window timetable. Windows
@@ -68,6 +83,16 @@ WORLD_BOSS_MAX_BATTLE_SECONDS = 320.0
 # The server only credits a perfect hit while the reported hold sits in this range.
 WORLD_BOSS_HOLD_MIN_MS = 520
 WORLD_BOSS_HOLD_MAX_MS = 1250
+# The server returns the measured ticket-to-hit hold on accepted strikes.  The
+# difference from our local press-to-release duration is mostly the relative
+# one-way latency of /charge-start and /hit.  Learn that skew during a battle,
+# but keep the correction conservative: one congested request must not move all
+# remaining charges outside the legal band.
+WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS = 700
+WORLD_BOSS_HOLD_SKEW_HISTORY_SIZE = 5
+WORLD_BOSS_HOLD_SKEW_WEIGHT = 0.35
+WORLD_BOSS_HOLD_PLAN_MIN_MS = WORLD_BOSS_HOLD_MIN_MS + 40
+WORLD_BOSS_HOLD_PLAN_MAX_MS = WORLD_BOSS_HOLD_MAX_MS - 40
 # The charge request's latency already counts towards the hold, because the press
 # is the moment the request is launched. On 2026-09-01 charge-start ran 100..381ms
 # at p50 but spiked to 3045..3417ms on four windows, and each spike produced a hold
@@ -76,13 +101,22 @@ WORLD_BOSS_HOLD_MAX_MS = 1250
 # how long a single window may waste.
 WORLD_BOSS_CHARGE_TIMEOUT_SECONDS = 5
 # The server timestamps arrival itself and ignores our reported ``elapsedMs`` for
-# the hit verdict: on 2026-09-01 the local delta averaged -18.6ms while the server
-# reported +160.7ms for the same strikes. Every server delta was positive, so the
-# residual bias after the static RTT/2 lead is a one-way delay we can only learn
-# from the server's own ``deltaMs``. Feed it back with an EWMA and bound it so a
-# single outlier cannot push later strikes early.
-WORLD_BOSS_DRIFT_WEIGHT = 0.5
+# the hit verdict. ``deltaMs`` is an absolute value, however, so it cannot by
+# itself tell us whether a request arrived before or after the centre. Compare
+# the two possible arrival timestamps with the local send-to-response interval
+# and learn a *signed* residual lead. Keep the controller conservative: one
+# congested request must not move all remaining strikes outside the legal band.
+WORLD_BOSS_DRIFT_MIN_MS = -200
 WORLD_BOSS_DRIFT_MAX_MS = 400
+WORLD_BOSS_DRIFT_SAMPLE_MAX_MS = 700
+WORLD_BOSS_DRIFT_HISTORY_SIZE = 5
+WORLD_BOSS_DRIFT_WEIGHT = 0.30
+WORLD_BOSS_DRIFT_LEGACY_WEIGHT = 0.5
+WORLD_BOSS_DRIFT_TOLERANCE_MS = 150
+# Alias kept for callers that describe this as an inference tolerance.
+WORLD_BOSS_DRIFT_INFERENCE_TOLERANCE_MS = WORLD_BOSS_DRIFT_TOLERANCE_MS
+WORLD_BOSS_DRIFT_HIGH_RTT_MS = 500
+WORLD_BOSS_DRIFT_LOW_RTT_WEIGHT = 0.15
 # Treated as "keep waiting", exactly as the Mini App client does.
 WORLD_BOSS_WINDOW_WAIT_ERRORS = {
     "boss_window_not_ready",
@@ -494,6 +528,18 @@ class WorldBossMonitor:
         # ones still pending. Reset per battle: RTT is not stable across events.
         self._drift_ms = 0.0
         self._drift_samples = 0
+        self._drift_history: list[float] = []
+        self._drift_weight_history: list[tuple[float, float]] = []
+        self._drift_direction_counts: dict[str, int] = {
+            "early": 0,
+            "late": 0,
+            "ambiguous": 0,
+            "none": 0,
+        }
+        # Separate from arrival lead: this estimator corrects the duration of
+        # the charge itself so the server's ticket age remains creditable.
+        self._hold_skew_ms = 0.0
+        self._hold_skew_samples: list[float] = []
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -501,11 +547,201 @@ class WorldBossMonitor:
         self._inflight_fingerprints: set[str] = set()
         self._fight_lock = asyncio.Lock()
         self._json_clients: dict[str, _PersistentWorldBossJsonClient] = {}
+        self._boss_defeated = asyncio.Event()
+        self._boss_defeat_reason = ""
+        self._boss_defeat_marker: Path | None = None
+        self._boss_skipped_window_count = 0
+        self._http_executor: ThreadPoolExecutor | None = None
+        try:
+            configured_workers = int(settings.get("http_workers") or WORLD_BOSS_HTTP_WORKERS)
+        except (TypeError, ValueError):
+            configured_workers = WORLD_BOSS_HTTP_WORKERS
+        self._http_workers = max(4, min(32, configured_workers))
+
+    def _world_boss_http_executor(self) -> ThreadPoolExecutor:
+        """Return the per-monitor executor used for blocking Boss HTTP calls."""
+        executor = self._http_executor
+        if executor is None:
+            workers = max(
+                4,
+                min(
+                    32,
+                    int(getattr(self, "_http_workers", WORLD_BOSS_HTTP_WORKERS)),
+                ),
+            )
+            executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix=f"world-boss-{getattr(self, 'account', '') or 'unknown'}",
+            )
+            self._http_executor = executor
+        return executor
 
     def _save(self) -> None:
         saver = getattr(self.actor, "save_state", None)
         if callable(saver):
             saver()
+
+    def _boss_marker_path(self, entry: WorldBossEntry) -> Path:
+        """Return the cross-process lifecycle marker for one battle token."""
+        actor = getattr(self, "actor", None)
+        state_file = str(getattr(actor, "state_file", "") or "").strip()
+        try:
+            base = Path(state_file).resolve().parent if state_file else Path(__file__).resolve().parent
+        except (OSError, RuntimeError, TypeError, ValueError):
+            base = Path(__file__).resolve().parent
+        # ``fingerprint`` is generated locally from the qyz token and is already
+        # a hexadecimal SHA-256 string.  Keep the defensive replacement anyway:
+        # marker paths must never be influenced by an untrusted entry URL.
+        fingerprint = re.sub(r"[^a-fA-F0-9]", "", str(entry.fingerprint or ""))[:64]
+        return base / f".world_boss_defeated_{fingerprint}.json"
+
+    def _prepare_boss_lifecycle(self, entry: WorldBossEntry) -> None:
+        """Reset per-battle stop state and adopt a fresh marker if one exists."""
+        # A few diagnostic callers construct a monitor with ``__new__`` to test
+        # parsing paths. Lazily create the lifecycle fields so those callers
+        # retain the old, network-free behaviour.
+        if not isinstance(getattr(self, "_boss_defeated", None), asyncio.Event):
+            self._boss_defeated = asyncio.Event()
+        if not hasattr(self, "_boss_defeat_marker"):
+            self._boss_defeat_marker = None
+        if not hasattr(self, "_boss_defeat_reason"):
+            self._boss_defeat_reason = ""
+        if not hasattr(self, "_boss_skipped_window_count"):
+            self._boss_skipped_window_count = 0
+        marker = self._boss_marker_path(entry)
+        # ``_participate`` prepares before the challenge handshake and ``_fight``
+        # prepares again for backwards-compatible direct callers. If a local
+        # stop was already observed in between (especially when marker writing
+        # is unavailable), do not clear that signal on the second call.
+        if marker == self._boss_defeat_marker and self._boss_defeated.is_set():
+            self._boss_stop_requested()
+            return
+        self._boss_defeated.clear()
+        self._boss_defeat_reason = ""
+        self._boss_skipped_window_count = 0
+        self._boss_defeat_marker = marker
+        # A previous process may have learned that this exact event was already
+        # settled while this worker was starting.  Reusing a fresh marker avoids
+        # another burst of doomed /charge-start requests.
+        self._boss_stop_requested()
+
+    def _boss_stop_requested(self) -> bool:
+        """Check local and shared death state without doing network I/O."""
+        defeated = getattr(self, "_boss_defeated", None)
+        if isinstance(defeated, asyncio.Event) and defeated.is_set():
+            return True
+        marker = getattr(self, "_boss_defeat_marker", None)
+        if marker is None:
+            return False
+        try:
+            stat = marker.stat()
+            age = max(0.0, time.time() - float(stat.st_mtime))
+            if age > WORLD_BOSS_DEFEAT_MARKER_TTL_SECONDS:
+                marker.unlink(missing_ok=True)
+                return False
+            with marker.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                return False
+            reason = str(data.get("reason") or "boss_defeated_remote").strip()
+            self._boss_defeat_reason = reason[:80]
+            if not isinstance(getattr(self, "_boss_defeated", None), asyncio.Event):
+                self._boss_defeated = asyncio.Event()
+            self._boss_defeated.set()
+            return True
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+
+    def _mark_boss_defeated(self, reason: Any = "boss_defeated", boss_hp: Any = None) -> None:
+        """Publish a best-effort local/cross-process stop signal."""
+        normalized_reason = str(reason or "boss_defeated").strip()[:80] or "boss_defeated"
+        self._boss_defeat_reason = normalized_reason
+        self._boss_defeated.set()
+        marker = self._boss_defeat_marker
+        if marker is None:
+            return
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            hp = self._finite_ms(boss_hp)
+            document = {
+                "version": 1,
+                "reason": normalized_reason,
+                "boss_hp": int(round(hp)) if hp is not None else None,
+                "updated_epoch": time.time(),
+            }
+            temp = marker.with_name(
+                f"{marker.name}.{os.getpid()}.{id(self)}.tmp"
+            )
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(document, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+            os.replace(temp, marker)
+        except (OSError, TypeError, ValueError):
+            # The local asyncio event still protects this worker if a read-only
+            # filesystem or a transient race prevents publishing the marker.
+            try:
+                if "temp" in locals() and temp.exists():
+                    temp.unlink()
+            except OSError:
+                pass
+
+    def _boss_stopped_error(self) -> MiniAppBeastError:
+        """Return the stable error used when another worker ended the battle.
+
+        A shared defeat marker is an expected lifecycle outcome, not malformed
+        challenge data.  Keeping a dedicated helper also ensures callers never
+        accidentally expose the marker path or any token-bearing payload.
+        """
+        error = MiniAppBeastError("boss_event_closed")
+        error.details = {
+            "reason": self._boss_defeat_reason or "boss_defeated_local",
+            "shared_stop": True,
+        }
+        return error
+
+    async def _wait_for_boss_stop(self) -> None:
+        """Poll the shared marker while a future window is sleeping."""
+        while not self._boss_defeated.is_set():
+            if self._boss_stop_requested():
+                return
+            await asyncio.sleep(0.05)
+
+    async def _sleep_until(self, target: float) -> bool:
+        """Sleep until ``target`` or wake early when another worker wins."""
+        remaining = float(target) - self.monotonic()
+        if remaining <= 0:
+            return not self._boss_stop_requested()
+        # Deterministic test clocks (and a few integrations) provide a custom
+        # sleep coroutine that advances virtual time synchronously. Running that
+        # coroutine in a second task lets several concurrent waits advance the
+        # same clock one after another, making every later window appear late.
+        # Preserve the original single-await semantics for custom sleepers; the
+        # production default below is the interruptible real-time path.
+        if self.sleep is not asyncio.sleep:
+            if self._boss_stop_requested():
+                return False
+            await self.sleep(remaining)
+            return not self._boss_stop_requested()
+        if self._boss_stop_requested() or self._boss_defeat_marker is None:
+            if self._boss_stop_requested():
+                return False
+            await self.sleep(remaining)
+            return not self._boss_stop_requested()
+
+        sleep_task = asyncio.create_task(self.sleep(remaining))
+        stop_task = asyncio.create_task(self._wait_for_boss_stop())
+        try:
+            done, _ = await asyncio.wait(
+                (sleep_task, stop_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return stop_task not in done
+        finally:
+            for task in (sleep_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleep_task, stop_task, return_exceptions=True)
 
     def _history(self) -> list[dict[str, Any]]:
         state = getattr(self.actor, "state", None)
@@ -619,6 +855,12 @@ class WorldBossMonitor:
         for client in self._json_clients.values():
             client.close()
         self._json_clients.clear()
+        executor, self._http_executor = self._http_executor, None
+        if executor is not None:
+            # Do not wait on a cancelled network future in the event-loop thread.
+            # Requests have their own finite timeout; interpreter shutdown will
+            # join any still-running worker naturally.
+            executor.shutdown(wait=False, cancel_futures=True)
         remover = getattr(self.client, "remove_event_handler", None)
         if callable(remover):
             if self._new_handler is not None:
@@ -909,7 +1151,17 @@ class WorldBossMonitor:
         retries: int = 0,
         timeout: int | None = None,
         trace: dict[str, Any] | None = None,
+        time_critical: bool | None = None,
     ) -> dict[str, Any]:
+        # Keep backwards compatibility for callers/tests that invoke /start
+        # directly, while making the policy explicit for every other endpoint:
+        # only entry/start may bypass a stale shared circuit.  Window polling,
+        # charge tickets, hits and finish all use the ordinary breaker.
+        if time_critical is None:
+            normalized_path = str(path or "").rstrip("/").casefold()
+            time_critical = normalized_path.endswith(
+                "/api/miniapp/xianxia-world-boss/start"
+            )
         trace_started_at = self.monotonic()
         if trace is not None:
             trace.update(
@@ -923,14 +1175,13 @@ class WorldBossMonitor:
             try:
                 request_timeout = int(timeout or self.timeout)
                 if self.post_json is None:
-                    # World-boss events are one-shot and time-critical, so the
-                    # first request must bypass a stale shared outage circuit.
                     result = await _post_json(
                         origin,
                         path,
                         payload,
                         request_timeout,
-                        time_critical=True,
+                        time_critical=bool(time_critical),
+                        executor=self._world_boss_http_executor(),
                     )
                 else:
                     result = await _post_json(
@@ -1014,6 +1265,8 @@ class WorldBossMonitor:
         *,
         trace: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if self._boss_stop_requested():
+            raise self._boss_stopped_error()
         return await self._request(
             entry.origin,
             "/api/miniapp/xianxia-world-boss/start",
@@ -1025,6 +1278,7 @@ class WorldBossMonitor:
             retries=2,
             timeout=min(self.timeout, 12),
             trace=trace,
+            time_critical=True,
         )
 
     async def _wait_for_challenge(
@@ -1040,6 +1294,8 @@ class WorldBossMonitor:
         entry_requests: list[dict[str, Any]] = []
         entry_request_count = 0
         while self.monotonic() < deadline:
+            if self._boss_stop_requested():
+                raise self._boss_stopped_error()
             request_trace: dict[str, Any] = {}
             entry_request_count += 1
             try:
@@ -1053,6 +1309,9 @@ class WorldBossMonitor:
             except MiniAppCircuitOpenError:
                 raise
             except MiniAppBeastError as exc:
+                if exc.code == "boss_event_closed":
+                    self._mark_boss_defeated("boss_event_closed")
+                    raise
                 observation = {
                     "sequence": entry_request_count,
                     "request": request_trace,
@@ -1073,6 +1332,9 @@ class WorldBossMonitor:
                 details["entry_requests"] = entry_requests
                 exc.details = details
                 raise
+
+            if self._boss_stop_requested():
+                raise self._boss_stopped_error()
 
             boss_observation = payload.get("boss") if isinstance(payload.get("boss"), dict) else {}
             observation = {
@@ -1283,6 +1545,15 @@ class WorldBossMonitor:
             # Bound on windows actually revealed: error entries share reveal_log but
             # must never consume the budget of windows still to come.
             while revealed_count < min(expected_count, WORLD_BOSS_WINDOW_LIMIT):
+                if self._boss_stop_requested():
+                    reveal_log.append(
+                        {
+                            "sequence": revealed_count + 1,
+                            "status": "stopped",
+                            "reason": self._boss_defeat_reason or "boss_defeated_local",
+                        }
+                    )
+                    break
                 now = self.monotonic()
                 if now >= deadline:
                     break
@@ -1305,10 +1576,14 @@ class WorldBossMonitor:
                         retries=0,
                         timeout=min(self.timeout, 5),
                         trace=trace,
+                        time_critical=False,
                     )
                 except MiniAppCircuitOpenError:
                     raise
                 except MiniAppBeastError as exc:
+                    if exc.code == "boss_event_closed":
+                        self._mark_boss_defeated("boss_event_closed")
+                        break
                     if exc.code not in WORLD_BOSS_WINDOW_WAIT_ERRORS:
                         error_budget -= 1
                         reveal_log.append(
@@ -1334,6 +1609,16 @@ class WorldBossMonitor:
                     continue
 
                 received_at = self.monotonic()
+                if self._boss_stop_requested():
+                    reveal_log.append(
+                        {
+                            "sequence": revealed_count + 1,
+                            "status": "stopped",
+                            "reason": self._boss_defeat_reason or "boss_defeated_local",
+                            "request": trace,
+                        }
+                    )
+                    break
                 window = self._revealed_window(data.get("window"))
                 try:
                     reported_count = int(data.get("windowCount") or 0)
@@ -1377,44 +1662,511 @@ class WorldBossMonitor:
             await queue.put(None)
 
     def _reset_drift(self) -> None:
-        """Forget the previous battle's lateness. RTT is not stable across events."""
+        """Forget the previous battle's arrival skew.
+
+        Network conditions are not stable across events, so the estimator is
+        intentionally scoped to one battle.  Keeping the history here (rather
+        than in actor state) also prevents a stale event from shifting a fresh
+        set of windows.
+        """
         self._drift_ms = 0.0
         self._drift_samples = 0
+        self._drift_history = []
+        self._drift_weight_history = []
+        self._drift_direction_counts = {
+            "early": 0,
+            "late": 0,
+            "ambiguous": 0,
+            "none": 0,
+        }
+
+    def _reset_hold_skew(self) -> None:
+        """Forget the previous battle's charge/hit latency skew."""
+        self._hold_skew_ms = 0.0
+        self._hold_skew_samples = []
+
+    @staticmethod
+    def _numeric_hold(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed) or parsed < 0:
+            return None
+        return parsed
+
+    @classmethod
+    def _server_hold_ms(cls, hit: Any) -> float | None:
+        """Read the server-measured hold across known response spellings."""
+        if not isinstance(hit, dict):
+            return None
+        for key in ("holdMs", "serverHoldMs", "server_hold_ms"):
+            if key in hit:
+                value = cls._numeric_hold(hit.get(key))
+                if value is not None:
+                    return value
+        return None
+
+    def _record_hold_skew(self, server_hold_ms: Any, local_hold_ms: Any) -> float | None:
+        """Update a robust EWMA of ``server hold - local hold``.
+
+        The server measurement is authoritative, but a single HTTP spike can
+        make the difference very large.  Keep a short median history first,
+        then move the estimate toward that median with a low gain.  Boundary
+        holds (forced to the minimum/maximum after a late reveal) are omitted
+        because they describe the reveal race more than normal request skew.
+        """
+        server = self._numeric_hold(server_hold_ms)
+        local = self._numeric_hold(local_hold_ms)
+        if server is None or local is None:
+            return None
+        if local <= WORLD_BOSS_HOLD_MIN_MS + 20 or local >= WORLD_BOSS_HOLD_MAX_MS - 20:
+            return None
+        sample = server - local
+        if not math.isfinite(sample):
+            return None
+        sample = max(
+            -float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS),
+            min(float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS), sample),
+        )
+        self._hold_skew_samples.append(sample)
+        del self._hold_skew_samples[:-WORLD_BOSS_HOLD_SKEW_HISTORY_SIZE]
+        robust = float(statistics.median(self._hold_skew_samples))
+        weight = max(0.0, min(1.0, float(WORLD_BOSS_HOLD_SKEW_WEIGHT)))
+        if len(self._hold_skew_samples) == 1:
+            self._hold_skew_ms = robust * weight
+        else:
+            self._hold_skew_ms = (
+                (1.0 - weight) * float(self._hold_skew_ms) + weight * robust
+            )
+        self._hold_skew_ms = max(
+            -float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS),
+            min(float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS), self._hold_skew_ms),
+        )
+        return sample
+
+    def _planned_hold_ms(self) -> int:
+        """Choose the next local hold while retaining legal server headroom."""
+        correction = max(
+            -float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS),
+            min(float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS), self._hold_skew_ms),
+        )
+        planned = float(WORLD_BOSS_HOLD_MS) - correction
+        planned = max(float(WORLD_BOSS_HOLD_PLAN_MIN_MS), planned)
+        planned = min(float(WORLD_BOSS_HOLD_PLAN_MAX_MS), planned)
+        return int(round(planned))
 
     def _drift_lead_ms(self) -> int:
-        """Extra lead, in ms, learned from the server's own ``deltaMs``."""
+        """Return the signed residual lead learned during this battle.
+
+        Positive values schedule the request earlier; negative values schedule
+        it later.  The old implementation discarded negative values, which made
+        an early first strike feed back into even earlier strikes.
+        """
         if self._drift_samples <= 0:
             return 0
-        return int(round(max(0.0, min(WORLD_BOSS_DRIFT_MAX_MS, self._drift_ms))))
+        return int(
+            round(
+                max(
+                    float(WORLD_BOSS_DRIFT_MIN_MS),
+                    min(float(WORLD_BOSS_DRIFT_MAX_MS), float(self._drift_ms)),
+                )
+            )
+        )
 
-    def _record_drift(self, server_delta_ms: Any) -> None:
-        """Calibrate the lead once, from the first strike the server accepted.
+    @staticmethod
+    def _finite_ms(value: Any) -> float | None:
+        """Parse a finite millisecond value without imposing a sign."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
 
-        ``deltaMs`` is unsigned, so it cannot distinguish early from late. Feeding
-        every sample back would therefore diverge: once the correction overshoots,
-        the strike lands early, ``deltaMs`` grows again, and a running sum would
-        keep pushing it earlier. Calibrate from the first sample only, while the
-        lead is still the static RTT/2 and the sign is known to be late (the
-        2026-09-01 run needed a full RTT of lead on all four accounts), then hold
-        that value for the rest of the battle.
+    @staticmethod
+    def _rounded_ms(value: Any) -> int | float | None:
+        """Keep diagnostics compact while retaining sub-millisecond readings."""
+        parsed = WorldBossMonitor._finite_ms(value)
+        if parsed is None:
+            return None
+        rounded = round(parsed, 3)
+        if abs(rounded - round(rounded)) < 1e-9:
+            return int(round(rounded))
+        return rounded
+
+    @staticmethod
+    def _weighted_median(samples: list[tuple[float, float]]) -> float | None:
+        """Return a weighted median while tolerating malformed replay entries."""
+        cleaned: list[tuple[float, float]] = []
+        for value, weight in samples:
+            try:
+                value_f = float(value)
+                weight_f = float(weight)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value_f) or not math.isfinite(weight_f) or weight_f <= 0:
+                continue
+            cleaned.append((value_f, weight_f))
+        if not cleaned:
+            return None
+        cleaned.sort(key=lambda item: item[0])
+        total = sum(item[1] for item in cleaned)
+        threshold = total / 2.0
+        cumulative = 0.0
+        for value, weight in cleaned:
+            cumulative += weight
+            if cumulative >= threshold:
+                return value
+        return cleaned[-1][0]
+
+    @classmethod
+    def _infer_arrival_direction(
+        cls,
+        server_delta_ms: Any,
+        center_ms: Any,
+        sent_elapsed_ms: Any = None,
+        request_completed_elapsed_ms: Any = None,
+        *,
+        request_lead_ms: Any = 0,
+        account_offset_ms: Any = 0,
+        request_interval_ms: Any = None,
+        tolerance_ms: Any = None,
+    ) -> dict[str, Any] | None:
+        """Infer the sign hidden by the server's unsigned ``deltaMs``.
+
+        The server reports ``abs(arrival - center)``.  A completed request gives
+        us a local interval in which the arrival almost certainly occurred.  If
+        exactly one of ``center - delta`` and ``center + delta`` falls in that
+        interval (with a small clock/network tolerance), its sign is useful.  If
+        both candidates fit, selecting one would manufacture a feedback loop, so
+        the sample is explicitly marked ambiguous and ignored by the estimator.
+
+        ``request_interval_ms`` is accepted as a convenience for diagnostics and
+        replay tools; normal callers pass the two endpoint arguments.
         """
+        delta = cls._finite_ms(server_delta_ms)
+        center = cls._finite_ms(center_ms)
+        if (
+            delta is None
+            or center is None
+            or delta <= 0
+            or delta > float(WORLD_BOSS_DRIFT_SAMPLE_MAX_MS)
+        ):
+            return None
+
+        interval_values: tuple[float, float] | None = None
+        if request_interval_ms is not None:
+            raw_interval: Any = request_interval_ms
+            if isinstance(raw_interval, dict):
+                raw_interval = (
+                    raw_interval.get("start_ms", raw_interval.get("start")),
+                    raw_interval.get("end_ms", raw_interval.get("end")),
+                )
+            if isinstance(raw_interval, (list, tuple)) and len(raw_interval) >= 2:
+                start = cls._finite_ms(raw_interval[0])
+                end = cls._finite_ms(raw_interval[1])
+                if start is not None and end is not None:
+                    interval_values = (start, end)
+        if interval_values is None:
+            start = cls._finite_ms(sent_elapsed_ms)
+            end = cls._finite_ms(request_completed_elapsed_ms)
+            if start is None or end is None:
+                return None
+            interval_values = (start, end)
+
+        interval_start = min(interval_values)
+        interval_end = max(interval_values)
+        tolerance = cls._finite_ms(
+            WORLD_BOSS_DRIFT_TOLERANCE_MS if tolerance_ms is None else tolerance_ms
+        )
+        if tolerance is None:
+            tolerance = float(WORLD_BOSS_DRIFT_TOLERANCE_MS)
+        tolerance = max(0.0, min(1000.0, tolerance))
+
+        early_candidate = center - delta
+        late_candidate = center + delta
+        # Prefer a candidate that is strictly inside the measured interval.  The
+        # tolerance is only a soft fallback for clock granularity and response
+        # bookkeeping; otherwise a broad interval would turn an exact late
+        # candidate plus a barely-soft early candidate into an unnecessary
+        # ambiguous sample.
+        early_strict = interval_start <= early_candidate <= interval_end
+        late_strict = interval_start <= late_candidate <= interval_end
+        early_soft = interval_start - tolerance <= early_candidate <= interval_end + tolerance
+        late_soft = interval_start - tolerance <= late_candidate <= interval_end + tolerance
+
+        if early_strict and not late_strict:
+            direction = "early"
+            candidate = early_candidate
+            signed_arrival = -delta
+            reason = "only_early_candidate_in_interval"
+        elif late_strict and not early_strict:
+            direction = "late"
+            candidate = late_candidate
+            signed_arrival = delta
+            reason = "only_late_candidate_in_interval"
+        elif early_strict and late_strict:
+            direction = "ambiguous"
+            candidate = None
+            signed_arrival = None
+            reason = "both_candidates_in_interval"
+        elif early_soft and not late_soft:
+            direction = "early"
+            candidate = early_candidate
+            signed_arrival = -delta
+            reason = "only_early_candidate_with_tolerance"
+        elif late_soft and not early_soft:
+            direction = "late"
+            candidate = late_candidate
+            signed_arrival = delta
+            reason = "only_late_candidate_with_tolerance"
+        elif early_soft and late_soft:
+            direction = "ambiguous"
+            candidate = None
+            signed_arrival = None
+            reason = "both_candidates_with_tolerance"
+        else:
+            direction = "none"
+            candidate = None
+            signed_arrival = None
+            reason = "no_candidate_in_interval"
+
+        rtt_ms = max(0.0, interval_end - interval_start)
+        confidence = 0.0
+        if candidate is not None:
+            distance = max(interval_start - candidate, candidate - interval_end, 0.0)
+            confidence = 1.0 if tolerance <= 0 else max(
+                0.0, min(1.0, 1.0 - distance / tolerance)
+            )
+
+        # Long responses make the interval broad and the candidate sign less
+        # trustworthy.  Do not throw the sample away entirely; reduce its EWMA
+        # gain so a later normal response can correct it quickly.
+        if rtt_ms <= float(WORLD_BOSS_DRIFT_HIGH_RTT_MS):
+            rtt_factor = 1.0
+        else:
+            excess = rtt_ms - float(WORLD_BOSS_DRIFT_HIGH_RTT_MS)
+            rtt_factor = max(
+                float(WORLD_BOSS_DRIFT_LOW_RTT_WEIGHT),
+                1.0 - excess / 500.0 * (1.0 - float(WORLD_BOSS_DRIFT_LOW_RTT_WEIGHT)),
+            )
+        sample_weight = confidence * rtt_factor if candidate is not None else 0.0
+
+        lead = cls._finite_ms(request_lead_ms)
+        if lead is None:
+            lead = 0.0
+        sent_anchor = cls._finite_ms(sent_elapsed_ms)
+        if sent_anchor is None:
+            sent_anchor = interval_values[0]
+        account_offset = cls._finite_ms(account_offset_ms)
+        if account_offset is None:
+            account_offset = 0.0
+        sample_drift = None
+        clamped_sample_drift = None
+        if candidate is not None:
+            # ``request_lead`` is the static RTT/2 compensation.  Subtracting it
+            # from the observed candidate gives the residual that belongs in the
+            # signed drift term, independent of the account's intentional offset.
+            sample_drift = candidate - sent_anchor - lead
+            clamped_sample_drift = max(
+                float(WORLD_BOSS_DRIFT_MIN_MS),
+                min(float(WORLD_BOSS_DRIFT_MAX_MS), sample_drift),
+            )
+
+        return {
+            "direction": direction,
+            "arrival_direction": direction,
+            "reason": reason,
+            "confidence": round(float(confidence), 3),
+            "direction_confidence": round(float(confidence), 3),
+            "sample_weight": round(float(sample_weight), 3),
+            "rtt_factor": round(float(rtt_factor), 3),
+            "delta_ms": cls._rounded_ms(delta),
+            "early_candidate_ms": cls._rounded_ms(early_candidate),
+            "late_candidate_ms": cls._rounded_ms(late_candidate),
+            "early_in_interval": bool(early_strict),
+            "late_in_interval": bool(late_strict),
+            "early_with_tolerance": bool(early_soft),
+            "late_with_tolerance": bool(late_soft),
+            "candidate_ms": cls._rounded_ms(candidate),
+            "signed_arrival_offset_ms": cls._rounded_ms(signed_arrival),
+            "signed_delta_ms": cls._rounded_ms(signed_arrival),
+            "arrival_offset_after_account_ms": cls._rounded_ms(
+                signed_arrival - account_offset
+                if signed_arrival is not None
+                else None
+            ),
+            "request_interval_ms": [
+                cls._rounded_ms(interval_start),
+                cls._rounded_ms(interval_end),
+            ],
+            "request_rtt_ms": cls._rounded_ms(rtt_ms),
+            "tolerance_ms": cls._rounded_ms(tolerance),
+            "sample_drift_ms": cls._rounded_ms(sample_drift),
+            "clamped_sample_drift_ms": cls._rounded_ms(clamped_sample_drift),
+            # This is the correction applied by the controller.  It is kept
+            # separate from ``sample_drift_ms`` (the raw network residual) so
+            # diagnostics can show both the physical estimate and the signed
+            # early/late feedback decision.
+            "controller_correction_ms": cls._rounded_ms(
+                max(
+                    float(WORLD_BOSS_DRIFT_MIN_MS),
+                    min(
+                        float(WORLD_BOSS_DRIFT_MAX_MS),
+                        signed_arrival - account_offset
+                        if signed_arrival is not None
+                        else 0.0,
+                    ),
+                )
+                if signed_arrival is not None
+                else None
+            ),
+        }
+
+    def _record_drift_legacy(self, server_delta_ms: Any) -> None:
+        """Compatibility path for older callers without request timing context."""
         if self._drift_samples > 0:
             return
-        try:
-            sample = float(server_delta_ms)
-        except (TypeError, ValueError):
-            return
-        if sample <= 0 or sample > 5000:
+        sample = self._finite_ms(server_delta_ms)
+        if sample is None or sample <= 0 or sample > 5000:
             # Zero needs no correction; a wild value is a broken reading, not a
             # measurement, and would poison every remaining window of the battle.
             return
-        # Clamp rather than discard: the account furthest off most needs the lead.
-        # Discarding anything above the cap gave the worst-offset account (main, a
-        # first sample of 450.7ms) no correction at all, which is backwards.
+        # Preserve the behaviour of the pre-context API for integrations and old
+        # tests.  New combat calls always use the signed contextual estimator.
         self._drift_ms = min(
-            float(WORLD_BOSS_DRIFT_MAX_MS), sample * WORLD_BOSS_DRIFT_WEIGHT
+            float(WORLD_BOSS_DRIFT_MAX_MS),
+            sample * float(WORLD_BOSS_DRIFT_LEGACY_WEIGHT),
         )
+        self._drift_history = [self._drift_ms]
+        self._drift_weight_history = [(self._drift_ms, 1.0)]
         self._drift_samples = 1
+
+    def _record_drift(
+        self,
+        server_delta_ms: Any,
+        center_ms: Any = None,
+        sent_elapsed_ms: Any = None,
+        request_completed_elapsed_ms: Any = None,
+        *,
+        request_lead_ms: Any = 0,
+        account_offset_ms: Any = 0,
+        request_interval_ms: Any = None,
+        tolerance_ms: Any = None,
+    ) -> dict[str, Any] | None:
+        """Record a contextual signed drift sample and return its diagnostics.
+
+        Calls that provide no timing context retain the old one-shot API.  This
+        matters for third-party callers and lets a zero-duration test transport
+        continue to exercise the old compatibility behaviour; real HTTP calls
+        have a non-zero send-to-response interval and use the directional path.
+        """
+        contextual = any(
+            value is not None
+            for value in (
+                center_ms,
+                sent_elapsed_ms,
+                request_completed_elapsed_ms,
+                request_interval_ms,
+            )
+        )
+        if not contextual:
+            self._record_drift_legacy(server_delta_ms)
+            return None
+
+        inference = self._infer_arrival_direction(
+            server_delta_ms,
+            center_ms,
+            sent_elapsed_ms,
+            request_completed_elapsed_ms,
+            request_lead_ms=request_lead_ms,
+            account_offset_ms=account_offset_ms,
+            request_interval_ms=request_interval_ms,
+            tolerance_ms=tolerance_ms,
+        )
+        if inference is None:
+            return None
+
+        direction = str(inference.get("direction") or "none")
+        counts = getattr(self, "_drift_direction_counts", None)
+        if not isinstance(counts, dict):
+            counts = {}
+            self._drift_direction_counts = counts
+        counts[direction] = int(counts.get(direction, 0) or 0) + 1
+
+        before = float(self._drift_ms)
+        inference["drift_before_ms"] = self._rounded_ms(before)
+        inference["drift_after_ms"] = self._rounded_ms(before)
+        inference["update_applied"] = False
+        inference["update_mode"] = "skipped"
+
+        # A zero-duration fake transport has no directional evidence.  Retain
+        # the historical first-sample behaviour solely for that compatibility
+        # case; production HTTP requests never complete at the send instant.
+        request_rtt = self._finite_ms(inference.get("request_rtt_ms"))
+        if request_rtt is not None and request_rtt <= 0:
+            self._record_drift_legacy(server_delta_ms)
+            inference["drift_after_ms"] = self._rounded_ms(self._drift_ms)
+            inference["update_applied"] = self._drift_samples > 0
+            inference["update_mode"] = "legacy_zero_rtt"
+            return inference
+
+        # Drive the feedback from the inferred sign.  A request that arrived
+        # early must reduce the lead; one that arrived late must increase it.
+        # The raw residual above is still retained for observability, but using
+        # it as the sole target can have the opposite sign when an intentional
+        # account offset is large.
+        sample = self._finite_ms(inference.get("controller_correction_ms"))
+        sample_weight = self._finite_ms(inference.get("sample_weight"))
+        if (
+            direction not in {"early", "late"}
+            or sample is None
+            or sample_weight is None
+            or sample_weight <= 0.05
+        ):
+            return inference
+
+        history = getattr(self, "_drift_history", None)
+        if not isinstance(history, list):
+            history = []
+            self._drift_history = history
+        history.append(float(sample))
+        del history[:-WORLD_BOSS_DRIFT_HISTORY_SIZE]
+        weighted_history = getattr(self, "_drift_weight_history", None)
+        if not isinstance(weighted_history, list):
+            weighted_history = [(float(value), 1.0) for value in history]
+            self._drift_weight_history = weighted_history
+        weighted_history.append((float(sample), max(0.01, float(sample_weight))))
+        del weighted_history[:-WORLD_BOSS_DRIFT_HISTORY_SIZE]
+        robust_value = self._weighted_median(weighted_history)
+        if robust_value is None:
+            robust_value = float(statistics.median(history))
+        robust = float(robust_value)
+        base_weight = max(0.05, min(0.6, float(WORLD_BOSS_DRIFT_WEIGHT)))
+        gain = max(0.05, min(0.5, base_weight * sample_weight))
+        # Treat the robust signed value as the next estimate, rather than adding
+        # every delta as an integral.  That lets the estimate move back through
+        # zero after an early sample follows a late one, while still guaranteeing
+        # that an early target lowers the current lead and a late target raises it.
+        self._drift_ms = before + gain * (robust - before)
+        self._drift_ms = max(
+            float(WORLD_BOSS_DRIFT_MIN_MS),
+            min(float(WORLD_BOSS_DRIFT_MAX_MS), self._drift_ms),
+        )
+        self._drift_samples += 1
+        inference.update(
+            {
+                "update_applied": True,
+                "update_mode": "median_ewma",
+                "gain": round(float(gain), 3),
+                "robust_sample_ms": self._rounded_ms(robust),
+                "history_size": len(history),
+                "drift_after_ms": self._rounded_ms(self._drift_ms),
+            }
+        )
+        return inference
 
     def _hit_offset_ms(self, window: dict[str, Any]) -> int:
         """Stagger requests while keeping arrival inside the server window."""
@@ -1422,6 +2174,82 @@ class WorldBossMonitor:
         perfect_ms = max(1, int(window.get("perfectMs") or 1))
         step = min(5, max(0, (perfect_ms - 10) // 8))
         return slot * step
+
+    @classmethod
+    def _boss_hp_from_response(
+        cls,
+        payload: Any,
+        hit: Any = None,
+    ) -> float | None:
+        """Extract the authoritative Boss HP from known hit response shapes."""
+        candidates: list[dict[str, Any]] = []
+        if isinstance(hit, dict):
+            candidates.append(hit)
+        if isinstance(payload, dict):
+            # Current API puts the value in ``hit.bossHp``; older revisions put
+            # a compact Boss object beside the hit.  Do not inspect arbitrary
+            # ``hp`` keys at the top level, which could be the player's HP.
+            for key in ("boss", "bossState", "bossInfo", "worldBoss"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    candidates.append(value)
+            result = payload.get("result")
+            if isinstance(result, dict):
+                for key in ("boss", "bossState", "bossInfo", "worldBoss"):
+                    value = result.get(key)
+                    if isinstance(value, dict):
+                        candidates.append(value)
+        for item in candidates:
+            for key in ("bossHp", "bossHP", "boss_hp", "remainingBossHp"):
+                if key in item:
+                    value = cls._finite_ms(item.get(key))
+                    if value is not None:
+                        return value
+            # ``hp`` is only accepted inside an explicitly named Boss object,
+            # never from the generic response or the hit object.
+            if item is not hit and "hp" in item:
+                value = cls._finite_ms(item.get("hp"))
+                if value is not None:
+                    return value
+        return None
+
+    def _skipped_hit_result(
+        self,
+        window: dict[str, Any],
+        window_index: int,
+        *,
+        reason: str = "boss_defeated_local",
+    ) -> dict[str, Any]:
+        """Build a proof-safe result for a window skipped after Boss death."""
+        self._boss_skipped_window_count += 1
+        center_ms = int(window.get("centerMs") or 0)
+        hit_ms = int(window.get("hitMs") or 460)
+        perfect_ms = int(window.get("perfectMs") or 150)
+        diagnostic = {
+            "sequence": max(1, int(window_index or 0)),
+            "window_id": str(window.get("id") or "")[:120],
+            "center_ms": center_ms,
+            "hit_ms": hit_ms,
+            "perfect_ms": perfect_ms,
+            "server_status": "skipped",
+            "error": reason,
+            "http_status": 0,
+            "skip_reason": self._boss_defeat_reason or reason,
+        }
+        return {
+            # No action is appended to the final proof: the browser stops the
+            # battle as soon as the room closes, so synthetic post-death presses
+            # must not dilute the server-side proof or local perfect counters.
+            "action": None,
+            "ok": False,
+            "matched": False,
+            "perfect": False,
+            "accepted_perfect": False,
+            "damage": 0.0,
+            "error": reason,
+            "skipped": True,
+            "diagnostic": diagnostic,
+        }
 
     async def _hit_window(
         self,
@@ -1435,11 +2263,15 @@ class WorldBossMonitor:
         request_lead_ms: int = 0,
         charge_required: bool = True,
     ) -> dict[str, Any]:
+        if self._boss_stop_requested():
+            return self._skipped_hit_result(window, window_index)
         offset_ms = self._hit_offset_ms(window)
         drift_ms = self._drift_lead_ms()
+        initial_drift_ms = drift_ms
         target_ms = max(
             0, int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms
         )
+        initial_target_ms = target_ms
         target = battle_start + target_ms / 1000.0
 
         # 2026-08-26 protocol: /hit is rejected without a chargeTicket, and the
@@ -1449,12 +2281,28 @@ class WorldBossMonitor:
         charge_error = ""
         charge_trace: dict[str, Any] = {}
         charge_started_elapsed_ms = -1
-        hold_ms = WORLD_BOSS_HOLD_MS
+        planned_hold_ms = self._planned_hold_ms() if charge_required else 0
+        hold_skew_estimate_ms = int(round(self._hold_skew_ms))
+        hold_ms = planned_hold_ms
         if charge_required:
-            charge_at = target - WORLD_BOSS_HOLD_MS / 1000.0
-            charge_wait = charge_at - self.monotonic()
-            if charge_wait > 0:
-                await self.sleep(charge_wait)
+            charge_at = target - planned_hold_ms / 1000.0
+            if not await self._sleep_until(charge_at):
+                return self._skipped_hit_result(window, window_index)
+            # A previous window may have completed while this one was waiting
+            # for its charge slot.  Refresh the signed lead immediately before
+            # minting the ticket so feedback can still move a not-yet-started
+            # charge later (or mark an already-late one accurately).
+            refreshed_drift_ms = self._drift_lead_ms()
+            if refreshed_drift_ms != drift_ms:
+                drift_ms = refreshed_drift_ms
+                target_ms = max(
+                    0,
+                    int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms,
+                )
+                target = battle_start + target_ms / 1000.0
+                refreshed_charge_at = target - planned_hold_ms / 1000.0
+                if not await self._sleep_until(refreshed_charge_at):
+                    return self._skipped_hit_result(window, window_index)
             charge_started_at = self.monotonic()
             charge_started_elapsed_ms = max(
                 0, int(round((charge_started_at - battle_start) * 1000))
@@ -1472,14 +2320,37 @@ class WorldBossMonitor:
                     retries=0,
                     timeout=min(self.timeout, WORLD_BOSS_CHARGE_TIMEOUT_SECONDS),
                     trace=charge_trace,
+                    time_critical=False,
                 )
                 charge_ticket = str(charge_payload.get("chargeTicket") or "").strip()
+                charge_boss_hp = self._boss_hp_from_response(charge_payload)
+                if charge_boss_hp is not None and charge_boss_hp <= 0:
+                    self._mark_boss_defeated("boss_defeated", charge_boss_hp)
                 if not charge_ticket:
                     charge_error = "boss_charge_ticket_missing"
             except MiniAppCircuitOpenError:
                 raise
             except Exception as exc:
                 charge_error = _error_code(exc)
+                if charge_error == "boss_event_closed":
+                    self._mark_boss_defeated("boss_event_closed")
+
+        if self._boss_stop_requested():
+            return self._skipped_hit_result(window, window_index)
+
+        # The charge request itself can take long enough for another strike's
+        # response to update the controller.  Re-read once before releasing so
+        # a delayed target is still reachable when the new estimate moves it
+        # later.  If the new target is already in the past, releasing now is the
+        # only honest option and the local/server diagnostics expose the miss.
+        refreshed_drift_ms = self._drift_lead_ms()
+        if refreshed_drift_ms != drift_ms:
+            drift_ms = refreshed_drift_ms
+            target_ms = max(
+                0,
+                int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms,
+            )
+            target = battle_start + target_ms / 1000.0
 
         strike_ms = target_ms
         if charge_required and charge_ticket and charge_started_elapsed_ms >= 0:
@@ -1495,10 +2366,11 @@ class WorldBossMonitor:
                     strike_ms = min_hold_strike_ms
         target = battle_start + strike_ms / 1000.0
 
-        wait = target - self.monotonic()
-        if wait > 0:
-            await self.sleep(wait)
+        if not await self._sleep_until(target):
+            return self._skipped_hit_result(window, window_index)
         sent_elapsed_ms = max(0, int(round((self.monotonic() - battle_start) * 1000)))
+        if self._boss_stop_requested():
+            return self._skipped_hit_result(window, window_index)
         # Estimated arrival on the server clock. Both terms are network
         # compensations of the same kind: request_lead_ms is half the measured
         # /begin round trip, drift_ms is the residual one-way delay the server's
@@ -1535,8 +2407,12 @@ class WorldBossMonitor:
             "account_offset_ms": offset_ms,
             "request_lead_ms": request_lead_ms,
             "drift_lead_ms": drift_ms,
+            "initial_drift_lead_ms": initial_drift_ms,
+            "planned_hold_ms": planned_hold_ms,
+            "hold_skew_estimate_ms": hold_skew_estimate_ms,
             "target_ms": strike_ms,
             "ideal_target_ms": target_ms,
+            "initial_target_ms": initial_target_ms,
             "sent_elapsed_ms": sent_elapsed_ms,
             "actual_elapsed_ms": elapsed_ms,
             "signed_delta_ms": signed_delta_ms,
@@ -1591,6 +2467,8 @@ class WorldBossMonitor:
             }
         request_trace: dict[str, Any] = {}
         try:
+            if self._boss_stop_requested():
+                return self._skipped_hit_result(window, window_index)
             payload = await self._request(
                 entry.origin,
                 "/api/miniapp/xianxia-world-boss/hit",
@@ -1606,18 +2484,33 @@ class WorldBossMonitor:
                 retries=2,
                 timeout=min(self.timeout, 10),
                 trace=request_trace,
+                time_critical=False,
             )
             hit = payload.get("hit") if isinstance(payload.get("hit"), dict) else {}
+            boss_hp = self._boss_hp_from_response(payload, hit)
+            if boss_hp is not None and boss_hp <= 0:
+                self._mark_boss_defeated("boss_defeated", boss_hp)
             accepted_perfect = bool(hit.get("perfect")) if "perfect" in hit else perfect
-            # The server's own measurement is the only signal that sees the real
-            # one-way delay; use it to lead the windows still pending.
-            self._record_drift(hit.get("deltaMs"))
+            server_hold_ms = self._server_hold_ms(hit)
+            hold_skew_sample_ms = self._record_hold_skew(server_hold_ms, hold_ms)
+            request_completed_elapsed_ms = max(
+                0,
+                int((self.monotonic() - battle_start) * 1000),
+            )
+            # ``deltaMs`` is unsigned.  Use the local send-to-response interval
+            # to decide whether the accepted strike was early or late before
+            # feeding its residual into the signed controller.
+            arrival_inference = self._record_drift(
+                hit.get("deltaMs"),
+                center_ms=window.get("centerMs"),
+                sent_elapsed_ms=sent_elapsed_ms,
+                request_completed_elapsed_ms=request_completed_elapsed_ms,
+                request_lead_ms=request_lead_ms,
+                account_offset_ms=offset_ms,
+            )
             diagnostic.update(
                 {
-                    "request_completed_elapsed_ms": max(
-                        0,
-                        int((self.monotonic() - battle_start) * 1000),
-                    ),
+                    "request_completed_elapsed_ms": request_completed_elapsed_ms,
                     "request": request_trace,
                     "server_status": "accepted",
                     "http_status": 200,
@@ -1625,6 +2518,15 @@ class WorldBossMonitor:
                     "server_hit": _diagnostic_value(hit),
                 }
             )
+            if server_hold_ms is not None:
+                diagnostic["server_hold_ms"] = server_hold_ms
+            if hold_skew_sample_ms is not None:
+                diagnostic["hold_skew_sample_ms"] = hold_skew_sample_ms
+                diagnostic["next_planned_hold_ms"] = self._planned_hold_ms()
+            if arrival_inference is not None:
+                diagnostic["arrival_inference"] = _diagnostic_value(
+                    arrival_inference
+                )
             return {
                 "action": action,
                 "ok": True,
@@ -1638,6 +2540,8 @@ class WorldBossMonitor:
             raise
         except Exception as exc:
             status = int(getattr(exc, "status", 0) or 0)
+            if _error_code(exc) == "boss_event_closed":
+                self._mark_boss_defeated("boss_event_closed")
             diagnostic.update(
                 {
                     "request_completed_elapsed_ms": max(
@@ -1673,6 +2577,12 @@ class WorldBossMonitor:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         challenge = payload.get("challenge") or {}
+        self._prepare_boss_lifecycle(entry)
+        if self._boss_stop_requested():
+            # Another account may have finished this exact event while this
+            # worker was waiting for its challenge. Do not call /begin or turn
+            # the expected lifecycle stop into ``boss_windows_invalid``.
+            raise self._boss_stopped_error()
         challenge_id = str(challenge.get("challengeId") or "").strip()
         if not challenge_id:
             raise MiniAppBeastError("boss_challenge_missing")
@@ -1701,6 +2611,7 @@ class WorldBossMonitor:
             retries=1,
             timeout=min(self.timeout, 10),
             trace=begin_trace,
+            time_critical=False,
         )
         response_at = self.monotonic()
         round_trip = max(0.0, response_at - started_request_at)
@@ -1709,6 +2620,7 @@ class WorldBossMonitor:
         battle_start = response_at + starts_in
         request_lead_ms = int(round(round_trip * 500))
         self._reset_drift()
+        self._reset_hold_skew()
 
         reveal_log: list[dict[str, Any]] = []
         reveal_mode = not windows
@@ -1743,6 +2655,10 @@ class WorldBossMonitor:
                     window = await queue.get()
                     if window is None:
                         break
+                    if self._boss_stop_requested():
+                        # The reveal coroutine will notice the same marker and
+                        # terminate; do not schedule any more doomed windows.
+                        break
                     windows.append(window)
                     hit_tasks.append(
                         asyncio.create_task(
@@ -1770,6 +2686,8 @@ class WorldBossMonitor:
                 except (asyncio.CancelledError, Exception):
                     pass
             if not windows:
+                if self._boss_stop_requested():
+                    raise self._boss_stopped_error()
                 error = MiniAppBeastError("boss_windows_invalid")
                 error.details = {
                     "challenge": _diagnostic_value(challenge),
@@ -1799,12 +2717,25 @@ class WorldBossMonitor:
         finish_at = battle_start + last_end_ms / 1000.0 + self.finish_grace_seconds
         finish_wait = finish_at - self.monotonic()
         if finish_wait > 0:
-            await self.sleep(finish_wait)
+            # A known defeat closes the room immediately.  Keep only a short
+            # drain for a response already in flight; otherwise retain the
+            # original browser-compatible wait through the last window.
+            if self._boss_stop_requested():
+                finish_at = min(
+                    finish_at,
+                    self.monotonic() + WORLD_BOSS_DEFEAT_FINISH_GRACE_SECONDS,
+                )
+            await self._sleep_until(finish_at)
 
-        actions = [item["action"] for item in hit_results]
+        actions = [
+            item["action"]
+            for item in hit_results
+            if isinstance(item, dict) and isinstance(item.get("action"), dict)
+        ]
         actions.sort(key=lambda item: item["t"])
         successful_hits = sum(1 for item in hit_results if item["ok"])
-        failed_hits = len(hit_results) - successful_hits
+        skipped_hits = sum(1 for item in hit_results if item.get("skipped"))
+        failed_hits = len(hit_results) - successful_hits - skipped_hits
         local_matched_hits = sum(1 for item in hit_results if item.get("matched"))
         local_perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
         accepted_perfect_hits = sum(
@@ -1823,7 +2754,7 @@ class WorldBossMonitor:
         )
         hit_error_counts: dict[str, int] = {}
         for item in hit_results:
-            if item.get("ok"):
+            if item.get("ok") or item.get("skipped"):
                 continue
             code = str(item.get("error") or "unknown")
             hit_error_counts[code] = hit_error_counts.get(code, 0) + 1
@@ -1831,9 +2762,13 @@ class WorldBossMonitor:
         player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
         player_hp = max(1, int(player.get("maxHp") or 100))
         elapsed_ms = max(0, int((self.monotonic() - battle_start) * 1000))
+        last_action_ms = max(
+            (int(item.get("t") or 0) for item in actions),
+            default=0,
+        )
         duration_ms = max(
             last_end_ms + int(self.finish_grace_seconds * 1000),
-            actions[-1]["t"],
+            last_action_ms,
             elapsed_ms,
         )
         proof = {
@@ -1868,6 +2803,7 @@ class WorldBossMonitor:
             },
             retries=1,
             trace=finish_trace,
+            time_critical=False,
         )
         result = finished.get("result") if isinstance(finished.get("result"), dict) else {}
         player = _diagnostic_value(player)
@@ -1884,10 +2820,21 @@ class WorldBossMonitor:
             "strategy": {
                 "stance": WORLD_BOSS_STANCE,
                 "hold_ms": WORLD_BOSS_HOLD_MS,
+                "planned_hold_ms": self._planned_hold_ms(),
+                "hold_skew_estimate_ms": int(round(self._hold_skew_ms)),
+                "hold_skew_sample_count": len(self._hold_skew_samples),
                 "drift_lead_ms": self._drift_lead_ms(),
+                "drift_sample_count": int(self._drift_samples),
+                "drift_history_ms": [
+                    self._rounded_ms(value) for value in self._drift_history[-WORLD_BOSS_DRIFT_HISTORY_SIZE:]
+                ],
+                "drift_direction_counts": dict(self._drift_direction_counts),
                 "account_offset_slot": int(
                     WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0)
                 ),
+                "boss_defeated": self._boss_defeated.is_set(),
+                "boss_defeat_reason": self._boss_defeat_reason,
+                "skipped_after_defeat": int(self._boss_skipped_window_count),
             },
             "player": player if isinstance(player, dict) else {},
             "boss": _diagnostic_value(boss),
@@ -1940,6 +2887,7 @@ class WorldBossMonitor:
             "local_matched_count": local_matched_hits,
             "local_perfect_count": local_perfect_hits,
             "failed_hit_count": failed_hits,
+            "skipped_hit_count": skipped_hits,
             "hit_error_counts": hit_error_counts,
             "window_count": len(windows),
             "damage_yi_total": damage_yi_total,
@@ -1955,6 +2903,12 @@ class WorldBossMonitor:
         identity: str = WORLD_BOSS_IDENTITY,
         init_data: str = "",
     ) -> dict[str, Any]:
+        # Prepare the lifecycle before the potentially long webview/challenge
+        # handshake. This lets a worker that starts late notice a sibling's
+        # shared defeat marker without issuing more /start requests.
+        self._prepare_boss_lifecycle(entry)
+        if self._boss_stop_requested():
+            raise self._boss_stopped_error()
         if not init_data:
             init_data = await request_webview_init_data(
                 self.client,
@@ -2090,6 +3044,7 @@ class WorldBossMonitor:
         total = int(outcome.get("window_count") or 0)
         hp = int(outcome.get("player_hp") or 0)
         failed = int(outcome.get("failed_hit_count") or 0)
+        skipped = int(outcome.get("skipped_hit_count") or 0)
         summary = f"{grade} {score}分；命中 {hits}/{total}，完美 {perfects}，余血 {hp}"
         local_perfects = int(outcome.get("local_perfect_count") or perfects)
         if local_perfects != perfects:
@@ -2105,6 +3060,8 @@ class WorldBossMonitor:
                 )
                 if details:
                     summary += f"（{details}）"
+        if skipped:
+            summary += f"；Boss结束后跳过 {skipped} 次无效请求"
         damage_summary = WorldBossMonitor._damage_summary(outcome)
         if damage_summary:
             summary += f"；{damage_summary}"
@@ -2130,4 +3087,3 @@ async def install_world_boss_monitor(
     await monitor.install()
     setattr(actor, "_world_boss_monitor", monitor)
     return monitor
-

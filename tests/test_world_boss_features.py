@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from miniapp_beast import MiniAppBeastError
 from world_boss_features import (
     WORLD_BOSS_DRIFT_MAX_MS,
+    WORLD_BOSS_DRIFT_MIN_MS,
     WORLD_BOSS_HOLD_MAX_MS,
     WORLD_BOSS_HOLD_MIN_MS,
     WORLD_BOSS_HOLD_MS,
@@ -497,6 +500,112 @@ class WorldBossFeatureTests(unittest.TestCase):
         monitor._record_drift(99999)
         self.assertEqual(monitor._drift_lead_ms(), 0)
 
+    def test_contextual_drift_uses_direction_and_signed_lead(self):
+        early_monitor = WorldBossMonitor(FakeActor(), "main")
+        early = early_monitor._record_drift(
+            120,
+            center_ms=1000,
+            sent_elapsed_ms=860,
+            request_completed_elapsed_ms=930,
+            request_lead_ms=0,
+        )
+        self.assertEqual(early["direction"], "early")
+        self.assertLess(early_monitor._drift_lead_ms(), 0)
+        self.assertGreaterEqual(early_monitor._drift_lead_ms(), WORLD_BOSS_DRIFT_MIN_MS)
+
+        late_monitor = WorldBossMonitor(FakeActor(), "main")
+        late = late_monitor._record_drift(
+            120,
+            center_ms=1000,
+            sent_elapsed_ms=1080,
+            request_completed_elapsed_ms=1150,
+            request_lead_ms=0,
+        )
+        self.assertEqual(late["direction"], "late")
+        self.assertGreater(late_monitor._drift_lead_ms(), 0)
+
+    def test_contextual_drift_skips_ambiguous_candidates(self):
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        inference = monitor._record_drift(
+            100,
+            center_ms=1000,
+            sent_elapsed_ms=850,
+            request_completed_elapsed_ms=1150,
+            request_lead_ms=0,
+        )
+        self.assertEqual(inference["direction"], "ambiguous")
+        self.assertFalse(inference["update_applied"])
+        self.assertEqual(monitor._drift_samples, 0)
+        self.assertEqual(monitor._drift_lead_ms(), 0)
+
+    def test_contextual_drift_downweights_long_http_intervals(self):
+        normal = WorldBossMonitor(FakeActor(), "main")
+        normal_result = normal._record_drift(
+            200,
+            center_ms=1000,
+            sent_elapsed_ms=1190,
+            request_completed_elapsed_ms=1250,
+            request_lead_ms=0,
+        )
+        slow = WorldBossMonitor(FakeActor(), "main")
+        slow_result = slow._record_drift(
+            200,
+            center_ms=1000,
+            sent_elapsed_ms=1150,
+            request_completed_elapsed_ms=2050,
+            request_lead_ms=0,
+        )
+        self.assertEqual(normal_result["direction"], "late")
+        self.assertEqual(slow_result["direction"], "late")
+        self.assertLess(slow_result["gain"], normal_result["gain"])
+        self.assertLess(slow._drift_lead_ms(), normal._drift_lead_ms())
+
+    def test_contextual_drift_long_outlier_does_not_replace_short_history(self):
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        first = monitor._record_drift(
+            120,
+            center_ms=1000,
+            sent_elapsed_ms=1080,
+            request_completed_elapsed_ms=1150,
+        )
+        before = monitor._drift_lead_ms()
+        # The late candidate is unique, but the 900ms response interval is a
+        # low-confidence observation and should not replace the normal sample in
+        # the weighted median.
+        second = monitor._record_drift(
+            200,
+            center_ms=1000,
+            sent_elapsed_ms=1150,
+            request_completed_elapsed_ms=2050,
+        )
+        self.assertTrue(first["update_applied"])
+        self.assertTrue(second["update_applied"])
+        self.assertLess(second["gain"], first["gain"])
+        self.assertEqual(second["robust_sample_ms"], first["controller_correction_ms"])
+        self.assertGreater(monitor._drift_lead_ms(), before)
+
+    def test_server_hold_feedback_adjusts_only_the_next_charge_plan(self):
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        self.assertEqual(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MS)
+
+        # A server hold 200ms longer than the local press-to-release duration
+        # should make the next charge shorter, while retaining legal headroom.
+        sample = monitor._record_hold_skew(1200, WORLD_BOSS_HOLD_MS)
+        self.assertEqual(sample, 200)
+        self.assertLess(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MS)
+        self.assertGreaterEqual(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MIN_MS)
+        self.assertLessEqual(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MAX_MS)
+
+        monitor._reset_hold_skew()
+        self.assertEqual(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MS)
+
+    def test_server_hold_feedback_ignores_late_reveal_boundary_samples(self):
+        monitor = WorldBossMonitor(FakeActor(), "main")
+        # 520ms is the emergency minimum used when a window is revealed late;
+        # it should not drag the normal plan toward a misleading correction.
+        self.assertIsNone(monitor._record_hold_skew(900, WORLD_BOSS_HOLD_MIN_MS))
+        self.assertEqual(monitor._planned_hold_ms(), WORLD_BOSS_HOLD_MS)
+
     def test_calibrated_drift_leads_the_next_strike(self):
         async def run():
             clock = [100.0]
@@ -818,6 +927,245 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertFalse(queued)
             self.assertFalse(monitor._tasks)
             self.assertEqual(actor.state.get("world_boss_events"), None)
+
+        asyncio.run(run())
+
+    def test_boss_hp_response_marks_local_lifecycle_stop(self):
+        async def run():
+            calls = []
+            clock = [100.0]
+
+            async def sleep(seconds):
+                clock[0] += max(0.0, float(seconds))
+
+            async def post_json(origin, path, payload, timeout):
+                calls.append(path.rsplit("/", 1)[-1])
+                if path.endswith("/charge-start"):
+                    return {"chargeTicket": "charge_fixture"}
+                if path.endswith("/hit"):
+                    return {
+                        "hit": {
+                            "bossHp": 0,
+                            "deltaMs": 4,
+                            "perfect": True,
+                            "damageYi": 10,
+                        }
+                    }
+                raise AssertionError(path)
+
+            actor = FakeActor()
+            with tempfile.TemporaryDirectory() as directory:
+                actor.state_file = f"{directory}/state.json"
+                monitor = WorldBossMonitor(
+                    actor,
+                    "main",
+                    post_json=post_json,
+                    sleep=sleep,
+                    monotonic=lambda: clock[0],
+                )
+                entry = extract_world_boss_entry(DummyMessage())
+                monitor._prepare_boss_lifecycle(entry)
+                result = await monitor._hit_window(
+                    entry,
+                    "signed_init_data",
+                    "session_fixture",
+                    "challenge_fixture",
+                    100.0,
+                    {
+                        "id": "w1",
+                        "centerMs": 3000,
+                        "hitMs": 460,
+                        "perfectMs": 150,
+                    },
+                    1,
+                )
+                self.assertTrue(result["ok"])
+                self.assertTrue(monitor._boss_defeated.is_set())
+                self.assertEqual(calls, ["charge-start", "hit"])
+
+                skipped = await monitor._hit_window(
+                    entry,
+                    "signed_init_data",
+                    "session_fixture",
+                    "challenge_fixture",
+                    100.0,
+                    {
+                        "id": "w2",
+                        "centerMs": 6000,
+                        "hitMs": 460,
+                        "perfectMs": 150,
+                    },
+                    2,
+                )
+                self.assertTrue(skipped["skipped"])
+                self.assertEqual(skipped["error"], "boss_defeated_local")
+                self.assertEqual(calls, ["charge-start", "hit"])
+
+        asyncio.run(run())
+
+    def test_boss_defeat_marker_is_shared_between_monitors(self):
+        entry = extract_world_boss_entry(DummyMessage())
+        with tempfile.TemporaryDirectory() as directory:
+            actor1 = FakeActor()
+            actor2 = FakeActor()
+            actor1.state_file = f"{directory}/state_main.json"
+            actor2.state_file = f"{directory}/state_sub.json"
+            first = WorldBossMonitor(actor1, "main")
+            second = WorldBossMonitor(actor2, "sub")
+            first._prepare_boss_lifecycle(entry)
+            second._prepare_boss_lifecycle(entry)
+            self.assertFalse(second._boss_stop_requested())
+            first._mark_boss_defeated("boss_defeated", 0)
+            self.assertTrue(second._boss_stop_requested())
+            self.assertEqual(second._boss_defeat_reason, "boss_defeated")
+
+    def test_shared_defeat_before_first_window_is_event_closed_not_invalid(self):
+        async def run():
+            entry = extract_world_boss_entry(DummyMessage())
+            with tempfile.TemporaryDirectory() as directory:
+                winner_actor = FakeActor()
+                loser_actor = FakeActor()
+                winner_actor.state_file = f"{directory}/state_main.json"
+                loser_actor.state_file = f"{directory}/state_sub.json"
+                winner = WorldBossMonitor(winner_actor, "main")
+                calls = []
+
+                async def post_json(origin, path, payload, timeout):
+                    calls.append(path)
+                    raise AssertionError("a stopped battle must not call the API")
+
+                loser = WorldBossMonitor(
+                    loser_actor,
+                    "sub",
+                    post_json=post_json,
+                    sleep=AsyncMock(),
+                    monotonic=lambda: 100.0,
+                    finish_grace_seconds=0,
+                )
+                winner._prepare_boss_lifecycle(entry)
+                winner._mark_boss_defeated("boss_defeated", 0)
+
+                with self.assertRaises(MiniAppBeastError) as raised:
+                    await loser._fight(
+                        entry,
+                        "signed_init_data",
+                        "session_fixture",
+                        {
+                            "player": {"maxHp": 100},
+                            "boss": {"phase": 1},
+                            "challenge": {"challengeId": "challenge_fixture"},
+                        },
+                    )
+                self.assertEqual(raised.exception.code, "boss_event_closed")
+                self.assertNotIn("boss_windows_invalid", str(raised.exception))
+                self.assertEqual(calls, [])
+
+        asyncio.run(run())
+
+    def test_concurrent_window_wait_wakes_when_sibling_marks_defeat(self):
+        async def run():
+            entry = extract_world_boss_entry(DummyMessage())
+            with tempfile.TemporaryDirectory() as directory:
+                winner_actor = FakeActor()
+                waiting_actor = FakeActor()
+                winner_actor.state_file = f"{directory}/state_main.json"
+                waiting_actor.state_file = f"{directory}/state_sub.json"
+                winner = WorldBossMonitor(winner_actor, "main")
+                waiting = WorldBossMonitor(waiting_actor, "sub")
+                winner._prepare_boss_lifecycle(entry)
+                waiting._prepare_boss_lifecycle(entry)
+
+                async def mark_after_scheduler_turn():
+                    await asyncio.sleep(0.05)
+                    winner._mark_boss_defeated("boss_defeated", 0)
+
+                battle_start = time.monotonic()
+                waiting_task = asyncio.create_task(
+                    waiting._hit_window(
+                        entry,
+                        "signed_init_data",
+                        "session_fixture",
+                        "challenge_fixture",
+                        battle_start,
+                        {
+                            "id": "w1",
+                            "centerMs": 5000,
+                            "hitMs": 460,
+                            "perfectMs": 150,
+                        },
+                        1,
+                    )
+                )
+                marker_task = asyncio.create_task(mark_after_scheduler_turn())
+                result, _ = await asyncio.gather(waiting_task, marker_task)
+                self.assertTrue(result["skipped"])
+                self.assertEqual(result["error"], "boss_defeated_local")
+                self.assertTrue(waiting._boss_defeated.is_set())
+
+        asyncio.run(run())
+
+    def test_skipped_windows_do_not_require_a_proof_action(self):
+        async def run():
+            actor = FakeActor()
+            with tempfile.TemporaryDirectory() as directory:
+                actor.state_file = f"{directory}/state.json"
+                monitor = WorldBossMonitor(
+                    actor,
+                    "main",
+                    post_json=None,
+                    sleep=AsyncMock(),
+                    monotonic=lambda: 100.0,
+                    finish_grace_seconds=0,
+                )
+                accepted = {
+                    "action": {"t": 1000, "holdMs": WORLD_BOSS_HOLD_MS, "stance": "强攻"},
+                    "ok": True,
+                    "matched": True,
+                    "perfect": True,
+                    "accepted_perfect": True,
+                    "damage": 10,
+                    "diagnostic": {"sequence": 1},
+                }
+                skipped = monitor._skipped_hit_result(
+                    {"id": "w2", "centerMs": 2000, "hitMs": 460, "perfectMs": 150},
+                    2,
+                )
+                monitor._hit_window = AsyncMock(side_effect=[accepted, skipped])
+                calls = []
+
+                async def post_json(origin, path, payload, timeout):
+                    calls.append((path, payload))
+                    if path.endswith("/begin"):
+                        return {"startsInMs": 0}
+                    if path.endswith("/finish"):
+                        return {"result": {"grade": "甲等", "score": 100, "player_hp": 100}}
+                    raise AssertionError(path)
+
+                monitor.post_json = post_json
+                entry = extract_world_boss_entry(DummyMessage())
+                outcome = await monitor._fight(
+                    entry,
+                    "signed_init_data",
+                    "session_fixture",
+                    {
+                        "player": {"maxHp": 100},
+                        "boss": {"phase": 1},
+                        "challenge": {
+                            "challengeId": "challenge_fixture",
+                            "windows": [
+                                {"id": "w1", "centerMs": 1000, "hitMs": 460, "perfectMs": 150},
+                                {"id": "w2", "centerMs": 2000, "hitMs": 460, "perfectMs": 150},
+                            ],
+                        },
+                    },
+                )
+                self.assertEqual(outcome["hit_count"], 1)
+                self.assertEqual(outcome["failed_hit_count"], 0)
+                self.assertEqual(outcome["skipped_hit_count"], 1)
+                self.assertEqual(
+                    next(payload for path, payload in calls if path.endswith("/finish"))["bossProof"]["actions"],
+                    [accepted["action"]],
+                )
 
         asyncio.run(run())
 
