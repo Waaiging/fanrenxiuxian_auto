@@ -4,47 +4,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  diagnose:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Read remote world boss state (diagnostic only)
+      - name: Deploy over SSH
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
-          set -euo pipefail
           mkdir -p ~/.ssh
           install -m 600 /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 ubuntu@54.241.169.42 'bash -s' <<'REMOTE'
-          set -u
-          cd /home/ubuntu/deploy
-          echo "REMOTE_DATE=$(date -Is)"
-          echo "REMOTE_GIT=$(git rev-parse HEAD 2>/dev/null || true)"
-          stat -c 'FILE %y %s %n' world_boss_features.py miniapp_beast.py state_main.json state_sub.json state_xiaohao.json state_waaiging.json 2>/dev/null || true
-          echo '--- PROCESS ---'
-          pgrep -af 'intelligent_cultivator.py|sub_cultivator.py|cultivator_xiaohao.py|cultivator_waaiging.py|dashboard_server.py' || true
-          echo '--- WORLD BOSS STATES ---'
-          python3 - <<'PY'
-          import json
-          for fn in ('state_main.json','state_sub.json','state_xiaohao.json','state_waaiging.json'):
-              print('###',fn)
-              try: d=json.load(open(fn,encoding='utf-8'))
-              except Exception as e: print('READ_ERROR',type(e).__name__,e); continue
-              evs=d.get('world_boss_events') or []
-              print('last_status=',d.get('world_boss_last_status'),'last_updated=',d.get('world_boss_last_updated_at'),'count=',len(evs))
-              for e in evs[-3:]:
-                  print('EVENT',json.dumps({k:e.get(k) for k in ('message_id','fingerprint','status','started_at','updated_at','completed_at','source','identities','error')},ensure_ascii=False))
-                  for r in e.get('identity_results') or []:
-                      diag=r.get('diagnostics') or {}
-                      out={k:r.get(k) for k in ('identity','status','grade','score','hit_count','perfect_count','failed_hit_count','hit_error_counts','window_count','error')}
-                      out['failure_keys']=sorted((diag.get('failure') or {}).keys()) if isinstance(diag,dict) else []
-                      for key in ('clock_sync','window_reveal','strategy','finish'):
-                          val=diag.get(key) if isinstance(diag,dict) else None
-                          if isinstance(val,dict): out[key]={k:v for k,v in val.items() if k not in ('attempts','entry_requests','log','hits','server_result')}
-                      print('RESULT',json.dumps(out,ensure_ascii=False)[:6000])
-          PY
-          echo '--- WORLD BOSS LOGS ---'
-          for f in cultivator.log sub_cultivator.log cultivator_xiaohao.log cultivator_waaiging.log intelligent_stdout.log sub_stdout.log xiaohao_stdout.log waaiging_stdout.log dashboard_server.log; do
-              if [ -f "$f" ]; then echo "### $f"; grep -a -E '青元子世界 Boss|世界.?Boss|world.?boss|turnstile|boss_(event|window|challenge|token)|初始化失败' "$f" | tail -n 100 || true; fi
-          done
-          REMOTE
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 ubuntu@54.241.169.42 "cd /home/ubuntu/deploy && git fetch origin main && git reset --hard origin/main && /home/ubuntu/deploy/venv/bin/python -m py_compile world_boss_features.py tests/test_world_boss_features.py && tmux respawn-pane -k -t xiuxian:0 'cd /home/ubuntu/deploy && source /home/ubuntu/deploy/venv/bin/activate && python3 intelligent_cultivator.py' && tmux respawn-pane -k -t xiuxian:1 'cd /home/ubuntu/deploy && source /home/ubuntu/deploy/venv/bin/activate && python3 sub_cultivator.py' && tmux respawn-pane -k -t xiuxian:2 'cd /home/ubuntu/deploy && source /home/ubuntu/deploy/venv/bin/activate && python3 cultivator_xiaohao.py' && sleep 3 && git rev-parse HEAD && pgrep -af 'intelligent_cultivator.py|sub_cultivator.py|cultivator_xiaohao.py'"
