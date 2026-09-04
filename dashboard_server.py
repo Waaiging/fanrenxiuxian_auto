@@ -41,12 +41,14 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
 from automation_settings import (
+    DEFAULT_SUB_YINLUO_IDENTITY,
     MINIAPP_FISHING_BAITS,
     MINIAPP_FISHING_CHUMS,
     MINIAPP_FISHING_PONDS,
     MULAN_SUPPORT_MODES,
     SUB_YINLUO_IDENTITY,
     automation_dashboard_payload,
+    canonical_automation_identity,
     current_sub_yinluo_identity,
     current_xiaohao_taiyi_identity,
     miniapp_beast_abyss_settings,
@@ -352,7 +354,7 @@ ACCOUNT_PROFILE_USERNAMES = {
     "main": {
         "主魂": {"weeguu"},
         "无咎子": {"wuxinglinggen"},
-        "缘生子": {"kulipabp"},
+        "玄续子": {"kulipabp"},
         "素缘子": {"oldeinstein"},
     },
     "sub": {
@@ -373,13 +375,51 @@ ACCOUNT_PROFILE_USERNAMES = {
 }
 MULAN_SUPPORT_COMMANDS = tuple(f".支援慕兰 {mode}" for mode in MULAN_SUPPORT_MODES)
 
+def stable_sub_avatar_identity(state, slot_name):
+    """Resolve the live Dao name for a stable sub avatar slot (寻真子 -> 寒续尘)."""
+    from automation_settings import STABLE_SUB_AVATAR_SLOTS
+    for player_id, slot in STABLE_SUB_AVATAR_SLOTS.items():
+        if slot != slot_name:
+            continue
+        if not isinstance(state, dict):
+            return ""
+        player_names = state.get("avatar_dao_names_by_player_id")
+        if isinstance(player_names, dict):
+            current = str(player_names.get(str(player_id)) or "").strip()
+            if current and current != "一缕残魂":
+                return current
+    return ""
+
+
 def account_profile_usernames(account, state=None):
     """Return dashboard-safe username mapping for every identity in an account."""
     mapping = dict(ACCOUNT_PROFILE_USERNAMES.get(account) or {})
-    if account == "sub":
+    if account == "main":
+        # 主号化身的道号可能重生改名（缘生子->玄续子），从 state 的 aliases 解新名
+        if isinstance(state, dict):
+            aliases = state.get("avatar_dao_name_aliases") or {}
+            for old_name in list(mapping.keys()):
+                current = old_name
+                seen = set()
+                while current in aliases and current not in seen:
+                    seen.add(current)
+                    mapped = str(aliases.get(current) or "").strip()
+                    if not mapped or mapped == current or mapped == "一缕残魂":
+                        break
+                    current = mapped
+                if current != old_name and current not in mapping:
+                    mapping[current] = mapping[old_name]
+    elif account == "sub":
         current_identity = current_sub_yinluo_identity(state)
-        usernames = mapping.pop(SUB_YINLUO_IDENTITY, {"lvdoumiao"})
-        mapping[current_identity] = usernames
+        if current_identity and current_identity != SUB_YINLUO_IDENTITY:
+            usernames = mapping.pop(SUB_YINLUO_IDENTITY, {"lvdoumiao"})
+            mapping[current_identity] = usernames
+        # Stable avatar slot follows its live Dao name after rebirth
+        # (e.g. 寻真子 -> 寒续尘), keeping username lookups matched.
+        stable_current = stable_sub_avatar_identity(state, "寻真子")
+        if stable_current and stable_current != "寻真子":
+            usernames = mapping.pop("寻真子", {"ding303"})
+            mapping[stable_current] = usernames
     elif account == "xiaohao":
         current_identity = current_xiaohao_taiyi_identity(state)
         usernames = mapping.pop("缘生子", {"adai925"})
@@ -2102,7 +2142,108 @@ def yinluo_commands(state):
     return rows
 
 
-def soul_curse_identity_enabled_for_dashboard(account, identity):
+def _soul_curse_dashboard_identity_candidates(account, identity, state=None):
+    """Return current and legacy names for one dashboard identity switch.
+
+    Rebirth changes a Dao name while ``soul_curse_settings.json`` may still
+    contain the retired name.  Keep the current name first so an explicit
+    current-name value overrides a legacy value, then follow persisted alias
+    links to retain old settings during the migration window.
+    """
+    account = str(account or "").strip()
+    original = str(identity or "主魂").strip() or "主魂"
+    candidates = []
+
+    def add(value):
+        value = str(value or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    try:
+        current = canonical_automation_identity(account, original)
+    except Exception:
+        current = original
+    add(current)
+    add(original)
+
+    alias_state = state if isinstance(state, dict) else None
+    # Most avatar panels pass only the avatar subsection, while aliases and
+    # identity->sect mappings live at the account root.  Load the root as a
+    # supplement when needed so a renamed Yinluo avatar is still recognized.
+    root_state = None
+    if account in WINDOW_MAP:
+        try:
+            root_state = load_account_state_raw(account)
+        except Exception:
+            root_state = None
+    if alias_state is None:
+        alias_state = root_state
+    aliases = alias_state.get("avatar_dao_name_aliases") if isinstance(alias_state, dict) else None
+    if not isinstance(aliases, dict) and isinstance(root_state, dict):
+        aliases = root_state.get("avatar_dao_name_aliases")
+    if isinstance(aliases, dict):
+        changed = True
+        while changed:
+            changed = False
+            for old_name, new_name in aliases.items():
+                old_name = str(old_name or "").strip()
+                new_name = str(new_name or "").strip()
+                if not old_name or not new_name:
+                    continue
+                if new_name in candidates and old_name not in candidates:
+                    add(old_name)
+                    changed = True
+                elif old_name in candidates and new_name not in candidates:
+                    add(new_name)
+                    changed = True
+
+    # A legacy file without aliases can still use the historical Yinluo name.
+    # Only add these aliases when the requested identity itself is one of the
+    # known Yinluo names; this prevents a non-Yinluo avatar inheriting its flag.
+    state_sect = ""
+    if isinstance(state, dict):
+        state_sect = str(
+            state.get("miniapp_sect_name") or state.get("sect_name") or ""
+        ).strip()
+        state_identity_sects = state.get("identity_sect_names")
+        if not state_sect and isinstance(state_identity_sects, dict):
+            state_sect = str(
+                state_identity_sects.get(original)
+                or state_identity_sects.get(current)
+                or ""
+            ).strip()
+    if not state_sect and isinstance(root_state, dict):
+        root_identity_sects = root_state.get("identity_sect_names")
+        if isinstance(root_identity_sects, dict):
+            state_sect = str(
+                root_identity_sects.get(original)
+                or root_identity_sects.get(current)
+                or ""
+            ).strip()
+
+    yinluo_names = set()
+    if account == "main":
+        yinluo_names.add("缘生子")
+    elif account == "sub":
+        yinluo_names.update({SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY})
+    legacy_yinluo_names = []
+    if account == "main":
+        legacy_yinluo_names.append("缘生子")
+    elif account == "sub":
+        legacy_yinluo_names.append("缘生子")
+        legacy_yinluo_names.extend([SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY])
+    if state_sect == "阴罗宗":
+        # The sect snapshot is authoritative for a renamed/current Dao name.
+        # Include the historical names only for this confirmed Yinluo avatar.
+        for name in legacy_yinluo_names:
+            add(name)
+    elif any(name in yinluo_names for name in candidates):
+        for name in legacy_yinluo_names:
+            add(name)
+    return candidates
+
+
+def soul_curse_identity_enabled_for_dashboard(account, identity, state=None):
     """Dashboard 侧读运行时同一份 soul_curse_settings.json 开关。"""
     import json
 
@@ -2118,7 +2259,9 @@ def soul_curse_identity_enabled_for_dashboard(account, identity):
         return False
     account_map = identities.get(str(account or ""))
     if isinstance(account_map, dict):
-        return bool(account_map.get(str(identity or "主魂")))
+        for candidate in _soul_curse_dashboard_identity_candidates(account, identity, state=state):
+            if candidate in account_map:
+                return bool(account_map.get(candidate))
     return False
 
 
@@ -2148,7 +2291,7 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂"):
     curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
     if not isinstance(curse, dict):
         curse = {}
-    if account and not soul_curse_identity_enabled_for_dashboard(account, identity):
+    if account and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state):
         return [soul_curse_switch_row(identity, False)]
     detail = clean_custom_text(curse.get("last_detail") or "", 120)
     commission_id = str(curse.get("commission_id") or "").strip()
@@ -2271,7 +2414,7 @@ def soul_curse_assist_commands(state, account=None, identity=None):
     assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
     if not isinstance(assist, dict):
         assist = {}
-    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity):
+    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state):
         return [soul_curse_switch_row(identity, False, group="阴罗宗")]
     commission_id = str(assist.get("commission_id") or "").strip()
     target = str(assist.get("target_username") or "").strip()
@@ -2725,6 +2868,7 @@ def main_soul_panel(account, state):
         rows.extend(meditation_commands(state))
         rows.append(manual_command(".安置侍妾", "安置侍妾", group="侍妾"))
         rows.extend(concubine_commands(state, include_divination=True, include_voyage=False))
+        rows.extend(soul_curse_publisher_commands(state, account="waaiging", identity="主魂"))
     if "主魂" in miniapp_journey_identities_for_account(account):
         rows.append(miniapp_tianxing_journey_command(state))
     rows.append(mulan_support_daily_command(state))
@@ -2733,10 +2877,24 @@ def main_soul_panel(account, state):
 
 def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
     rows = []
-    root_state = root_state or {}
+    root_state = root_state if isinstance(root_state, dict) else {}
+    sect_names = root_state.get("identity_sect_names") or {}
+    avatar_sect = ""
+    if isinstance(state, dict):
+        avatar_sect = str(
+            state.get("miniapp_sect_name") or state.get("sect_name") or ""
+        ).strip()
+    # 主号阴罗化身会在夺舍/重生后改道号（例如 缘生子 -> 玄续子）。
+    # 不能只比较静态旧常量，否则当前面板会误显示 publisher 链，
+    # 而运行时实际需要的是阴罗接取链。
+    is_yinluo = (
+        name == YINLUO_IDENTITY
+        or str(sect_names.get(name) or "").strip() == "阴罗宗"
+        or avatar_sect == "阴罗宗"
+    )
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
-    if name == YINLUO_IDENTITY:
+    if is_yinluo:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
     if name == "无咎子":
@@ -2760,7 +2918,7 @@ def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
                 group="每日",
             ),
         ])
-    if name == "缘生子":
+    if is_yinluo:
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
@@ -2794,6 +2952,9 @@ def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
     rows.append(mulan_support_daily_command(state))
+    # 阴罗宗身份（缘生子）走 assist 链，不重复挂 publisher 行。
+    if not is_yinluo:
+        rows.extend(soul_curse_publisher_commands(state, account="main", identity=name))
     return rows
 
 
@@ -2809,7 +2970,7 @@ def star_avatar_commands(name, state, root_state=None, account="sub"):
     if is_yinluo:
         rows.extend(yinluo_commands(state))
         rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
-    if is_yinluo or name == "寻真子":
+    if is_yinluo or name == "寻真子" or name == stable_sub_avatar_identity(root_state, "寻真子"):
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
@@ -2825,6 +2986,9 @@ def star_avatar_commands(name, state, root_state=None, account="sub"):
         ])
     rows.append(mulan_support_daily_command(state))
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
+    # 阴罗宗身份（玄续玄）走 assist 链，不重复挂 publisher 行。
+    if name != SUB_YINLUO_IDENTITY:
+        rows.extend(soul_curse_publisher_commands(state, account="sub", identity=name))
     return rows
 
 
@@ -2870,6 +3034,7 @@ def xiaohao_avatar_commands(name, state, root_state=None):
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("xiaohao", name)))
     rows.append(mulan_support_daily_command(state))
+    rows.extend(soul_curse_publisher_commands(state, account="xiaohao", identity=name))
     return rows
 
 

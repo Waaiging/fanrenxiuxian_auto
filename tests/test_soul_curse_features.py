@@ -147,6 +147,59 @@ class SoulCurseParserTests(unittest.TestCase):
 
 
 class SoulCurseFlowTests(unittest.TestCase):
+    def test_tick_publishes_then_auto_accepts_in_same_tick(self):
+        """发布成功后，共享池接取阶段不能被 publisher 的短等待截断。"""
+        actor = DummySoulCurseActor(
+            "main",
+            main_responses={
+                SOUL_CURSE_PUBLISH_COMMAND: [
+                    "**【解咒委托已发布】**\n委托 ID：**99**\n报酬：**1** 灵石"
+                ],
+            },
+            identity_responses={
+                ("缘生子", ".接取解咒委托 99"): [
+                    "**【咒契协定已成】** 阴罗宗弟子已接取 @Weeguu 的解咒委托。"
+                ],
+                ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Weeguu"): [
+                    "**【阴罗辨咒】** 咒源 +27。"
+                ],
+                ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Weeguu"): [
+                    "**【借幡镇魂】** 魂封 -11，月魄 +1。"
+                ],
+                ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Weeguu"): [
+                    "**【剥离咒源成功】** 获得【阴罗残咒】x1。"
+                ],
+            },
+        )
+        future = soul_curse_features.add_seconds_str(soul_curse_features.now_str(), 3600)
+        actor.state["soul_curse"] = {
+            "chain_stage": "publish",
+            "next_action_at": "",
+            "next_chain_time": "",
+            "last_visit_date": soul_curse_features._today(),
+            "last_wanying_greeting_date": soul_curse_features._today(),
+            "next_moon_meditation_time": future,
+        }
+
+        async def fast_sleep(_seconds):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_file = os.path.join(tmpdir, "soul_curse_commissions.json")
+            with patch.object(soul_curse_features, "SOUL_CURSE_SHARED_FILE", shared_file), patch.object(
+                soul_curse_features.asyncio, "sleep", new=fast_sleep
+            ):
+                asyncio.run(actor.soul_curse_tick())
+
+        self.assertEqual(actor.main_sent, [SOUL_CURSE_PUBLISH_COMMAND])
+        self.assertEqual(actor.identity_sent, [
+            ("缘生子", ".接取解咒委托 99"),
+            ("缘生子", f"{SOUL_CURSE_IDENTIFY_COMMAND} @Weeguu"),
+            ("缘生子", f"{SOUL_CURSE_SUPPRESS_COMMAND} @Weeguu"),
+            ("缘生子", f"{SOUL_CURSE_STRIP_COMMAND} @Weeguu"),
+        ])
+        self.assertEqual(actor.state["soul_curse"]["commission_status"], "completed")
+
     def test_main_chain_publishes_and_local_yinluo_completes_commission(self):
         actor = DummySoulCurseActor(
             "main",

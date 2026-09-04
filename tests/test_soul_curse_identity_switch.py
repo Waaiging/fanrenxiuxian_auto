@@ -69,6 +69,42 @@ class SoulCurseIdentitySwitchTests(unittest.TestCase):
     def test_unknown_account_defaults_disabled(self):
         self.assertFalse(self._enabled("waaiging", "主魂"))
 
+    def test_renamed_yinluo_keeps_legacy_setting_and_uses_current_name(self):
+        import json
+        import soul_curse_features
+
+        with open(self.temp_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "enabled": True,
+                    "identities": {"main": {"缘生子": True}},
+                },
+                fh,
+                ensure_ascii=False,
+            )
+
+        class _RenamedActor(soul_curse_features.SoulCurseMixin, _FakeActor):
+            def __init__(self):
+                super().__init__(account_key="main")
+                self.avatars = ["玄续子"]
+                self.state = {
+                    "avatars": {"玄续子": {}},
+                    "avatar_dao_name_aliases": {"缘生子": "玄续子"},
+                }
+
+            def resolve_avatar_identity(self, identity):
+                return self.state["avatar_dao_name_aliases"].get(identity, identity)
+
+            def get_avatar_state(self, identity):
+                identity = self.resolve_avatar_identity(identity)
+                return self.state["avatars"].setdefault(identity, {})
+
+        actor = _RenamedActor()
+        self.assertEqual(actor.soul_curse_yinluo_identity(), "玄续子")
+        self.assertTrue(actor.soul_curse_identity_enabled(identity="玄续子"))
+        self.assertTrue(actor.soul_curse_identity_enabled(identity="缘生子"))
+        self.assertFalse(actor.soul_curse_identity_enabled(identity="无咎子"))
+
 
 class SoulCurseNoSettingsTests(unittest.TestCase):
     """Missing/broken settings file => everything disabled (safe default)."""
@@ -104,9 +140,13 @@ class SoulCurseNoSettingsTests(unittest.TestCase):
             pass
 
         actor = _Actor(account_key="main")
-        self.assertIsNone(
-            _Actor(account_key="waaiging").soul_curse_publisher_profile()
+        # waaiging 主魂自 2026-08-31 起接入 publisher 链（此前为 None）。
+        self.assertEqual(
+            _Actor(account_key="waaiging").soul_curse_publisher_profile().get("owner_account"),
+            "waaiging",
         )
+        # 未知账号仍无 profile。
+        self.assertIsNone(_Actor(account_key="nobody").soul_curse_publisher_profile())
 
 
 if __name__ == "__main__":

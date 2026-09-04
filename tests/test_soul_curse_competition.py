@@ -153,5 +153,49 @@ class SharedCommissionCompetitionTests(unittest.TestCase):
         self.assertEqual(item.get("assistant_account"), "")
         self.assertEqual(item.get("status"), "pending_accept")
 
+    def test_publisher_only_account_is_not_an_assistant_candidate(self):
+        """没有阴罗身份的发布账号不能先占用自己的共享委托。"""
+        class _SoulActor(scf.SoulCurseMixin, _Actor):
+            pass
+
+        actor = _SoulActor("xiaohao", avatars=["问心子"])
+        profiles = actor.soul_curse_shared_assistant_profiles()
+        self.assertFalse(any(p.get("owner_account") == "xiaohao" for p in profiles))
+
+    def test_terminal_main_entry_does_not_hide_pending_avatar_entry(self):
+        """旧主魂委托已结束时，仍应扫描同账号化身的新委托。"""
+        scf.write_soul_curse_shared_state({
+            "main": {
+                "commission_id": "DONE",
+                "target_username": "@old",
+                "assistant_account": "sub",
+                "status": "completed",
+            },
+            "main:玄续玄": {
+                "commission_id": "NEW",
+                "target_username": "@new",
+                "assistant_account": "",
+                "status": "pending_accept",
+            },
+        })
+        actor = _Actor("sub", avatars=["厚土", "玄续玄", "寻真子"])
+        actor.soul_curse_process_assist_commission = AsyncMock(return_value=600)
+
+        async def go():
+            return await scf.SoulCurseMixin.soul_curse_shared_assist_tick(
+                actor,
+                {
+                    "owner_account": "main",
+                    "target_username": "@new",
+                    "assistant_identity": "玄续玄",
+                    "shared": True,
+                },
+            )
+
+        asyncio.run(go())
+        item = self._read("main:玄续玄")
+        self.assertEqual(item.get("assistant_account"), "sub")
+        actor.soul_curse_process_assist_commission.assert_awaited_once()
+
 if __name__ == "__main__":
     unittest.main()

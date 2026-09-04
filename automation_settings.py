@@ -41,9 +41,24 @@ ACCOUNT_NAMES = {
     "waaiging": "Waaiging",
 }
 DEFAULT_SUB_YINLUO_IDENTITY = "玄续玄"
+# Stable avatar slots that survive rebirth: slot name -> the player id whose
+# live Dao name in avatar_dao_names_by_player_id is the current name.
+STABLE_SUB_AVATAR_SLOTS = {
+    "-1003340352216": "寻真子",
+}
 SUB_YINLUO_PLAYER_ID = "-1003885521329"
 DEFAULT_XIAOHAO_TAIYI_IDENTITY = "缘生子"
 XIAOHAO_TAIYI_PLAYER_ID = "-1003996748766"
+# 主号化身槽位：槽名 -> player_id（重生后按 avatar_dao_names_by_player_id
+# 解析最新道号，Dashboard 储物袋/指令记录/周期收益/斗法/自动化设置同步跟随）。
+MAIN_STATE_FILE = CONFIG_DIR / "state_main.json"
+_MAIN_IDENTITY_STATE_CACHE: dict[str, Any] = {"signature": None, "state": {}}
+_MAIN_IDENTITY_STATE_LOCK = threading.Lock()
+STABLE_MAIN_AVATAR_SLOTS = {
+    "无咎子": "-1004240160265",
+    "缘生子": "-1003809391782",
+    "素缘子": "-1003999815554",
+}
 
 
 def _load_sub_identity_state() -> dict[str, Any]:
@@ -69,6 +84,33 @@ def _load_sub_identity_state() -> dict[str, Any]:
         ) or {}
         _SUB_IDENTITY_STATE_CACHE["signature"] = signature
         _SUB_IDENTITY_STATE_CACHE["state"] = state
+        return state
+
+
+def _load_main_identity_state() -> dict[str, Any]:
+    """Load state_main.json with mtime+size caching (mirrors sub loader)."""
+    with _MAIN_IDENTITY_STATE_LOCK:
+        try:
+            stat = MAIN_STATE_FILE.stat()
+            signature = (
+                str(MAIN_STATE_FILE),
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(stat.st_size),
+            )
+        except OSError:
+            signature = (str(MAIN_STATE_FILE), None, None)
+
+        if _MAIN_IDENTITY_STATE_CACHE.get("signature") == signature:
+            cached = _MAIN_IDENTITY_STATE_CACHE.get("state")
+            return cached if isinstance(cached, dict) else {}
+
+        state = load_json_state(
+            str(MAIN_STATE_FILE),
+            expected_type=dict,
+            default={},
+        ) or {}
+        _MAIN_IDENTITY_STATE_CACHE["signature"] = signature
+        _MAIN_IDENTITY_STATE_CACHE["state"] = state
         return state
 
 
@@ -329,7 +371,37 @@ def canonical_automation_identity(account: Any, identity: Any) -> str:
             identity_name = mapped
         if identity_name == "一缕残魂":
             return current
+    elif account_key == "main":
+        # 主号化身槽位：旧道号/槽名 -> 最新道号（重生后 aliases 链解析）。
+        main_state = _load_main_identity_state()
+        aliases = main_state.get("avatar_dao_name_aliases")
+        seen = set()
+        while isinstance(aliases, dict) and identity_name not in seen:
+            seen.add(identity_name)
+            mapped = str(aliases.get(identity_name) or "").strip()
+            if not mapped or mapped == identity_name:
+                break
+            identity_name = mapped
+        # 槽名兜底：aliases 未覆盖时按 player_id 解析。
+        if identity_name in STABLE_MAIN_AVATAR_SLOTS:
+            current_name = _current_stable_avatar_identity(
+                main_state, STABLE_MAIN_AVATAR_SLOTS[identity_name]
+            )
+            if current_name:
+                return current_name
     return identity_name
+
+
+def _current_stable_avatar_identity(state: Any, player_id: str) -> str:
+    """Resolve the current Dao name for one stable avatar slot by player id."""
+    if not isinstance(state, dict):
+        return ""
+    player_names = state.get("avatar_dao_names_by_player_id")
+    if isinstance(player_names, dict):
+        current = str(player_names.get(str(player_id)) or "").strip()
+        if current and current != "一缕残魂":
+            return current
+    return ""
 
 
 def automation_account_identities() -> dict[str, tuple[str, ...]]:
@@ -344,6 +416,30 @@ def automation_account_identities() -> dict[str, tuple[str, ...]]:
         current_xiaohao if identity == DEFAULT_XIAOHAO_TAIYI_IDENTITY else identity
         for identity in ACCOUNT_IDENTITIES["xiaohao"]
     )
+    # Stable avatar slots (e.g. sub 寻真子 -> 寒续尘 after rebirth) follow the
+    # per-player Dao-name map, so dashboards and workers keyed by identity
+    # keep matching the live roster instead of the retired name.
+    sub_state = _load_sub_identity_state()
+    for player_id, slot in STABLE_SUB_AVATAR_SLOTS.items():
+        current_name = _current_stable_avatar_identity(sub_state, player_id)
+        if not current_name or current_name in identities["sub"]:
+            continue
+        if slot in identities["sub"]:
+            identities["sub"] = tuple(
+                current_name if identity == slot else identity
+                for identity in identities["sub"]
+            )
+    # 主号化身槽位同样跟随重生道号（如 缘生子 -> 玄续子）。
+    main_state = _load_main_identity_state()
+    for slot, player_id in STABLE_MAIN_AVATAR_SLOTS.items():
+        current_name = _current_stable_avatar_identity(main_state, player_id)
+        if not current_name or current_name in identities["main"]:
+            continue
+        if slot in identities["main"]:
+            identities["main"] = tuple(
+                current_name if identity == slot else identity
+                for identity in identities["main"]
+            )
     return identities
 
 
