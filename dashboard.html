@@ -1058,6 +1058,61 @@
             font-size: 0.64rem;
             line-height: 1.4;
         }
+        .world-boss-turnstile-requests {
+            display: grid;
+            gap: 0.5rem;
+            margin-top: 0.65rem;
+        }
+        .world-boss-turnstile-request {
+            display: grid;
+            gap: 0.42rem;
+            padding: 0.55rem;
+            border: 1px solid #394652;
+            border-radius: 6px;
+            background: rgba(15, 23, 31, 0.86);
+        }
+        .world-boss-turnstile-request-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 0.5rem;
+            color: #dbeafe;
+            font-size: 0.68rem;
+            font-weight: 800;
+        }
+        .world-boss-turnstile-request-meta {
+            color: var(--text-secondary);
+            font-size: 0.61rem;
+            line-height: 1.35;
+        }
+        .world-boss-turnstile-request-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            align-items: center;
+        }
+        .world-boss-turnstile-token {
+            width: 100%;
+            min-height: 3.5rem;
+            resize: vertical;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.62rem;
+        }
+        .world-boss-turnstile-script {
+            width: 100%;
+            min-height: 5.5rem;
+            resize: vertical;
+            color: #cbd5e1;
+            background: #0b1117;
+            border: 1px solid #303943;
+            border-radius: 5px;
+            padding: 0.45rem;
+            font: 0.58rem/1.35 'JetBrains Mono', monospace;
+        }
+        .world-boss-turnstile-status {
+            color: #86efac;
+            font-size: 0.64rem;
+        }
         .automation-account-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1552,6 +1607,30 @@
                     </div>
                 </div>
                 <div class="automation-card">
+                    <div class="automation-card-title">青元子安全验证</div>
+                    <div class="automation-card-hint">
+                        自动验证助手会依次为各账号完成浏览器验证，并把一次性令牌交给机器人入阵。这里分别显示浏览器验证进度和实际入阵结果；验证失败时保留错误码。
+                    </div>
+                    <div class="world-boss-turnstile-requests" id="world-boss-turnstile-requests">
+                        <div class="record-empty">暂无待处理验证。</div>
+                    </div>
+                    <details>
+                    <summary class="automation-card-hint">手动验证与浏览器检查</summary>
+                    <div class="automation-card-hint">可将“青元子验证”拖到收藏栏，在对应验证页点击收藏并完成验证。</div>
+                    <div class="world-boss-turnstile-request-actions">
+                        <a class="red-packet-save" id="world-boss-turnstile-bookmarklet" href="#" draggable="true" onclick="event.preventDefault(); document.getElementById('world-boss-turnstile-status').textContent='请把此链接拖到收藏栏，然后在青元子验证页点击收藏。';">青元子验证</a>
+                        <button class="red-packet-save" type="button" onclick="openWorldBossTurnstile('')">提前检查浏览器验证</button>
+                    </div>
+                    <details>
+                        <summary class="automation-card-hint">手动执行脚本</summary>
+                        <div class="automation-card-hint">只在 <code>asc.aiopenai.app</code> 的青元子页面执行。复制后在该页开发者工具 Console 中运行，再完成验证。</div>
+                        <textarea class="world-boss-turnstile-script" id="world-boss-turnstile-script" readonly></textarea>
+                        <button class="red-packet-save" type="button" onclick="copyWorldBossTurnstileScript()">复制脚本</button>
+                    </details>
+                    </details>
+                    <div class="world-boss-turnstile-status" id="world-boss-turnstile-status"></div>
+                </div>
+                <div class="automation-card">
                     <div class="automation-card-title">使用风雷翅加速</div>
                     <div class="automation-card-hint">
                         启用后，所选身份执行 .寻觅灵兽 / .问道 / .探寻裂缝 时自动取下、装备并保留风雷翅以缩短冷却；默认关闭。
@@ -1855,6 +1934,11 @@
         let automationSettingsDirty = false;
         let automationSavePending = false;
         let miniappFishingForceRetryPending = false;
+        let worldBossTurnstileRequests = [];
+        let worldBossTurnstileRenderKey = null;
+        const worldBossTurnstileDrafts = {};
+        const worldBossTurnstileSubmitPending = new Set();
+        const worldBossTurnstilePopups = new Map();
         let lastFishingAutoSummary = null;
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
@@ -4249,6 +4333,306 @@
             });
         }
 
+        // This function is serialized into a bookmarklet and executed by the
+        // user on the real asc.aiopenai.app origin.  It intentionally only
+        // renders Turnstile and hands the callback token to the opener; it does
+        // not attempt to forge, alter, or replay the token.
+        function worldBossTurnstileBrowserHelper() {
+            if (window.location.origin !== 'https://asc.aiopenai.app' || window.location.pathname !== '/miniapp/xianxia-world-boss') {
+                window.alert('请在青元子的官方验证页使用此脚本。');
+                return;
+            }
+            const query = new URLSearchParams(window.location.search);
+            const hash = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+            const requestId = hash.get('qyz_turnstile_request') || query.get('qyz_turnstile_request') || '';
+            const returnOrigin = hash.get('qyz_turnstile_return_origin') || query.get('qyz_turnstile_return_origin') || '';
+            const config = window.__QYZ_TURNSTILE_CONFIG__ || {};
+            const sitekey = String(config.siteKey || '0x4AAAAAAEmIsCuTGsikqRH9');
+            const action = String(config.action || 'qyz_world_boss_begin');
+            const old = document.getElementById('__qyz_manual_turnstile');
+            if (old) {
+                try { if (old.dataset.widgetId && window.turnstile) window.turnstile.remove(old.dataset.widgetId); } catch (_) {}
+                old.remove();
+            }
+            const wrap = document.createElement('div');
+            wrap.id = '__qyz_manual_turnstile';
+            wrap.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:50%;transform:translate(-50%,-50%);width:min(94vw,430px);padding:18px;border:1px solid #d7b66a;background:#0b120f;color:#f6edd6;box-shadow:0 14px 46px rgba(0,0,0,.68);font:14px system-ui,sans-serif;text-align:center';
+            const title = document.createElement('div');
+            title.textContent = requestId ? '青元子安全验证（完成后自动回传）' : '青元子安全验证（完成后复制令牌）';
+            title.style.cssText = 'margin-bottom:10px;font-weight:700';
+            const widget = document.createElement('div');
+            widget.id = '__qyz_manual_turnstile_widget';
+            const status = document.createElement('div');
+            status.style.cssText = 'margin-top:10px;color:#a1ead5;word-break:break-all;font-size:12px';
+            status.textContent = '正在加载验证控件…';
+            const tokenBox = document.createElement('textarea');
+            tokenBox.readOnly = true;
+            tokenBox.hidden = true;
+            tokenBox.setAttribute('aria-label', 'Turnstile 令牌');
+            tokenBox.style.cssText = 'display:block;width:100%;min-height:72px;margin-top:10px;padding:7px;resize:vertical;background:#060b08;color:#dff7e7;border:1px solid #49675b;border-radius:4px;font:11px/1.35 ui-monospace,monospace;word-break:break-all';
+            tokenBox.addEventListener('click', () => { tokenBox.focus(); tokenBox.select(); });
+            wrap.append(title, widget, status, tokenBox);
+            document.body.appendChild(wrap);
+            let target = '';
+            try {
+                const parsed = new URL(returnOrigin);
+                if (parsed.protocol === 'https:' || parsed.protocol === 'http:') target = parsed.origin;
+            } catch (_) {}
+            const current = () => document.getElementById('__qyz_manual_turnstile') === wrap;
+            const report = (stage, code = '') => {
+                if (!current() || !requestId || !target || !window.opener || window.opener.closed) return;
+                window.opener.postMessage({type:'qyz-turnstile-event',requestId,event:stage,errorCode:/^[0-9]{3,6}$/.test(String(code)) ? String(code) : ''}, target);
+            };
+            report('helper_ready');
+            const receipt = event => {
+                if (!current()) { window.removeEventListener('message', receipt); return; }
+                if (event.origin !== target || event.source !== window.opener) return;
+                const data = event.data || {};
+                if (data.type !== 'qyz-turnstile-receipt' || data.requestId !== requestId) return;
+                const states = {submitted:'令牌已接收，等待机器人取用。',consumed:'令牌已取用，等待入阵结果。',accepted:'入阵成功。',rejected:'入阵未成功：' + String(data.error || '未知错误'),expired:'验证请求已过期。',cancelled:'验证请求已结束。'};
+                if (states[data.status]) status.textContent = states[data.status];
+            };
+            window.addEventListener('message', receipt);
+            const copy = value => {
+                const text = String(value || '');
+                if (!text) return Promise.resolve(false);
+                if (navigator.clipboard && window.isSecureContext) {
+                    return navigator.clipboard.writeText(text).then(() => true).catch(() => false);
+                }
+                const area = document.createElement('textarea');
+                area.value = text;
+                area.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+                document.body.appendChild(area);
+                area.focus();
+                area.select();
+                let ok = false;
+                try { ok = Boolean(document.execCommand('copy')); } catch (_) {}
+                area.remove();
+                return Promise.resolve(ok);
+            };
+            let sent = false;
+            const completed = token => {
+                if (sent || !current()) return;
+                const value = String(token || '');
+                if (!value) return;
+                sent = true;
+                tokenBox.value = value;
+                tokenBox.hidden = false;
+                report('token_generated');
+                if (requestId && target && window.opener && !window.opener.closed) {
+                    try {
+                        window.opener.postMessage({type: 'qyz-turnstile-token', requestId, token: value}, target);
+                        status.textContent = '令牌已发送，等待 Dashboard 接收回执。';
+                    } catch (_) {
+                        status.textContent = '回传失败，令牌将尝试复制到剪贴板。';
+                    }
+                }
+                copy(value).then(ok => {
+                    if (!requestId || !target || !window.opener || window.opener.closed) {
+                        status.textContent = ok ? '令牌已复制，请粘贴到 Dashboard 对应输入框。' : '请点击令牌框并复制，再粘贴到 Dashboard 对应输入框。';
+                    } else if (ok) {
+                        status.textContent += '（同时已复制）';
+                    }
+                });
+            };
+            const render = () => {
+                if (!window.turnstile || typeof window.turnstile.render !== 'function') {
+                    status.textContent = 'Turnstile 控件不可用，请刷新页面重试。';
+                    return;
+                }
+                try {
+                    status.textContent = '请完成验证。';
+                    const widgetId = window.turnstile.render(widget, {
+                        sitekey,
+                        action,
+                        theme: 'dark',
+                        appearance: 'always',
+                        execution: 'render',
+                        callback: completed,
+                        'expired-callback': () => { if (!current()) return; sent = false; tokenBox.value = ''; tokenBox.hidden = true; report('expired'); status.textContent = '令牌已过期，请重新验证。'; },
+                        'error-callback': code => { if (!current()) return; sent = false; tokenBox.value = ''; tokenBox.hidden = true; report('widget_error', code); status.textContent = '验证失败：' + String(code || 'unknown'); },
+                        'before-interactive-callback': () => report('interaction_required'),
+                        'timeout-callback': () => { report('widget_timeout'); status.textContent = '验证操作超时，请重新验证。'; },
+                        'unsupported-callback': () => { report('unsupported'); status.textContent = '当前浏览器不支持验证，请使用最新版本的 Chrome。'; }
+                    });
+                    wrap.dataset.widgetId = widgetId;
+                    if (!sent) report('widget_ready');
+                } catch (error) {
+                    status.textContent = '控件初始化失败：' + String(error && error.message || error || 'unknown');
+                }
+            };
+            if (window.turnstile && typeof window.turnstile.ready === 'function') {
+                window.turnstile.ready(render);
+            } else {
+                const script = document.createElement('script');
+                script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+                script.onload = () => window.turnstile && window.turnstile.ready ? window.turnstile.ready(render) : render();
+                script.onerror = () => { report('script_error'); status.textContent = '验证脚本加载失败，请检查网络。'; };
+                document.head.appendChild(script);
+            }
+        }
+
+        function worldBossTurnstileScriptText() {
+            return `javascript:(${worldBossTurnstileBrowserHelper.toString()})();`;
+        }
+
+        async function copyWorldBossTurnstileScript() {
+            const script = document.getElementById('world-boss-turnstile-script');
+            const status = document.getElementById('world-boss-turnstile-status');
+            const text = worldBossTurnstileScriptText();
+            if (script) script.value = text;
+            try {
+                await copyTextToClipboard(text);
+                if (status) status.textContent = '脚本已复制，请在青元子验证页执行。';
+            } catch (_) {
+                if (script) {
+                    for (let parent = script.parentElement; parent; parent = parent.parentElement) {
+                        if (parent.tagName === 'DETAILS') parent.open = true;
+                    }
+                    script.focus(); script.select();
+                }
+                if (status) status.textContent = '浏览器未允许复制；脚本已选中，可手动复制。';
+            }
+        }
+
+        function preserveWorldBossTurnstileDrafts() {
+            document.querySelectorAll('#world-boss-turnstile-requests textarea[data-turnstile-request]').forEach(input => {
+                const key = input.dataset.turnstileRequest || '';
+                if (key) worldBossTurnstileDrafts[key] = input.value || '';
+            });
+        }
+
+        function renderWorldBossTurnstileRequests(requests) {
+            preserveWorldBossTurnstileDrafts();
+            worldBossTurnstileRequests = Array.isArray(requests) ? requests : [];
+            const box = document.getElementById('world-boss-turnstile-requests');
+            const script = document.getElementById('world-boss-turnstile-script');
+            if (script) script.value = worldBossTurnstileScriptText();
+            const bookmark = document.getElementById('world-boss-turnstile-bookmarklet');
+            if (bookmark) bookmark.href = worldBossTurnstileScriptText();
+            if (!box) return;
+            const activeIds = new Set(worldBossTurnstileRequests.filter(item => item.status === 'pending').map(item => item.request_id));
+            Object.keys(worldBossTurnstileDrafts).forEach(key => { if (!activeIds.has(key)) delete worldBossTurnstileDrafts[key]; });
+            const renderKey = JSON.stringify(worldBossTurnstileRequests);
+            if (renderKey === worldBossTurnstileRenderKey && box.dataset.turnstileRendered === '1') return;
+            const expanded = new Set(Array.from(box.querySelectorAll('details[open] textarea[data-turnstile-request]'))
+                .map(input => input.dataset.turnstileRequest));
+            worldBossTurnstileRenderKey = renderKey;
+            box.dataset.turnstileRendered = '1';
+            if (!worldBossTurnstileRequests.length) {
+                box.innerHTML = '<div class="record-empty">暂无待处理验证。</div>';
+                return;
+            }
+            box.innerHTML = worldBossTurnstileRequests.map(item => {
+                const requestId = String(item.request_id || '');
+                const label = `${item.account || '--'} · ${item.identity || '--'}`;
+                const states = {pending:item.browser_source === 'automatic' ? '自动验证中' : '等待浏览器验证',submitted:'令牌已提交，等待取用',consumed:'令牌已取用，等待入阵结果',accepted:'入阵成功',rejected:'入阵未成功',expired:'请求已过期',cancelled:item.cancel_reason === 'turnstile_timeout' ? '等待验证超时' : '请求已结束'};
+                const state = states[item.status] || item.status || '等待验证';
+                const stages = {helper_ready:'浏览器已就绪',widget_ready:'控件已加载',interaction_required:'正在验证',token_generated:'已生成令牌',widget_error:'CF 验证失败',widget_timeout:'控件超时',unsupported:'浏览器不支持',expired:'令牌过期',script_error:'脚本加载失败',config_error:'浏览器启动或配置失败'};
+                const detail = [stages[item.browser_event], item.browser_error_code, item.result_error].filter(Boolean).join(' · ');
+                const editable = item.status === 'pending';
+                const draft = worldBossTurnstileDrafts[requestId] || '';
+                const pending = worldBossTurnstileSubmitPending.has(requestId);
+                return `
+                    <div class="world-boss-turnstile-request">
+                        <div class="world-boss-turnstile-request-head">
+                            <span>${escapeHtml(label)}</span>
+                            <span>${escapeHtml(state)}</span>
+                        </div>
+                        <div class="world-boss-turnstile-request-meta">消息 ${escapeHtml(item.message_id || '--')} · 过期 ${escapeHtml(item.expires_at || '--')}${detail ? '<br>' + escapeHtml(detail) : ''}</div>
+                        ${editable ? `<details ${expanded.has(requestId) ? 'open' : ''}><summary class="automation-card-hint">手动完成此验证</summary><div class="world-boss-turnstile-request-actions">
+                            <button class="red-packet-save" type="button" onclick="openWorldBossTurnstile('${escapeJs(requestId)}')">打开验证页</button>
+                        </div>
+                        <textarea class="record-input world-boss-turnstile-token" data-turnstile-request="${escapeHtml(requestId)}" placeholder="脚本未自动回传时，把令牌粘贴到这里" oninput="worldBossTurnstileDrafts['${escapeJs(requestId)}']=this.value">${escapeHtml(draft)}</textarea>
+                        <button class="red-packet-save" type="button" ${pending ? 'disabled' : ''} onclick="submitWorldBossTurnstileFromInput('${escapeJs(requestId)}', this)">${pending ? '提交中…' : '提交令牌'}</button></details>` : ''}
+                    </div>`;
+            }).join('');
+        }
+
+        function openWorldBossTurnstile(requestId) {
+            const clean = String(requestId || '').trim();
+            const returnOrigin = encodeURIComponent(window.location.origin);
+            const url = `https://asc.aiopenai.app/miniapp/xianxia-world-boss#qyz_turnstile_request=${encodeURIComponent(clean)}&qyz_turnstile_return_origin=${returnOrigin}`;
+            const popup = window.open(url, `qyz-turnstile-${clean}`, 'popup,width=520,height=760,resizable=yes,scrollbars=yes');
+            if (popup && clean) worldBossTurnstilePopups.set(clean, popup);
+            const status = document.getElementById('world-boss-turnstile-status');
+            if (status) status.textContent = popup ? '验证页已打开；点击收藏栏中的“青元子验证”，或执行已复制的脚本。' : '浏览器阻止了弹窗，请允许 Dashboard 打开验证页。';
+        }
+
+        async function submitWorldBossTurnstileToken(requestId, token) {
+            const cleanId = String(requestId || '').trim();
+            const cleanToken = String(token || '').trim();
+            if (!cleanId || !cleanToken || worldBossTurnstileSubmitPending.has(cleanId)) return false;
+            worldBossTurnstileSubmitPending.add(cleanId);
+            try {
+                const response = await fetch(apiUrl('/api/world-boss/turnstile'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({request_id: cleanId, token: cleanToken})
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                delete worldBossTurnstileDrafts[cleanId];
+                const status = document.getElementById('world-boss-turnstile-status');
+                if (status) status.textContent = '令牌已提交，机器人正在继续入阵。';
+                await updateWorldBossTurnstileDashboard(true);
+                return true;
+            } catch (error) {
+                const status = document.getElementById('world-boss-turnstile-status');
+                if (status) status.textContent = `令牌提交失败：${error.message || error}`;
+                worldBossTurnstileDrafts[cleanId] = cleanToken;
+                return false;
+            } finally {
+                worldBossTurnstileSubmitPending.delete(cleanId);
+                worldBossTurnstileRenderKey = null;
+                renderWorldBossTurnstileRequests(worldBossTurnstileRequests);
+            }
+        }
+
+        async function submitWorldBossTurnstileFromInput(requestId, button) {
+            const cleanId = String(requestId || '');
+            const input = Array.from(document.querySelectorAll('#world-boss-turnstile-requests textarea[data-turnstile-request]'))
+                .find(item => String(item.dataset.turnstileRequest || '') === cleanId);
+            const token = input ? input.value : (worldBossTurnstileDrafts[cleanId] || '');
+            if (button) button.disabled = true;
+            await submitWorldBossTurnstileToken(cleanId, token);
+            if (button) button.disabled = false;
+        }
+
+        async function updateWorldBossTurnstileDashboard(force = false) {
+            try {
+                const response = await fetch(apiUrl('/api/world-boss/turnstile?include_finished=true'), {cache: 'no-store'});
+                const data = await response.json();
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                renderWorldBossTurnstileRequests(data.requests || []);
+                for (const item of data.requests || []) {
+                    const popup = worldBossTurnstilePopups.get(item.request_id);
+                    if (popup && !popup.closed) popup.postMessage({type:'qyz-turnstile-receipt',requestId:item.request_id,status:item.status,error:item.result_error || ''}, 'https://asc.aiopenai.app');
+                    if (['accepted','rejected','expired','cancelled'].includes(item.status)) worldBossTurnstilePopups.delete(item.request_id);
+                }
+            } catch (error) {
+                const status = document.getElementById('world-boss-turnstile-status');
+                if (status && force) status.textContent = '待处理验证状态暂时无法读取。';
+            }
+        }
+
+        window.addEventListener('message', async event => {
+            if (event.origin !== 'https://asc.aiopenai.app') return;
+            const data = event.data || {};
+            if (!data.requestId || event.source !== worldBossTurnstilePopups.get(data.requestId)) return;
+            if (data.type === 'qyz-turnstile-token') await submitWorldBossTurnstileToken(data.requestId, data.token);
+            if (data.type === 'qyz-turnstile-event') {
+                try {
+                    await fetch(apiUrl('/api/world-boss/turnstile/browser-event'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:data.requestId,event:data.event,error_code:data.errorCode || ''})});
+                } catch (_) {}
+            }
+        });
+
+        setInterval(() => {
+            for (const [key, popup] of worldBossTurnstilePopups) if (popup.closed) worldBossTurnstilePopups.delete(key);
+            if (worldBossTurnstilePopups.size) updateWorldBossTurnstileDashboard();
+        }, 3000);
+
         function renderAutomationDashboard(data) {
             automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, wind_thunder: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
@@ -4569,6 +4953,7 @@
                     ? '<i data-lucide="loader-circle" aria-hidden="true"></i>处理中'
                     : '<i data-lucide="rotate-cw" aria-hidden="true"></i>强制重试';
             }
+            renderWorldBossTurnstileRequests(worldBossTurnstileRequests);
             refreshIcons();
         }
 
@@ -4582,6 +4967,7 @@
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
                 renderAutomationDashboard(data);
+                await updateWorldBossTurnstileDashboard(force);
             } catch (error) {
                 console.error('Automation settings update failed:', error);
                 const summary = document.getElementById('automation-summary');

@@ -16,6 +16,7 @@ import re
 import statistics
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,10 @@ from miniapp_beast import (
     miniapp_circuit_preflight,
     miniapp_origin,
     request_webview_init_data,
+)
+from world_boss_turnstile import (
+    WorldBossTurnstileBroker,
+    default_world_boss_turnstile_broker,
 )
 
 
@@ -69,6 +74,18 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
 WORLD_BOSS_DIAGNOSTIC_VERSION = 2
+# The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
+# never fabricates a token: after the server reports that verification is
+# required, it creates a short-lived Dashboard handoff and waits for a real
+# browser callback.  Four accounts can require separate one-shot tokens, so
+# allow three minutes for the human handoffs; every submitted token is still
+# consumed and sent within the broker's 0.5-second polling interval.
+WORLD_BOSS_TURNSTILE_WAIT_SECONDS = 180
+WORLD_BOSS_TURNSTILE_MAX_HANDOFFS = 2
+WORLD_BOSS_TURNSTILE_ERRORS = {
+    "turnstile_required",
+    "turnstile_failed",
+}
 
 # 2026-08-26 server format: /start no longer carries a window timetable. Windows
 # are revealed one at a time through /window (``afterWindowId`` paging), and every
@@ -509,6 +526,9 @@ class WorldBossMonitor:
         sleep: Any = asyncio.sleep,
         monotonic: Any = time.monotonic,
         finish_grace_seconds: float = WORLD_BOSS_FINISH_GRACE_SECONDS,
+        turnstile_broker: WorldBossTurnstileBroker | None = None,
+        turnstile_wait_seconds: int | None = None,
+        turnstile_max_handoffs: int | None = None,
     ) -> None:
         self.actor = actor
         self.client = actor.client
@@ -520,6 +540,27 @@ class WorldBossMonitor:
         self.monotonic = monotonic
         self.finish_grace_seconds = max(0.0, float(finish_grace_seconds))
         settings = (getattr(actor, "config", {}) or {}).get("world_boss") or {}
+        self.turnstile_broker = turnstile_broker or default_world_boss_turnstile_broker()
+        try:
+            configured_turnstile_wait = int(
+                turnstile_wait_seconds
+                if turnstile_wait_seconds is not None
+                else settings.get("turnstile_wait_seconds")
+                or WORLD_BOSS_TURNSTILE_WAIT_SECONDS
+            )
+        except (TypeError, ValueError):
+            configured_turnstile_wait = WORLD_BOSS_TURNSTILE_WAIT_SECONDS
+        self.turnstile_wait_seconds = max(20, min(180, configured_turnstile_wait))
+        try:
+            configured_handoffs = int(
+                turnstile_max_handoffs
+                if turnstile_max_handoffs is not None
+                else settings.get("turnstile_max_handoffs")
+                or WORLD_BOSS_TURNSTILE_MAX_HANDOFFS
+            )
+        except (TypeError, ValueError):
+            configured_handoffs = WORLD_BOSS_TURNSTILE_MAX_HANDOFFS
+        self.turnstile_max_handoffs = max(1, min(4, configured_handoffs))
         self.enabled = bool(settings.get("enabled", True))
         self.timeout = max(5, min(60, int(settings.get("timeout_seconds") or WORLD_BOSS_TIMEOUT_SECONDS)))
         self.target_chats: list[Any] = []
@@ -2569,12 +2610,330 @@ class WorldBossMonitor:
                 "diagnostic": diagnostic,
             }
 
+    async def _wait_for_turnstile_token(
+        self,
+        entry: WorldBossEntry,
+        identity: str,
+        challenge_id: str,
+    ) -> tuple[str, str]:
+        """Wait for one real browser token submitted through the Dashboard.
+
+        The token is deliberately read once and deleted by the broker.  This
+        coroutine only keeps the battle task alive while the user completes the
+        widget; it never attempts to synthesize or modify the token.
+        """
+
+        broker = getattr(self, "turnstile_broker", None)
+        if broker is None:
+            broker = default_world_boss_turnstile_broker()
+            self.turnstile_broker = broker
+        try:
+            wait_seconds = max(
+                20,
+                min(
+                    180,
+                    int(
+                        getattr(
+                            self,
+                            "turnstile_wait_seconds",
+                            WORLD_BOSS_TURNSTILE_WAIT_SECONDS,
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            wait_seconds = WORLD_BOSS_TURNSTILE_WAIT_SECONDS
+
+        request = broker.create_request(
+            event_fingerprint=entry.fingerprint,
+            message_id=entry.message_id,
+            account=self.account,
+            identity=identity,
+            challenge_id=challenge_id,
+            origin=entry.origin,
+            ttl_seconds=wait_seconds,
+        )
+        request_id = str(request.get("request_id") or "")
+        self.log.warning(
+            "[%s/%s] Qing Yuanzi World Boss requires browser verification; "
+            "automatic verifier queued for request %s before %s (Dashboard fallback available)",
+            self.account,
+            identity,
+            request_id,
+            request.get("expires_at") or "timeout",
+        )
+
+        started = self.monotonic()
+        deadline = started + wait_seconds
+        while self.monotonic() < deadline:
+            if self._boss_stop_requested():
+                broker.cancel(request_id, reason="boss_event_closed")
+                raise self._boss_stopped_error()
+            try:
+                token = broker.take_token(request_id)
+            except Exception as exc:
+                # A transient local queue read failure should not expose a path
+                # or token in the worker log.  Keep polling until the handoff
+                # deadline, then report a sanitized timeout.
+                self.log.debug(
+                    "World Boss Turnstile queue read failed for %s: %s",
+                    request_id,
+                    _error_code(exc),
+                )
+                token = None
+            if token:
+                self.log.info(
+                    "[%s/%s] Qing Yuanzi World Boss browser token received",
+                    self.account,
+                    identity,
+                )
+                return token, request_id
+            remaining = max(0.05, deadline - self.monotonic())
+            try:
+                await self.sleep(min(0.5, remaining))
+            except asyncio.CancelledError:
+                try:
+                    broker.cancel(request_id, reason="worker_cancelled")
+                except Exception:
+                    pass
+                raise
+
+        browser_diagnostics = {}
+        try:
+            metadata = broker.get_request(request_id) or {}
+            browser_diagnostics = {
+                key: metadata[key]
+                for key in ("browser_event", "browser_error_code", "browser_updated_at", "browser_source")
+                if key in metadata
+            }
+            broker.cancel(request_id, reason="turnstile_timeout")
+        except Exception:
+            pass
+        error = MiniAppBeastError("world_boss_turnstile_timeout")
+        error.details = {
+            "turnstile_request_id": request_id,
+            "turnstile_wait_seconds": wait_seconds,
+            "account": self.account,
+            "identity": identity,
+            "challenge_id": challenge_id,
+            "browser": browser_diagnostics,
+        }
+        raise error
+
+    def _record_turnstile_result(
+        self, request_id: str, *, accepted: bool, error: str = "", http_status: int = 0,
+    ) -> None:
+        if not request_id:
+            return
+        try:
+            self.turnstile_broker.record_result(
+                request_id, accepted=accepted, error=error, http_status=http_status,
+            )
+        except Exception as exc:
+            # A local receipt failure must not turn an accepted /begin into a
+            # second upstream request (or put a credential in the log).
+            self.log.warning("World Boss verification receipt failed: %s", _error_code(exc))
+
+    async def _begin_with_turnstile(
+        self,
+        entry: WorldBossEntry,
+        identity: str,
+        init_data: str,
+        session_token: str,
+        challenge_id: str,
+        *,
+        trace: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Begin the battle, pausing for a browser token when the API asks for it."""
+
+        base_payload = {
+            "token": session_token,
+            "initData": init_data,
+            "challengeId": challenge_id,
+        }
+        all_attempts: list[dict[str, Any]] = []
+        handoffs: list[dict[str, Any]] = []
+        active_request_id = ""
+        started_at = self.monotonic()
+        max_handoffs = max(1, int(getattr(
+            self,
+            "turnstile_max_handoffs",
+            WORLD_BOSS_TURNSTILE_MAX_HANDOFFS,
+        )))
+
+        # The first request intentionally follows the old client shape.  It
+        # tells us whether this deployment actually requires Turnstile, while
+        # keeping older/staging servers compatible without any configuration.
+        for handoff_index in range(max_handoffs + 1):
+            request_trace: dict[str, Any] = {}
+            using_turnstile = bool(base_payload.get("turnstileToken"))
+            request_started_at = self.monotonic()
+            try:
+                result = await self._request(
+                    entry.origin,
+                    "/api/miniapp/xianxia-world-boss/begin",
+                    dict(base_payload),
+                    # Siteverify tokens are one-shot even if the response is
+                    # lost.  The initial token-free request may retry once,
+                    # but a browser-token request must never replay the same
+                    # token at the HTTP layer.
+                    retries=0 if using_turnstile else 1,
+                    timeout=min(self.timeout, 10),
+                    trace=request_trace,
+                    time_critical=False,
+                )
+            except asyncio.CancelledError:
+                self._record_turnstile_result(
+                    active_request_id, accepted=False, error="begin_cancelled",
+                )
+                raise
+            except MiniAppBeastError as exc:
+                self._record_turnstile_result(
+                    active_request_id, accepted=False, error=exc.code, http_status=exc.status,
+                )
+                active_request_id = ""
+                all_attempts.extend(
+                    item
+                    for item in request_trace.get("attempts", [])
+                    if isinstance(item, dict)
+                )
+                token_may_be_consumed = using_turnstile and (
+                    exc.status in RETRY_HTTP_STATUSES
+                    or exc.code in TRANSIENT_WORLD_BOSS_ERRORS
+                )
+                if (
+                    exc.code not in WORLD_BOSS_TURNSTILE_ERRORS
+                    and not token_may_be_consumed
+                ):
+                    if trace is not None:
+                        trace.clear()
+                        trace.update(
+                            {
+                                "path": "/begin",
+                                "attempts": all_attempts,
+                                "total_duration_ms": max(
+                                    0,
+                                    int(round((self.monotonic() - started_at) * 1000)),
+                                ),
+                                "turnstile_handoffs": handoffs,
+                            }
+                        )
+                    raise
+                if handoff_index >= max_handoffs:
+                    if trace is not None:
+                        trace.clear()
+                        trace.update(
+                            {
+                                "path": "/begin",
+                                "attempts": all_attempts,
+                                "total_duration_ms": max(
+                                    0,
+                                    int(round((self.monotonic() - started_at) * 1000)),
+                                ),
+                                "turnstile_handoffs": handoffs,
+                                "turnstile_error": exc.code,
+                            }
+                        )
+                    raise
+
+                # Drop the consumed/failed browser credential before waiting
+                # for another handoff.  Only the fresh replacement is ever
+                # included in the next /begin request.
+                base_payload.pop("turnstileToken", None)
+                base_payload.pop("turnstileIdempotencyKey", None)
+                handoff_started_at = self.monotonic()
+                try:
+                    token, request_id = await self._wait_for_turnstile_token(
+                        entry,
+                        identity,
+                        challenge_id,
+                    )
+                except MiniAppBeastError as wait_error:
+                    details = _error_diagnostics(wait_error)
+                    handoffs.append({
+                        "sequence": handoff_index + 1,
+                        "request_id": details.get("turnstile_request_id", ""),
+                        "received": False,
+                        "error_before_handoff": exc.code,
+                        "error": wait_error.code,
+                        "browser": details.get("browser", {}),
+                    })
+                    if trace is not None:
+                        trace.clear()
+                        trace.update({
+                            "path": "/begin",
+                            "attempts": all_attempts,
+                            "total_duration_ms": max(0, int(round((self.monotonic() - started_at) * 1000))),
+                            "turnstile_handoffs": handoffs,
+                            "turnstile_error": wait_error.code,
+                        })
+                    raise
+                active_request_id = request_id
+                handoff = {
+                    "sequence": handoff_index + 1,
+                    "request_id": request_id,
+                    "received": True,
+                    "error_before_handoff": exc.code,
+                    "wait_duration_ms": max(0, int(round((self.monotonic() - handoff_started_at) * 1000))),
+                }
+                # The broker intentionally does not expose the token.  Its
+                # request id is useful for diagnostics, but avoid retaining any
+                # token-bearing payload in state or logs.
+                handoffs.append(handoff)
+                base_payload = {
+                    **base_payload,
+                    "turnstileToken": token,
+                    "turnstileIdempotencyKey": str(uuid.uuid4()),
+                }
+                continue
+            else:
+                response_received_at = self.monotonic()
+                self._record_turnstile_result(active_request_id, accepted=True, http_status=200)
+                all_attempts.extend(
+                    item
+                    for item in request_trace.get("attempts", [])
+                    if isinstance(item, dict)
+                )
+                # Only the final successful HTTP attempt measures network RTT.
+                # Human verification and earlier requests can take minutes and
+                # must never advance the battle clock or the strike lead.
+                successful_attempt_ms = max(
+                    0, int(round((response_received_at - request_started_at) * 1000)),
+                )
+                for attempt in reversed(request_trace.get("attempts", [])):
+                    if isinstance(attempt, dict) and attempt.get("ok") is True:
+                        duration = attempt.get("duration_ms")
+                        if isinstance(duration, (int, float)) and math.isfinite(duration) and duration >= 0:
+                            successful_attempt_ms = int(round(duration))
+                        break
+                if trace is not None:
+                    trace.clear()
+                    trace.update(
+                        {
+                            "path": "/begin",
+                            "attempts": all_attempts,
+                            "total_duration_ms": max(
+                                0,
+                                int(round((self.monotonic() - started_at) * 1000)),
+                            ),
+                            "turnstile_handoffs": handoffs,
+                            "successful_attempt_ms": successful_attempt_ms,
+                            "response_received_monotonic": response_received_at,
+                        }
+                    )
+                return result
+
+        # The loop always returns or raises; retain a defensive sanitized error
+        # for static analyzers and unusual test doubles.
+        raise MiniAppBeastError("request_failed")
+
     async def _fight(
         self,
         entry: WorldBossEntry,
         init_data: str,
         session_token: str,
         payload: dict[str, Any],
+        identity: str = WORLD_BOSS_IDENTITY,
     ) -> dict[str, Any]:
         challenge = payload.get("challenge") or {}
         self._prepare_boss_lifecycle(entry)
@@ -2600,21 +2959,24 @@ class WorldBossMonitor:
 
         begin_trace: dict[str, Any] = {}
         started_request_at = self.monotonic()
-        sync = await self._request(
-            entry.origin,
-            "/api/miniapp/xianxia-world-boss/begin",
-            {
-                "token": session_token,
-                "initData": init_data,
-                "challengeId": challenge_id,
-            },
-            retries=1,
-            timeout=min(self.timeout, 10),
-            trace=begin_trace,
-            time_critical=False,
-        )
-        response_at = self.monotonic()
-        round_trip = max(0.0, response_at - started_request_at)
+        try:
+            sync = await self._begin_with_turnstile(
+                entry,
+                identity,
+                init_data,
+                session_token,
+                challenge_id,
+                trace=begin_trace,
+            )
+        except MiniAppBeastError as exc:
+            exc.details = {**_error_diagnostics(exc), "begin_request": begin_trace}
+            raise
+        response_at = begin_trace.pop("response_received_monotonic", self.monotonic())
+        successful_attempt_ms = begin_trace.get("successful_attempt_ms")
+        if isinstance(successful_attempt_ms, (int, float)) and math.isfinite(successful_attempt_ms):
+            round_trip = max(0.0, successful_attempt_ms / 1000.0)
+        else:
+            round_trip = max(0.0, response_at - started_request_at)
         server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))
         starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
         battle_start = response_at + starts_in
@@ -2926,7 +3288,13 @@ class WorldBossMonitor:
         if isinstance(client_diagnostics, dict):
             client_diagnostics["requested_identity"] = identity
             client_diagnostics["fixed_player_id_available"] = player_id is not None
-        return await self._fight(entry, init_data, session_token, payload)
+        return await self._fight(
+            entry,
+            init_data,
+            session_token,
+            payload,
+            identity=identity,
+        )
 
     @staticmethod
     def _format_damage_yi(value: Any) -> str:

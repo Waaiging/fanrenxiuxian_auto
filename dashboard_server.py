@@ -87,6 +87,12 @@ from surprise_raid_features import (
 )
 from red_packet_features import red_packet_dashboard_payload, save_red_packet_settings
 from miniapp_beast import write_refresh_request
+from world_boss_turnstile import (
+    TurnstileRequestError,
+    list_world_boss_turnstile_requests,
+    record_world_boss_turnstile_browser_event,
+    submit_world_boss_turnstile_token,
+)
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
 from miniapp_fishing import (
     miniapp_fishing_global_snapshot,
@@ -5641,6 +5647,60 @@ def automation_settings_dashboard(username: str = Depends(authenticate)):
         }
     payload["miniapp_fishing"] = fishing
     return payload
+
+
+@app.get("/api/world-boss/turnstile")
+def world_boss_turnstile_requests(
+    include_finished: bool = False,
+    username: str = Depends(authenticate),
+):
+    """Return pending browser-verification requests without token contents."""
+
+    return {
+        "success": True,
+        "requests": list_world_boss_turnstile_requests(
+            include_finished=bool(include_finished)
+        ),
+    }
+
+
+@app.post("/api/world-boss/turnstile")
+def world_boss_turnstile_submit(
+    payload: dict = Body(...),
+    username: str = Depends(authenticate),
+):
+    """Accept one browser token through the authenticated Dashboard only."""
+
+    try:
+        request = submit_world_boss_turnstile_token(
+            payload.get("request_id"),
+            payload.get("token"),
+        )
+    except TurnstileRequestError as exc:
+        messages = {
+            "turnstile_request_invalid": "验证请求无效",
+            "turnstile_token_invalid": "Turnstile 令牌格式无效",
+            "turnstile_request_not_found": "验证请求已不存在或已过期",
+            "turnstile_request_expired": "验证请求已过期，请重新等待机器人提示",
+            "turnstile_request_already_submitted": "该验证请求已经提交过令牌",
+        }
+        return {"success": False, "msg": messages.get(exc.code, "验证令牌提交失败")}
+    return {"success": True, "request": request}
+
+
+@app.post("/api/world-boss/turnstile/browser-event")
+def world_boss_turnstile_browser_event(
+    payload: dict = Body(...),
+    username: str = Depends(authenticate),
+):
+    """Accept bounded widget diagnostics without tokens or arbitrary browser text."""
+    try:
+        request = record_world_boss_turnstile_browser_event(
+            payload.get("request_id"), payload.get("event"), payload.get("error_code", ""),
+        )
+    except TurnstileRequestError as exc:
+        return {"success": False, "code": exc.code, "msg": "验证状态未更新，请刷新请求列表"}
+    return {"success": True, "request": request}
 
 
 @app.post("/api/automation-settings")

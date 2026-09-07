@@ -3,3 +3,4 @@ fastapi
 uvicorn
 python-multipart
 networkx
+websocket-client==1.9.0

@@ -25,7 +25,12 @@ create_placeholder_window() {
 launch_window() {
     local index="$1"
     local script="$2"
+    shift 2
     local launch="cd \"$DEPLOY_DIR\" && source \"$VENV_PATH\" && exec python3 \"$script\""
+    local argument
+    for argument in "$@"; do
+        printf -v launch '%s %q' "$launch" "$argument"
+    done
     tmux respawn-window -k -t "$SESSION_NAME:$index" "$launch"
 }
 
@@ -35,7 +40,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 fi
 
-# Keep a placeholder alive while the tmux server and all five windows are built.
+# Keep a placeholder alive while the tmux server and all six windows are built.
 if ! tmux new-session -d -s "$SESSION_NAME" -n "Main" "exec sleep infinity"; then
     sleep 1
     tmux new-session -d -s "$SESSION_NAME" -n "Main" "exec sleep infinity"
@@ -46,21 +51,25 @@ create_placeholder_window 1 "Sub"
 create_placeholder_window 2 "Xiaohao"
 create_placeholder_window 3 "Waaiging"
 create_placeholder_window 4 "Dashboard"
+create_placeholder_window 5 "BossVerify"
 
 # Start managed windows first and the main visibility controller last.
-echo "[1/5] Starting Sub..."
+echo "[1/6] Starting the shared World Boss browser verifier..."
+launch_window 5 "world_boss_browser.py" "--no-sandbox"
+
+echo "[2/6] Starting Sub..."
 launch_window 1 "sub_cultivator.py"
 
-echo "[2/5] Starting Xiaohao..."
+echo "[3/6] Starting Xiaohao..."
 launch_window 2 "cultivator_xiaohao.py"
 
-echo "[3/5] Starting Waaiging..."
+echo "[4/6] Starting Waaiging..."
 launch_window 3 "cultivator_waaiging.py"
 
-echo "[4/5] Starting Dashboard..."
+echo "[5/6] Starting Dashboard..."
 launch_window 4 "dashboard_server.py"
 
-echo "[5/5] Starting Main..."
+echo "[6/6] Starting Main..."
 launch_window 0 "intelligent_cultivator.py"
 
 PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"

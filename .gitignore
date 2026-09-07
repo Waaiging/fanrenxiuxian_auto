@@ -48,6 +48,8 @@ star_gazing_events.lock
 duel_state.json
 duel_state.lock
 .world_boss_*.lock
+.world_boss_turnstile/
+.qyz_research_*/
 
 # Local backups, snapshots, and temporary scripts
 *.bak

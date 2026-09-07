@@ -17,8 +17,9 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 | `xiuxian:2` | `cultivator_xiaohao.py` 或 `red_packet_account.py --account xiaohao` | 小号，主魂为万灵宗 |
 | `xiuxian:3` | `cultivator_waaiging.py` 或 `red_packet_account.py --account waaiging` | Waaiging，天星宗单主魂 |
 | `xiuxian:4` | `dashboard_server.py` | FastAPI Dashboard |
+| `xiuxian:5` | `world_boss_browser.py --no-sandbox` | 四账号共用的青元子浏览器验证器 |
 
-`start_all.sh` 会先创建完整的 5 个固定窗口，再启动副号、小号、Waaiging、Dashboard，最后启动负责可见性控制的主号。不要再使用“窗口 3 是 Dashboard”的旧映射。
+`start_all.sh` 会先创建完整的 6 个固定窗口，再启动浏览器验证器、副号、小号、Waaiging、Dashboard，最后启动负责可见性控制的主号。不要再使用“窗口 3 是 Dashboard”的旧映射。
 
 上表是 `start_all.sh` 的预期布局。运维时要注意实际进程可能漂移：2026-08-29 核查线上时，`tmux list-windows -t xiuxian` 只有 `0..3` 四个窗口，`dashboard_server.py` 以裸 `nohup python3 -X utf8 dashboard_server.py` 运行在 tmux 之外（手工重启未走 `start_all.sh` 所致）。排查 Dashboard 前先用 `pgrep -af dashboard_server.py` 确认它到底在哪里，不要假定 `xiuxian:4` 一定存在。
 
@@ -128,11 +129,25 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 - 四个账号是否参战、以及各自使用哪个身份，由 Dashboard“自动化设置”单独开关控制；每个账号最多选择一个身份。当前线上配置为 `main|主魂`、`sub|主魂`、`xiaohao|主魂`、`waaiging|主魂`。
 - 2026-08-09 实战确认：化身使用负数 `playerId` 时，伤害与 100 分能够正常结算，但可能被服务端最终排行榜和奖励聚合遗漏；Waaiging 使用主魂正数 `playerId` 时正常上榜。在服务端明确修复前，四账号均只使用主魂参战。
 - 优先使用洞府首页已经确认的 `playerId`，固定入口不可用时也只接受事件页明确匹配所选身份的玩家，不会误选其他分身。
-- 入场后等待服务端锁定战场，按 `challenge.windows` 的灵机中心依次使用“强攻”，蓄势按 `1200ms` 提交，最后用 `qyz_focus_burst_v2` proof 结算。
-- 四账号按主号 `-160ms`、副号 `-120ms`、小号 `-80ms`、Waaiging `-40ms` 提前错峰，给请求传输留出余量，避免正向偏移把到达时间推过完美中心。
+- 入场后等待服务端锁定战场，按 `challenge.windows` 的灵机中心依次使用“强攻”，以 `1000ms` 为蓄势基准，并根据服务端返回的实际 `holdMs` 对后续窗口做限幅自适应；最后用 `qyz_focus_burst_v2` proof 结算。
+- 四账号按主号 `-20ms`、副号 `-15ms`、小号 `-10ms`、Waaiging `-5ms` 提前错峰，给请求传输留出少量余量；每次服务端命中后会用请求发送—完成区间解出 `deltaMs` 的 early/late 方向，仅对唯一候选做有符号、限幅的短历史 EWMA 校准（早到会减少 lead，晚到会增加 lead）；世界 Boss 的阻塞 HTTP 请求使用独立线程池，避免背景 Mini App 任务挤占命中窗口。
 - 小号与 Waaiging 切到群发受限待机 worker 后仍保留监听；完整脚本与待机 worker 通过账号级进程锁去重，不会在切换瞬间重复参战。
 - 每轮只记录一条 Mini App 发起日志和一条最终成绩汇总，不逐次展示 `/hit` 请求。详细诊断保存在对应状态文件的 `world_boss_events[].identity_results[].diagnostics`，包括脱敏后的角色战场参数、入场轮询、开战校时、逐击计划/实际偏移、HTTP 耗时、服务端回复和结算请求。
 - Boss 诊断明确区分本地判定与服务端确认；实时回传失败的攻击不会再显示为服务端确认完美。动态入口 token、`initData`、会话 token、Cookie、签名等凭据不会写入状态或日志。
+- `/begin` 要求 Cloudflare Turnstile 时，worker 创建最长 180 秒的验证请求；独立的 `world_boss_browser.py` 自动打开官方青元子页面，读取页面当前的 Turnstile 配置、完成控件交互，将真实回调令牌交给原 worker 继续 `/begin`。浏览器不接收 Telegram 凭据，也不负责参战请求。
+- 四账号共用一个原生 Chrome/Chromium，使用独立浏览器目录和本机 CDP 连接。队列锁防止重复启动；账号首次验证优先于失败重试，每请求最多尝试 2 次，空闲 20 秒后关闭浏览器。Linux 无显示器时使用 Xvfb；当前 VPS 采用 `--no-sandbox --disable-gpu --disable-dev-shm-usage`，未改动系统级沙箱设置。
+- Dashboard“自动化设置”的“青元子安全验证”卡片区分自动验证进度、令牌已取用和服务端入阵结果，保留 CF 错误码。自动验证失败时可展开手动入口：打开对应页面，运行收藏栏“青元子验证”或复制脚本；回传失败时仍可粘贴令牌。令牌只保存于私有短时队列，取用即删除，不写入日志或账号 state。
+- 开战校时仅使用最终成功 `/begin` 的 HTTP 往返耗时及收包时刻，浏览器验证等待、失败重试和本地回执保存耗时不计入 RTT。
+- 2026-09-07 已在 VPS 验证冷启动后连续 4 次真实 CF 回调（29.64 / 11.14 / 11.24 / 10.78 秒）。这证明自动生成回调可行，尚不能替代下一场真实 `/begin` 验票与实战确认；无效战场凭据会先被服务端拒绝，无法离线验证此环节。
+
+验证器依赖 `requirements.txt` 中的 `websocket-client==1.9.0`、Chrome/Chromium 和 Linux 下的 `xvfb-run`；可自动发现系统浏览器或本机已有的 Playwright Chromium 可执行文件，但不使用 Playwright 控制验证页面。`start_all.sh` 会启动常驻进程；单独启动与隔离自检示例：
+
+```bash
+./venv/bin/python world_boss_browser.py --no-sandbox
+./venv/bin/python world_boss_browser.py --probe --count 4 --queue-dir /tmp/qyz-callback-check --no-sandbox
+```
+
+自检只检查回调，不会开始战斗；输出包含成功状态、令牌长度和耗时，不包含令牌内容。可用 `--chrome /path/to/chrome` 指定浏览器。生产 worker、Dashboard 和验证器必须共用同一个 `WORLD_BOSS_TURNSTILE_QUEUE_DIR`（默认部署目录下 `.world_boss_turnstile`）。排查时核对 `xiuxian:5` 是否存活，并区分 `600010`（CF 控件拒绝）、浏览器启动失败、请求超时和服务端拒绝。
 
 ### 南陇侯与侍妾保护
 
