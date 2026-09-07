@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import tempfile
@@ -248,6 +249,52 @@ def small_world_data(payload: Any) -> dict[str, Any]:
     if world is None:
         world = payload.get("smallWorld") if isinstance(payload.get("smallWorld"), dict) else {}
     return world
+
+
+def small_world_incense_plan(payload: Any) -> dict[str, Any]:
+    """Estimate when stock plus passive production can pay for soothing.
+
+    Missing stock is unknown, not zero. Fractional uncollected incense counts
+    toward production time, but only whole collectable points can be spent.
+    """
+    world = small_world_data(payload)
+    summary = world.get("summary") if isinstance(world.get("summary"), dict) else {}
+    actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
+
+    def number(value):
+        try:
+            result = float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, result) if math.isfinite(result) else None
+
+    required = number(actions.get("sootheCost"))
+    stock = number(summary.get("incensePoints"))
+    uncollected = number(summary.get("uncollectedIncense"))
+    collectable = number(summary.get("collectableIncense"))
+    hourly = number(summary.get("hourlyIncense"))
+    if uncollected is None:
+        uncollected = collectable or 0.0
+    if collectable is None:
+        collectable = math.floor(uncollected)
+    deficit = max(0.0, required - stock) if required is not None and stock is not None else None
+    production_deficit = max(0.0, deficit - uncollected) if deficit is not None else None
+    wait = None
+    if production_deficit == 0:
+        wait = 0
+    elif production_deficit is not None and hourly:
+        wait = math.ceil(production_deficit * 3600 / hourly)
+    return {
+        "required": required,
+        "stock": stock,
+        "uncollected": uncollected,
+        "collectable": collectable,
+        "hourly": hourly,
+        "deficit": deficit,
+        "production_deficit": production_deficit,
+        "production_wait_seconds": wait,
+        "can_collect": bool(actions.get("canCollect")),
+    }
 
 
 def small_world_status_text(payload: Any) -> str:

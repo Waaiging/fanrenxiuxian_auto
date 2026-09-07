@@ -101,6 +101,7 @@ from miniapp_dwelling import (
     command_result_ok,
     command_result_text,
     small_world_data,
+    small_world_incense_plan,
 )
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
@@ -252,6 +253,7 @@ MIRACLE_PREACH_COMMAND = ".神迹 布道"
 MIRACLE_PREACH_CD_SECONDS = 3 * 3600
 SMALL_WORLD_RETRY_SECONDS = 10 * 60
 SMALL_WORLD_CALAMITY_RETRY_SECONDS = 5 * 60
+SMALL_WORLD_RESOURCE_RECHECK_SECONDS = 60 * 60
 
 
 def parse_small_world_calamity_event(text):
@@ -2275,6 +2277,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.state["small_world_calamity_last_incense_loss"] = parsed["incense_loss"]
         self.state["small_world_calamity_last_status"] = "queued"
         self.state["small_world_calamity_last_error"] = ""
+        self.state.pop("small_world_calamity_resource_plan", None)
         self.state["next_small_world_calamity_time"] = now
         self.save_state()
 
@@ -2304,19 +2307,66 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.state["small_world_calamity_last_response"] = str(response or "")[:700]
         self.state["small_world_calamity_last_error"] = str(error or "")[:200]
         self.state["next_small_world_calamity_time"] = retry_at
-        if status == "edict_cooldown":
+        if status in {"edict_cooldown", "insufficient_incense", "incense_unavailable"}:
             self.state["next_miracle_preach_time"] = retry_at
         self.save_state()
         return seconds
 
+    def defer_small_world_calamity_for_resources(self, payload):
+        """Keep a resource shortage asleep until production and edict are ready."""
+        plan = small_world_incense_plan(payload)
+        now = now_str()
+        remaining = self.small_world_remaining_seconds(payload, "edictRemainingSeconds")
+        plan["observed_at"] = now
+        plan["edict_remaining_seconds"] = remaining
+        wait = plan["production_wait_seconds"]
+        plan["estimated_ready_at"] = (
+            add_seconds_str(now, max(remaining, wait + (2 if wait else 0)))
+            if wait is not None else ""
+        )
+        self.state["small_world_calamity_resource_plan"] = plan
+        if plan["required"] is None or plan["stock"] is None:
+            response = "小世界香火库存或安抚消耗暂不可用，1 小时后刷新状态"
+            wait = SMALL_WORLD_RESOURCE_RECHECK_SECONDS
+            status = "incense_unavailable"
+        elif plan["deficit"] > 0 and (
+            plan["collectable"] < plan["deficit"] or not plan["can_collect"]
+        ):
+            response = (
+                f"安抚信徒需要 {plan['required']:g} 香火，库存 {plan['stock']:g}，"
+                f"待收 {plan['uncollected']:g}，库存还差 {plan['deficit']:g}"
+            )
+            if wait is not None and wait > 0:
+                wait += 2  # Round past the server's whole-point collection boundary.
+                response += (
+                    f"；还需产出 {plan['production_deficit']:g}，按 {plan['hourly']:g}/小时，"
+                    f"预计 {plan['estimated_ready_at']} 可执行"
+                )
+            else:
+                wait = SMALL_WORLD_RESOURCE_RECHECK_SECONDS
+                plan["estimated_ready_at"] = ""
+                response += "；产出为零、未知或待收香火尚不可领取，1 小时后刷新状态"
+            status = "insufficient_incense"
+        elif remaining > 0:
+            wait = remaining
+            response = f"安抚信徒需等待神谕冷却 {remaining} 秒"
+            status = "edict_cooldown"
+        else:
+            return False
+        self.defer_small_world_calamity(max(remaining, wait), status, response=response)
+        log.info("Small-world calamity waiting: %s", response)
+        return True
+
     @staticmethod
     def small_world_soothe_completed(payload):
-        if command_result_ok(payload):
-            return True
         result = payload.get("actionResult") if isinstance(payload, dict) else {}
         result = result if isinstance(result, dict) else {}
-        code = str(result.get("error") or "").strip().casefold()
+        code = str(result.get("error") or (payload.get("error") if isinstance(payload, dict) else "") or "").strip().casefold()
         text = str(command_result_text(payload) or "").strip()
+        if "incense" in code or any(marker in text for marker in ("香火不足", "香火库存不足")):
+            return False
+        if command_result_ok(payload) and isinstance(payload, dict) and payload.get("ok") is not False:
+            return True
         if code in {"nothing_to_soothe", "no_calamity", "already_soothed", "already_stable"}:
             return True
         return any(marker in text for marker in (
@@ -2372,49 +2422,31 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             if not world or world.get("hasWorld") is False:
                 raise MiniAppBeastError("small_world_unavailable")
 
-            remaining = self.small_world_remaining_seconds(snapshot, "edictRemainingSeconds")
-            if remaining > 0:
-                self.defer_small_world_calamity(
-                    remaining,
-                    "edict_cooldown",
-                    response=f"安抚信徒需等待神谕冷却 {remaining} 秒",
-                )
-                log.info("Small-world calamity soothe waiting for edict cooldown: %ss.", remaining)
-                return False
-
             if self.dashboard_command_paused(SMALL_WORLD_SOOTHE_COMMAND, "主魂"):
                 self.defer_small_world_calamity(300, "paused", response="安抚信徒已暂停")
                 return False
 
-            actions = world.get("actions") if isinstance(world.get("actions"), dict) else {}
-            summary = world.get("summary") if isinstance(world.get("summary"), dict) else {}
-            try:
-                soothe_cost = max(0, int(float(str(actions.get("sootheCost") or 0).replace(",", ""))))
-            except (TypeError, ValueError):
-                soothe_cost = 0
-            try:
-                incense_points = max(0, int(float(str(summary.get("incensePoints") or 0).replace(",", ""))))
-            except (TypeError, ValueError):
-                incense_points = 0
-            if soothe_cost > incense_points and actions.get("canCollect"):
+            if self.defer_small_world_calamity_for_resources(snapshot):
+                return False
+            plan = self.state["small_world_calamity_resource_plan"]
+            if plan["deficit"] > 0:
                 collected = await transport.small_world_action("主魂", "collect")
                 apply_dwelling_snapshot(self, "主魂", collected)
-                world = small_world_data(collected)
-                summary = world.get("summary") if isinstance(world.get("summary"), dict) else {}
-                try:
-                    incense_points = max(0, int(float(str(summary.get("incensePoints") or 0).replace(",", ""))))
-                except (TypeError, ValueError):
-                    incense_points = 0
-            if soothe_cost > 0 and incense_points < soothe_cost:
-                response = f"安抚信徒需要 {soothe_cost} 香火，当前仅 {incense_points}"
-                self.defer_small_world_calamity(
-                    SMALL_WORLD_CALAMITY_RETRY_SECONDS,
-                    "insufficient_incense",
-                    response=response,
-                    error="insufficient_incense",
-                )
-                log.error("Small-world calamity soothe deferred: %s", response)
-                return False
+                # Action replies can omit the entire smallWorld summary. Read
+                # authoritative stock instead of turning a successful collect
+                # into a fictitious zero balance.
+                snapshot = await transport.small_world_snapshot("主魂")
+                apply_dwelling_snapshot(self, "主魂", snapshot)
+                if self.defer_small_world_calamity_for_resources(snapshot):
+                    return False
+                plan = self.state["small_world_calamity_resource_plan"]
+                if plan["deficit"] > 0:
+                    self.defer_small_world_calamity(
+                        SMALL_WORLD_RESOURCE_RECHECK_SECONDS,
+                        "incense_unavailable",
+                        response="收割后香火尚未到账，稍后刷新库存",
+                    )
+                    return False
 
             result = await transport.small_world_action("主魂", "soothe")
             apply_dwelling_snapshot(self, "主魂", result)
@@ -2438,7 +2470,15 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
             result_data = result.get("actionResult") if isinstance(result, dict) else {}
             result_data = result_data if isinstance(result_data, dict) else {}
-            error = str(result_data.get("error") or "small_world_soothe_failed")
+            error = str(result_data.get("error") or result.get("error") or "small_world_soothe_failed")
+            if "incense" in error.casefold() or any(marker in response for marker in ("香火不足", "香火库存不足")):
+                snapshot = await transport.small_world_snapshot("主魂")
+                apply_dwelling_snapshot(self, "主魂", snapshot)
+                if not self.defer_small_world_calamity_for_resources(snapshot):
+                    self.defer_small_world_calamity(
+                        SMALL_WORLD_RESOURCE_RECHECK_SECONDS, "insufficient_incense", response=response,
+                    )
+                return False
             retry = remaining or SMALL_WORLD_CALAMITY_RETRY_SECONDS
             self.defer_small_world_calamity(retry, "action_failed", response=response, error=error)
             log.error("Small-world calamity soothe was not completed: %s", response[:300])
@@ -2484,6 +2524,15 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         elif remaining <= 0:
             remaining = SMALL_WORLD_CD_SECONDS if ok else SMALL_WORLD_RETRY_SECONDS
         self.state["next_small_world_time"] = add_seconds_str(now, remaining)
+        resource_plan = small_world_incense_plan(payload)
+        if self.state.get("small_world_calamity_pending") and all(
+            resource_plan[key] is not None for key in ("required", "stock")
+        ):
+            if not self.defer_small_world_calamity_for_resources(payload):
+                self.state["next_small_world_calamity_time"] = now
+            signal = getattr(self, "small_world_calamity_event", None)
+            if signal is not None:
+                signal.set()
         self.save_state()
         return ok
 
@@ -2616,6 +2665,11 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         if signal is None:
             signal = asyncio.Event()
             self.small_world_calamity_event = signal
+        if self.state.get("small_world_calamity_pending") and not self.state.get("small_world_calamity_resource_plan"):
+            # Migrate the old fixed five-minute retry once; later restarts keep
+            # the persisted production estimate instead of starting over.
+            self.state["next_small_world_calamity_time"] = now_str()
+            self.save_state()
         while self.is_running:
             if not self.state.get("small_world_calamity_pending"):
                 signal.clear()
