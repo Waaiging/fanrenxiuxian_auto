@@ -1,5 +1,7 @@
 import asyncio
+import atexit
 import logging
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -57,7 +59,9 @@ class FakeActor:
         self.config = {}
         self.mc = {}
         self.state = {}
-        self.state_file = "state_fixture.json"
+        self._directory = tempfile.TemporaryDirectory()
+        atexit.register(self._directory.cleanup)
+        self.state_file = str(Path(self._directory.name) / "state_fixture.json")
         self.target_chat_id = 2083016447
         self.avatars = list(avatars or [])
         self.identity_usernames = identity_usernames or {"主魂": ["Waaiging"]}
@@ -507,7 +511,7 @@ class WorldBossFeatureTests(unittest.TestCase):
             center_ms=1000,
             sent_elapsed_ms=860,
             request_completed_elapsed_ms=930,
-            request_lead_ms=0,
+            request_lead_ms=160,
         )
         self.assertEqual(early["direction"], "early")
         self.assertLess(early_monitor._drift_lead_ms(), 0)
@@ -543,7 +547,7 @@ class WorldBossFeatureTests(unittest.TestCase):
         normal_result = normal._record_drift(
             200,
             center_ms=1000,
-            sent_elapsed_ms=1190,
+            sent_elapsed_ms=1150,
             request_completed_elapsed_ms=1250,
             request_lead_ms=0,
         )
@@ -581,7 +585,7 @@ class WorldBossFeatureTests(unittest.TestCase):
         self.assertTrue(first["update_applied"])
         self.assertTrue(second["update_applied"])
         self.assertLess(second["gain"], first["gain"])
-        self.assertEqual(second["robust_sample_ms"], first["controller_correction_ms"])
+        self.assertEqual(second["robust_sample_ms"], first["clamped_sample_drift_ms"])
         self.assertGreater(monitor._drift_lead_ms(), before)
 
     def test_server_hold_feedback_adjusts_only_the_next_charge_plan(self):

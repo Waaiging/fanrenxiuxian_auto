@@ -49,6 +49,7 @@ duel_state.json
 duel_state.lock
 .world_boss_*.lock
 .world_boss_turnstile/
+.world_boss_recovery/
 .qyz_research_*/
 
 # Local backups, snapshots, and temporary scripts

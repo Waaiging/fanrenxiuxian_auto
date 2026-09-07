@@ -2,12 +2,12 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from miniapp_beast import MiniAppBeastError
-from world_boss_features import WorldBossMonitor
+from world_boss_features import WorldBossMonitor, extract_world_boss_entry
+from tests.test_world_boss_features import DummyMessage, FakeActor
 
 
 class WindowsDiagnosticsTests(unittest.TestCase):
@@ -65,26 +65,26 @@ class WindowsDiagnosticsTests(unittest.TestCase):
         }
         sync = {"startsInMs": 1000, "windows": []}
 
-        monitor = WorldBossMonitor.__new__(WorldBossMonitor)
-        monitor.monotonic = lambda: 1_000.0
-        monitor.timeout = 10
-
-        async def fail_request(origin, path, payload, **kwargs):
+        now = [1_000.0]
+        async def sleep(seconds):
+            now[0] += seconds
+        async def fail_request(origin, path, payload, timeout):
             return sync
-
-        monitor._request = fail_request
+        monitor = WorldBossMonitor(FakeActor(), "main", post_json=fail_request,
+                                   monotonic=lambda: now[0], sleep=sleep)
 
         async def go():
             with self.assertRaises(MiniAppBeastError) as ctx:
                 await monitor._fight(
-                    entry=MagicMock(),
+                    entry=extract_world_boss_entry(DummyMessage()),
                     init_data="init",
                     session_token="tok",
                     payload={"challenge": challenge},
                 )
+            await monitor.stop()
             return ctx.exception
 
-        exc = asyncio.new_event_loop().run_until_complete(go())
+        exc = asyncio.run(go())
         self.assertEqual(exc.code, "boss_windows_invalid")
         self.assertIn("challenge", exc.details)
         self.assertIn("begin_response", exc.details)

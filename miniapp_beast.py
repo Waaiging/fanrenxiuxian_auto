@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -310,6 +311,15 @@ class MiniAppTransportCircuitBreaker:
         with _exclusive_transport_health_lock(self.lock_path):
             document = self._read_unlocked()
             key, entry = self._load_entry(document, origin)
+            # A normal successful request (or another worker's recovery) may
+            # already have closed the circuit.  Avoid an unnecessary fsync and
+            # duplicate warning for every retry of the same /start call.
+            if (
+                str(entry.get("status") or "closed") == "closed"
+                and int(entry.get("consecutive_failures") or 0) <= 0
+                and not entry.get("last_error")
+            ):
+                return
             generation = int(entry.get("generation") or 0)
             entry = self._empty_entry()
             entry["generation"] = generation
@@ -590,6 +600,24 @@ def normalize_spirit_beast_roster(payload):
     return beasts
 
 
+def miniapp_error_details(value, depth=0):
+    """Keep bounded API diagnostics without retaining credentials."""
+    if depth >= 5:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(key)[:80]: miniapp_error_details(item, depth + 1)
+            for key, item in list(value.items())[:40]
+            if not any(part in re.sub(r"[^a-z0-9]", "", str(key).lower())
+                       for part in ("token", "ticket", "initdata", "authorization", "cookie", "secret", "signature"))
+        }
+    if isinstance(value, (list, tuple)):
+        return [miniapp_error_details(item, depth + 1) for item in value[:20]]
+    if isinstance(value, str):
+        return value[:240]
+    return value if value is None or isinstance(value, (bool, int, float)) else None
+
+
 def _post_json_sync(origin, path, payload, timeout):
     request = urllib.request.Request(
         urllib.parse.urljoin(origin.rstrip("/") + "/", path.lstrip("/")),
@@ -599,6 +627,7 @@ def _post_json_sync(origin, path, payload, timeout):
             "Origin": origin,
             "Referer": origin.rstrip("/") + "/miniapp/xianxia-dwelling",
             "User-Agent": "Mozilla/5.0 Telegram-Android/11.0",
+            "Connection": "close",
         },
         method="POST",
     )
@@ -608,7 +637,10 @@ def _post_json_sync(origin, path, payload, timeout):
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status = int(exc.code or 0)
-        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        finally:
+            exc.close()
     except Exception as exc:
         raise MiniAppBeastError(type(exc).__name__.lower()) from exc
     try:
@@ -618,8 +650,24 @@ def _post_json_sync(origin, path, payload, timeout):
     if not isinstance(data, dict):
         raise MiniAppBeastError("invalid_response", status)
     if status >= 400 or data.get("ok") is False:
-        raise MiniAppBeastError(data.get("error") or f"http_{status}", status)
+        error = MiniAppBeastError(data.get("error") or f"http_{status}", status)
+        error.details = miniapp_error_details(data)
+        raise error
     return data
+
+
+async def _run_blocking(func, *args, executor=None):
+    """Run one blocking transport operation without monopolizing the
+    event loop's shared default executor.
+
+    Callers normally use ``asyncio.to_thread``.  Deadline-sensitive monitors may
+    supply their own executor so unrelated background jobs cannot delay a
+    request at a battle window boundary.
+    """
+    if executor is None:
+        return await asyncio.to_thread(func, *args)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, func, *args)
 
 
 async def _post_json(
@@ -630,6 +678,9 @@ async def _post_json(
     post_json=None,
     *,
     time_critical: bool = False,
+    executor=None,
+    request_sync=None,
+    network_trace=None,
 ):
     if post_json is not None:
         # Injected transports are used by focused tests and do not represent the
@@ -647,7 +698,7 @@ async def _post_json(
     # request even while the shared breaker is cooling; failures still update
     # the shared health state. Ordinary background traffic keeps waiting.
     decision = (
-        await asyncio.to_thread(_MINIAPP_CIRCUIT.acquire, origin)
+        await _run_blocking(_MINIAPP_CIRCUIT.acquire, origin, executor=executor)
         if not time_critical
         else MiniAppCircuitDecision(permit=MiniAppCircuitPermit())
     )
@@ -657,20 +708,35 @@ async def _post_json(
         raise MiniAppCircuitOpenError(decision.wait_seconds, decision.retry_at)
     permit = decision.permit
 
+    def request():
+        if network_trace is not None:
+            network_trace["sent_monotonic"] = time.monotonic()
+        try:
+            return (request_sync or _post_json_sync)(origin, path, payload, timeout)
+        finally:
+            if network_trace is not None:
+                network_trace["received_monotonic"] = time.monotonic()
+
     try:
-        result = await asyncio.to_thread(_post_json_sync, origin, path, payload, timeout)
+        # World-boss windows are deadline-driven.  Keep their blocking HTTP calls
+        # out of asyncio's shared default pool, which is also used by background
+        # Mini App refreshes and can otherwise delay a /hit.
+        result = await _run_blocking(
+            request, executor=executor
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         if miniapp_upstream_failure(exc):
-            await asyncio.to_thread(
+            await _run_blocking(
                 _MINIAPP_CIRCUIT.record_failure,
                 origin,
                 permit,
                 exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower(),
                 int(getattr(exc, "status", 0) or 0),
+                executor=executor,
             )
-            circuit_error = miniapp_circuit_preflight(origin)
+            circuit_error = await _run_blocking(miniapp_circuit_preflight, origin, executor=executor)
             if circuit_error is not None:
                 # The circuit transition already emitted the useful outage log.
                 # Pause callers instead of logging or retrying the same failure
@@ -679,14 +745,14 @@ async def _post_json(
         else:
             # A structured application/authentication error proves the HTTP
             # service answered; a half-open transport probe therefore succeeded.
-            await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
+            await _run_blocking(_MINIAPP_CIRCUIT.record_success, origin, permit, executor=executor)
         raise
-    await asyncio.to_thread(_MINIAPP_CIRCUIT.record_success, origin, permit)
+    await _run_blocking(_MINIAPP_CIRCUIT.record_success, origin, permit, executor=executor)
     if time_critical:
         # A successful deadline request is authoritative evidence that the
         # upstream has recovered, even though it did not hold the elected
         # half-open probe lease.
-        await asyncio.to_thread(_MINIAPP_CIRCUIT.force_recover, origin)
+        await _run_blocking(_MINIAPP_CIRCUIT.force_recover, origin, executor=executor)
     return result
 
 

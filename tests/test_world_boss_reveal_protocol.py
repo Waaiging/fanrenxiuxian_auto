@@ -37,7 +37,7 @@ class RevealClock:
 
 
 def build_monitor(clock, post_json, account="main"):
-    return WorldBossMonitor(
+    monitor = WorldBossMonitor(
         FakeActor(avatars=["缘生子"]),
         account,
         logger=logging.getLogger("world-boss-reveal-test"),
@@ -47,6 +47,9 @@ def build_monitor(clock, post_json, account="main"):
         monotonic=clock.monotonic,
         finish_grace_seconds=0,
     )
+    # Disk latency is covered by recovery tests; these tests use a virtual clock.
+    monitor._save_checkpoint = AsyncMock()
+    return monitor
 
 
 class WorldBossRevealProtocolTests(unittest.TestCase):

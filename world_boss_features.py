@@ -14,10 +14,11 @@ import math
 import os
 import re
 import statistics
+import threading
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from miniapp_beast import (
     MiniAppBeastError,
     MiniAppCircuitOpenError,
     _post_json,
+    _run_blocking,
+    miniapp_error_details,
     miniapp_circuit_preflight,
     miniapp_origin,
     request_webview_init_data,
@@ -38,6 +41,7 @@ from world_boss_turnstile import (
     WorldBossTurnstileBroker,
     default_world_boss_turnstile_broker,
 )
+from world_boss_recovery import WorldBossRecoveryStore
 
 
 WORLD_BOSS_BUTTON_TEXT = "进入真仙战场"
@@ -55,6 +59,7 @@ WORLD_BOSS_HOLD_MS = 1000
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
 WORLD_BOSS_RECOVERY_WINDOW_SECONDS = 120
+WORLD_BOSS_RESUME_WINDOW_SECONDS = 15 * 60
 WORLD_BOSS_FINISH_GRACE_SECONDS = 2.2
 # Once any account reports ``bossHp <= 0`` the remaining windows are no longer
 # actionable.  Keep a tiny grace period for an in-flight response, then finish
@@ -170,11 +175,12 @@ COMPLETED_EVENT_STATUSES = {
     "not_enough_participants",
     "event_closed",
     "expired",
-    "paused_upstream",
+    "recovery_expired",
 }
 
 WORLD_BOSS_DIAGNOSTIC_SENSITIVE_PARTS = (
     "token",
+    "ticket",
     "initdata",
     "authorization",
     "cookie",
@@ -190,7 +196,7 @@ def _diagnostic_value(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, str):
         return value[:240]
     if depth >= 4:
-        return str(value)[:240]
+        return None
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for raw_key, raw_value in list(value.items())[:40]:
@@ -211,12 +217,7 @@ def _error_diagnostics(exc: BaseException) -> dict[str, Any]:
 
 
 class _PersistentWorldBossJsonClient:
-    """One keep-alive HTTP connection matching the browser's fetch behavior.
-
-    The realtime hit window is only a few hundred milliseconds wide. Opening a new
-    TLS connection for every hit regularly takes more than one second on the VPS,
-    so all requests for one account/event are serialized over one warm connection.
-    """
+    """Reuse idle connections without serializing polling and timed strikes."""
 
     def __init__(self, origin: str) -> None:
         parsed = urllib.parse.urlsplit(str(origin or "").strip())
@@ -228,16 +229,16 @@ class _PersistentWorldBossJsonClient:
         self.scheme = parsed.scheme
         self.hostname = parsed.hostname
         self.port = parsed.port
-        self.connection: http.client.HTTPConnection | None = None
-        self.lock = asyncio.Lock()
+        self._idle: list[tuple[float, http.client.HTTPConnection]] = []
+        self._lock = threading.Lock()
+        self._closed = False
 
     def close(self) -> None:
-        connection, self.connection = self.connection, None
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
+        with self._lock:
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for _, connection in idle:
+            connection.close()
 
     def _new_connection(self, timeout: int) -> http.client.HTTPConnection:
         connection_type = (
@@ -273,26 +274,41 @@ class _PersistentWorldBossJsonClient:
             "Connection": "keep-alive",
         }
 
-        for connection_attempt in range(2):
-            if self.connection is None:
-                self.connection = self._new_connection(timeout)
-            else:
-                self.connection.timeout = max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
-            try:
-                self.connection.request("POST", request_path, body=body, headers=headers)
-                response = self.connection.getresponse()
-                status = int(response.status or 0)
-                response_body = response.read().decode("utf-8", errors="replace")
-                if response.will_close:
-                    self.close()
-                break
-            except (OSError, http.client.HTTPException) as exc:
-                self.close()
-                if connection_attempt == 0:
-                    continue
-                raise MiniAppBeastError(type(exc).__name__.lower()) from exc
-        else:
-            raise MiniAppBeastError("request_failed")
+        connection = None
+        with self._lock:
+            if self._closed:
+                raise MiniAppBeastError("request_failed")
+            while self._idle:
+                returned_at, candidate = self._idle.pop()
+                if time.monotonic() - returned_at < 15:
+                    connection = candidate
+                    break
+                candidate.close()
+        connection = connection or self._new_connection(timeout)
+        connection.timeout = max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
+        if connection.sock is not None:
+            connection.sock.settimeout(connection.timeout)
+        reusable = False
+        try:
+            connection.request("POST", request_path, body=body, headers=headers)
+            response = connection.getresponse()
+            status = int(response.status or 0)
+            response_body = response.read().decode("utf-8", errors="replace")
+            reusable = not response.will_close
+        except (OSError, http.client.HTTPException) as exc:
+            # A lost response may follow a successful one-shot POST. Only the
+            # endpoint's explicit retry policy may decide to send again.
+            error = MiniAppBeastError(
+                "api_timeout" if isinstance(exc, TimeoutError) else "api_unreachable"
+            )
+            error.details = {"transport_error": type(exc).__name__.lower()}
+            raise error from exc
+        finally:
+            with self._lock:
+                if reusable and not self._closed and len(self._idle) < 32:
+                    self._idle.append((time.monotonic(), connection))
+                else:
+                    connection.close()
 
         try:
             data = json.loads(response_body)
@@ -302,18 +318,20 @@ class _PersistentWorldBossJsonClient:
             raise MiniAppBeastError("invalid_response", status)
         if status >= 400 or data.get("ok") is False:
             error = MiniAppBeastError(data.get("error") or f"http_{status}", status)
-            error.details = _diagnostic_value(data)
+            error.details = miniapp_error_details(data)
             raise error
         return data
 
-    async def post(
+    def post_sync(
         self,
+        origin: str,
         path: str,
         payload: dict[str, Any],
         timeout: int,
     ) -> dict[str, Any]:
-        async with self.lock:
-            return await asyncio.to_thread(self._post_sync, path, payload, timeout)
+        if origin.rstrip("/") != self.origin:
+            raise MiniAppBeastError("invalid_entry_url")
+        return self._post_sync(path, payload, timeout)
 
 
 def _now_text() -> str:
@@ -349,6 +367,7 @@ class WorldBossEntry:
     bot_username: str
     fingerprint: str
     token: str = field(repr=False)
+    notice_epoch: float = 0.0
 
 
 def extract_world_boss_entry(
@@ -412,6 +431,8 @@ def extract_world_boss_entry(
         bot_username=bot_username,
         fingerprint=fingerprint,
         token=token,
+        notice_epoch=(getattr(message, "date").timestamp()
+                      if isinstance(getattr(message, "date", None), datetime) else time.time()),
     )
 
 
@@ -488,8 +509,20 @@ class _ProcessLease:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("a+b")
         if os.name == "nt":
-            # The VPS uses flock. The in-process monitor lock is sufficient for local runs.
-            return True
+            import msvcrt
+
+            try:
+                self.handle.seek(0, os.SEEK_END)
+                if self.handle.tell() == 0:
+                    self.handle.write(b"0")
+                    self.handle.flush()
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError:
+                self.handle.close()
+                self.handle = None
+                return False
         try:
             import fcntl
 
@@ -503,7 +536,12 @@ class _ProcessLease:
     def release(self) -> None:
         if self.handle is None:
             return
-        if os.name != "nt":
+        if os.name == "nt":
+            import msvcrt
+
+            self.handle.seek(0)
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
             try:
                 import fcntl
 
@@ -529,6 +567,7 @@ class WorldBossMonitor:
         turnstile_broker: WorldBossTurnstileBroker | None = None,
         turnstile_wait_seconds: int | None = None,
         turnstile_max_handoffs: int | None = None,
+        recovery_store: WorldBossRecoveryStore | None = None,
     ) -> None:
         self.actor = actor
         self.client = actor.client
@@ -584,9 +623,16 @@ class WorldBossMonitor:
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._recovery_cleanup_task: asyncio.Task[Any] | None = None
         self._inflight_messages: set[tuple[Any, int]] = set()
         self._inflight_fingerprints: set[str] = set()
         self._fight_lock = asyncio.Lock()
+        self._checkpoint_lock = asyncio.Lock()
+        self._checkpoint: dict[str, Any] | None = None
+        state_file = Path(getattr(actor, "state_file", "") or __file__).resolve()
+        self.recovery_store = recovery_store or WorldBossRecoveryStore(
+            state_file.parent / ".world_boss_recovery", self.account,
+        )
         self._json_clients: dict[str, _PersistentWorldBossJsonClient] = {}
         self._boss_defeated = asyncio.Event()
         self._boss_defeat_reason = ""
@@ -621,6 +667,42 @@ class WorldBossMonitor:
         saver = getattr(self.actor, "save_state", None)
         if callable(saver):
             saver()
+
+    async def _save_checkpoint(self) -> None:
+        if self._checkpoint is None or not hasattr(self, "recovery_store"):
+            return
+        async with self._checkpoint_lock:
+            snapshot = json.loads(json.dumps(self._checkpoint))
+            writing = asyncio.create_task(_run_blocking(
+                self.recovery_store.save, snapshot, executor=self._world_boss_http_executor(),
+            ))
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                # Do not release the event lease while an older checkpoint can
+                # still replace the next process's resumed state.
+                await writing
+                raise
+
+    async def _track_hit(self, *args: Any) -> dict[str, Any]:
+        checkpoint = self._checkpoint
+        window_id = str(args[5]["id"])
+        if checkpoint is not None and window_id in checkpoint["hit_results"]:
+            return checkpoint["hit_results"][window_id]
+        result = await self._hit_window(*args)
+        checkpoint = self._checkpoint
+        if checkpoint is not None:
+            checkpoint["hit_results"][window_id] = result
+            await self._save_checkpoint()
+        return result
+
+    async def _cleanup_recovery_files(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await _run_blocking(self.recovery_store.list_pending, executor=self._world_boss_http_executor())
+            except Exception as exc:
+                self.log.warning("World Boss recovery cleanup failed: %s", _error_code(exc))
 
     def _boss_marker_path(self, entry: WorldBossEntry) -> Path:
         """Return the cross-process lifecycle marker for one battle token."""
@@ -795,7 +877,7 @@ class WorldBossMonitor:
         return value
 
     def _event_status(self, fingerprint: str) -> str:
-        for item in reversed(self._history()):
+        for item in reversed((getattr(self.actor, "state", {}) or {}).get("world_boss_events") or []):
             if isinstance(item, dict) and item.get("fingerprint") == fingerprint:
                 return str(item.get("status") or "")
         return ""
@@ -814,6 +896,8 @@ class WorldBossMonitor:
             record = {
                 "message_id": entry.message_id,
                 "fingerprint": entry.fingerprint,
+                "chat_id": entry.chat_id,
+                "notice_epoch": entry.notice_epoch or time.time(),
             }
             history.append(record)
         record.update({"status": status, "updated_at": _now_text(), **updates})
@@ -873,6 +957,17 @@ class WorldBossMonitor:
             self.target_chats,
         )
 
+        for checkpoint in await _run_blocking(
+            self.recovery_store.list_pending, executor=self._world_boss_http_executor(),
+        ):
+            entry = WorldBossEntry(**checkpoint["entry"])
+            if self._event_status(entry.fingerprint) in COMPLETED_EVENT_STATUSES:
+                self.recovery_store.delete(entry.fingerprint)
+                continue
+            if checkpoint["identity"] in world_boss_identities_for_account(self.account):
+                self._queue_entry(entry, source="recovery", identities=[checkpoint["identity"]])
+        self._recovery_cleanup_task = asyncio.create_task(self._cleanup_recovery_files())
+
         for target_chat in self.target_chats:
             try:
                 recent = await self.client.get_messages(target_chat, limit=WORLD_BOSS_SCAN_LIMIT)
@@ -886,9 +981,34 @@ class WorldBossMonitor:
                     target_chat,
                     _error_code(exc),
                 )
+        for record in list(self._history()):
+            if record.get("status") in COMPLETED_EVENT_STATUSES:
+                continue
+            noticed = record.get("notice_epoch")
+            if not noticed:
+                try:
+                    noticed = datetime.fromisoformat(record.get("updated_at") or "").timestamp()
+                except (ValueError, TypeError):
+                    continue
+            if not 0 <= time.time() - float(noticed) <= WORLD_BOSS_RESUME_WINDOW_SECONDS:
+                continue
+            if record.get("fingerprint") in self._inflight_fingerprints:
+                continue
+            targets = [record["chat_id"]] if record.get("chat_id") is not None else self.target_chats
+            for target in targets:
+                try:
+                    message = await self.client.get_messages(target, ids=int(record["message_id"]))
+                    if await self.process_message(message, source="startup"):
+                        break
+                except Exception as exc:
+                    self.log.warning("World Boss pending notice lookup failed: %s", _error_code(exc))
         return True
 
     async def stop(self) -> None:
+        if self._recovery_cleanup_task is not None:
+            self._recovery_cleanup_task.cancel()
+            await asyncio.gather(self._recovery_cleanup_task, return_exceptions=True)
+            self._recovery_cleanup_task = None
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
@@ -914,18 +1034,22 @@ class WorldBossMonitor:
             self._save()
 
     @staticmethod
-    def _message_recent_enough(message: Any) -> bool:
+    def _message_recent_enough(message: Any, max_age: float = WORLD_BOSS_RECOVERY_WINDOW_SECONDS) -> bool:
         message_date = getattr(message, "date", None)
         if not isinstance(message_date, datetime):
             return True
         if message_date.tzinfo is None:
             message_date = message_date.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - message_date.astimezone(timezone.utc)).total_seconds()
-        return -30 <= age <= WORLD_BOSS_RECOVERY_WINDOW_SECONDS
+        return -30 <= age <= max_age
 
     async def process_message(self, message: Any, *, source: str = "new") -> bool:
         entry = extract_world_boss_entry(message)
-        if entry is None or (source == "startup" and not self._message_recent_enough(message)):
+        if entry is None:
+            return False
+        previous_status = self._event_status(entry.fingerprint)
+        max_age = WORLD_BOSS_RESUME_WINDOW_SECONDS if previous_status else WORLD_BOSS_RECOVERY_WINDOW_SECONDS
+        if source == "startup" and not self._message_recent_enough(message, max_age):
             return False
         try:
             sender = await message.get_sender()
@@ -938,7 +1062,12 @@ class WorldBossMonitor:
         if entry is None:
             return False
         identities = world_boss_identities_for_account(self.account)
+        return self._queue_entry(entry, source=source, identities=identities)
+
+    def _queue_entry(self, entry: WorldBossEntry, *, source: str, identities: list[str]) -> bool:
         if not identities:
+            return False
+        if entry.notice_epoch and time.time() - entry.notice_epoch > WORLD_BOSS_RESUME_WINDOW_SECONDS:
             return False
         if self._event_status(entry.fingerprint) in COMPLETED_EVENT_STATUSES:
             return False
@@ -983,6 +1112,29 @@ class WorldBossMonitor:
         entry: WorldBossEntry,
         identities: list[str] | None = None,
     ) -> None:
+        remaining = (entry.notice_epoch or time.time()) + WORLD_BOSS_RESUME_WINDOW_SECONDS - time.time()
+        deadline = self.monotonic() + max(0.0, remaining)
+        while self.monotonic() < deadline:
+            await self._run_entry_once(entry, identities)
+            record = next((item for item in self._history()
+                           if item.get("fingerprint") == entry.fingerprint), {})
+            retryable = record.get("status") in {"paused_upstream", "finish_pending", "delegated"}
+            retryable = retryable or record.get("error") in TRANSIENT_WORLD_BOSS_ERRORS
+            if not retryable:
+                return
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                break
+            await self.sleep(min(30.0, remaining))
+        self._record(entry, "recovery_expired", error="world_boss_recovery_expired")
+        self.log.error("World Boss recovery deadline reached for event %s", entry.message_id)
+        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+
+    async def _run_entry_once(
+        self,
+        entry: WorldBossEntry,
+        identities: list[str] | None = None,
+    ) -> None:
         if identities is None:
             identities = world_boss_identities_for_account(self.account)
         identities = list(identities)
@@ -1006,14 +1158,9 @@ class WorldBossMonitor:
                     started_at=_now_text(),
                     error="",
                 )
-                init_data = await request_webview_init_data(
-                    self.client,
-                    entry.bot_username,
-                    entry.token,
-                )
                 results = await asyncio.gather(
                     *(
-                        self._run_identity(entry, identity, init_data)
+                        self._run_identity(entry, identity, "")
                         for identity in identities
                     )
                 )
@@ -1090,6 +1237,9 @@ class WorldBossMonitor:
         except asyncio.CancelledError:
             raise
         except MiniAppCircuitOpenError as exc:
+            pending_outcome = getattr(exc, "world_boss_outcome", None)
+            if isinstance(pending_outcome, dict):
+                return {**pending_outcome, "identity": identity, "status": "finish_pending", "error": exc.code}
             self.log.info(
                 "Mini App [%s] Qing Yuanzi World Boss paused by upstream circuit until %s",
                 identity,
@@ -1114,6 +1264,11 @@ class WorldBossMonitor:
                 "boss_token_used": "expired",
             }
             status = status_map.get(code, "failed")
+            pending_outcome = getattr(exc, "world_boss_outcome", None)
+            if isinstance(pending_outcome, dict):
+                self.log.warning("World Boss settlement pending for %s: %s", identity, code)
+                return {**pending_outcome, "identity": identity,
+                        "status": status_map.get(code, "finish_pending"), "error": code}
             if code == "boss_action_limit":
                 self.log.info(
                     "IN [Mini App | %s]:\n青元子世界 Boss -> 服务器确认本轮已完成",
@@ -1163,6 +1318,10 @@ class WorldBossMonitor:
         if transport is None:
             return None
         try:
+            return int(transport.player_id(identity))
+        except Exception:
+            pass
+        try:
             initializer = getattr(transport, "initialize", None)
             if callable(initializer):
                 result = initializer()
@@ -1170,7 +1329,9 @@ class WorldBossMonitor:
                     await result
             return int(transport.player_id(identity))
         except MiniAppCircuitOpenError:
-            raise
+            # The fixed entry is optional. /start can identify this player and
+            # is allowed to probe recovery at the event's entry deadline.
+            return None
         except Exception as exc:
             self.log.warning(
                 "World Boss fixed-entry identity lookup failed for %s (%s); using event choices",
@@ -1196,8 +1357,8 @@ class WorldBossMonitor:
     ) -> dict[str, Any]:
         # Keep backwards compatibility for callers/tests that invoke /start
         # directly, while making the policy explicit for every other endpoint:
-        # only entry/start may bypass a stale shared circuit.  Window polling,
-        # charge tickets, hits and finish all use the ordinary breaker.
+        # Entry/start and settlement may probe a stale shared circuit. Window
+        # polling, charge tickets and hits use the ordinary breaker.
         if time_critical is None:
             normalized_path = str(path or "").rstrip("/").casefold()
             time_critical = normalized_path.endswith(
@@ -1213,9 +1374,12 @@ class WorldBossMonitor:
             )
         for attempt in range(max(0, retries) + 1):
             attempt_started_at = self.monotonic()
+            network_trace: dict[str, float] = {}
             try:
                 request_timeout = int(timeout or self.timeout)
                 if self.post_json is None:
+                    if origin not in self._json_clients:
+                        self._json_clients[origin] = _PersistentWorldBossJsonClient(origin)
                     result = await _post_json(
                         origin,
                         path,
@@ -1223,6 +1387,8 @@ class WorldBossMonitor:
                         request_timeout,
                         time_critical=bool(time_critical),
                         executor=self._world_boss_http_executor(),
+                        request_sync=self._json_clients[origin].post_sync,
+                        network_trace=network_trace,
                     )
                 else:
                     result = await _post_json(
@@ -1295,6 +1461,17 @@ class WorldBossMonitor:
                         int(round((self.monotonic() - trace_started_at) * 1000)),
                     )
                 return result
+            finally:
+                if trace is not None and network_trace.get("received_monotonic") is not None:
+                    received = network_trace["received_monotonic"]
+                    sent = network_trace["sent_monotonic"]
+                    trace["response_received_monotonic"] = received
+                    if trace["attempts"]:
+                        trace["attempts"][-1].update({
+                            "network_duration_ms": max(0, int(round((received - sent) * 1000))),
+                            "queue_delay_ms": max(0, int(round((sent - attempt_started_at) * 1000))),
+                            "bookkeeping_ms": max(0, int(round((self.monotonic() - received) * 1000))),
+                        })
         raise MiniAppBeastError("request_failed")
 
     async def _start_request(
@@ -1569,6 +1746,9 @@ class WorldBossMonitor:
         queue: asyncio.Queue,
         reveal_log: list[dict[str, Any]],
         expected_count: int,
+        *,
+        after_window_id: str = "",
+        revealed_count: int = 0,
     ) -> None:
         """Page through /window until the server reports ``done``.
 
@@ -1577,11 +1757,9 @@ class WorldBossMonitor:
         no more windows. Each reveal records how much lead time it arrived with,
         which is the number needed to judge whether a full hold still fits.
         """
-        after_window_id = ""
         error_budget = WORLD_BOSS_WINDOW_ERROR_BUDGET
         last_reveal_at = self.monotonic()
         deadline = battle_start + WORLD_BOSS_MAX_BATTLE_SECONDS
-        revealed_count = 0
         try:
             # Bound on windows actually revealed: error entries share reveal_log but
             # must never consume the budget of windows still to come.
@@ -2154,12 +2332,9 @@ class WorldBossMonitor:
             inference["update_mode"] = "legacy_zero_rtt"
             return inference
 
-        # Drive the feedback from the inferred sign.  A request that arrived
-        # early must reduce the lead; one that arrived late must increase it.
-        # The raw residual above is still retained for observability, but using
-        # it as the sole target can have the opposite sign when an intentional
-        # account offset is large.
-        sample = self._finite_ms(inference.get("controller_correction_ms"))
+        # Arrival direction validates the observation; the absolute residual
+        # gives a stable target even after earlier strikes changed the lead.
+        sample = self._finite_ms(inference.get("clamped_sample_drift_ms"))
         sample_weight = self._finite_ms(inference.get("sample_weight"))
         if (
             direction not in {"early", "late"}
@@ -2187,10 +2362,9 @@ class WorldBossMonitor:
         robust = float(robust_value)
         base_weight = max(0.05, min(0.6, float(WORLD_BOSS_DRIFT_WEIGHT)))
         gain = max(0.05, min(0.5, base_weight * sample_weight))
-        # Treat the robust signed value as the next estimate, rather than adding
-        # every delta as an integral.  That lets the estimate move back through
-        # zero after an early sample follows a late one, while still guaranteeing
-        # that an early target lowers the current lead and a late target raises it.
+        # Learn the absolute transport residual. Arrival error alone already
+        # includes the correction applied to this strike; using it as a target
+        # would converge to half the required correction.
         self._drift_ms = before + gain * (robust - before)
         self._drift_ms = max(
             float(WORLD_BOSS_DRIFT_MIN_MS),
@@ -2344,6 +2518,10 @@ class WorldBossMonitor:
                 refreshed_charge_at = target - planned_hold_ms / 1000.0
                 if not await self._sleep_until(refreshed_charge_at):
                     return self._skipped_hit_result(window, window_index)
+            checkpoint = getattr(self, "_checkpoint", None)
+            if checkpoint is not None:
+                checkpoint["claimed_window_ids"].append(str(window["id"]))
+                await self._save_checkpoint()
             charge_started_at = self.monotonic()
             charge_started_elapsed_ms = max(
                 0, int(round((charge_started_at - battle_start) * 1000))
@@ -2797,7 +2975,7 @@ class WorldBossMonitor:
                     for attempt in request_trace.get("attempts", []):
                         if not isinstance(attempt, dict) or attempt.get("error") not in WORLD_BOSS_TURNSTILE_ERRORS:
                             continue
-                        duration = attempt.get("duration_ms")
+                        duration = attempt.get("network_duration_ms", attempt.get("duration_ms"))
                         if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
                             pre_verification_rtts.append(int(round(duration)))
                 all_attempts.extend(
@@ -2895,7 +3073,7 @@ class WorldBossMonitor:
                 }
                 continue
             else:
-                response_received_at = self.monotonic()
+                response_received_at = request_trace.pop("response_received_monotonic", self.monotonic())
                 self._record_turnstile_result(active_request_id, accepted=True, http_status=200)
                 all_attempts.extend(
                     item
@@ -2910,7 +3088,7 @@ class WorldBossMonitor:
                 )
                 for attempt in reversed(request_trace.get("attempts", [])):
                     if isinstance(attempt, dict) and attempt.get("ok") is True:
-                        duration = attempt.get("duration_ms")
+                        duration = attempt.get("network_duration_ms", attempt.get("duration_ms"))
                         if isinstance(duration, (int, float)) and math.isfinite(duration) and duration >= 0:
                             successful_attempt_ms = int(round(duration))
                         break
@@ -2955,10 +3133,15 @@ class WorldBossMonitor:
         session_token: str,
         payload: dict[str, Any],
         identity: str = WORLD_BOSS_IDENTITY,
+        *,
+        resume: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._checkpoint = resume
+        if resume and resume.get("stage") == "finish_pending":
+            return await self._submit_finish(entry, resume)
         challenge = payload.get("challenge") or {}
         self._prepare_boss_lifecycle(entry)
-        if self._boss_stop_requested():
+        if self._boss_stop_requested() and not resume:
             # Another account may have finished this exact event while this
             # worker was waiting for its challenge. Do not call /begin or turn
             # the expected lifecycle stop into ``boss_windows_invalid``.
@@ -2978,41 +3161,66 @@ class WorldBossMonitor:
         except MiniAppBeastError as parse_exc:
             windows = []
 
-        begin_trace: dict[str, Any] = {}
-        started_request_at = self.monotonic()
-        try:
-            sync = await self._begin_with_turnstile(
-                entry,
-                identity,
-                init_data,
-                session_token,
-                challenge_id,
-                trace=begin_trace,
-            )
-        except MiniAppBeastError as exc:
-            exc.details = {**_error_diagnostics(exc), "begin_request": begin_trace}
-            raise
-        response_at = begin_trace.pop("response_received_monotonic", self.monotonic())
-        clock_rtt_ms = begin_trace.get("clock_rtt_ms", begin_trace.get("successful_attempt_ms"))
-        if isinstance(clock_rtt_ms, (int, float)) and math.isfinite(clock_rtt_ms):
-            round_trip = max(0.0, clock_rtt_ms / 1000.0)
+        if resume:
+            sync = resume["sync"]
+            begin_trace = resume["begin_trace"]
+            round_trip = resume["round_trip"]
+            starts_in = resume["starts_in"]
+            battle_start = self.monotonic() + resume["battle_start_epoch"] - time.time()
+            windows = resume["windows"]
+            for window in windows:
+                window_id = str(window["id"])
+                if window_id in resume["claimed_window_ids"] and window_id not in resume["hit_results"]:
+                    resume["hit_results"][window_id] = {
+                        "action": None, "ok": False, "skipped": True,
+                        "matched": False, "perfect": False, "accepted_perfect": False,
+                        "damage": 0, "error": "interrupted_window",
+                        "diagnostic": {"window_id": window_id, "server_status": "unknown",
+                                       "error": "interrupted_window"},
+                    }
         else:
-            round_trip = max(0.0, response_at - started_request_at)
+            begin_trace: dict[str, Any] = {}
+            started_request_at = self.monotonic()
+            try:
+                sync = await self._begin_with_turnstile(
+                    entry, identity, init_data, session_token, challenge_id, trace=begin_trace,
+                )
+            except MiniAppBeastError as exc:
+                exc.details = {**_error_diagnostics(exc), "begin_request": begin_trace}
+                raise
+            response_at = begin_trace.pop("response_received_monotonic", self.monotonic())
+            clock_rtt_ms = begin_trace.get("clock_rtt_ms", begin_trace.get("successful_attempt_ms"))
+            if isinstance(clock_rtt_ms, (int, float)) and math.isfinite(clock_rtt_ms):
+                round_trip = max(0.0, clock_rtt_ms / 1000.0)
+            else:
+                round_trip = max(0.0, response_at - started_request_at)
+            starts_in = max(0.0, float(sync.get("startsInMs") or 0) / 1000.0 - round_trip / 2.0)
+            battle_start = response_at + starts_in
         server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))
-        starts_in = max(0.0, server_starts_in_ms / 1000.0 - round_trip / 2.0)
-        battle_start = response_at + starts_in
         request_lead_ms = int(round(round_trip * 500))
         self._reset_drift()
         self._reset_hold_skew()
 
-        reveal_log: list[dict[str, Any]] = []
-        reveal_mode = not windows
+        reveal_log: list[dict[str, Any]] = resume["reveal_log"] if resume else []
+        reveal_mode = resume["reveal_mode"] if resume else not windows
+        if resume is None:
+            self._checkpoint = {
+                "version": 1, "account": getattr(self, "account", "main"), "identity": identity,
+                "entry": asdict(entry), "init_data": init_data, "session_token": session_token,
+                "payload": payload, "stage": "fighting",
+                "expires_epoch": (entry.notice_epoch or time.time()) + WORLD_BOSS_RESUME_WINDOW_SECONDS,
+                "battle_start_epoch": time.time() + battle_start - self.monotonic(),
+                "sync": sync, "begin_trace": begin_trace, "round_trip": round_trip, "starts_in": starts_in,
+                "windows": windows, "reveal_log": reveal_log, "reveal_mode": reveal_mode,
+                "hit_results": {}, "claimed_window_ids": [],
+            }
+            await self._save_checkpoint()
         if reveal_mode:
             # 2026-08-26 protocol: no timetable up front. Windows are revealed one
             # at a time by /window while the battle runs, so reveal and strike must
             # run concurrently instead of precomputing every hit.
             try:
-                expected_count = max(1, int(challenge.get("windowCount") or 0))
+                expected_count = max(0, int(challenge.get("windowCount") or 0))
             except (TypeError, ValueError):
                 expected_count = 0
             if expected_count <= 0:
@@ -3028,11 +3236,16 @@ class WorldBossMonitor:
                     queue,
                     reveal_log,
                     expected_count,
+                    after_window_id=str(windows[-1]["id"]) if windows else "",
+                    revealed_count=len(windows),
                 )
             )
             # Each strike owns its own schedule: one slow /hit (retries plus timeout)
             # must never push the next window's charge past its moment.
-            hit_tasks: list[asyncio.Task] = []
+            hit_tasks = [asyncio.create_task(self._track_hit(
+                entry, init_data, session_token, challenge_id, battle_start,
+                window, index, request_lead_ms,
+            )) for index, window in enumerate(windows, start=1)]
             try:
                 while True:
                     window = await queue.get()
@@ -3045,7 +3258,7 @@ class WorldBossMonitor:
                     windows.append(window)
                     hit_tasks.append(
                         asyncio.create_task(
-                            self._hit_window(
+                            self._track_hit(
                                 entry,
                                 init_data,
                                 session_token,
@@ -3058,9 +3271,12 @@ class WorldBossMonitor:
                         )
                     )
                 hit_results = list(await asyncio.gather(*hit_tasks))
+                if reveal_task.done():
+                    await reveal_task
             except BaseException:
                 for task in hit_tasks:
                     task.cancel()
+                await asyncio.gather(*hit_tasks, return_exceptions=True)
                 raise
             finally:
                 reveal_task.cancel()
@@ -3081,7 +3297,7 @@ class WorldBossMonitor:
         else:
             tasks = [
                 asyncio.create_task(
-                    self._hit_window(
+                    self._track_hit(
                         entry,
                         init_data,
                         session_token,
@@ -3094,7 +3310,13 @@ class WorldBossMonitor:
                 )
                 for index, window in enumerate(windows, start=1)
             ]
-            hit_results = await asyncio.gather(*tasks)
+            try:
+                hit_results = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         last_end_ms = max(item["centerMs"] + item["hitMs"] for item in windows)
         finish_at = battle_start + last_end_ms / 1000.0 + self.finish_grace_seconds
@@ -3175,20 +3397,6 @@ class WorldBossMonitor:
             },
             "realtimeDamageApplied": realtime_damage,
         }
-        finish_trace: dict[str, Any] = {}
-        finished = await self._request(
-            entry.origin,
-            "/api/miniapp/xianxia-world-boss/finish",
-            {
-                "token": session_token,
-                "initData": init_data,
-                "bossProof": proof,
-            },
-            retries=1,
-            trace=finish_trace,
-            time_critical=False,
-        )
-        result = finished.get("result") if isinstance(finished.get("result"), dict) else {}
         player = _diagnostic_value(player)
         boss = payload.get("boss") if isinstance(payload.get("boss"), dict) else {}
         challenge_profile = {
@@ -3257,14 +3465,12 @@ class WorldBossMonitor:
             },
             "hits": [item.get("diagnostic") or {} for item in hit_results],
             "finish": {
-                "request": finish_trace,
-                "server_result": _diagnostic_value(result),
+                "request": {},
+                "server_result": {},
             },
         }
-        return {
-            "grade": str(result.get("grade") or ""),
-            "score": int(result.get("score") or 0),
-            "player_hp": int(result.get("player_hp") if result.get("player_hp") is not None else player_hp),
+        outcome = {
+            "grade": "", "score": 0, "player_hp": player_hp,
             "hit_count": successful_hits,
             "perfect_count": accepted_perfect_hits,
             "local_matched_count": local_matched_hits,
@@ -3279,6 +3485,40 @@ class WorldBossMonitor:
             "damage_yi_hits": damage_yi_hits,
             "diagnostics": diagnostics,
         }
+        self._checkpoint.update(stage="finish_pending", proof=proof, outcome=outcome)
+        await self._save_checkpoint()
+        return await self._submit_finish(entry, self._checkpoint)
+
+    async def _submit_finish(self, entry: WorldBossEntry, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        outcome = checkpoint["outcome"]
+        trace: dict[str, Any] = {}
+        try:
+            finished = await self._request(
+                entry.origin, "/api/miniapp/xianxia-world-boss/finish",
+                {"token": checkpoint["session_token"], "initData": checkpoint["init_data"],
+                 "bossProof": checkpoint["proof"]},
+                retries=1, trace=trace, time_critical=True,
+            )
+        except MiniAppBeastError as exc:
+            outcome["diagnostics"]["finish"] = {
+                "request": trace, "error": exc.code, "server_details": _error_diagnostics(exc),
+            }
+            if exc.code in AUTH_TOKEN_ERRORS | {"boss_action_limit", "boss_event_closed", "boss_join_closed"}:
+                await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+                self._checkpoint = None
+            else:
+                await self._save_checkpoint()
+            exc.world_boss_outcome = outcome
+            raise
+        result = finished.get("result") if isinstance(finished.get("result"), dict) else {}
+        outcome.update(
+            grade=str(result.get("grade") or ""), score=int(result.get("score") or 0),
+            player_hp=int(result.get("player_hp") if result.get("player_hp") is not None else outcome["player_hp"]),
+        )
+        outcome["diagnostics"]["finish"] = {"request": trace, "server_result": _diagnostic_value(result)}
+        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+        self._checkpoint = None
+        return outcome
 
     async def _participate(
         self,
@@ -3286,6 +3526,15 @@ class WorldBossMonitor:
         identity: str = WORLD_BOSS_IDENTITY,
         init_data: str = "",
     ) -> dict[str, Any]:
+        resume = await _run_blocking(
+            self.recovery_store.load, entry.fingerprint, executor=self._world_boss_http_executor(),
+        )
+        if resume and resume.get("identity") == identity:
+            return await self._fight(
+                entry, resume["init_data"], resume["session_token"], resume["payload"],
+                identity=identity, resume=resume,
+            )
+        self._checkpoint = None
         # Prepare the lifecycle before the potentially long webview/challenge
         # handshake. This lets a worker that starts late notice a sibling's
         # shared defeat marker without issuing more /start requests.
