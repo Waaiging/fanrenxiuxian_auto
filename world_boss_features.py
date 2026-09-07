@@ -2753,6 +2753,7 @@ class WorldBossMonitor:
         }
         all_attempts: list[dict[str, Any]] = []
         handoffs: list[dict[str, Any]] = []
+        pre_verification_rtts: list[int] = []
         active_request_id = ""
         started_at = self.monotonic()
         max_handoffs = max(1, int(getattr(
@@ -2792,6 +2793,13 @@ class WorldBossMonitor:
                     active_request_id, accepted=False, error=exc.code, http_status=exc.status,
                 )
                 active_request_id = ""
+                if not using_turnstile and exc.code in WORLD_BOSS_TURNSTILE_ERRORS:
+                    for attempt in request_trace.get("attempts", []):
+                        if not isinstance(attempt, dict) or attempt.get("error") not in WORLD_BOSS_TURNSTILE_ERRORS:
+                            continue
+                        duration = attempt.get("duration_ms")
+                        if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
+                            pre_verification_rtts.append(int(round(duration)))
                 all_attempts.extend(
                     item
                     for item in request_trace.get("attempts", [])
@@ -2906,6 +2914,17 @@ class WorldBossMonitor:
                         if isinstance(duration, (int, float)) and math.isfinite(duration) and duration >= 0:
                             successful_attempt_ms = int(round(duration))
                         break
+                # Siteverify can add seconds of server work before startsInMs
+                # is generated. Keep that duration for diagnostics, but use the
+                # faster response from this same endpoint before verification
+                # as the network reference. Browser wait is excluded above too.
+                clock_rtt_ms = successful_attempt_ms
+                clock_rtt_source = "successful_begin"
+                if using_turnstile and pre_verification_rtts:
+                    reference_ms = min(pre_verification_rtts)
+                    if reference_ms < clock_rtt_ms:
+                        clock_rtt_ms = reference_ms
+                        clock_rtt_source = "pre_verification_begin"
                 if trace is not None:
                     trace.clear()
                     trace.update(
@@ -2918,6 +2937,8 @@ class WorldBossMonitor:
                             ),
                             "turnstile_handoffs": handoffs,
                             "successful_attempt_ms": successful_attempt_ms,
+                            "clock_rtt_ms": clock_rtt_ms,
+                            "clock_rtt_source": clock_rtt_source,
                             "response_received_monotonic": response_received_at,
                         }
                     )
@@ -2972,9 +2993,9 @@ class WorldBossMonitor:
             exc.details = {**_error_diagnostics(exc), "begin_request": begin_trace}
             raise
         response_at = begin_trace.pop("response_received_monotonic", self.monotonic())
-        successful_attempt_ms = begin_trace.get("successful_attempt_ms")
-        if isinstance(successful_attempt_ms, (int, float)) and math.isfinite(successful_attempt_ms):
-            round_trip = max(0.0, successful_attempt_ms / 1000.0)
+        clock_rtt_ms = begin_trace.get("clock_rtt_ms", begin_trace.get("successful_attempt_ms"))
+        if isinstance(clock_rtt_ms, (int, float)) and math.isfinite(clock_rtt_ms):
+            round_trip = max(0.0, clock_rtt_ms / 1000.0)
         else:
             round_trip = max(0.0, response_at - started_request_at)
         server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))

@@ -96,6 +96,70 @@ class WorldBossTurnstileBrokerTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_live_cf_validation_delays_do_not_make_valid_strikes_arrive_early(self):
+        # Timings observed in the first automatic four-account battle. /begin
+        # includes Siteverify work before the server starts its 1499 ms timer.
+        cases = (
+            ('waaiging', 237, 3128), ('main', 274, 1575),
+            ('sub', 142, 823), ('xiaohao', 889, 479),
+        )
+
+        async def run(account, token_free_ms, verified_ms):
+            now = [100.0]
+            server_start = [None]
+            accepted = []
+            transport_ms = min(token_free_ms, verified_ms)
+
+            async def sleep(seconds):
+                now[0] += max(0, seconds)
+
+            async def post_json(origin, path, payload, timeout):
+                if path.endswith('/begin'):
+                    if not payload.get('turnstileToken'):
+                        now[0] += token_free_ms / 1000
+                        raise MiniAppBeastError('turnstile_failed', 403)
+                    now[0] += verified_ms / 1000
+                    server_start[0] = now[0] + 1.499 - transport_ms / 2000
+                    return {'startsInMs': 1499}
+                if path.endswith('/charge-start'):
+                    now[0] += transport_ms / 1000
+                    return {'chargeTicket': 'clock-fixture-ticket'}
+                if path.endswith('/hit'):
+                    arrived = (now[0] - server_start[0]) * 1000 + transport_ms / 2
+                    now[0] += transport_ms / 1000
+                    delta = abs(arrived - 2500)
+                    if delta > 620:
+                        raise MiniAppBeastError('boss_hit_outside_window', 400)
+                    accepted.append(arrived)
+                    return {'hit': {'perfect': delta <= 210, 'deltaMs': delta, 'damageYi': 10}}
+                if path.endswith('/finish'):
+                    return {'result': {'score': 100 if accepted else 0}}
+                raise AssertionError(path)
+
+            with tempfile.TemporaryDirectory() as directory:
+                actor = FakeActor()
+                actor.state_file = str(Path(directory) / 'state.json')
+                monitor = WorldBossMonitor(
+                    actor, account, post_json=post_json, monotonic=lambda: now[0],
+                    sleep=sleep, turnstile_broker=_ImmediateTokenBroker(directory),
+                    finish_grace_seconds=0,
+                )
+                result = await monitor._fight(
+                    extract_world_boss_entry(DummyMessage()), 'init-fixture', 'session-fixture',
+                    {'challenge': {'challengeId': 'clock-fixture',
+                     'windows': [{'id': 'w1', 'centerMs': 2500, 'hitMs': 620, 'perfectMs': 210}]}},
+                )
+                self.assertEqual(result['score'], 100)
+                self.assertEqual(len(accepted), 1)
+                self.assertLessEqual(abs(accepted[0] - 2500), 210)
+                sync = result['diagnostics']['clock_sync']
+                self.assertEqual(sync['request']['successful_attempt_ms'], verified_ms)
+                self.assertEqual(sync['round_trip_ms'], transport_ms)
+
+        for case in cases:
+            with self.subTest(account=case[0]):
+                asyncio.run(run(*case))
+
     def test_cancelled_worker_removes_pending_browser_request(self):
         async def run():
             sleeping = asyncio.Event()
