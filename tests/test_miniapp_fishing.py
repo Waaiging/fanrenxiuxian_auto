@@ -773,7 +773,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(key, "hantan")
         self.assertEqual(pond["key"], "hantan")
 
-    def test_unaffordable_configured_bait_falls_back_to_most_available_bait(self):
+    def test_unaffordable_configured_bait_falls_back_to_nearest_lower_tier(self):
         class Actor:
             def __init__(self):
                 self.state = {}
@@ -817,7 +817,7 @@ class MiniAppFishingTests(unittest.TestCase):
         ]
         purchased = shop_payload(bait_count=0)
         purchased["shop"]["baits"] = [dict(item) for item in initial["shop"]["baits"]]
-        purchased["shop"]["baits"][0]["count"] = 10
+        purchased["shop"]["baits"][1]["count"] = 1
         transport = SimpleNamespace(
             fishing_entry=AsyncMock(
                 return_value=(
@@ -852,26 +852,29 @@ class MiniAppFishingTests(unittest.TestCase):
         transport.fishing_buy_bait.assert_awaited_once_with(
             "主魂",
             "fish_lobby",
-            "plain",
-            10,
-            [{"name": "灵石", "qty": 12, "owned": 125}],
+            "spirit_worm",
+            1,
+            [
+                {"name": "灵石", "qty": 90, "owned": 125},
+                {"name": "凝血草", "qty": 2, "owned": 123},
+            ],
             log_operation=False,
         )
         transport.fishing_next_cast.assert_awaited_once_with(
             "主魂",
             "fish_lobby",
             "qingxi",
-            "item_fishing_bait_plain",
+            "item_fishing_bait_spirit_worm",
             log_operation=False,
         )
-        self.assertEqual(worker.actor.state["miniapp_fishing_bait_key"], "plain")
+        self.assertEqual(worker.actor.state["miniapp_fishing_bait_key"], "spirit_worm")
         self.assertEqual(
             worker.actor.state["miniapp_fishing_configured_bait_key"],
             "demon_blood",
         )
         self.assertEqual(
             worker.actor.state["miniapp_fishing_bait_selection_reason"],
-            "configured",
+            "fallback",
         )
 
     def test_lobby_purchase_is_limited_by_available_cost_materials(self):

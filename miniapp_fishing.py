@@ -16,6 +16,7 @@ from automation_settings import (
     ACCOUNT_IDENTITIES,
     ACCOUNT_NAMES,
     DEFAULT_MINIAPP_FISHING_ROD,
+    MINIAPP_FISHING_BAITS,
     MINIAPP_FISHING_RODS,
     MINIAPP_FISHING_SUPPORTED_ACCOUNTS,
     automation_participant_key,
@@ -1448,6 +1449,11 @@ class MiniAppFishingAutomation:
         shop: dict[str, Any],
         configured_key: str,
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        unavailable_codes = {
+            "fishing_bait_unaffordable",
+            "fishing_bait_level_low",
+            "fishing_bait_invalid",
+        }
         try:
             updated_shop, bait = await self._ensure_bait(
                 identity,
@@ -1460,29 +1466,37 @@ class MiniAppFishingAutomation:
         except MiniAppCircuitOpenError:
             raise
         except MiniAppBeastError as exc:
-            if exc.code not in {"fishing_bait_unaffordable", "fishing_bait_level_low"}:
+            if exc.code not in unavailable_codes:
                 raise
             configured_error = exc
 
-        candidates: list[tuple[int, int, dict[str, Any]]] = []
-        for index, item in enumerate(_items(shop.get("baits"))):
-            key = str(item.get("key") or "")
-            if not key or key == configured_key or not item.get("unlocked"):
+        # The setting is a tier ceiling, independent of shop ordering, stock,
+        # or how many units we can afford. Try each lower tier at most once.
+        bait_keys = [key for key, _ in MINIAPP_FISHING_BAITS]
+        if configured_key not in bait_keys:
+            raise configured_error
+        for fallback_key in reversed(bait_keys[:bait_keys.index(configured_key)]):
+            fallback = fishing_option(shop.get("baits"), fallback_key)
+            if not fallback or not fallback.get("unlocked"):
                 continue
-            count = _integer(item.get("count"), 0)
-            if count > 0:
-                capacity = min(BAIT_PURCHASE_QUANTITY, count)
-            else:
-                try:
-                    capacity = affordable_bait_quantity(
-                        item,
-                        BAIT_PURCHASE_QUANTITY,
-                    )
-                except MiniAppBeastError:
+            try:
+                updated_shop, bait = await self._ensure_bait(
+                    identity,
+                    token,
+                    shop,
+                    fallback_key,
+                    notify_shortage=False,
+                )
+            except MiniAppCircuitOpenError:
+                raise
+            except MiniAppBeastError as exc:
+                if exc.code in unavailable_codes:
                     continue
-            candidates.append((capacity, index, item))
-
-        if not candidates:
+                # A timeout, expired token, missing price, or unconfirmed
+                # purchase must not trigger spending on another bait.
+                raise
+            break
+        else:
             configured_bait = fishing_option(shop.get("baits"), configured_key)
             if configured_error.code == "fishing_bait_unaffordable":
                 await self._notify_material_shortage(
@@ -1493,15 +1507,6 @@ class MiniAppFishingAutomation:
                 )
             raise configured_error
 
-        _, _, fallback = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
-        fallback_key = str(fallback.get("key") or "")
-        updated_shop, bait = await self._ensure_bait(
-            identity,
-            token,
-            shop,
-            fallback_key,
-            notify_shortage=False,
-        )
         state = self._state(identity)
         today = _today_text()
         already_recorded = (
@@ -1771,6 +1776,8 @@ class MiniAppFishingAutomation:
             shop,
             bait_key,
         )
+        if bait_key != configured_bait_key:
+            bait_selection_reason = "fallback"
         token, _ = await self.transport.fishing_next_cast(
             identity,
             token,
