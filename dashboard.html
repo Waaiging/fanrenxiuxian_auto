@@ -128,6 +128,33 @@
         .identity-command-open:hover { background: rgba(0,210,255,0.18); }
         .command-group { font-size: 0.78rem; color: var(--accent-color); letter-spacing: 0; padding: 0.9rem 0 0.35rem; font-weight: 800; border-top: 1px solid rgba(255,255,255,0.06); }
         .command-group:first-child { border-top: 0; padding-top: 0; }
+        .command-category-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0 0 0.8rem; border-bottom: 1px solid var(--border-color); }
+        .command-category-tab { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); min-height: 2.4rem; padding: 0.4rem 0.65rem; font: inherit; font-size: 0.78rem; cursor: pointer; }
+        .command-category-tab[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--success-color); }
+        .command-category-tab:focus-visible { outline: 2px solid var(--accent-color); outline-offset: -2px; }
+        .command-category-tab span { margin-left: 0.3rem; color: var(--text-secondary); font-size: 0.68rem; }
+        .command-category-heading { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 0; font-size: 0.9rem; font-weight: 700; }
+        .command-category-heading span { color: var(--text-secondary); font-size: 0.7rem; font-weight: 400; }
+        .command-classified-section + .command-classified-section { margin-top: 1rem; border-top: 1px solid var(--border-color); }
+        .command-classification-note { color: var(--warning-color); font-size: 0.65rem; line-height: 1.4; overflow-wrap: anywhere; }
+        .command-visibility-group { grid-column: 1 / -1; color: var(--text-primary); font-size: 0.73rem; padding-top: 0.4rem; }
+        .command-catalog { grid-column: 1 / -1; min-width: 0; }
+        .command-catalog-tools { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-bottom: 0.85rem; }
+        .command-catalog-tools .record-field { flex: 1 1 12rem; min-width: 0; }
+        .command-catalog-tools .record-input, .command-catalog-tools .record-select { width: 100%; min-width: 0; }
+        .command-catalog-row { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr) 5.5rem 8rem; gap: 0.8rem; padding: 0.7rem 0; align-items: start; border-top: 1px solid var(--border-color); font-size: 0.76rem; }
+        .command-catalog-row > div { min-width: 0; overflow-wrap: anywhere; }
+        .command-catalog-name { color: var(--text-primary); font-weight: 600; }
+        .command-catalog-code { display: block; margin-top: 0.3rem; color: var(--text-secondary); font-size: 0.68rem; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+        .command-catalog-condition, .command-catalog-mode { color: var(--text-secondary); line-height: 1.5; }
+        .command-catalog-lifecycle { color: #86efac; }
+        .command-catalog-lifecycle.opt_in { color: #fbbf24; }
+        .command-catalog-lifecycle.disabled, .command-catalog-lifecycle.retired { color: var(--text-secondary); }
+        @media (max-width: 600px) {
+            .command-catalog-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.4rem 0.75rem; }
+            .command-catalog-row > :first-child { grid-column: 1 / -1; }
+            .command-catalog-condition { grid-column: 1 / -1; }
+        }
         .command-row { display: grid; grid-template-columns: minmax(9rem, 1.6fr) minmax(8rem, 1fr) minmax(5.5rem, auto) minmax(5.8rem, auto); gap: 0.75rem; align-items: center; padding: 0.78rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.92rem; }
         .command-row:first-child { border-top: 0; }
         .command-main { min-width: 0; display: flex; flex-direction: column; gap: 0.22rem; }
@@ -1360,6 +1387,7 @@
         </section>
         <nav class="workspace-tabs" aria-label="Dashboard 工作区">
             <button class="workspace-tab is-active" type="button" data-workspace-target="records" aria-selected="true" onclick="setWorkspaceView('records', this)"><i data-lucide="list-checks" aria-hidden="true"></i>指令记录</button>
+            <button class="workspace-tab" type="button" data-workspace-target="catalog" aria-selected="false" onclick="setWorkspaceView('catalog', this)"><i data-lucide="library" aria-hidden="true"></i>功能目录</button>
             <button class="workspace-tab" type="button" data-workspace-target="rewards" aria-selected="false" onclick="setWorkspaceView('rewards', this)"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>周期收益</button>
             <button class="workspace-tab" type="button" data-workspace-target="inventory" aria-selected="false" onclick="setWorkspaceView('inventory', this)"><i data-lucide="backpack" aria-hidden="true"></i>储物袋</button>
             <button class="workspace-tab" type="button" data-workspace-target="duels" aria-selected="false" onclick="setWorkspaceView('duels', this)"><i data-lucide="swords" aria-hidden="true"></i>斗法</button>
@@ -1397,6 +1425,24 @@
             <div class="record-table-wrap" id="command-record-content">
                 <div class="record-empty">加载中...</div>
             </div>
+        </section>
+        <section class="workspace-view command-catalog" data-workspace-view="catalog">
+            <div class="section-heading">
+                <h2>指令与操作</h2>
+                <span class="section-heading-meta" id="command-catalog-summary">未加载</span>
+            </div>
+            <div id="command-catalog-categories" class="command-category-tabs" role="tablist" aria-label="功能分类"></div>
+            <div class="command-catalog-tools">
+                <label class="record-field">模块
+                    <select id="command-catalog-subcategory" class="record-select" onchange="renderCommandCatalog()"><option value="">全部模块</option></select>
+                </label>
+                <label class="record-field">搜索
+                    <input id="command-catalog-search" class="record-input" type="search" placeholder="指令、操作或条件" oninput="renderCommandCatalog()">
+                </label>
+                <label class="record-toggle"><input id="command-catalog-inactive" type="checkbox" onchange="renderCommandCatalog()">包含停用项</label>
+                <button class="command-action-button" type="button" onclick="loadCommandCatalog(true)" title="刷新目录" aria-label="刷新目录"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+            </div>
+            <div id="command-catalog-content"><div class="record-empty">未加载</div></div>
         </section>
         <section class="workspace-view reward-record-section" data-workspace-view="rewards">
             <div class="record-header">
@@ -1925,6 +1971,11 @@
         };
         const COMMAND_VISIBILITY_PREFIX = 'xiuxian.commandVisibility.v1.';
         let commandModalKey = '';
+        const COMMAND_CATEGORY_OPTIONS = [{id: 'sect', label: '宗门'}, {id: 'realm', label: '境界'}, {id: 'general', label: '通用'}];
+        const commandModalCategories = {};
+        let commandCatalogData = null;
+        let commandCatalogCategory = '';
+        let commandCatalogLoading = false;
         let commandRecordRows = [];
         let commandRecordUpdatedAt = '';
         let commandRecordAccountNames = {};
@@ -1997,6 +2048,7 @@
                 button.setAttribute('aria-selected', active ? 'true' : 'false');
             });
             if (target === 'logs') updateLogs(true);
+            if (target === 'catalog') loadCommandCatalog();
             if (target === 'rewards') updateDailyRewardLog(true);
             if (target === 'duels') updateDuelDashboard(true);
             if (target === 'automation') updateAutomationDashboard(true);
@@ -2277,6 +2329,125 @@
                 item.command || '',
                 item.label || item.command || ''
             ].join('\u001f');
+        }
+
+        function commandClassification(item) {
+            const value = item.classification || {};
+            const category = COMMAND_CATEGORY_OPTIONS.find(option => option.id === value.category);
+            return {
+                category: category?.id || 'general',
+                category_label: category?.label || '通用',
+                subcategory: value.subcategory || '归属待确认',
+                pending: value.pending !== false,
+                condition: value.condition || ''
+            };
+        }
+
+        function groupedCommandItems(items) {
+            return COMMAND_CATEGORY_OPTIONS.map(category => {
+                const rows = items.filter(item => commandClassification(item).category === category.id);
+                const groups = new Map();
+                for (const item of rows) {
+                    const name = commandClassification(item).subcategory;
+                    if (!groups.has(name)) groups.set(name, []);
+                    groups.get(name).push(item);
+                }
+                return {...category, rows, groups};
+            }).filter(category => category.rows.length);
+        }
+
+        function renderCommandCategoryTabs(items, selected, callback) {
+            return [{id: '', label: '全部'}, ...COMMAND_CATEGORY_OPTIONS].map(category => {
+                const count = items.filter(item => !category.id || commandClassification(item).category === category.id).length;
+                return `<button class="command-category-tab" type="button" role="tab" aria-selected="${selected === category.id}" onclick="${callback}('${category.id}')">${category.label}<span>${count}</span></button>`;
+            }).join('');
+        }
+
+        function setCommandModalCategory(category) {
+            if (!commandModalKey || (category && !COMMAND_CATEGORY_OPTIONS.some(item => item.id === category))) return;
+            commandModalCategories[commandModalKey] = category;
+            renderCommandModal(commandModalKey);
+        }
+
+        function renderClassifiedCommandRows(panelKey, commands, dueKey) {
+            return groupedCommandItems(commands).map(category => `
+                <section class="command-classified-section" aria-label="${category.label}">
+                    <h3 class="command-category-heading">${category.label}<span>${category.rows.length} 项</span></h3>
+                    ${Array.from(category.groups, ([name, rows]) => `
+                        <h4 class="command-group">${escapeHtml(name)}</h4>
+                        ${renderCommandRows(panelKey, rows, dueKey)}
+                    `).join('')}
+                </section>
+            `).join('');
+        }
+
+        async function loadCommandCatalog(force = false) {
+            if (commandCatalogLoading) return;
+            if (commandCatalogData && !force) { renderCommandCatalog(); return; }
+            commandCatalogLoading = true;
+            document.getElementById('command-catalog-summary').textContent = '加载中';
+            try {
+                const response = await fetch(apiUrl('/api/command-catalog'));
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                commandCatalogData = await response.json();
+                updateCommandCatalogSubcategories();
+                renderCommandCatalog();
+            } catch (error) {
+                document.getElementById('command-catalog-summary').textContent = '加载失败';
+                document.getElementById('command-catalog-content').innerHTML = `<div class="record-empty">${escapeHtml(error.message)}</div>`;
+            } finally {
+                commandCatalogLoading = false;
+            }
+        }
+
+        function setCommandCatalogCategory(category) {
+            if (category && !COMMAND_CATEGORY_OPTIONS.some(item => item.id === category)) return;
+            commandCatalogCategory = category;
+            document.getElementById('command-catalog-subcategory').value = '';
+            updateCommandCatalogSubcategories();
+            renderCommandCatalog();
+        }
+
+        function updateCommandCatalogSubcategories() {
+            const select = document.getElementById('command-catalog-subcategory');
+            const previous = select.value;
+            const categories = (commandCatalogData?.categories || []).filter(item => !commandCatalogCategory || item.id === commandCatalogCategory);
+            const names = [...new Set(categories.flatMap(item => item.subcategories || []))];
+            select.innerHTML = '<option value="">全部模块</option>' + names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+            if (names.includes(previous)) select.value = previous;
+        }
+
+        function renderCommandCatalog() {
+            if (!commandCatalogData) return;
+            const search = document.getElementById('command-catalog-search').value.trim().toLocaleLowerCase();
+            const subcategory = document.getElementById('command-catalog-subcategory').value;
+            const includeInactive = document.getElementById('command-catalog-inactive').checked;
+            const entries = commandCatalogData.entries || [];
+            const available = entries.filter(item => includeInactive || !['disabled', 'retired'].includes(item.lifecycle));
+            const rows = available.filter(item => {
+                const classification = commandClassification(item);
+                if (commandCatalogCategory && classification.category !== commandCatalogCategory) return false;
+                if (subcategory && classification.subcategory !== subcategory) return false;
+                return !search || [item.label, ...(item.commands || []), classification.category_label, classification.subcategory, classification.condition].join(' ').toLocaleLowerCase().includes(search);
+            });
+            document.getElementById('command-catalog-categories').innerHTML = renderCommandCategoryTabs(available, commandCatalogCategory, 'setCommandCatalogCategory');
+            document.getElementById('command-catalog-summary').textContent = `${rows.length} / ${entries.length} 项 · ${rows.filter(item => commandClassification(item).pending).length} 项归属待确认`;
+            document.getElementById('command-catalog-content').innerHTML = groupedCommandItems(rows).map(category => `
+                <section class="command-classified-section" aria-label="${category.label}">
+                    <h3 class="command-category-heading">${category.label}<span>${category.rows.length} 项</span></h3>
+                    ${Array.from(category.groups, ([name, items]) => `
+                        <h4 class="command-group">${escapeHtml(name)}</h4>
+                        ${items.map(item => `
+                            <div class="command-catalog-row" data-catalog-id="${escapeHtml(item.id)}">
+                                <div><span class="command-catalog-name">${escapeHtml(item.label)}</span>${(item.commands || []).map(command => `<code class="command-catalog-code">${escapeHtml(command)}</code>`).join('')}</div>
+                                <div class="command-catalog-condition">${escapeHtml(commandClassification(item).condition || '')}${commandClassification(item).pending ? '<div class="command-classification-note">归属待确认</div>' : ''}</div>
+                                <div class="command-catalog-mode">${escapeHtml(item.channel)}<br>${escapeHtml(item.trigger)}</div>
+                                <div class="command-catalog-lifecycle ${['implemented', 'opt_in', 'disabled', 'retired'].includes(item.lifecycle) ? item.lifecycle : ''}">${escapeHtml(item.lifecycle_label)}</div>
+                            </div>
+                        `).join('')}
+                    `).join('')}
+                </section>
+            `).join('') || '<div class="record-empty">没有匹配的指令或操作</div>';
         }
 
         function commandVisibilityStoreKey(panelKey) {
@@ -2895,11 +3066,10 @@
             `;
         }
 
-        function renderCommandRows(panelKey, commands) {
+        function renderCommandRows(panelKey, commands, dueKey = nextDueCommandKey(commands)) {
             const modalData = window.commandPanelDataMap?.[panelKey] || {};
             const account = modalData.account || '';
             const identity = modalData.panel?.identity || '主魂';
-            const dueKey = nextDueCommandKey(commands);
             return (commands || []).map(item => {
                 const tone = String(item.tone || 'unknown').replace(/[^a-z0-9_-]/gi, '') || 'unknown';
                 const scheduleText = commandScheduleText(item);
@@ -2952,6 +3122,7 @@
                                 <span class="command-name" title="${escapeHtml(item.command || item.label || '')}">${escapeHtml(item.label || item.command || '')}</span>
                                 <span class="command-channel execution-${executionChannel}" title="${escapeHtml(executionTitle)}">${escapeHtml(executionLabel)}</span>
                             </div>
+                            ${commandClassification(item).pending ? '<div class="command-classification-note">归属待确认</div>' : ''}
                         </div>
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
@@ -3019,6 +3190,8 @@
             const panel = data.panel;
             const commands = dashboardCommands(panel.commands);
             const shown = visibleCommands(panelKey, commands);
+            const category = commandModalCategories[panelKey] || '';
+            const filteredShown = shown.filter(item => !category || commandClassification(item).category === category);
             const hiddenCount = commands.length - shown.length;
             const pausedCount = commands.filter(item => item.control_disabled).length;
             const miniappCount = shown.filter(item => item.execution_channel === 'miniapp').length;
@@ -3027,7 +3200,9 @@
             const subtitle = `Mini App ${miniappCount} 条 · 群指令 ${groupCount} 条 · 隐藏 ${hiddenCount} 条 · 暂停 ${pausedCount} 条`;
 
             const visibility = loadCommandVisibility(panelKey);
-            const switches = commands.map(item => {
+            const switches = groupedCommandItems(commands).map(category => Array.from(category.groups, ([name, rows]) => `
+                <div class="command-visibility-group">${category.label} / ${escapeHtml(name)}</div>
+                ${rows.map(item => {
                 const itemKey = commandItemKey(item);
                 const checked = visibility[itemKey] !== false;
                 const label = item.label || item.command || '未命名指令';
@@ -3037,7 +3212,8 @@
                         <span class="command-visibility-label">${escapeHtml(label)}</span>
                     </label>
                 `;
-            }).join('');
+                }).join('')}
+            `).join('')).join('');
 
             document.getElementById('commandModalTitle').innerHTML = `
                 <strong>${escapeHtml(title)}</strong>
@@ -3056,7 +3232,8 @@
                     <summary>显示设置</summary>
                     <div class="command-visibility-grid">${switches || '<span class="command-visibility-item">暂无可配置指令</span>'}</div>
                 </details>
-                ${shown.length ? renderCommandRows(panelKey, shown) : '<div class="command-list-empty">当前身份没有可显示的冷却或每日任务。</div>'}
+                <div class="command-category-tabs" role="tablist" aria-label="排程分类">${renderCommandCategoryTabs(shown, category, 'setCommandModalCategory')}</div>
+                ${filteredShown.length ? renderClassifiedCommandRows(panelKey, filteredShown, nextDueCommandKey(shown)) : '<div class="command-list-empty">当前分类没有可显示的冷却或每日任务。</div>'}
                 ${renderIdentityCommandRecords(data.account, panel.identity || '主魂')}
             `;
             refreshIcons();

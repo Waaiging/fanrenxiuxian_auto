@@ -60,6 +60,7 @@ from automation_settings import (
     save_automation_settings,
 )
 from log_utils import command_control_key
+from dashboard_command_catalog import apply_command_classifications, command_catalog_payload
 from command_modules import (
     ASK_DAO_COMMAND,
     DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
@@ -3141,6 +3142,7 @@ def build_command_panels(account, state):
         panel = apply_command_execution_channels(panel, root_state=state)
         panel = apply_command_controls(account, panel)
         panel = apply_identity_pause(panel, state)
+        panel = apply_command_classifications(panel)
         result.append(panel)
     return result
 
@@ -5599,6 +5601,11 @@ def refresh_miniapp_inventory(payload: dict = Body(...), username: str = Depends
         "request": request,
         "msg": "已请求刷新全部身份" if identity == "*" else f"已请求刷新 {request['identity']}",
     }
+
+@app.get("/api/command-catalog")
+def command_catalog(username: str = Depends(authenticate)):
+    return command_catalog_payload()
+
 
 @app.get("/api/command-records")
 def command_records(username: str = Depends(authenticate)):
