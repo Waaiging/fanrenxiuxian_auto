@@ -5,3 +5,5 @@ uvicorn==0.46.0
 python-multipart==0.0.27
 networkx==3.6.1
 websocket-client==1.9.0
+# Windows does not provide the IANA database used by ZoneInfo("Asia/Shanghai").
+tzdata==2026.1; sys_platform == "win32"
