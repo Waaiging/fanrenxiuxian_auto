@@ -258,6 +258,10 @@ ACCOUNT_IDENTITIES = {
 }
 MULAN_SUPPORT_MODES = ("斥候", "破灯", "奇袭", "护阵")
 DEFAULT_MULAN_SUPPORT_MODE = "护阵"
+DEFAULT_STAR_GAZING_LEAD_SECONDS = 10
+STAR_GAZING_MIN_LEAD_SECONDS = -120
+STAR_GAZING_MAX_LEAD_SECONDS = 120
+STAR_GAZING_LEAD_OPTIONS = (120, 60, 30, 20, 10, 5, 0, -5, -10, -20, -30, -60, -120)
 MINIAPP_FISHING_PONDS = (
     ("auto", "默认最高级"),
     ("qingxi", "青溪浅滩"),
@@ -501,7 +505,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 12,
+        "version": 13,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -509,6 +513,7 @@ def default_automation_settings() -> dict[str, Any]:
             ],
         },
         "mulan_support": {"mode": DEFAULT_MULAN_SUPPORT_MODE},
+        "star_gazing": {"lead_seconds": DEFAULT_STAR_GAZING_LEAD_SECONDS},
         "miniapp_beast_abyss": {
             "power_min": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MIN,
             "power_max": DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX,
@@ -589,6 +594,15 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
         mode = str(mulan.get("mode") or "").strip()
         if mode in MULAN_SUPPORT_MODES:
             result["mulan_support"]["mode"] = mode
+
+    star_gazing = source.get("star_gazing")
+    if isinstance(star_gazing, dict):
+        try:
+            result["star_gazing"]["lead_seconds"] = _parse_star_gazing_lead_seconds(
+                star_gazing.get("lead_seconds")
+            )
+        except ValueError:
+            pass
 
     abyss = source.get("miniapp_beast_abyss")
     if isinstance(abyss, dict):
@@ -781,6 +795,7 @@ def save_automation_settings(
     *,
     world_boss_participants: Any,
     mulan_support_mode: Any,
+    star_gazing_lead_seconds: Any = None,
     miniapp_fishing_enabled: Any = None,
     miniapp_fishing_pond: Any = None,
     miniapp_fishing_bait: Any = None,
@@ -824,6 +839,11 @@ def save_automation_settings(
         raise ValueError("multiple world boss identities per account")
 
     current_settings = load_automation_settings()
+    star_lead_seconds = _parse_star_gazing_lead_seconds(
+        current_settings["star_gazing"]["lead_seconds"]
+        if star_gazing_lead_seconds is None
+        else star_gazing_lead_seconds
+    )
     current_fishing = current_settings.get("miniapp_fishing") or {}
     fishing_enabled = (
         bool(current_fishing.get("enabled", DEFAULT_MINIAPP_FISHING_ENABLED))
@@ -1086,6 +1106,7 @@ def save_automation_settings(
         {
             "world_boss": {"participants": world_boss_participants},
             "mulan_support": {"mode": mode},
+            "star_gazing": {"lead_seconds": star_lead_seconds},
             "miniapp_beast_abyss": {
                 "power_min": power_min,
                 "power_max": power_max,
@@ -1154,6 +1175,24 @@ def world_boss_identities_for_account(
         for identity in identities[account]
         if automation_participant_key(account, identity) in selected
     ]
+
+
+def _parse_star_gazing_lead_seconds(value: Any) -> int:
+    error = "invalid star gazing lead seconds"
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(error)
+    try:
+        seconds = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(error)
+    if not STAR_GAZING_MIN_LEAD_SECONDS <= seconds <= STAR_GAZING_MAX_LEAD_SECONDS:
+        raise ValueError(error)
+    return seconds
+
+
+def star_gazing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(source["star_gazing"])
 
 
 def mulan_support_mode(settings: dict[str, Any] | None = None) -> str:
@@ -1361,6 +1400,19 @@ def automation_dashboard_payload() -> dict[str, Any]:
             "mode": mulan_support_mode(settings),
             "command": mulan_support_command(settings),
             "modes": list(MULAN_SUPPORT_MODES),
+        },
+        "star_gazing": {
+            **star_gazing_settings(settings),
+            "min_lead_seconds": STAR_GAZING_MIN_LEAD_SECONDS,
+            "max_lead_seconds": STAR_GAZING_MAX_LEAD_SECONDS,
+            "lead_options": [
+                {"key": str(seconds), "name": (
+                    f"显化前 {seconds} 秒" if seconds > 0
+                    else f"显化后 {-seconds} 秒" if seconds < 0
+                    else "显化时发送"
+                )}
+                for seconds in STAR_GAZING_LEAD_OPTIONS
+            ],
         },
         "miniapp_beast_abyss": {
             **miniapp_beast_abyss_settings(settings),

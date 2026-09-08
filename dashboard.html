@@ -1699,6 +1699,19 @@
                     </label>
                     <div class="automation-card-hint" id="tianxing-tianji-runtime">等待运行状态...</div>
                 </div>
+                <div class="automation-card" style="align-self: start;">
+                    <div class="automation-card-title">星宫 · 观星时机</div>
+                    <div class="automation-card-hint">在目标 Good 天象轮次自动观星。正数表示显化前，0 表示显化时，负数表示显化后；适用于所有自动观星的星宫身份。</div>
+                    <label class="record-field">
+                        观星发送时间
+                        <select id="star-gazing-lead" class="record-select" onchange="syncStarGazingControls(); markAutomationSettingsDirty()"></select>
+                    </label>
+                    <label class="record-field" id="star-gazing-custom-field" style="display: none;">
+                        自定义提前量（秒，-120 至 120）
+                        <input id="star-gazing-lead-custom" class="record-input" type="number" min="-120" max="120" step="1" value="10" disabled oninput="markAutomationSettingsDirty()">
+                    </label>
+                    <div class="automation-card-hint" id="star-gazing-runtime">默认显化前 10 秒。保存后，等待中的观星排程也会调整。</div>
+                </div>
                 <div class="automation-card">
                     <div class="automation-card-title">灵溪自动垂钓</div>
                     <div class="automation-card-hint">所选身份分别使用自己的钓竿。没有匹配钓竿的身份会自动跳过，不会在身份之间转移钓竿。</div>
@@ -4305,6 +4318,14 @@
             });
         }
 
+        function syncStarGazingControls() {
+            const custom = document.getElementById('star-gazing-lead')?.value === 'custom';
+            const field = document.getElementById('star-gazing-custom-field');
+            const input = document.getElementById('star-gazing-lead-custom');
+            if (field) field.style.display = custom ? '' : 'none';
+            if (input) input.disabled = !custom;
+        }
+
         function syncMiniappTianjiTrialControls() {
             const enabled = Boolean(document.getElementById('miniapp-tianji-trial-enabled')?.checked);
             document.querySelectorAll('#miniapp-tianji-trial-participant-controls input[type="checkbox"]').forEach(input => {
@@ -4638,6 +4659,8 @@
             const settings = automationDashboardData.settings || {};
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
+            const starGazing = automationDashboardData.star_gazing || {};
+            const starGazingLeadSeconds = Number(starGazing.lead_seconds ?? settings.star_gazing?.lead_seconds ?? 10);
             const abyss = automationDashboardData.miniapp_beast_abyss || {};
             const windThunder = automationDashboardData.wind_thunder || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
@@ -4697,6 +4720,19 @@
             }
 
             if (!automationSettingsDirty) {
+                const starGazingSelect = document.getElementById('star-gazing-lead');
+                const starGazingCustom = document.getElementById('star-gazing-lead-custom');
+                const starGazingOptions = Array.isArray(starGazing.lead_options)
+                    ? starGazing.lead_options : [{key: '10', name: '显化前 10 秒'}];
+                if (starGazingSelect) {
+                    starGazingSelect.innerHTML = starGazingOptions.map(item =>
+                        `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name)}</option>`
+                    ).join('') + '<option value="custom">自定义提前秒数</option>';
+                    starGazingSelect.value = starGazingOptions.some(item => Number(item.key) === starGazingLeadSeconds)
+                        ? String(starGazingLeadSeconds) : 'custom';
+                }
+                if (starGazingCustom) starGazingCustom.value = String(starGazingLeadSeconds);
+                syncStarGazingControls();
                 const identityControls = document.getElementById('world-boss-identity-controls');
                 if (identityControls) {
                     identityControls.innerHTML = accounts.map(account => {
@@ -4874,6 +4910,12 @@
                 renderFishingSelect('miniapp-fishing-chum', fishing.chums, fishingChum);
                 const fishingStartTimeControl = document.getElementById('miniapp-fishing-start-time');
                 if (fishingStartTimeControl) fishingStartTimeControl.value = fishingStartTime;
+            }
+            const starGazingRuntime = document.getElementById('star-gazing-runtime');
+            if (starGazingRuntime) {
+                const timing = starGazingLeadSeconds > 0 ? `显化前 ${starGazingLeadSeconds} 秒`
+                    : starGazingLeadSeconds < 0 ? `显化后 ${-starGazingLeadSeconds} 秒` : '显化时发送';
+                starGazingRuntime.innerText = `当前已保存：${timing}。保存后，等待中的观星排程也会调整。`;
             }
             const abyssRuntimeControl = document.getElementById('miniapp-beast-abyss-runtime');
             if (abyssRuntimeControl) {
@@ -5139,6 +5181,9 @@
                 .map(input => input.value)
                 .filter(Boolean);
             const mode = document.querySelector('#mulan-support-mode-controls input[type="radio"]:checked')?.value || '';
+            const starGazingChoice = document.getElementById('star-gazing-lead')?.value || '10';
+            const starGazingLeadSeconds = Number(starGazingChoice === 'custom'
+                ? document.getElementById('star-gazing-lead-custom')?.value : starGazingChoice);
             const abyssPowerMin = document.getElementById('miniapp-beast-abyss-power-min')?.value || '';
             const abyssPowerMax = document.getElementById('miniapp-beast-abyss-power-max')?.value || '';
             const fishingEnabled = Boolean(document.getElementById('miniapp-fishing-enabled')?.checked);
@@ -5175,6 +5220,11 @@
                 .filter(Boolean);
             if (!mode) {
                 alert('请选择慕兰支援参数。');
+                return;
+            }
+            if (!Number.isInteger(starGazingLeadSeconds) || starGazingLeadSeconds < -120 || starGazingLeadSeconds > 120
+                || (starGazingChoice === 'custom' && !document.getElementById('star-gazing-lead-custom')?.value.trim())) {
+                alert('观星提前量必须是 -120 至 120 秒的整数（负数表示显化后发送）。');
                 return;
             }
             if (!fishingRod || !fishingPond || !fishingBait || !fishingChum) {
@@ -5222,6 +5272,7 @@
                     body: JSON.stringify({
                         world_boss_participants: participants,
                         mulan_support_mode: mode,
+                        star_gazing: {lead_seconds: starGazingLeadSeconds},
                         miniapp_beast_abyss: {
                             power_min: abyssPowerMin,
                             power_max: abyssPowerMax,

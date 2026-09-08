@@ -12,12 +12,17 @@ Mini App initialization or execution fails.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
+import os
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
+from automation_settings import star_gazing_settings
 from miniapp_beast import (
     MiniAppBeastError,
     MiniAppCircuitOpenError,
@@ -63,10 +68,180 @@ STAR_PALACE_TIME_CRITICAL_SECONDS = 90
 STAR_PALACE_SHIFT_MAX_DELAY_SECONDS = 20
 STAR_PALACE_ERROR_RETRY_SECONDS = 90
 STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS = 300
+STAR_PALACE_SETTINGS_POLL_SECONDS = 5
+STAR_PALACE_SEND_GRACE_SECONDS = 5
+STAR_PALACE_EVENT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "star_gazing_events.jsonl",
+)
+STAR_PALACE_COORDINATION_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "star_palace_coordination.json",
+)
+STAR_PALACE_COORDINATION_LOCK = STAR_PALACE_COORDINATION_FILE + ".lock"
+STAR_PALACE_ATTEMPT_TTL_SECONDS = 150
+STAR_PALACE_GOOD_FATE_TITLES = {
+    "地磁暴动",
+    "星辰异象",
+    "五彩缤纷",
+    "封魔裂隙回响",
+}
 
 
 def _now_text() -> str:
     return datetime.now().strftime(TIME_FORMAT)
+
+
+def _star_palace_manifest_key(manifest_dt: datetime) -> str:
+    return manifest_dt.strftime(TIME_FORMAT)
+
+
+def _parse_star_palace_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.strptime(str(value or ""), TIME_FORMAT)
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=None)
+
+
+def _confirmed_star_palace_good(manifest_key: str) -> dict[str, Any] | None:
+    """Read a target Good notice recorded by any account."""
+    try:
+        with open(STAR_PALACE_EVENT_FILE, "r", encoding="utf-8", errors="replace") as fh:
+            for line in reversed(fh.readlines()):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(record.get("target_manifest_time") or "") != manifest_key:
+                    continue
+                title = str(record.get("fate_type") or "")
+                if title.startswith("Good - "):
+                    title = title[len("Good - "):]
+                if title not in STAR_PALACE_GOOD_FATE_TITLES:
+                    continue
+                return record
+    except OSError:
+        return None
+    return None
+
+
+def _load_star_palace_coordination() -> dict[str, Any]:
+    try:
+        with open(STAR_PALACE_COORDINATION_FILE, "r", encoding="utf-8") as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_star_palace_coordination(value: dict[str, Any]) -> None:
+    directory = os.path.dirname(STAR_PALACE_COORDINATION_FILE) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".star_palace_", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(value, fh, ensure_ascii=False, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary_path, STAR_PALACE_COORDINATION_FILE)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def _exclusive_star_palace_lock():
+    lock_directory = os.path.dirname(STAR_PALACE_COORDINATION_LOCK) or "."
+    os.makedirs(lock_directory, exist_ok=True)
+    with open(STAR_PALACE_COORDINATION_LOCK, "a+", encoding="utf-8") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _claim_star_palace_attempt(account: str, identity: str, manifest_key: str, now: datetime | None = None) -> bool:
+    """Atomically allow one script identity for one manifestation round."""
+    now = now or datetime.now()
+    own_key = f"{account}|{identity}"
+    active_cutoff = now - timedelta(seconds=STAR_PALACE_ATTEMPT_TTL_SECONDS)
+    with _exclusive_star_palace_lock():
+        # Reload under the lock so simultaneous scripts cannot both claim.
+        locked_value = _load_star_palace_coordination()
+        if locked_value.get("manifest_key") != manifest_key:
+            locked_value = {"manifest_key": manifest_key, "attempts": []}
+        attempts = locked_value.get("attempts")
+        attempts = attempts if isinstance(attempts, list) else []
+        attempt_keys = {
+            f"{str(item.get('account') or '')}|{str(item.get('identity') or '')}"
+            for item in attempts
+            if isinstance(item, dict)
+        }
+        if own_key in attempt_keys:
+            return False
+        success = locked_value.get("success")
+        if (
+            locked_value.get("manifest_key") == manifest_key
+            and isinstance(success, dict)
+            and success.get("account")
+            and success.get("identity")
+        ):
+            return False
+        active = locked_value.get("active")
+        active_claimed_at = _parse_star_palace_time(active.get("claimed_at")) if isinstance(active, dict) else None
+        if (
+            isinstance(active, dict)
+            and str(active.get("manifest_key") or "") == manifest_key
+            and active_claimed_at is not None
+            and active_claimed_at > active_cutoff
+        ):
+            return False
+        attempts.append({"account": account, "identity": identity})
+        locked_value["attempts"] = attempts
+        locked_value["active"] = {
+            "manifest_key": manifest_key,
+            "account": account,
+            "identity": identity,
+            "claimed_at": now.strftime(TIME_FORMAT),
+        }
+        _save_star_palace_coordination(locked_value)
+        return True
+
+
+def _finish_star_palace_attempt(account: str, identity: str, manifest_key: str, success: bool) -> None:
+    value = _load_star_palace_coordination()
+    if value.get("manifest_key") != manifest_key:
+        return
+    active = value.get("active")
+    if not (
+        isinstance(active, dict)
+        and active.get("account") == account
+        and active.get("identity") == identity
+        and active.get("manifest_key") == manifest_key
+    ):
+        return
+    if success:
+        value["success"] = {"account": account, "identity": identity, "completed_at": _now_text()}
+    value.pop("active", None)
+    _save_star_palace_coordination(value)
 
 
 class MiniAppCommandRouter:
@@ -799,8 +974,85 @@ class MiniAppCommandRouter:
             ))
         return False
 
+    @staticmethod
+    def _star_palace_send_deadline(manifest_dt: datetime, lead: int) -> datetime:
+        if lead > 0:
+            return manifest_dt
+        return manifest_dt + timedelta(seconds=-lead + STAR_PALACE_SEND_GRACE_SECONDS)
+
+    def _star_palace_manifest_for_send(self, now: datetime | None = None) -> datetime:
+        now = now or datetime.now()
+        boundary = self._next_star_boundary(now)
+        previous = boundary - timedelta(hours=STAR_GAZING_BOUNDARY_INTERVAL_HOURS)
+        lead = star_gazing_settings()["lead_seconds"]
+        if lead <= 0 and now < self._star_palace_send_deadline(previous, lead):
+            # A delayed send still belongs to the boundary that just passed,
+            # including when a worker restarts inside that scheduled window.
+            return previous
+        return boundary
+
+    async def _wait_for_confirmed_star_palace_good(
+        self,
+        identity: str,
+        manifest_dt: datetime,
+    ) -> bool:
+        """Wait for any account to record a target Good notice before acting."""
+        manifest_key = _star_palace_manifest_key(manifest_dt)
+        while getattr(self.actor, "is_running", True):
+            record = _confirmed_star_palace_good(manifest_key)
+            if record is not None:
+                return True
+            lead = star_gazing_settings()["lead_seconds"]
+            remaining = (self._star_palace_send_deadline(manifest_dt, lead) - datetime.now()).total_seconds()
+            if remaining <= 0:
+                self.log.info(
+                    "Mini App star palace [%s]: no target Good notice for %s; skip this round",
+                    identity,
+                    manifest_key,
+                )
+                return False
+            await asyncio.sleep(min(STAR_PALACE_SETTINGS_POLL_SECONDS, remaining))
+        return False
+
+    async def _wait_for_star_palace_send_time(
+        self,
+        identity: str,
+        manifest_dt: datetime,
+    ) -> bool:
+        """Apply saved timing changes while waiting, without holding a round claim."""
+        while getattr(self.actor, "is_running", True):
+            pause_event = getattr(self.actor, "pause_event", None)
+            if pause_event is not None:
+                await pause_event.wait()
+            if not getattr(self.actor, "is_running", True):
+                return False
+            now = datetime.now()
+            lead = star_gazing_settings()["lead_seconds"]
+            if now >= self._star_palace_send_deadline(manifest_dt, lead):
+                return False
+            send_dt = manifest_dt - timedelta(seconds=lead)
+            send_text = send_dt.strftime(TIME_FORMAT)
+            state = identity_state(self.actor, identity)
+            if state.get("miniapp_star_palace_next_divine_time") != send_text:
+                self._save_star_palace_identity_state(
+                    identity,
+                    miniapp_star_palace_next_divine_time=send_text,
+                    miniapp_star_palace_lead_seconds=lead,
+                )
+                self.log.info(
+                    "Mini App star palace [%s]: 观星 scheduled at %s (lead=%ss, manifestation=%s)",
+                    identity, send_text, lead, manifest_dt.strftime(TIME_FORMAT),
+                )
+            if send_dt <= now:
+                return True
+            await asyncio.sleep(min(
+                STAR_PALACE_SETTINGS_POLL_SECONDS,
+                (send_dt - now).total_seconds(),
+            ))
+        return False
+
     async def run_star_palace_divine_loop(self, identity: str) -> None:
-        """Observe stars through the dwelling shortly before each manifestation."""
+        """Observe stars through the dwelling at the configured manifestation offset."""
         startup_done = getattr(self.actor, "startup_done", None)
         if startup_done is not None:
             await startup_done.wait()
@@ -822,30 +1074,47 @@ class MiniAppCommandRouter:
                     if next_boundary.date() == datetime.now().date():
                         wait = max(60, (next_boundary + timedelta(seconds=5) - datetime.now()).total_seconds())
                     else:
-                        wait = max(60, (
+                        wait = max(1, (
                             datetime.combine(datetime.now().date(), datetime.min.time())
-                            + timedelta(days=1, minutes=1)
+                            + timedelta(days=1)
                             - datetime.now()
                         ).total_seconds())
                     await asyncio.sleep(min(wait, STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
                     continue
 
-                manifest_dt = self._next_star_boundary()
-                lead = random.uniform(*STAR_GAZING_LEAD_RANGE_SECONDS)
-                wake_dt = manifest_dt - timedelta(seconds=lead)
-                now = datetime.now()
-                if now < wake_dt and (wake_dt - now).total_seconds() > 60:
-                    self.log.info(
-                        "Mini App star palace [%s]: waiting %.0fs for 观星 at %s (%.0fs before %s)",
+                manifest_dt = self._star_palace_manifest_for_send()
+                manifest_key = _star_palace_manifest_key(manifest_dt)
+                if not await self._wait_for_confirmed_star_palace_good(identity, manifest_dt):
+                    await asyncio.sleep(min(
+                        max(30, (manifest_dt + timedelta(seconds=5) - datetime.now()).total_seconds()),
+                        STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS,
+                    ))
+                    continue
+                if not await self._wait_for_star_palace_send_time(identity, manifest_dt):
+                    continue
+                if not _claim_star_palace_attempt(self.account, identity, manifest_key):
+                    await asyncio.sleep(min(5, max(1, (manifest_dt - datetime.now()).total_seconds())))
+                    continue
+                succeeded = False
+                try:
+                    succeeded = await self.run_star_palace_cycle(
                         identity,
-                        (wake_dt - now).total_seconds(),
-                        wake_dt.strftime(TIME_FORMAT),
-                        lead,
-                        manifest_dt.strftime(TIME_FORMAT),
+                        manifest_dt,
+                        target_username,
                     )
-                    if not await self._wait_until_star_palace(wake_dt):
-                        break
-                await self.run_star_palace_cycle(identity, manifest_dt, target_username)
+                except Exception:
+                    _finish_star_palace_attempt(self.account, identity, manifest_key, False)
+                    raise
+                finally:
+                    self._save_star_palace_identity_state(
+                        identity, miniapp_star_palace_next_divine_time="",
+                    )
+                    _finish_star_palace_attempt(
+                        self.account,
+                        identity,
+                        manifest_key,
+                        succeeded,
+                    )
                 # The next opportunity follows the regular three-hour boundary.
                 next_wait = max(
                     30,
@@ -867,13 +1136,18 @@ class MiniAppCommandRouter:
                     exc_info=True,
                 )
                 await asyncio.sleep(STAR_PALACE_ERROR_RETRY_SECONDS)
+            finally:
+                if identity_state(self.actor, identity).get("miniapp_star_palace_next_divine_time"):
+                    self._save_star_palace_identity_state(
+                        identity, miniapp_star_palace_next_divine_time="",
+                    )
 
     async def run_star_palace_cycle(
         self,
         identity: str,
         manifest_dt: datetime,
         target_username: str = DEFAULT_STAR_SHIFT_TARGET,
-    ) -> None:
+    ) -> bool:
         manifest_key = manifest_dt.strftime(TIME_FORMAT)
         # A time-critical manifestation is worth one direct probe even when the
         # shared breaker is cooling; ordinary background loops must keep waiting.
@@ -932,21 +1206,24 @@ class MiniAppCommandRouter:
                     await asyncio.sleep(min(remaining + 2, STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS))
                     await self.run_star_palace_cycle(identity, manifest_dt, target_username)
                     return
+            return False
 
         result = self._star_action_mapping(payload, "actionResult")
         divination = self._star_action_mapping(result, "divination") or self._star_action_mapping(result, "starPalace", "divination")
         active = self._star_action_mapping(divination, "active")
         remaining = self._star_remaining_seconds(active.get("remainingSeconds"))
         message = command_result_text(payload) or miniapp_operation_result_text(payload) or "完成"
+        # 观星成功 = 机会已消耗：立即写入 done_date（不等 shift 成功）
         self._save_star_palace_identity_state(identity,
             miniapp_star_palace_last_error="",
             miniapp_star_palace_last_error_time="",
             miniapp_star_palace_last_success_time=_now_text(),
             miniapp_star_palace_last_manifest=manifest_key,
             miniapp_star_palace_last_result=message,
+            miniapp_star_palace_done_date=datetime.now().strftime("%Y-%m-%d"),
         )
         self.log.info(
-            "Mini App star palace [%s]: 观星 completed before %s; result=%s; active=%s",
+            "Mini App star palace [%s]: 观星 completed for manifestation %s; result=%s; active=%s",
             identity,
             manifest_key,
             message,
@@ -954,7 +1231,7 @@ class MiniAppCommandRouter:
         )
 
         if not active:
-            return
+            return False
 
         # Shift while the manifestation is still pending, never after it lands.
         if remaining is None:
@@ -1024,6 +1301,9 @@ class MiniAppCommandRouter:
                 exc.code,
                 exc_info=True,
             )
+            return False
+
+        return True
 
     def _identity_routable(self, identity: str) -> bool:
         key = self._resolve_identity(identity)
