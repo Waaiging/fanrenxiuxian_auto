@@ -182,6 +182,97 @@ class SmallWorldSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.transport.small_world_snapshot.assert_awaited_once()
         self.next_after(213752)
 
+    async def test_long_incense_wait_does_not_delay_the_next_sermon_edict(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot(cooldown=3600))
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 08:00:00")
+        self.assertGreater(self.actor.state["next_small_world_calamity_time"], "2026-09-09 00:00:00")
+        self.assertFalse(self.actor.defer_miracle_preach_for_small_world_calamity())
+
+    async def test_sermon_improves_production_and_replans_pending_soothing(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        previous = self.actor.state["next_small_world_calamity_time"]
+        self.actor.state["next_small_world_time"] = "2026-09-08 09:00:00"
+        result = snapshot(pending=1, hourly=40, cooldown=10800)
+        result["actionResult"] = {"ok": True, "message": "信仰和稳定已提升"}
+        self.transport.small_world_action.return_value = result
+        self.assertTrue(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_awaited_once_with("主魂", "miracle_sermon")
+        self.assertTrue(self.actor.state["small_world_calamity_pending"])
+        self.assertEqual(self.actor.state["small_world_calamity_resource_plan"]["hourly"], 40)
+        self.assertLess(self.actor.state["next_small_world_calamity_time"], previous)
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 10:00:00")
+        self.assertEqual(self.actor.state["next_small_world_time"], "2026-09-08 09:00:00")
+
+    async def test_nearby_resource_deadline_reserves_edict_for_soothing(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot(stock=290, pending=0, hourly=20))
+        self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_not_awaited()
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], self.actor.state["next_small_world_calamity_time"])
+
+    async def test_live_stock_change_blocks_sermon_and_wakes_ready_soothing(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.transport.small_world_snapshot.return_value = snapshot(stock=300)
+        self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_not_awaited()
+        self.next_after(0)
+        self.assertTrue(self.actor.small_world_calamity_event.is_set())
+
+    async def test_long_shortage_still_respects_server_edict_cooldown(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.transport.small_world_snapshot.return_value = snapshot(cooldown=3588)
+        self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_not_awaited()
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 07:59:48")
+
+    async def test_missing_live_stock_does_not_reuse_an_old_long_shortage(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.transport.small_world_snapshot.return_value = snapshot(stock=None)
+        self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_not_awaited()
+        self.assertEqual(self.actor.state["small_world_calamity_last_status"], "incense_unavailable")
+
+    async def test_partial_sermon_reply_refreshes_resources_without_resending(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.transport.small_world_snapshot.side_effect = [snapshot(), snapshot(hourly=20, cooldown=10800)]
+        self.transport.small_world_action.return_value = {"actionResult": {"ok": True, "message": "布道成功"}}
+        self.assertTrue(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_awaited_once_with("主魂", "miracle_sermon")
+        self.assertEqual(self.actor.state["small_world_calamity_resource_plan"]["hourly"], 20)
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 10:00:00")
+
+    async def test_failed_post_sermon_refresh_keeps_success_and_retries_only_read(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.transport.small_world_snapshot.side_effect = [snapshot(), OSError("temporary read failure")]
+        self.transport.small_world_action.return_value = {"actionResult": {"ok": True, "message": "布道成功"}}
+        self.assertTrue(await self.actor.execute_miracle_preach_once())
+        self.assertEqual(self.actor.state["last_miracle_preach_time"], "2026-09-08 07:00:00")
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 10:00:00")
+        self.next_after(300)
+        self.transport.small_world_action.assert_awaited_once()
+        self.logger.error.assert_not_called()
+
+    async def test_restart_releases_only_the_legacy_incense_deferral(self):
+        self.actor.defer_small_world_calamity_for_resources(snapshot(cooldown=3600))
+        self.actor.state["next_miracle_preach_time"] = self.actor.state["next_small_world_calamity_time"]
+        self.actor.startup_done = asyncio.Event()
+        self.actor.startup_done.set()
+        self.actor.is_running = False
+        await self.actor.run_miracle_preach_loop()
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 08:00:00")
+        self.transport.small_world_snapshot.assert_not_awaited()
+        self.actor.state["next_miracle_preach_time"] = "2026-09-08 09:00:00"
+        await self.actor.run_miracle_preach_loop()
+        self.assertEqual(self.actor.state["next_miracle_preach_time"], "2026-09-08 09:00:00")
+
+    async def test_sermon_stays_blocked_when_resource_estimate_is_unknown_or_paused(self):
+        for hourly in (None, 0):
+            self.actor.defer_small_world_calamity_for_resources(snapshot(hourly=hourly))
+            self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.actor.defer_small_world_calamity_for_resources(snapshot())
+        self.actor.dashboard_command_paused = lambda *args: True
+        self.assertFalse(await self.actor.execute_miracle_preach_once())
+        self.transport.small_world_action.assert_not_awaited()
+
     def test_numeric_strings_and_fractional_point_boundary(self):
         data = snapshot(stock="1,299", pending=0.985, hourly="36")
         data["account"]["smallWorld"]["actions"]["sootheCost"] = "1,300"

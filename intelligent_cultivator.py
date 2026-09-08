@@ -2348,7 +2348,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.state["small_world_calamity_last_error"] = str(error or "")[:200]
         self.state["next_small_world_calamity_time"] = retry_at
         if status in {"edict_cooldown", "insufficient_incense", "incense_unavailable"}:
-            self.state["next_miracle_preach_time"] = retry_at
+            if self.small_world_preach_fits_resource_wait():
+                plan = self.state["small_world_calamity_resource_plan"]
+                edict_at = add_seconds_str(plan["observed_at"], plan["edict_remaining_seconds"])
+                self.state["next_miracle_preach_time"] = max(add_seconds_str(now, 30), edict_at)
+            else:
+                self.state["next_miracle_preach_time"] = retry_at
         self.save_state()
         return seconds
 
@@ -2436,8 +2441,49 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         )
         log.error("Mini App small-world calamity soothe failed: %s", code, exc_info=True)
 
+    def small_world_preach_fits_resource_wait(self):
+        """Only spend an edict if incense cannot be ready within its cooldown."""
+        plan = self.state.get("small_world_calamity_resource_plan") or {}
+        wait = plan.get("production_wait_seconds")
+        observed = str(plan.get("observed_at") or "")
+        if not isinstance(wait, (int, float)) or wait <= 0 or not observed:
+            return False
+        try:
+            resource_at = add_seconds_str(observed, wait)
+            return seconds_until(resource_at) > MIRACLE_PREACH_CD_SECONDS + 30
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def refresh_small_world_calamity_plan(self, payload, *, authoritative=False):
+        if not self.state.get("small_world_calamity_pending"):
+            return
+        plan = small_world_incense_plan(payload)
+        if not authoritative and any(plan[key] is None for key in ("required", "stock")):
+            return
+        if not self.defer_small_world_calamity_for_resources(payload):
+            self.state["next_small_world_calamity_time"] = now_str()
+        signal = getattr(self, "small_world_calamity_event", None)
+        if signal is not None:
+            signal.set()
+        self.save_state()
+
+    def restore_small_world_preach_schedule(self):
+        """Release the old day-long sermon deferral after upgrading/restarting."""
+        if (not self.state.get("small_world_calamity_pending")
+                or self.state.get("next_miracle_preach_time") != self.state.get("next_small_world_calamity_time")
+                or not self.small_world_preach_fits_resource_wait()):
+            return
+        plan = self.state["small_world_calamity_resource_plan"]
+        edict_at = add_seconds_str(plan["observed_at"], plan.get("edict_remaining_seconds") or 0)
+        self.state["next_miracle_preach_time"] = max(now_str(), edict_at)
+        self.save_state()
+        log.info("Miracle preaching released from incense wait; next edict check at %s.",
+                 self.state["next_miracle_preach_time"])
+
     def defer_miracle_preach_for_small_world_calamity(self):
         if not self.state.get("small_world_calamity_pending"):
+            return False
+        if self.small_world_preach_fits_resource_wait():
             return False
         next_time = str(self.state.get("next_small_world_calamity_time") or "").strip()
         wait = seconds_until(next_time) if next_time and is_future(next_time) else SMALL_WORLD_CALAMITY_RETRY_SECONDS
@@ -2564,15 +2610,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         elif remaining <= 0:
             remaining = SMALL_WORLD_CD_SECONDS if ok else SMALL_WORLD_RETRY_SECONDS
         self.state["next_small_world_time"] = add_seconds_str(now, remaining)
-        resource_plan = small_world_incense_plan(payload)
-        if self.state.get("small_world_calamity_pending") and all(
-            resource_plan[key] is not None for key in ("required", "stock")
-        ):
-            if not self.defer_small_world_calamity_for_resources(payload):
-                self.state["next_small_world_calamity_time"] = now
-            signal = getattr(self, "small_world_calamity_event", None)
-            if signal is not None:
-                signal.set()
+        self.refresh_small_world_calamity_plan(payload)
         self.save_state()
         return ok
 
@@ -2677,6 +2715,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                     MiniAppBeastError("small_world_unavailable"),
                 )
                 return False
+            self.refresh_small_world_calamity_plan(snapshot, authoritative=True)
             remaining = self.small_world_remaining_seconds(snapshot, "edictRemainingSeconds")
             if remaining > 0:
                 self.state["next_miracle_preach_time"] = add_seconds_str(now_str(), remaining)
@@ -2686,9 +2725,25 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 return False
             if self.defer_miracle_preach_for_small_world_calamity():
                 return False
+            if self.dashboard_command_paused(MIRACLE_PREACH_COMMAND, "主魂"):
+                return False
             result = await transport.small_world_action("主魂", "miracle_sermon")
             apply_dwelling_snapshot(self, "主魂", result)
-            return self.record_miracle_preach_miniapp_state(result)
+            ok = self.record_miracle_preach_miniapp_state(result)
+            if ok and self.state.get("small_world_calamity_pending"):
+                plan = small_world_incense_plan(result)
+                if any(plan[key] is None for key in ("required", "stock")):
+                    try:
+                        result = await transport.small_world_snapshot("主魂")
+                        refreshed = small_world_incense_plan(result)
+                        if any(refreshed[key] is None for key in ("required", "stock")):
+                            raise MiniAppBeastError("small_world_unavailable")
+                    except Exception:
+                        self.defer_small_world_calamity(300, "recheck_after_preach")
+                        log.warning("Miracle preaching completed; small-world resource refresh will retry.")
+                        return ok
+                self.refresh_small_world_calamity_plan(result)
+            return ok
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2753,6 +2808,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
     async def run_miracle_preach_loop(self):
         await self.startup_done.wait()
+        self.restore_small_world_preach_schedule()
         while self.is_running:
             next_time = self.state.get("next_miracle_preach_time", "")
             if next_time and is_future(next_time):
