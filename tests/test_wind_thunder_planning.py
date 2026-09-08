@@ -342,13 +342,12 @@ class ExposureStateTests(WindThunderFixture):
                 self.assertNotIn("wind_thunder_last_cleanup_time", actor.state)
                 self.assertGreater(datetime.strptime(actor.state["wind_thunder_cleanup_due_at"], TIME_FORMAT), datetime.now())
 
-    def test_restart_restores_pending_listing_even_when_acceleration_is_disabled(self):
+    def test_restart_restores_pending_listing_for_enabled_identity(self):
         async def scenario():
             actor = self.actor
             actor.state = {"wind_thunder_list_pending": True, "wind_thunder_equipped": False}
-            with patch.object(wt, "wind_thunder_enabled", return_value=False):
-                wt.recover_wind_thunder_sessions(actor)
-                await actor._wind_thunder_cleanup_tasks["主魂"]
+            wt.recover_wind_thunder_sessions(actor)
+            await actor._wind_thunder_cleanup_tasks["主魂"]
             return actor
 
         actor = _run(scenario())
@@ -382,6 +381,210 @@ class ExposureStateTests(WindThunderFixture):
             self.assertEqual(actor.sent, [".散念 风雷翅", ".上架至万宝阁 风雷翅"])
 
         _run(scenario())
+
+
+class DisabledIdentityTests(WindThunderFixture):
+    def select(self, participants, enabled=True):
+        automation_settings.save_automation_settings(
+            world_boss_participants=[], mulan_support_mode="护阵",
+            wind_thunder_enabled=enabled, wind_thunder_participants=participants,
+        )
+
+    def avatar(self, equipped=False, pending=True):
+        actor = _enabled_actor(identity="无咎子")
+        actor.avatar_states["无咎子"] = {
+            "wind_thunder_equipped": equipped,
+            "wind_thunder_equipped_at": "2026-08-30 01:03:55",
+            "wind_thunder_list_pending": pending,
+            "wind_thunder_list_fail_count": 5,
+            "wind_thunder_cleanup_due_at": datetime.now().strftime(TIME_FORMAT),
+        }
+        actor.responses = {
+            ".散念 风雷翅": "你已散去对【风雷翅】的祭炼联系，此宝自法宝谱中除名。",
+            ".上架至万宝阁 风雷翅": "你已将【风雷翅】郑重地放置在万宝阁的展台上。",
+        }
+        return actor
+
+    def test_restart_skips_unselected_avatar_without_clearing_equipment_facts(self):
+        self.select(["sub|主魂"])
+        for equipped, pending in ((False, True), (True, False)):
+            with self.subTest(equipped=equipped, pending=pending):
+                actor = self.avatar(equipped, pending)
+                with patch.object(wt, "_wind_thunder_notify") as notify:
+                    wt.recover_wind_thunder_sessions(actor)
+                state = actor.avatar_states["无咎子"]
+                self.assertEqual(actor.sent, [])
+                self.assertEqual(getattr(actor, "_wind_thunder_cleanup_tasks", {}), {})
+                self.assertEqual(state["wind_thunder_cleanup_due_at"], "")
+                self.assertEqual(state["wind_thunder_last_defer_reason"], "disabled")
+                self.assertEqual(state["wind_thunder_equipped"], equipped)
+                self.assertEqual(state["wind_thunder_list_pending"], pending)
+                self.assertEqual(state["wind_thunder_list_fail_count"], 5)
+                self.assertNotIn("wind_thunder_last_cleanup_time", state)
+                notify.assert_not_called()
+
+    def test_global_off_blocks_cleanup_for_a_selected_identity(self):
+        self.select(["main|无咎子"], enabled=False)
+        actor = self.avatar(equipped=True, pending=False)
+        self.assertFalse(_run(wt._cleanup(actor, "无咎子")))
+        self.assertEqual(actor.sent, [])
+        self.assertTrue(actor.avatar_states["无咎子"]["wind_thunder_equipped"])
+
+    def test_selected_sub_identity_still_lists_normally(self):
+        self.select(["sub|主魂"])
+        actor = _enabled_actor(account="sub")
+        actor.state["wind_thunder_list_pending"] = True
+        actor.responses = self.avatar().responses
+        self.assertTrue(_run(wt._cleanup(actor, "主魂")))
+        self.assertEqual(actor.sent, [".上架至万宝阁 风雷翅"])
+        self.assertFalse(actor.state["wind_thunder_list_pending"])
+
+    def test_disabling_cancels_sleeping_retry_and_does_not_rearm_it(self):
+        async def scenario():
+            actor = self.avatar()
+            state = actor.avatar_states["无咎子"]
+            state["wind_thunder_cleanup_due_at"] = (
+                datetime.now() + timedelta(minutes=30)
+            ).strftime(TIME_FORMAT)
+            wt._schedule_cleanup(actor, "无咎子")
+            timer = actor._wind_thunder_cleanup_tasks["无咎子"]
+            await asyncio.sleep(0)
+            self.select(["sub|主魂"])
+            wt._schedule_cleanup(actor, "无咎子")
+            await asyncio.gather(timer, return_exceptions=True)
+            self.assertTrue(timer.cancelled())
+            self.assertFalse(await wt._retry_listing(actor, "无咎子", state))
+            wt.recover_wind_thunder_sessions(actor)
+            self.assertEqual(actor._wind_thunder_cleanup_tasks, {})
+            self.assertEqual(actor.sent, [])
+            self.assertEqual(state["wind_thunder_list_fail_count"], 5)
+
+        _run(scenario())
+
+    def test_disable_while_waiting_for_session_lock_blocks_both_entry_points(self):
+        async def scenario(operation):
+            self.select(["main|无咎子"])
+            actor = self.avatar(equipped=True, pending=False)
+            sender = AsyncMock(return_value="plain")
+            lock = wt._session_lock(actor)
+            await lock.acquire()
+            coroutine = (wt._cleanup(actor, "无咎子") if operation == "cleanup" else
+                         wt.wind_thunder_send(actor, "无咎子", ".探寻裂缝", sender))
+            task = asyncio.create_task(coroutine)
+            await asyncio.sleep(0)
+            self.select(["sub|主魂"])
+            lock.release()
+            result = await task
+            self.assertEqual(actor.sent, [])
+            if operation == "cleanup":
+                self.assertFalse(result)
+                sender.assert_not_awaited()
+            else:
+                self.assertEqual(result, "plain")
+                sender.assert_awaited_once()
+
+        for operation in ("cleanup", "command"):
+            with self.subTest(operation=operation):
+                _run(scenario(operation))
+
+    def test_disable_during_san_nian_records_reply_without_followup_listing(self):
+        actor = self.avatar(equipped=True, pending=False)
+
+        async def response(identity, command, **kwargs):
+            actor.sent.append((identity, command))
+            self.select(["sub|主魂"])
+            return actor.responses[command]
+
+        actor.send_and_wait_feedback_identity = response
+        with patch.object(wt, "_wind_thunder_notify") as notify:
+            self.assertFalse(_run(wt._cleanup(actor, "无咎子")))
+        self.assertEqual(actor.sent, [("无咎子", ".散念 风雷翅")])
+        state = actor.avatar_states["无咎子"]
+        self.assertFalse(state["wind_thunder_equipped"])
+        self.assertTrue(state["wind_thunder_list_pending"])
+        self.assertEqual(state["wind_thunder_cleanup_due_at"], "")
+        notify.assert_not_called()
+
+    def test_disable_during_failed_listing_does_not_count_retry_or_alert(self):
+        actor = self.avatar()
+
+        async def response(identity, command, **kwargs):
+            actor.sent.append((identity, command))
+            self.select(["sub|主魂"])
+            return "此宝似与储物袋中的因果牵连过深，本次放置失败，请稍后再试。"
+
+        actor.send_and_wait_feedback_identity = response
+        state = actor.avatar_states["无咎子"]
+        with patch.object(wt, "_wind_thunder_notify") as notify:
+            self.assertFalse(_run(wt._retry_listing(actor, "无咎子", state)))
+        self.assertEqual(actor.sent, [("无咎子", ".上架至万宝阁 风雷翅")])
+        self.assertEqual(state["wind_thunder_list_fail_count"], 5)
+        self.assertEqual(state["wind_thunder_cleanup_due_at"], "")
+        notify.assert_not_called()
+
+    def test_disabled_stale_session_does_not_block_normal_command(self):
+        self.select(["sub|主魂"])
+        actor = self.avatar()
+        sender = AsyncMock(return_value="plain")
+        with patch.object(wt, "_wind_thunder_notify") as notify:
+            result = _run(wt.wind_thunder_send(actor, "无咎子", ".探寻裂缝", sender))
+        self.assertEqual(result, "plain")
+        sender.assert_awaited_once()
+        self.assertEqual(actor.sent, [])
+        notify.assert_not_called()
+
+    def test_disable_during_equipment_setup_stops_subsequent_operations(self):
+        for disable_after in (".从万宝阁取下 风雷翅", ".装备 风雷翅"):
+            with self.subTest(disable_after=disable_after):
+                self.select(["main|无咎子"])
+                actor = self.avatar(equipped=False, pending=False)
+
+                async def response(identity, command, **kwargs):
+                    actor.sent.append((identity, command))
+                    if command == disable_after:
+                        self.select(["sub|主魂"])
+                    return "你已祭出【风雷翅】。" if command == ".装备 风雷翅" else "已取回【风雷翅】。"
+
+                actor.send_and_wait_feedback_identity = response
+                sender = AsyncMock(return_value="plain")
+                with patch.object(wt, "_wind_thunder_notify") as notify:
+                    self.assertEqual(_run(wt.wind_thunder_send(actor, "无咎子", ".探寻裂缝", sender)), "plain")
+                expected = [("无咎子", ".从万宝阁取下 风雷翅")]
+                if disable_after == ".装备 风雷翅":
+                    expected.append(("无咎子", ".装备 风雷翅"))
+                self.assertEqual(actor.sent, expected)
+                self.assertEqual(actor.avatar_states["无咎子"]["wind_thunder_cleanup_due_at"], "")
+                self.assertEqual(actor.avatar_states["无咎子"]["wind_thunder_equipped"], disable_after == ".装备 风雷翅")
+                sender.assert_awaited_once()
+                notify.assert_not_called()
+
+    def test_reenabled_pending_session_resumes_listing_without_re_equipping(self):
+        async def scenario():
+            actor = self.avatar()
+            self.select(["sub|主魂"])
+            wt.recover_wind_thunder_sessions(actor)
+            self.select(["main|无咎子", "sub|主魂"])
+            sender = AsyncMock(return_value="plain")
+            self.assertEqual(await wt.wind_thunder_send(actor, "无咎子", ".探寻裂缝", sender), "plain")
+            await actor._wind_thunder_cleanup_tasks["无咎子"]
+            self.assertEqual(actor.sent, [("无咎子", ".上架至万宝阁 风雷翅")])
+            self.assertFalse(actor.avatar_states["无咎子"]["wind_thunder_list_pending"])
+            sender.assert_awaited_once()
+
+        _run(scenario())
+
+    def test_manual_listing_confirmation_still_updates_disabled_identity(self):
+        self.select(["sub|主魂"])
+        actor = self.avatar()
+        wt.recover_wind_thunder_sessions(actor)
+        self.assertTrue(wt.sync_wind_thunder_manual_response(
+            actor, "无咎子", ".上架至万宝阁 风雷翅", actor.responses[".上架至万宝阁 风雷翅"]
+        ))
+        state = actor.avatar_states["无咎子"]
+        self.assertFalse(state["wind_thunder_list_pending"])
+        self.assertEqual(state["wind_thunder_list_fail_count"], 0)
+        self.assertEqual(state["wind_thunder_cleanup_due_at"], "")
+        self.assertEqual(actor.sent, [])
 
 
 if __name__ == "__main__":

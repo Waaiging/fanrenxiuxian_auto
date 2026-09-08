@@ -13,6 +13,8 @@ The item is deliberately managed as a per-identity session:
    re-assesses again.
 3. Only when nothing else is coming does the cleanup perform
    ``.散念 风雷翅`` followed by ``.上架至万宝阁 风雷翅``.
+4. Disabling an identity stops this automation, including persisted cleanup
+   and listing retries. Observed equipment state is retained for manual use.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
-from automation_settings import wind_thunder_identities_for_account
+from automation_settings import load_automation_settings, wind_thunder_identities_for_account
 
 _INTERNAL_ACTORS = ContextVar("wind_thunder_internal_actors", default=frozenset())
 
@@ -94,7 +96,10 @@ def wind_thunder_enabled(actor: Any, identity: str = "主魂") -> bool:
         return False
     normalized_identity = _text(identity) or "主魂"
     try:
-        return normalized_identity in wind_thunder_identities_for_account(account)
+        settings = load_automation_settings()
+        return bool((settings.get("wind_thunder") or {}).get("enabled")) and (
+            normalized_identity in wind_thunder_identities_for_account(account, settings=settings)
+        )
     except Exception:
         return False
 
@@ -122,6 +127,33 @@ def _save(actor: Any) -> None:
             saver()
         except Exception:
             pass
+
+
+def _pause_disabled_cleanup(actor: Any, identity: str) -> bool:
+    """Honor the current opt-in without claiming the item has been stored."""
+    if wind_thunder_enabled(actor, identity):
+        return False
+    tasks = getattr(actor, "_wind_thunder_cleanup_tasks", {})
+    task = tasks.get(identity) if isinstance(tasks, dict) else None
+    if task is not None:
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        lock = getattr(actor, "_wind_thunder_lock", None)
+        # Let an in-flight operation record its reply. Every subsequent
+        # request rechecks the switch; sleeping timers can be cancelled now.
+        if task.done() or task is current or not (lock and lock.locked()):
+            tasks.pop(identity, None)
+            if not task.done() and task is not current:
+                task.cancel()
+    state = _identity_state(actor, identity)
+    if state.get("wind_thunder_equipped") or state.get("wind_thunder_list_pending") or state.get("wind_thunder_cleanup_due_at"):
+        if state.get("wind_thunder_cleanup_due_at") or state.get("wind_thunder_last_defer_reason") != "disabled":
+            state["wind_thunder_cleanup_due_at"] = ""
+            state["wind_thunder_last_defer_reason"] = "disabled"
+            _save(actor)
+    return True
 
 
 def _next_due_command(actor: Any, identity: str) -> tuple[str, datetime]:
@@ -216,8 +248,7 @@ def sync_wind_thunder_manual_response(actor: Any, identity: str, command: str, t
     manual intervention never leaves a stale flag behind (the root cause of
     the 2026-09-01 main-account divergence).
     """
-    if not wind_thunder_enabled(actor, identity):
-        return False
+    # Manual replies are observations, even when automatic management is off.
     clean = _text(text)
     state = _identity_state(actor, identity)
     changed = False
@@ -267,6 +298,8 @@ def sync_wind_thunder_manual_response(actor: Any, identity: str, command: str, t
                 state["wind_thunder_cleanup_due_at"] = ""
                 state["wind_thunder_last_cleanup_time"] = now.strftime(TIME_FORMAT)
                 state["wind_thunder_last_cleanup_error"] = ""
+                state["wind_thunder_last_defer_reason"] = ""
+                state["wind_thunder_list_fail_count"] = 0
                 changed = True
         elif "放置失败" in clean:
             if not state.get("wind_thunder_list_pending"):
@@ -275,6 +308,7 @@ def sync_wind_thunder_manual_response(actor: Any, identity: str, command: str, t
 
     if changed:
         _save(actor)
+        _pause_disabled_cleanup(actor, identity)
     return changed
 
 
@@ -293,6 +327,8 @@ def _listing_backoff_seconds(state: dict[str, Any]) -> int:
 
 async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bool:
     """Retry the market listing for an already-san-nian'd wing (exposure state)."""
+    if _pause_disabled_cleanup(actor, identity):
+        return False
     try:
         list_resp = await _send_internal(
             actor,
@@ -308,6 +344,8 @@ async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bo
             (getattr(list_resp, "text", "") or "") if list_resp else ""
         )
         if not _listing_confirmed(list_text):
+            if _pause_disabled_cleanup(actor, identity):
+                return False
             try:
                 fails = int(state.get("wind_thunder_list_fail_count") or 0) + 1
             except (TypeError, ValueError):
@@ -340,6 +378,8 @@ async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bo
         _save(actor)
         return True
     except Exception as exc:
+        if _pause_disabled_cleanup(actor, identity):
+            return False
         state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
         state["wind_thunder_list_pending"] = True
         state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
@@ -356,6 +396,8 @@ async def _cleanup(actor: Any, identity: str) -> bool:
 
 
 async def _cleanup_locked(actor: Any, identity: str) -> bool:
+    if _pause_disabled_cleanup(actor, identity):
+        return False
     state = _identity_state(actor, identity)
     if state.get("wind_thunder_list_pending"):
         # 散念已成功、上架失败的补挂路径：跳过散念，直接重试上架。
@@ -364,10 +406,7 @@ async def _cleanup_locked(actor: Any, identity: str) -> bool:
         return True
     # 规划检查：半小时内还有可加速指令待执行 → 持有到该指令执行完毕
     # （调度时间 + 执行缓冲），其完成路径会再次触发重新评估。
-    upcoming, upcoming_due = (
-        _next_due_command(actor, identity)
-        if wind_thunder_enabled(actor, identity) else ("", _now())
-    )
+    upcoming, upcoming_due = _next_due_command(actor, identity)
     if upcoming:
         hold_until = max(
             upcoming_due + timedelta(seconds=WIND_THUNDER_EXEC_BUFFER_SECONDS),
@@ -405,6 +444,8 @@ async def _cleanup_locked(actor: Any, identity: str) -> bool:
             not any(marker in san_text for marker in ("散去", "散念成功", "已散念"))
             or any(marker in san_text for marker in ("失败", "未能", "无法"))
         ):
+            if _pause_disabled_cleanup(actor, identity):
+                return False
             # 散念未确认成功（可能未装备或响应未匹配）——不盲目继续上架，
             # 短退避后重试整个收尾流程。
             state["wind_thunder_last_cleanup_error"] = "san_nian_unconfirmed"
@@ -420,6 +461,8 @@ async def _cleanup_locked(actor: Any, identity: str) -> bool:
         _save(actor)
         return await _retry_listing(actor, identity, state)
     except Exception as exc:
+        if _pause_disabled_cleanup(actor, identity):
+            return False
         state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
         state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
         _save(actor)
@@ -428,6 +471,9 @@ async def _cleanup_locked(actor: Any, identity: str) -> bool:
 
 
 def _schedule_cleanup(actor: Any, identity: str) -> None:
+    identity = _text(identity) or "主魂"
+    if _pause_disabled_cleanup(actor, identity):
+        return
     tasks = getattr(actor, "_wind_thunder_cleanup_tasks", None)
     if not isinstance(tasks, dict):
         tasks = {}
@@ -438,6 +484,11 @@ def _schedule_cleanup(actor: Any, identity: str) -> None:
         old.cancel()
 
     state = _identity_state(actor, key)
+    if state.get("wind_thunder_last_defer_reason") == "disabled":
+        state["wind_thunder_last_defer_reason"] = ""
+        if not _parse_dt(state.get("wind_thunder_cleanup_due_at")):
+            state["wind_thunder_cleanup_due_at"] = _now().strftime(TIME_FORMAT)
+        _save(actor)
     due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
     delay = WIND_THUNDER_HOLD_SECONDS
     if due:
@@ -459,12 +510,14 @@ def _schedule_cleanup(actor: Any, identity: str) -> None:
 
 
 def recover_wind_thunder_sessions(actor: Any) -> None:
-    """Re-arm persisted cleanup timers after a process restart."""
+    """Re-arm persisted cleanup only for identities that are still enabled."""
     candidates = {"主魂"}
     avatars = getattr(actor, "avatars", None)
     if isinstance(avatars, (list, tuple, set)):
         candidates.update(str(value).strip() for value in avatars if str(value).strip())
     for identity in sorted(candidates):
+        if _pause_disabled_cleanup(actor, identity):
+            continue
         state = _identity_state(actor, identity)
         due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
         if not (state.get("wind_thunder_equipped") or state.get("wind_thunder_list_pending")):
@@ -473,18 +526,7 @@ def recover_wind_thunder_sessions(actor: Any) -> None:
             due = _now()
             state["wind_thunder_cleanup_due_at"] = due.strftime(TIME_FORMAT)
             _save(actor)
-        try:
-            if due > _now():
-                _schedule_cleanup(actor, identity)
-            else:
-                task = asyncio.create_task(_cleanup(actor, identity))
-                tasks = getattr(actor, "_wind_thunder_cleanup_tasks", None)
-                if not isinstance(tasks, dict):
-                    tasks = {}
-                    setattr(actor, "_wind_thunder_cleanup_tasks", tasks)
-                tasks[identity] = task
-        except RuntimeError:
-            return
+        _schedule_cleanup(actor, identity)
 
 
 async def wind_thunder_send(
@@ -495,12 +537,14 @@ async def wind_thunder_send(
 ) -> Any:
     """Equip, execute, and retain Wind-Thunder Wings for the shared window."""
     identity = _text(identity) or "主魂"
-    if not wind_thunder_enabled(actor, identity) or _text(command) not in WIND_THUNDER_COOLDOWNS:
-        return await sender()
     if id(actor) in _INTERNAL_ACTORS.get():
+        return await sender()
+    if _pause_disabled_cleanup(actor, identity) or _text(command) not in WIND_THUNDER_COOLDOWNS:
         return await sender()
 
     async with _session_lock(actor):
+        if _pause_disabled_cleanup(actor, identity):
+            return await sender()
         state = _identity_state(actor, identity)
         now = _now()
         # 脱节防护：equipped 标记的装备时间超出持有窗口（或缺失）= state
@@ -533,9 +577,18 @@ async def wind_thunder_send(
         if state.get("wind_thunder_equipped") and due and due <= now:
             await _cleanup_locked(actor, identity)
             state = _identity_state(actor, identity)
+        if _pause_disabled_cleanup(actor, identity):
+            return await sender()
         if state.get("wind_thunder_list_pending"):
             # 上架失败的翅膀还滞留储物袋（追杀暴露态）——不重新装备，
             # 优先把上架补上；本次指令按普通冷却执行。
+            # Re-enabling an identity can leave a paused pending listing
+            # without a timer. Resume it without re-equipping or bypassing
+            # an existing retry deadline.
+            tasks = getattr(actor, "_wind_thunder_cleanup_tasks", {})
+            task = tasks.get(identity) if isinstance(tasks, dict) else None
+            if task is None or task.done():
+                _schedule_cleanup(actor, identity)
             _wind_thunder_notify(
                 actor,
                 f"[{identity}] 风雷翅仍在待上架状态（此前上架失败），本次 {command} 不启用加速，"
@@ -544,11 +597,15 @@ async def wind_thunder_send(
             return await sender()
         if not state.get("wind_thunder_equipped"):
             await _send_internal(actor, identity, ".从万宝阁取下 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
+            if _pause_disabled_cleanup(actor, identity):
+                return await sender()
             equip_resp = await _send_internal(actor, identity, ".装备 风雷翅", timeout=60, max_retries=0, force_identity_check=True)
             equip_text = str(equip_resp or "") if isinstance(equip_resp, str) else (
                 (getattr(equip_resp, "text", "") or "") if equip_resp else ""
             )
             if "祭出" not in equip_text:
+                if _pause_disabled_cleanup(actor, identity):
+                    return await sender()
                 # 装备未确认成功（Bot 不可用被跳过发送、翅膀不在万宝阁等）。
                 # 绝不标记 equipped——否则 state 与游戏脱节，收尾定时器会
                 # 每 5 分钟重发 .散念 撞"储物袋中没有"死循环。本次按普通冷却执行。
@@ -565,6 +622,8 @@ async def wind_thunder_send(
                 return await sender()
             state["wind_thunder_equipped"] = True
             state["wind_thunder_equipped_at"] = now.strftime(TIME_FORMAT)
+        if _pause_disabled_cleanup(actor, identity):
+            return await sender()
         state["wind_thunder_last_command"] = _text(command)
         state["wind_thunder_last_command_time"] = now.strftime(TIME_FORMAT)
         state["wind_thunder_cleanup_due_at"] = (now + timedelta(seconds=WIND_THUNDER_HOLD_SECONDS)).strftime(TIME_FORMAT)
