@@ -113,7 +113,7 @@ class WaaigingCultivator(core.Cultivator):
         # other accounts; this account is always a single Tianxing main soul.
         self.enable_miniapp_star_palace = False
         self.enable_main_beasts = False
-        self.enable_soul_curse = False
+        self.enable_soul_curse = True
         # Waaiging has no sky bottle; keep the inherited loop off.
         self.enable_sky_bottle = False
 
@@ -121,21 +121,23 @@ class WaaigingCultivator(core.Cultivator):
         # different account's hard-coded commands until they are configured.
         self.enable_treasure_touch = False
         self.enable_nurture_spirit = False
-        self.enable_small_world = False
+        # 化神境（2026-09-07）：启用小世界三件套——显灵 / 安抚信徒（浩劫）/ 神迹布道。
+        # 全部走 Mini App 通道，与主号主魂同一套代码（intelligent_cultivator.py 继承）。
+        self.enable_small_world = True
+        # 化神境 .搜寻节点：12 小时冷却群聊指令（主号主魂 + Waaiging）。
+        self.enable_node_search = True
+        # 虚天鼎炼焰是主号主魂专属法宝；Waaiging 账号未持有，保持关闭。
+        self.enable_treasure_refine = False
+        # 历史遗留：旧版本曾禁用小世界并清空排期；现在不再清空，
+        # 保留 state 里已有的排期/冷却记录无缝续跑。
         disabled_state_changed = False
         for key in (
             "next_treasure_touch_time",
             "next_nurture_spirit_time",
-            "next_small_world_time",
-            "next_small_world_calamity_time",
-            "next_miracle_preach_time",
         ):
             if self.state.get(key):
                 self.state[key] = ""
                 disabled_state_changed = True
-        if self.state.get("small_world_calamity_pending"):
-            self.state["small_world_calamity_pending"] = False
-            disabled_state_changed = True
         if disabled_state_changed or avatars_removed or meditation_scope_changed or star_state_changed:
             self.save_state()
 
@@ -436,6 +438,7 @@ class WaaigingCultivator(core.Cultivator):
         self.create_scheduler_task("tianxing_destiny", lambda: self.run_tianxing_destiny_loop())
         self.create_scheduler_task("dual_cultivation", lambda: self.run_dual_cultivation_loop())
         self.create_scheduler_task("second_soul", lambda: self.run_second_soul_loop())
+        self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=90))
         return await super().run_cultivation_loop()
 
 

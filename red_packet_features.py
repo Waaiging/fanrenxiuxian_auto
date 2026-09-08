@@ -965,6 +965,34 @@ class RedPacketMonitor:
         except OSError as exc:
             self.log.warning("[%s] Red-packet status write failed: %s", self.account, exc)
 
+    async def _confirm_deleted_anchor_topic(self) -> bool:
+        """Confirm a forum topic even when Telegram no longer returns its root message."""
+        try:
+            topic_messages = await self.client.get_messages(
+                self.entity,
+                limit=1,
+                reply_to=RED_PACKET_ANCHOR_MESSAGE_ID,
+            )
+            if any(
+                message_topic_id(message) == RED_PACKET_ANCHOR_MESSAGE_ID
+                for message in topic_messages
+                if message
+            ):
+                return True
+        except Exception as exc:
+            self.log.warning(
+                "[%s] Direct red-packet topic lookup failed; falling back to recent messages: %s",
+                self.account,
+                exc,
+            )
+
+        recent_messages = await self.client.get_messages(self.entity, limit=100)
+        return any(
+            message_topic_id(message) == RED_PACKET_ANCHOR_MESSAGE_ID
+            for message in recent_messages
+            if message
+        )
+
     async def install(self) -> bool:
         try:
             self.entity = await self.client.get_entity(RED_PACKET_CHAT)
@@ -973,13 +1001,7 @@ class RedPacketMonitor:
                 raise RuntimeError(f"account is not a member of @{RED_PACKET_CHAT}")
             anchor = await self.client.get_messages(self.entity, ids=RED_PACKET_ANCHOR_MESSAGE_ID)
             if not anchor:
-                recent_messages = await self.client.get_messages(self.entity, limit=100)
-                topic_confirmed = any(
-                    message_topic_id(message) == RED_PACKET_ANCHOR_MESSAGE_ID
-                    for message in recent_messages
-                    if message
-                )
-                if not topic_confirmed:
+                if not await self._confirm_deleted_anchor_topic():
                     raise RuntimeError(
                         f"deleted topic root {RED_PACKET_ANCHOR_MESSAGE_ID} could not be confirmed"
                     )

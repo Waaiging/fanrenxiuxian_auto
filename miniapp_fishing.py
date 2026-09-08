@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from automation_settings import (
     MINIAPP_FISHING_BAITS,
     MINIAPP_FISHING_RODS,
     MINIAPP_FISHING_SUPPORTED_ACCOUNTS,
+    automation_account_identities,
     automation_participant_key,
     canonical_automation_identity,
     miniapp_fishing_settings,
@@ -54,6 +56,9 @@ FISHING_SHOP_RETRY_SECONDS = 3600
 FISHING_MATERIAL_NOTICE_RETRY_SECONDS = 3600
 FISHING_GLOBAL_LOCK_TIMEOUT_SECONDS = 8.0
 FISHING_GLOBAL_LOCK_RETRY_SECONDS = (5 * 60, 15 * 60, 60 * 60, 6 * 60 * 60)
+FISHING_SCAN_MIN_INTERVAL_SECONDS = 5 * 60
+FISHING_SCAN_LEASE_SECONDS = 90.0
+FISHING_RATE_LIMIT_RETRY_SECONDS = (5 * 60, 15 * 60, 60 * 60)
 FISHING_TRANSFER_FAILURE_STATUSES = {
     "listing_failed",
     "listing_unknown",
@@ -128,7 +133,11 @@ def fishing_participant_parts(value: Any) -> tuple[str, str]:
     if account not in MINIAPP_FISHING_SUPPORTED_ACCOUNTS:
         return "", ""
     identity = canonical_automation_identity(account, identity)
-    if identity not in ACCOUNT_IDENTITIES.get(account, ()):
+    # 动态名单：改名后的化身（灵脉玄/寒续尘）会被 canonical 映射为新道号，
+    # 静态 ACCOUNT_IDENTITIES（含旧名缘生子/寻真子）校验会把新名整个丢弃。
+    # automation_account_identities() 与 _valid_participant 一致地做了
+    # 改名映射，这里必须用同一来源，否则改名后化身被静默剔除出垂钓名单。
+    if identity not in automation_account_identities().get(account, ()):
         return "", ""
     return account, identity
 
@@ -138,6 +147,40 @@ def fishing_participant_label(value: Any) -> str:
     if not account:
         return ""
     return f"{ACCOUNT_NAMES.get(account, account)}｜{identity}"
+
+
+FISHING_ERROR_TEXT = {
+    "external_action_rate_limited": "操作太频繁，稍后自动重试",
+    "fishing_scan_account_busy": "同账号身份冷却中，稍后自动重试",
+    "fishing_rod_missing": "当前身份没有鱼竿",
+    "fishing_rod_type_mismatch": "鱼竿类型不匹配",
+    "fishing_daily_limit_reached": "今日竿数已尽",
+    "fishing_auth_refreshed": "授权过期，正在刷新",
+    "hash_mismatch": "授权过期，正在刷新",
+    "auth_date_expired": "授权过期，正在刷新",
+    "fishing_shop_cost_missing": "商店价格暂时不可用",
+    "fishing_bait_unaffordable": "鱼饵材料不足",
+    "fishing_pond_locked": "鱼塘尚未解锁",
+    "miniapp_circuit_open": "Mini App 暂时不可用",
+    "miniapp_fishing_global_lock_timeout": "状态同步繁忙，稍后重试",
+}
+
+
+def fishing_error_text(code: Any) -> str:
+    key = str(code or "").strip()
+    return FISHING_ERROR_TEXT.get(key, "暂时无法垂钓，稍后自动重试")
+
+
+def fishing_display_error_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for code, message in FISHING_ERROR_TEXT.items():
+        text = text.replace(code, message)
+    text = re.sub(r"（([^（）]*)）", r"：\1", text)
+    while "稍后自动重试，稍后自动重试" in text:
+        text = text.replace("稍后自动重试，稍后自动重试", "稍后自动重试")
+    return text
 
 
 def configured_fishing_rod(settings: dict[str, Any]) -> str:
@@ -200,6 +243,7 @@ def _global_default_state() -> dict[str, Any]:
         "status": "scanning",
         "detail": "等待扫描鱼竿",
         "updated_at": _now_text(),
+        "account_scan_gates": {},
     }
 
 
@@ -294,6 +338,7 @@ def _normalize_global_state(data: Any) -> dict[str, Any]:
         "last_force_retry",
         "account_current_keys",
         "account_statuses",
+        "account_scan_gates",
     ):
         if not isinstance(data.get(key), dict):
             data[key] = {}
@@ -301,6 +346,32 @@ def _normalize_global_state(data: Any) -> dict[str, Any]:
         data["participants"] = []
     _migrate_global_participant_keys(data)
     return data
+
+
+def _parse_fishing_time(value: Any) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), TIME_FORMAT)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fishing_scan_gate_wait(gate: Any) -> float:
+    now = datetime.now()
+    started_at = _parse_fishing_time(_mapping(gate).get("started_at"))
+    if started_at is not None:
+        lease_end = started_at + timedelta(seconds=FISHING_SCAN_LEASE_SECONDS)
+        return max(0.0, (lease_end - now).total_seconds())
+
+    last_scan_at = _parse_fishing_time(_mapping(gate).get("last_scan_at"))
+    if last_scan_at is None:
+        return 0.0
+    return max(
+        0.0,
+        (
+            last_scan_at + timedelta(seconds=FISHING_SCAN_MIN_INTERVAL_SECONDS)
+            - now
+        ).total_seconds(),
+    )
 
 
 def _load_global_state() -> dict[str, Any]:
@@ -901,6 +972,7 @@ class MiniAppFishingAutomation:
         self._scan_started = False
         self._force_retry_request_id = ""
         self._global_state_busy_failures = 0
+        self._rate_limit_failures = 0
         # Fishing result settlement can outlive the initial polling window.
         # Keep the active token in memory so the next cycle can query the
         # completed cast before requesting or starting another one.
@@ -1036,7 +1108,9 @@ class MiniAppFishingAutomation:
     def _clear_irrelevant_local_statuses(self, settings: dict[str, Any]) -> None:
         relevant = set(self._local_relevant_identities(settings))
         changed = False
-        for identity in ACCOUNT_IDENTITIES.get(self.account, ()):
+        # 动态名单：改名后的化身以新道号（灵脉玄等）出现在 state/参与名单中，
+        # 静态 ACCOUNT_IDENTITIES 仍是旧名（缘生子），既清不到新名还会写幽灵旧名。
+        for identity in automation_account_identities().get(self.account, ()):
             if identity in relevant:
                 continue
             state = self._state(identity)
@@ -1941,6 +2015,7 @@ class MiniAppFishingAutomation:
                 self.log.warning("Mini App fishing reward recording failed", exc_info=True)
         if ready:
             self._pending_result_tokens.pop(identity, None)
+            self._rate_limit_failures = 0
         self._last_round_completed = ready
         return 3 if ready else 30
 
@@ -2133,7 +2208,9 @@ class MiniAppFishingAutomation:
         return bool(info.get("definitive")) and cls._seconds_since(info.get("updated_at")) <= seconds
 
     def _local_identity_keys(self, settings: dict[str, Any], runtime: dict[str, Any]) -> list[str]:
-        available = list(ACCOUNT_IDENTITIES.get(self.account, ()))
+        # 动态名单：静态 ACCOUNT_IDENTITIES 存的是改名前的旧道号（缘生子），
+        # 会让改名后的化身（灵脉玄）被当成不可用而过滤出垂钓扫描名单。
+        available = list(automation_account_identities().get(self.account, ()))
         transport_ids = getattr(self.transport, "identity_player_ids", {}) or {}
         if isinstance(transport_ids, dict) and transport_ids:
             available = [
@@ -2163,6 +2240,22 @@ class MiniAppFishingAutomation:
         settings: dict[str, Any],
     ) -> dict[str, Any]:
         key = automation_participant_key(self.account, identity)
+        gate = _mapping(
+            _mapping(
+                miniapp_fishing_global_snapshot(settings).get("account_scan_gates")
+            ).get(self.account)
+        )
+        gate_wait = _fishing_scan_gate_wait(gate)
+        if gate_wait > 0:
+            await asyncio.sleep(gate_wait)
+
+        def begin_scan(data: dict[str, Any]) -> None:
+            data.setdefault("account_scan_gates", {})[self.account] = {
+                "started_at": _now_text(),
+                "last_scan_at": str(gate.get("last_scan_at") or ""),
+            }
+
+        _update_global_state(begin_scan, settings=settings)
         info: dict[str, Any] = {
             "account": self.account,
             "identity": identity,
@@ -2232,7 +2325,14 @@ class MiniAppFishingAutomation:
                 data["rod_holder_source"] = ""
                 data["rod_holder_verified_at"] = ""
 
-        _update_global_state(update, settings=settings)
+        def finish_scan(data: dict[str, Any]) -> None:
+            update(data)
+            data.setdefault("account_scan_gates", {})[self.account] = {
+                "started_at": "",
+                "last_scan_at": info["updated_at"],
+            }
+
+        _update_global_state(finish_scan, settings=settings)
         self._record(
             identity,
             miniapp_fishing_scan_has_rod=bool(info.get("has_rod")),
@@ -2243,14 +2343,35 @@ class MiniAppFishingAutomation:
         )
         return info
 
-    async def _scan_local(self, settings: dict[str, Any], force: bool = False) -> None:
+    async def _scan_local(
+        self,
+        settings: dict[str, Any],
+        force: bool = False,
+    ) -> dict[str, Any]:
         runtime = miniapp_fishing_global_snapshot(settings)
         scans = _mapping(runtime.get("scans"))
-        for identity in self._local_identity_keys(settings, runtime):
+        identities = self._local_identity_keys(settings, runtime)
+        current_key = str(
+            _mapping(runtime.get("account_current_keys")).get(self.account) or ""
+        )
+        current_identity = fishing_participant_parts(current_key)[1]
+        if current_identity in identities:
+            key = automation_participant_key(self.account, current_identity)
+            if force or not self._scan_fresh(scans.get(key)):
+                scans[key] = await self._scan_identity(current_identity, settings)
+                runtime["scans"] = scans
+            self._scan_started = True
+            return runtime
+        for identity in identities:
             key = automation_participant_key(self.account, identity)
             if force or not self._scan_fresh(scans.get(key)):
                 await self._scan_identity(identity, settings)
+                runtime = miniapp_fishing_global_snapshot(settings)
+                scans = _mapping(runtime.get("scans"))
+            self._scan_started = True
+            return runtime
         self._scan_started = True
+        return runtime
 
     def _set_global_status(
         self,
@@ -3005,8 +3126,12 @@ class MiniAppFishingAutomation:
         return wait
 
     async def _drive_once(self, settings: dict[str, Any]) -> int:
-        await self._scan_local(settings, force=not self._scan_started)
-        runtime = miniapp_fishing_global_snapshot(settings)
+        runtime = await self._scan_local(
+            settings,
+            force=not self._scan_started,
+        )
+        if runtime is None:
+            runtime = miniapp_fishing_global_snapshot(settings)
         scans = _mapping(runtime.get("scans"))
         participants = [str(item) for item in runtime.get("participants") or []]
         completed = _mapping(runtime.get("completed_today"))
@@ -3032,12 +3157,15 @@ class MiniAppFishingAutomation:
             return 5
         if local_force_pending:
             target_key = local_force_pending[0]
+            if fishing_participant_parts(target_key)[0] != self.account:
+                target_key = ""
 
         # Advance stale queue entries without ever searching another identity
         # for a rod or creating a marketplace transfer.
         invalid_or_done = (
             not target_key
             or target_key not in local_participants
+            or fishing_participant_parts(target_key)[0] != self.account
             or completed.get(target_key)
             or no_rod_today.get(target_key)
         )
@@ -3057,8 +3185,32 @@ class MiniAppFishingAutomation:
 
         target_account, target_identity = fishing_participant_parts(target_key)
         scan = _mapping(scans.get(target_key))
-        if not self._scan_fresh(scan, 90):
-            scan = await self._scan_identity(target_identity, settings)
+        if self._rate_limit_failures == 0 and scan.get("definitive"):
+            self._rate_limit_failures = 0
+        if not scan.get("definitive"):
+            error_code = str(scan.get("error") or "")
+            if error_code == "external_action_rate_limited":
+                self._rate_limit_failures += 1
+                wait = FISHING_RATE_LIMIT_RETRY_SECONDS[
+                    min(self._rate_limit_failures, len(FISHING_RATE_LIMIT_RETRY_SECONDS)) - 1
+                ]
+            else:
+                wait = self.retry_seconds
+            self._set_global_status(
+                settings,
+                "scan_unavailable",
+                f"{fishing_participant_label(target_key)} {fishing_error_text(error_code)}，{wait // 60}分钟后自动重试",
+            )
+            self._record(
+                target_identity,
+                miniapp_fishing_status="scan_unavailable",
+                miniapp_fishing_last_error=fishing_error_text(error_code),
+                miniapp_fishing_last_error_time=_now_text(),
+                miniapp_fishing_next_run_time=(
+                    datetime.now() + timedelta(seconds=wait)
+                ).strftime(TIME_FORMAT),
+            )
+            return wait
         if not scan.get("has_rod"):
             self._mark_no_rod(settings, target_key)
             if target_account == self.account:
@@ -3147,7 +3299,7 @@ class MiniAppFishingAutomation:
                 self._record(
                     identity,
                     miniapp_fishing_status="paused_upstream",
-                    miniapp_fishing_last_error=exc.code,
+                    miniapp_fishing_last_error=fishing_error_text(exc.code),
                     miniapp_fishing_last_error_time=_now_text(),
                     miniapp_fishing_next_run_time=(
                         datetime.now() + timedelta(seconds=wait)
@@ -3178,7 +3330,7 @@ class MiniAppFishingAutomation:
                 self._record(
                     identity,
                     miniapp_fishing_status="paused_state",
-                    miniapp_fishing_last_error="miniapp_fishing_global_lock_timeout",
+                    miniapp_fishing_last_error=fishing_error_text("miniapp_fishing_global_lock_timeout"),
                     miniapp_fishing_last_error_time=_now_text(),
                     miniapp_fishing_next_run_time=(
                         datetime.now() + timedelta(seconds=wait)
@@ -3276,11 +3428,11 @@ class MiniAppFishingAutomation:
                 else:
                     status = "error"
                     wait = self.retry_seconds
-                    self._set_global_status(settings, status, f"{self.account}：{code}")
+                    self._set_global_status(settings, status, fishing_error_text(code))
                 self._record(
                     identity,
                     miniapp_fishing_status=status,
-                    miniapp_fishing_last_error=code,
+                    miniapp_fishing_last_error=fishing_error_text(code),
                     miniapp_fishing_last_error_time=_now_text(),
                     miniapp_fishing_next_run_time=(
                         datetime.now() + timedelta(seconds=wait)
@@ -3299,7 +3451,11 @@ class MiniAppFishingAutomation:
                 elif status == "auth_refresh" and previous_status != status:
                     self.log.info("Mini App fishing authorization refreshed; retrying shortly.")
                 elif status == "error":
-                    self.log.error("Mini App fishing loop failed: %s", code, exc_info=True)
+                    self.log.warning(
+                        "灵溪垂钓：%s，%s 稍后自动重试。",
+                        fishing_error_text(code),
+                        identity,
+                    )
                 elif status == "shop_unavailable" and previous_status != status:
                     self.log.warning(
                         "Mini App fishing shop cost metadata unavailable for %s; retrying hourly.",
@@ -3318,6 +3474,29 @@ class MiniAppFishingAutomation:
                 if force_retry_active and status not in {"daily_done"}:
                     self._finish_force_retry_after_error(settings, participant_key)
                     wait = 1
+                if code == "external_action_rate_limited":
+                    self._rate_limit_failures += 1
+                    wait = FISHING_RATE_LIMIT_RETRY_SECONDS[
+                        min(
+                            self._rate_limit_failures,
+                            len(FISHING_RATE_LIMIT_RETRY_SECONDS),
+                        )
+                        - 1
+                    ]
+                    self._record(
+                        identity,
+                        miniapp_fishing_next_run_time=(
+                            datetime.now() + timedelta(seconds=wait)
+                        ).strftime(TIME_FORMAT),
+                    )
+                    self._set_global_status(
+                        settings,
+                        "paused_upstream",
+                        f"{fishing_participant_label(participant_key)} 操作太频繁，{wait // 60}分钟后自动重试",
+                    )
+                    self.log.warning(
+                        "灵溪垂钓：操作太频繁，%s 将在 %s 分钟后自动重试。",
+                        identity,
+                        wait // 60,
+                    )
             await self._sleep_until_next_cycle(wait, settings)
-
-

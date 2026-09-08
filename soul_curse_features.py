@@ -42,6 +42,16 @@ SOUL_CURSE_CHAIN_SECONDS = 8 * 3600
 SOUL_CURSE_VISIT_HOUR = 9
 SOUL_CURSE_RETRY_SECONDS = 10 * 60
 SOUL_CURSE_UNKNOWN_RETRY_SECONDS = 30 * 60
+# 身份切换可能被手动指令打断。解咒链在确认到这类竞态时短暂退避，
+# 不把委托永久标记为 blocked；下一轮会重新确认阴罗身份。
+SOUL_CURSE_IDENTITY_RETRY_SECONDS = 90
+SOUL_CURSE_IDENTITY_RETRY_ATTEMPTS = 2
+SOUL_CURSE_IDENTITY_MISMATCH_MARKERS = (
+    "只有阴罗宗弟子",
+    "阴罗宗弟子熟悉此类魂咒",
+    "仅限阴罗宗",
+    "非阴罗宗",
+)
 SOUL_CURSE_SHARED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul_curse_commissions.json")
 SOUL_CURSE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul_curse_settings.json")
 
@@ -175,6 +185,12 @@ def _target_username(value):
     if not text:
         return ""
     return text if text.startswith("@") else f"@{text}"
+
+
+def soul_curse_identity_mismatch_response(text):
+    """Return whether a response says the command was sent under a non-Yinluo identity."""
+    clean = _strip_markdown(text)
+    return bool(clean) and any(marker in clean for marker in SOUL_CURSE_IDENTITY_MISMATCH_MARKERS)
 
 
 def _next_visit_time(done_today=False, minute=0, now=None):
@@ -835,14 +851,54 @@ class SoulCurseMixin:
         )
 
     async def soul_curse_send_identity(self, identity, command, timeout=60):
-        return await self.send_and_wait_feedback_identity(
-            identity,
-            command,
-            timeout=timeout,
-            max_retries=0,
-            force_identity_check=True,
-            suppress_no_response_alert=True,
-        )
+        """Send one identity-sensitive soul-curse command safely.
+
+        The shared feedback layer normally performs an implicit retry without
+        re-running identity alignment.  That is unsafe here: a manual command
+        can switch the live game identity while we wait for a delayed reply,
+        causing the implicit retry to be sent as 主魂 (or another avatar).
+        Disable that retry and let this wrapper re-confirm the target identity
+        before each bounded retry instead.
+        """
+        logger = self.soul_curse_logger()
+        last_response = None
+        try:
+            retry_attempts = max(0, int(SOUL_CURSE_IDENTITY_RETRY_ATTEMPTS))
+        except (TypeError, ValueError):
+            retry_attempts = 2
+
+        for attempt in range(retry_attempts + 1):
+            if attempt:
+                # Give any manual identity command a chance to finish before
+                # acquiring the serialized avatar send lock again.
+                await asyncio.sleep(1)
+            force_fresh = attempt > 0
+            response = await self.send_and_wait_feedback_identity(
+                identity,
+                command,
+                timeout=timeout,
+                max_retries=0,
+                force_identity_check=True,
+                force_fresh_identity_confirm=force_fresh,
+                retry_on_timeout=False,
+                suppress_no_response_alert=True,
+            )
+            last_response = response
+            response_text = self.soul_curse_response_text(response)
+            if response_text and not soul_curse_identity_mismatch_response(response_text):
+                return response
+            if attempt >= retry_attempts:
+                break
+            reason = "身份不匹配" if response_text else "无回执"
+            logger.warning(
+                "Soul curse identity command [%s] %s; re-confirming [%s] before retry %d/%d.",
+                command,
+                reason,
+                identity,
+                attempt + 1,
+                retry_attempts,
+            )
+        return last_response
 
     def record_soul_curse_visit_response(self, text, profile=None, identity="主魂"):
         profile = profile or self.soul_curse_publisher_profile() or {}
@@ -1073,6 +1129,17 @@ class SoulCurseMixin:
                 owner_account=owner_account,
             )
             return "success"
+        if parsed.get("status") == "blocked" and soul_curse_identity_mismatch_response(text):
+            wait = max(30, int(SOUL_CURSE_IDENTITY_RETRY_SECONDS))
+            self.soul_curse_set_assist_status(
+                identity,
+                "accept_identity_mismatch",
+                f"接取委托 {state['commission_id']} 时身份被切走，{wait}秒后重新确认阴罗身份",
+                wait,
+                text,
+                owner_account=owner_account,
+            )
+            return "identity_mismatch"
         if parsed.get("status") in {"gone", "blocked", "cooldown"}:
             wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
             self.soul_curse_set_assist_status(
@@ -1134,6 +1201,17 @@ class SoulCurseMixin:
                 owner_account=owner_account,
             )
             return "sha_not_enough"
+        if soul_curse_identity_mismatch_response(text):
+            wait = max(30, int(SOUL_CURSE_IDENTITY_RETRY_SECONDS))
+            self.soul_curse_set_assist_status(
+                identity,
+                f"{action}_identity_mismatch",
+                f"{label}发送时身份被切走，{wait}秒后重新确认阴罗身份",
+                wait,
+                text,
+                owner_account=owner_account,
+            )
+            return "identity_mismatch"
         if parsed.get("status") in {"cooldown", "source_not_ready", "no_contract", "blocked"}:
             wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
             state[next_key] = add_seconds_str(now, wait)

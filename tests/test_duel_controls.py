@@ -655,8 +655,14 @@ class DuelControlTests(unittest.TestCase):
                 duel_features.refresh_duel_identity_name("sub", old_identity, "新缘子")
             )
             self.assertEqual(duel_features.duel_identity_for_username("lvdoumiao")["identity"], "新缘子")
-            state = duel_features.load_duel_state()
+            # Model the account worker publishing its new snapshot. A later
+            # reader must retain both the new name and the custom target.
+            live = {account: [item["identity"] for item in entries]
+                    for account, entries in duel_features.DUEL_IDENTITIES.items()}
+            with patch.object(duel_features, "automation_account_identities", return_value=live):
+                state = duel_features.load_duel_state()
             self.assertIn("sub|新缘子", state["queues"][ROTATION]["participants"])
+            self.assertEqual(state["queues"][ROTATION]["participants"]["sub|新缘子"]["target_username"], "Weeguu")
             self.assertNotIn(
                 f"sub|{old_identity}",
                 state["queues"][ROTATION]["participants"],
@@ -757,6 +763,56 @@ class DuelControlTests(unittest.TestCase):
         )
         avatar_target = duel_features.duel_dashboard_payload()["multi"]["targets"][0]
         self.assertEqual(avatar_target["duel_method"], "reply_switch")
+
+    def test_one_to_many_direct_mode_is_independent_from_rotation_mode(self):
+        duel_features.set_duel_target_switch(True)
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+            target_switch_enabled=False,
+        )
+
+        reservation = duel_features.reserve_duel_for_account("main")
+
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation["command"], ".斗法 @ding303")
+        self.assertEqual(reservation["preparation_run_id"], "")
+        self.assertEqual(duel_features.load_duel_state()["multi"]["preparation"], {})
+        self.assertFalse(duel_features.duel_dashboard_payload()["multi"]["target_switch_enabled"])
+
+    def test_one_to_many_switch_mode_works_when_rotation_is_direct(self):
+        duel_features.set_duel_target_switch(False)
+        duel_features.configure_duel_multi_plan(
+            "main",
+            "无咎子",
+            [{"username": "ding303", "count": 1}],
+            enabled=True,
+            target_switch_enabled=True,
+        )
+
+        self.assertIsNone(duel_features.reserve_duel_for_account("main"))
+        preparation = duel_features.load_duel_state()["multi"]["preparation"]
+        self.assertEqual(preparation["owner"], "sub")
+        self.assertEqual(preparation["status"], "pending")
+        self.assertTrue(duel_features.load_duel_state()["multi"]["target_switch_explicit"])
+
+    def test_legacy_multi_mode_inherits_global_rotation_mode(self):
+        state = duel_features.load_duel_state()
+        state["target_switch_enabled"] = False
+        state["multi"].pop("target_switch_enabled", None)
+        state["multi"].pop("target_switch_explicit", None)
+
+        shaped = duel_features._ensure_duel_state_shape(state, reset_daily=False)
+
+        self.assertFalse(shaped["multi"]["target_switch_enabled"])
+        self.assertFalse(shaped["multi"]["target_switch_explicit"])
+        self.assertFalse(
+            duel_features.duel_multi_target_switch_enabled(
+                shaped["multi"], fallback=shaped["target_switch_enabled"]
+            )
+        )
 
 
     def test_state_shape_defaults_target_switch_enabled(self):

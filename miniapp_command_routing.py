@@ -65,7 +65,7 @@ STAR_GAZING_BOUNDARY_INTERVAL_HOURS = 3
 STAR_GAZING_LEAD_RANGE_SECONDS = (30, 40)
 STAR_PALACE_SHIFT_SAFETY_SECONDS = 3
 STAR_PALACE_TIME_CRITICAL_SECONDS = 90
-STAR_PALACE_SHIFT_MAX_DELAY_SECONDS = 20
+STAR_PALACE_SHIFT_MAX_DELAY_SECONDS = 320
 STAR_PALACE_ERROR_RETRY_SECONDS = 90
 STAR_PALACE_IDLE_WAIT_CHUNK_SECONDS = 300
 STAR_PALACE_SETTINGS_POLL_SECONDS = 5
@@ -1230,20 +1230,28 @@ class MiniAppCommandRouter:
             bool(active),
         )
 
-        if not active:
+        # 显化窗口开启的信号：divination.active 字段，或结果文本明确包含改换星移提示
+        shift_hint = "施展改换星移" in str(message)
+        if not active and not shift_hint:
             return False
 
         # Shift while the manifestation is still pending, never after it lands.
         if remaining is None:
-            shift_delay = random.randint(0, STAR_PALACE_SHIFT_MAX_DELAY_SECONDS)
-        else:
-            shift_delay = max(
-                0,
-                min(
-                    STAR_PALACE_SHIFT_MAX_DELAY_SECONDS,
-                    remaining - STAR_PALACE_SHIFT_SAFETY_SECONDS,
-                ),
+            # remainingSeconds 解析失败时显化窗口通常 300 秒，保底压哨
+            remaining = 300
+            self.log.info(
+                "Mini App star palace [%s]: remainingSeconds missing; defaulting to %ss window",
+                identity,
+                remaining,
             )
+        shift_delay = max(
+            0,
+            min(
+                STAR_PALACE_SHIFT_MAX_DELAY_SECONDS,
+                remaining - STAR_PALACE_SHIFT_SAFETY_SECONDS,
+            ),
+        )
+
         if shift_delay:
             self.log.info(
                 "Mini App star palace [%s]: waiting %ss to 改换星移 -> %s (remaining=%ss)",

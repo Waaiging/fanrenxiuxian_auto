@@ -28,6 +28,12 @@ class FeatureActor(CommonCommandMixin):
 
     async def send_and_wait_feedback(self, command, **kwargs):
         self.calls.append(command)
+        if command == ".装备 风雷翅":
+            return "你已祭出【风雷翅】。"
+        if command == ".散念 风雷翅":
+            return "你已散去对【风雷翅】的祭炼联系。"
+        if command == ".上架至万宝阁 风雷翅":
+            return "你已将【风雷翅】放置在万宝阁的展台上。"
         return "完成"
 
     def save_state(self):
@@ -111,7 +117,7 @@ class RequestedFeatureUpdatesTests(unittest.TestCase):
         }
         self.assertEqual(current_xiaohao_taiyi_identity(state), "灵脉玄")
 
-    def test_wind_thunder_second_command_keeps_fixed_hold_window(self):
+    def test_wind_thunder_second_command_reuses_equipment_before_reassessment(self):
         async def scenario():
             actor = FeatureActor("sub")
             settings_module.save_automation_settings(

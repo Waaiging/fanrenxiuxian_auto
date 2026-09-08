@@ -1,6 +1,7 @@
-telethon
-fastapi
-uvicorn
-python-multipart
-networkx
+# Direct dependencies matched to the validated VPS runtime (2026-09-08).
+telethon==1.43.2
+fastapi==0.136.1
+uvicorn==0.46.0
+python-multipart==0.0.27
+networkx==3.6.1
 websocket-client==1.9.0

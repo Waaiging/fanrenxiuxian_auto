@@ -59,6 +59,9 @@ STABLE_MAIN_AVATAR_SLOTS = {
     "缘生子": "-1003809391782",
     "素缘子": "-1003999815554",
 }
+# 主号阴罗宗化身的稳定 player_id（"缘生子"槽位，重生后道号会变）
+MAIN_YINLUO_PLAYER_ID = "-1003809391782"
+DEFAULT_MAIN_YINLUO_IDENTITY = "缘生子"
 
 
 def _load_sub_identity_state() -> dict[str, Any]:
@@ -138,6 +141,29 @@ def current_sub_yinluo_identity(state: Any = None) -> str:
         return current
 
     return DEFAULT_SUB_YINLUO_IDENTITY
+
+
+def current_main_yinluo_identity(state: Any = None) -> str:
+    """Return the current Dao name for the stable main-account Yinluo avatar."""
+    source = state if isinstance(state, dict) else _load_main_identity_state()
+    player_names = source.get("avatar_dao_names_by_player_id")
+    if not isinstance(player_names, dict):
+        player_names = source.get("avatar_dao_names_by_tgid")
+    if isinstance(player_names, dict):
+        current = str(player_names.get(MAIN_YINLUO_PLAYER_ID) or "").strip()
+        if current and current != "一缕残魂":
+            return current
+
+    aliases = source.get("avatar_dao_name_aliases")
+    current = DEFAULT_MAIN_YINLUO_IDENTITY
+    seen = set()
+    while isinstance(aliases, dict) and current not in seen:
+        seen.add(current)
+        mapped = str(aliases.get(current) or "").strip()
+        if not mapped or mapped == current or mapped == "一缕残魂":
+            break
+        current = mapped
+    return current
 
 
 def _load_xiaohao_identity_state() -> dict[str, Any]:
@@ -245,7 +271,27 @@ def current_xiaohao_taiyi_identity(state: Any = None) -> str:
     return current or DEFAULT_XIAOHAO_TAIYI_IDENTITY
 
 
+def current_sub_stable_avatar_identity(slot_name: str = "寻真子", state: Any = None) -> str:
+    """Return the current Dao name for a stable sub avatar slot (寻真子 -> 寒续尘)."""
+    source = state if isinstance(state, dict) else _load_sub_identity_state()
+    player_names = source.get("avatar_dao_names_by_player_id")
+    if not isinstance(player_names, dict):
+        player_names = source.get("avatar_dao_names_by_tgid")
+    for player_id, slot in STABLE_SUB_AVATAR_SLOTS.items():
+        if slot != slot_name:
+            continue
+        if isinstance(player_names, dict):
+            current = str(player_names.get(str(player_id)) or "").strip()
+            if current and current != "一缕残魂":
+                return current
+        return slot_name
+    return slot_name
+
+
 SUB_YINLUO_IDENTITY = current_sub_yinluo_identity()
+MAIN_YINLUO_IDENTITY = current_main_yinluo_identity()
+XIAOHAO_TAIYI_IDENTITY = current_xiaohao_taiyi_identity()
+SUB_XUNZHENZI_IDENTITY = current_sub_stable_avatar_identity("寻真子")
 LEGACY_SUB_IDENTITY_ALIASES = {
     "缘生子": SUB_YINLUO_IDENTITY,
     DEFAULT_SUB_YINLUO_IDENTITY: SUB_YINLUO_IDENTITY,

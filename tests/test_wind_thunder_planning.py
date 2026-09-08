@@ -1,13 +1,16 @@
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wind_thunder_features as wt
+import automation_settings
 from wind_thunder_features import (
     WIND_THUNDER_HOLD_SECONDS,
     WIND_THUNDER_PLANNING_WINDOW_SECONDS,
@@ -56,57 +59,73 @@ class _Actor:
 
 
 def _run(coro):
-    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _enabled_actor(identity="主魂", account="main"):
-    actor = _Actor(account=account, identity=identity)
-    # Patch enabled check: main|主魂 is in the default identity set.
-    return actor
+    return _Actor(account=account, identity=identity)
 
 
-class NextDueCommandTests(unittest.TestCase):
+class WindThunderFixture(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        file_patch = patch.object(
+            automation_settings, "AUTOMATION_SETTINGS_FILE", Path(directory.name) / "settings.json"
+        )
+        file_patch.start()
+        self.addCleanup(file_patch.stop)
+        automation_settings.save_automation_settings(
+            world_boss_participants=[], mulan_support_mode="护阵",
+            wind_thunder_enabled=True,
+            wind_thunder_participants=["main|主魂", "main|无咎子"],
+        )
+
+
+class NextDueCommandTests(WindThunderFixture):
     """Planning check: which accelerated command is due within the window."""
 
     def setUp(self):
+        super().setUp()
         self.actor = _enabled_actor()
 
     def test_upcoming_rift_keeps_session(self):
         due = datetime.now() + timedelta(minutes=20)
         self.actor.state["next_rift_search_time"] = due.strftime(TIME_FORMAT)
-        self.assertEqual(_next_due_command(self.actor, "主魂"), ".探寻裂缝")
+        self.assertEqual(_next_due_command(self.actor, "主魂"), (".探寻裂缝", due.replace(microsecond=0)))
 
     def test_overdue_rift_keeps_session(self):
         due = datetime.now() - timedelta(minutes=5)
         self.actor.state["next_rift_search_time"] = due.strftime(TIME_FORMAT)
-        self.assertEqual(_next_due_command(self.actor, "主魂"), ".探寻裂缝")
+        self.assertEqual(_next_due_command(self.actor, "主魂"), (".探寻裂缝", due.replace(microsecond=0)))
 
     def test_far_future_schedule_released(self):
         due = datetime.now() + timedelta(hours=3)
         self.actor.state["next_rift_search_time"] = due.strftime(TIME_FORMAT)
-        self.assertEqual(_next_due_command(self.actor, "主魂"), "")
+        self.assertEqual(_next_due_command(self.actor, "主魂")[0], "")
 
     def test_missing_schedule_released(self):
-        self.assertEqual(_next_due_command(self.actor, "主魂"), "")
+        self.assertEqual(_next_due_command(self.actor, "主魂")[0], "")
 
     def test_ask_dao_and_beast_keys_covered(self):
         now = datetime.now()
         self.actor.state["next_ask_dao_time"] = (now + timedelta(minutes=10)).strftime(TIME_FORMAT)
-        self.assertEqual(_next_due_command(self.actor, "主魂"), ".问道")
+        self.assertEqual(_next_due_command(self.actor, "主魂")[0], ".问道")
         self.actor.state["next_hunt_time"] = (now + timedelta(minutes=2)).strftime(TIME_FORMAT)
-        self.assertEqual(_next_due_command(self.actor, "主魂"), ".问道")  # rift/ask_dao first
+        self.assertEqual(_next_due_command(self.actor, "主魂")[0], ".寻觅灵兽")
 
     def test_avatar_state_used_for_avatar_identity(self):
         actor = _enabled_actor(identity="无咎子")
         due = datetime.now() + timedelta(minutes=15)
         actor.avatar_states["无咎子"] = {"next_rift_search_time": due.strftime(TIME_FORMAT)}
-        self.assertEqual(_next_due_command(actor, "无咎子"), ".探寻裂缝")
+        self.assertEqual(_next_due_command(actor, "无咎子"), (".探寻裂缝", due.replace(microsecond=0)))
 
 
-class CleanupPlanningTests(unittest.TestCase):
+class CleanupPlanningTests(WindThunderFixture):
     """The cleanup timer defers when commands are coming within 30 minutes."""
 
     def setUp(self):
+        super().setUp()
         self.actor = _enabled_actor()
         self.actor.responses = {
             ".散念 风雷翅": "你已散去对【风雷翅】的祭炼联系，此宝自法宝谱中除名。",
@@ -153,8 +172,8 @@ class CleanupPlanningTests(unittest.TestCase):
         self.assertEqual(
             [c for c in actor.sent if c == ".上架至万宝阁 风雷翅"].count(".上架至万宝阁 风雷翅"), 1
         )
-        # Still equipped, retry scheduled.
-        self.assertTrue(actor.state.get("wind_thunder_equipped"))
+        self.assertFalse(actor.state.get("wind_thunder_equipped"))
+        self.assertTrue(actor.state.get("wind_thunder_list_pending"))
         self.assertEqual(actor.state.get("wind_thunder_last_cleanup_error"), "list_failed")
         due = datetime.strptime(actor.state["wind_thunder_cleanup_due_at"], TIME_FORMAT)
         self.assertGreater(due, datetime.now())
@@ -173,11 +192,31 @@ class CleanupPlanningTests(unittest.TestCase):
             actor.state.get("wind_thunder_last_cleanup_error"), "san_nian_unconfirmed"
         )
 
+    def test_manual_listing_failure_preserves_pending_recovery(self):
+        actor = self.actor
+        actor.state["wind_thunder_list_pending"] = True
+        wt.sync_wind_thunder_manual_response(
+            actor, "主魂", ".上架至万宝阁 风雷翅", "【风雷翅】本次放置失败，请稍后再试。"
+        )
+        self.assertTrue(actor.state["wind_thunder_list_pending"])
+        self.assertNotIn("wind_thunder_last_cleanup_time", actor.state)
 
-class WindThunderSendTests(unittest.TestCase):
+    def test_cleanup_uses_its_own_backoff_without_implicit_send_retries(self):
+        actor = self.actor
+        actor.state["wind_thunder_equipped"] = True
+        actor.send_and_wait_feedback = AsyncMock(side_effect=[
+            actor.responses[".散念 风雷翅"], actor.responses[".上架至万宝阁 风雷翅"],
+        ])
+        self.assertTrue(_run(wt._cleanup(actor, "主魂")))
+        for call in actor.send_and_wait_feedback.await_args_list:
+            self.assertIs(call.kwargs["retry_on_timeout"], False)
+
+
+class WindThunderSendTests(WindThunderFixture):
     """Equip-execute flow keeps one cycle per burst of commands."""
 
     def setUp(self):
+        super().setUp()
         self.actor = _enabled_actor()
 
     def test_second_command_within_window_reuses_equipped_item(self):
@@ -221,17 +260,18 @@ class WindThunderSendTests(unittest.TestCase):
 
         result = _run(wind_thunder_send(actor, "主魂", ".问道", sender))
         self.assertEqual(result, "ran")
-        # One full cycle: teardown then re-equip, each exactly once.
-        self.assertEqual(actor.sent.count(".散念 风雷翅"), 1)
-        self.assertEqual(actor.sent.count(".上架至万宝阁 风雷翅"), 1)
+        # An expired equipment snapshot is revalidated by one equip request.
+        self.assertEqual(actor.sent.count(".散念 风雷翅"), 0)
+        self.assertEqual(actor.sent.count(".上架至万宝阁 风雷翅"), 0)
         self.assertEqual(actor.sent.count(".从万宝阁取下 风雷翅"), 1)
         self.assertEqual(actor.sent.count(".装备 风雷翅"), 1)
 
 
-class ExposureStateTests(unittest.TestCase):
+class ExposureStateTests(WindThunderFixture):
     """Hunt-exposure protections: list-pending lock and escalating backoff."""
 
     def setUp(self):
+        super().setUp()
         self.actor = _enabled_actor()
         self.actor.responses = {
             ".散念 风雷翅": "你已散去对【风雷翅】的祭炼联系，此宝自法宝谱中除名。",
@@ -265,8 +305,10 @@ class ExposureStateTests(unittest.TestCase):
         state = {}
         self.assertEqual(wt._listing_backoff_seconds(state), 5 * 60)
         state["wind_thunder_list_fail_count"] = 1
-        self.assertEqual(wt._listing_backoff_seconds(state), 15 * 60)
+        self.assertEqual(wt._listing_backoff_seconds(state), 5 * 60)
         state["wind_thunder_list_fail_count"] = 2
+        self.assertEqual(wt._listing_backoff_seconds(state), 15 * 60)
+        state["wind_thunder_list_fail_count"] = 3
         self.assertEqual(wt._listing_backoff_seconds(state), 30 * 60)
         state["wind_thunder_list_fail_count"] = 5
         self.assertEqual(wt._listing_backoff_seconds(state), 30 * 60)
@@ -276,8 +318,8 @@ class ExposureStateTests(unittest.TestCase):
         actor.responses[".上架至万宝阁 风雷翅"] = "此宝似与储物袋中的因果牵连过深，本次放置失败，请稍后再试。"
         actor.state["wind_thunder_list_pending"] = True
         notified = []
-        wt._wind_thunder_notify = lambda a, m: notified.append(m)
-        ok = _run(wt._retry_listing(actor, "主魂", actor.state))
+        with patch.object(wt, "_wind_thunder_notify", side_effect=lambda a, m: notified.append(m)):
+            ok = _run(wt._retry_listing(actor, "主魂", actor.state))
         self.assertFalse(ok)
         self.assertTrue(actor.state.get("wind_thunder_list_pending"))
         self.assertEqual(actor.state.get("wind_thunder_list_fail_count"), 1)
@@ -286,6 +328,60 @@ class ExposureStateTests(unittest.TestCase):
         # Backoff is the first-tier 5 minutes.
         due = datetime.strptime(actor.state["wind_thunder_cleanup_due_at"], TIME_FORMAT)
         self.assertGreater(due - datetime.now(), timedelta(minutes=4))
+
+    def test_unconfirmed_listing_retains_pending_state_and_retries(self):
+        for reply in (None, "", "请稍后再试", "上架失败，风雷翅仍在储物袋"):
+            with self.subTest(reply=reply):
+                actor = self.actor
+                actor.state = {"wind_thunder_equipped": True}
+                actor.responses[".上架至万宝阁 风雷翅"] = reply
+                self.assertFalse(_run(wt._cleanup(actor, "主魂")))
+                self.assertFalse(actor.state["wind_thunder_equipped"])
+                self.assertTrue(actor.state["wind_thunder_list_pending"])
+                self.assertEqual(actor.state["wind_thunder_last_cleanup_error"], "list_unconfirmed")
+                self.assertNotIn("wind_thunder_last_cleanup_time", actor.state)
+                self.assertGreater(datetime.strptime(actor.state["wind_thunder_cleanup_due_at"], TIME_FORMAT), datetime.now())
+
+    def test_restart_restores_pending_listing_even_when_acceleration_is_disabled(self):
+        async def scenario():
+            actor = self.actor
+            actor.state = {"wind_thunder_list_pending": True, "wind_thunder_equipped": False}
+            with patch.object(wt, "wind_thunder_enabled", return_value=False):
+                wt.recover_wind_thunder_sessions(actor)
+                await actor._wind_thunder_cleanup_tasks["主魂"]
+            return actor
+
+        actor = _run(scenario())
+        self.assertEqual(actor.sent, [".上架至万宝阁 风雷翅"])
+        self.assertFalse(actor.state["wind_thunder_list_pending"])
+
+    def test_cleanup_waits_for_inflight_command(self):
+        async def scenario():
+            actor = self.actor
+            actor.state = {
+                "wind_thunder_equipped": True,
+                "wind_thunder_equipped_at": datetime.now().strftime(TIME_FORMAT),
+                "wind_thunder_cleanup_due_at": (datetime.now() + timedelta(minutes=5)).strftime(TIME_FORMAT),
+            }
+            started, release = asyncio.Event(), asyncio.Event()
+
+            async def sender():
+                started.set()
+                await release.wait()
+                return "ok"
+
+            command = asyncio.create_task(wind_thunder_send(actor, "主魂", ".问道", sender))
+            await started.wait()
+            cleanup = asyncio.create_task(wt._cleanup(actor, "主魂"))
+            await asyncio.sleep(0)
+            self.assertFalse(cleanup.done())
+            self.assertEqual(actor.sent, [])
+            release.set()
+            self.assertEqual(await command, "ok")
+            self.assertTrue(await cleanup)
+            self.assertEqual(actor.sent, [".散念 风雷翅", ".上架至万宝阁 风雷翅"])
+
+        _run(scenario())
 
 
 if __name__ == "__main__":

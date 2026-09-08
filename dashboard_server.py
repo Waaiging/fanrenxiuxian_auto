@@ -33,6 +33,7 @@ import uuid
 import re
 import signal
 import sqlite3
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body, Request
@@ -62,8 +63,10 @@ from log_utils import command_control_key
 from command_modules import (
     ASK_DAO_COMMAND,
     DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
+    NODE_SEARCH_COMMAND,
     NURTURE_SPIRIT_COMMAND,
     RIFT_SEARCH_COMMAND,
+    TREASURE_REFINE_COMMAND,
     YUANYING_OUT_COMMAND,
     field_training_plan_from_features,
     treasure_touch_plan,
@@ -73,6 +76,7 @@ from duel_features import (
     DUEL_ROTATION_QUEUE_KEY,
     configure_duel_multi_plan,
     duel_dashboard_payload,
+    duel_multi_target_switch_enabled,
     set_duel_control,
     set_duel_intervals,
     set_duel_multi_control,
@@ -95,6 +99,7 @@ from world_boss_turnstile import (
 )
 from miniapp_dwelling import miniapp_command_allowed, normalize_miniapp_command
 from miniapp_fishing import (
+    fishing_display_error_text,
     miniapp_fishing_global_snapshot,
     request_miniapp_fishing_force_retry,
 )
@@ -196,6 +201,11 @@ DASHBOARD_COOKIE_SECURE = os.environ.get("DASHBOARD_COOKIE_SECURE", "true").stri
     "0", "false", "no", "off",
 }
 DASHBOARD_SESSION_COOKIE = "fanren_dashboard_session"
+LOGIN_FAILURE_LIMIT = 10
+LOGIN_FAILURE_WINDOW_SECONDS = 300
+LOGIN_FAILURE_MAX_CLIENTS = 4096
+LOGIN_FAILURES = OrderedDict()
+LOGIN_FAILURE_LOCK = threading.Lock()
 
 
 def _session_signing_key():
@@ -223,6 +233,8 @@ def create_dashboard_session(username, now=None):
 
 def dashboard_session_user(token, now=None):
     """Return the authenticated user from a valid session token."""
+    if not DASHBOARD_PASSWORD or not token or len(str(token)) > 4096:
+        return ""
     try:
         encoded, signature = str(token or "").rsplit(".", 1)
         expected = hmac.new(
@@ -232,15 +244,27 @@ def dashboard_session_user(token, now=None):
             return ""
         padded = encoded + "=" * (-len(encoded) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
-        username = str(payload.get("u") or "")
-        current = int(time.time() if now is None else now)
-        if current >= int(payload.get("exp") or 0):
+        if not isinstance(payload, dict) or not isinstance(payload.get("u"), str):
             return ""
-        if not any(secrets.compare_digest(username, name) for name in USER_NAMES):
+        username = payload["u"]
+        current = int(time.time() if now is None else now)
+        issued, expires = payload.get("iat"), payload.get("exp")
+        if type(issued) is not int or type(expires) is not int:
+            return ""
+        if not (0 <= issued <= current < expires) or expires - issued > DASHBOARD_SESSION_DAYS * 86400:
+            return ""
+        if not any(_constant_time_text_equal(username, name) for name in USER_NAMES):
             return ""
         return username
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         return ""
+
+
+def _constant_time_text_equal(first, second):
+    try:
+        return secrets.compare_digest(str(first).encode("utf-8"), str(second).encode("utf-8"))
+    except UnicodeError:
+        return False
 
 
 def dashboard_credentials_valid(username, password):
@@ -248,10 +272,35 @@ def dashboard_credentials_valid(username, password):
         return False
     supplied_username = str(username or "").strip()
     correct_username = not supplied_username or any(
-        secrets.compare_digest(supplied_username, name) for name in USER_NAMES
+        _constant_time_text_equal(supplied_username, name) for name in USER_NAMES
     )
-    correct_password = secrets.compare_digest(str(password or ""), DASHBOARD_PASSWORD)
+    correct_password = _constant_time_text_equal(password or "", DASHBOARD_PASSWORD)
     return correct_username and correct_password
+
+
+def _check_dashboard_credentials(request, username, password):
+    # Uvicorn resolves the trusted local proxy. Do not trust raw forwarded
+    # headers here: direct callers could rotate them to bypass the limit.
+    client = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with LOGIN_FAILURE_LOCK:
+        expired = [key for key, (started, _) in LOGIN_FAILURES.items()
+                   if now - started >= LOGIN_FAILURE_WINDOW_SECONDS]
+        for key in expired:
+            LOGIN_FAILURES.pop(key, None)
+        started, failures = LOGIN_FAILURES.get(client, (now, 0))
+        if failures >= LOGIN_FAILURE_LIMIT:
+            retry_after = max(1, int(LOGIN_FAILURE_WINDOW_SECONDS - (now - started)) + 1)
+            raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试",
+                                headers={"Retry-After": str(retry_after)})
+        if dashboard_credentials_valid(username, password):
+            LOGIN_FAILURES.pop(client, None)
+            return True
+        LOGIN_FAILURES[client] = (started, failures + 1)
+        LOGIN_FAILURES.move_to_end(client)
+        while len(LOGIN_FAILURES) > LOGIN_FAILURE_MAX_CLIENTS:
+            LOGIN_FAILURES.popitem(last=False)
+    return False
 
 
 def authenticate(
@@ -267,7 +316,7 @@ def authenticate(
     session_user = dashboard_session_user(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     if session_user:
         return session_user
-    if credentials and dashboard_credentials_valid(credentials.username, credentials.password):
+    if credentials and _check_dashboard_credentials(request, credentials.username, credentials.password):
         return credentials.username
     raise HTTPException(
         status_code=http_status.HTTP_401_UNAUTHORIZED,
@@ -1508,7 +1557,7 @@ def miniapp_fishing_command(state):
     except Exception:
         runtime = {}
     status_key = str(runtime.get("status") or state.get("miniapp_fishing_status") or "waiting")
-    error = clean_custom_text(state.get("miniapp_fishing_last_error") or "", 100)
+    error = clean_custom_text(fishing_display_error_text(state.get("miniapp_fishing_last_error")), 100)
     result = clean_custom_text(state.get("miniapp_fishing_last_result") or "", 180)
     next_time = str(state.get("miniapp_fishing_next_run_time") or "").strip()
     target = parse_state_time(next_time)
@@ -1529,7 +1578,7 @@ def miniapp_fishing_command(state):
     score = int(state.get("miniapp_fishing_last_score") or 0)
     participants = runtime.get("participant_labels") or []
     current_label = clean_custom_text(runtime.get("current_label") or "", 60)
-    runtime_detail = clean_custom_text(runtime.get("detail") or "", 180)
+    runtime_detail = clean_custom_text(fishing_display_error_text(runtime.get("detail")), 180)
     detail_parts = [f"参与 {len(participants)} 个身份", pond, bait, chum, "自动购饵每次 10 份"]
     start_time = clean_custom_text(settings.get("start_time") or "", 10)
     detail_parts.append(f"开始 {start_time}" if start_time else "立即开始")
@@ -2697,6 +2746,18 @@ def main_soul_panel(account, state):
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_node_search_time", NODE_SEARCH_COMMAND, "搜寻节点", waiting="12小时冷却", group="化神"),
+            time_command(
+                state,
+                "next_treasure_refine_time",
+                TREASURE_REFINE_COMMAND,
+                "虚天鼎炼焰",
+                waiting="8小时冷却",
+                ready="可炼焰",
+                missing="待祭炼",
+                detail=f"炼焰进度 {state.get('treasure_refine_progress') or 0}/9" + (" · 已圆满" if state.get("treasure_refine_complete") else ""),
+                group="法宝",
+            ),
             time_command(state, "next_treasure_touch_time", MAIN_TREASURE_TOUCH_COMMAND, "抚摸法宝", group="法宝"),
             time_command(state, "next_small_world_time", ".小世界", "小世界", waiting="6小时冷却", group="化神"),
             manual_command(".显灵", "显灵", "凡人祈愿时自动响应", "化神"),
@@ -2869,6 +2930,11 @@ def main_soul_panel(account, state):
             ),
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
             time_command(state, "next_rift_search_time", RIFT_SEARCH_COMMAND, "探寻裂缝", group="通用"),
+            time_command(state, "next_node_search_time", NODE_SEARCH_COMMAND, "搜寻节点", waiting="12小时冷却", group="化神"),
+            time_command(state, "next_small_world_time", ".小世界", "小世界", waiting="6小时冷却", group="化神"),
+            manual_command(".显灵", "显灵", "凡人祈愿时自动响应", "化神"),
+            small_world_calamity_command(state),
+            time_command(state, "next_miracle_preach_time", ".神迹 布道", "神迹 布道", waiting="3小时冷却", group="化神"),
         ])
         rows.extend(sect_war_commands(state))
         rows.extend(meditation_commands(state))
@@ -5350,7 +5416,12 @@ LOGIN_PAGE = """<!DOCTYPE html>
 
 def _safe_next_path(value):
     value = str(value or "/").strip()
-    return value if value.startswith("/") and not value.startswith("//") else "/"
+    if (
+        not value.startswith("/") or value.startswith("//")
+        or "\\" in value or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        return "/"
+    return value
 
 
 def dashboard_login_page(next_path="/", username="admin", error=""):
@@ -5369,13 +5440,13 @@ async def login_page(request: Request, next: str = "/"):
 
 
 @app.post("/login")
-async def login(payload: dict = Body(...)):
+async def login(request: Request, payload: dict = Body(...)):
     username = str(payload.get("username") or (USER_NAMES[0] if USER_NAMES else "admin"))
     password = str(payload.get("access_token") or payload.get("password") or "")
     next_path = str(payload.get("next_path") or "/")
     if not DASHBOARD_PASSWORD:
         raise HTTPException(status_code=503, detail="Dashboard 认证尚未配置")
-    if not dashboard_credentials_valid(username, password):
+    if not _check_dashboard_credentials(request, username, password):
         raise HTTPException(status_code=401, detail="账号或密码不正确")
     response = RedirectResponse(_safe_next_path(next_path), status_code=303)
     response.set_cookie(
@@ -5949,11 +6020,20 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
     """Create, replace, pause, or resume the active one-to-many duel plan."""
     try:
         if "targets" in payload:
+            multi_target_switch = payload.get("target_switch_enabled")
+            if multi_target_switch is None and "duel_method" in payload:
+                legacy_method = str(payload.get("duel_method") or "").strip().lower()
+                # Older Dashboard clients called the direct username mode
+                # ``username`` and the reply/switch mode ``reply_switch``.
+                # Accept both names while retaining switch as the safe default
+                # for unknown values.
+                multi_target_switch = legacy_method not in {"direct", "username"}
             data = configure_duel_multi_plan(
                 payload.get("initiator_account"),
                 payload.get("initiator_identity"),
                 payload.get("targets"),
                 enabled=bool(payload.get("enabled", True)),
+                target_switch_enabled=multi_target_switch,
             )
         else:
             data = set_duel_multi_control(bool(payload.get("enabled")))
@@ -5974,11 +6054,16 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
     with STATUS_LOCK:
         STATUS_CACHE.clear()
     multi = data.get("multi") or {}
+    multi_target_switch_enabled_value = duel_multi_target_switch_enabled(
+        multi, fallback=bool(data.get("target_switch_enabled", True))
+    )
     return {
         "success": True,
         "enabled": bool(multi.get("enabled")),
         "initiator_account": multi.get("initiator_account") or "",
         "initiator_identity": multi.get("initiator_identity") or "",
+        "target_switch_enabled": multi_target_switch_enabled_value,
+        "duel_method": "reply_switch" if multi_target_switch_enabled_value else "username",
         "target_count": len(multi.get("targets") or []),
         "updated_by": username,
     }

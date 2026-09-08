@@ -296,6 +296,11 @@ def update_json_state(
             )
         encoded = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
+        # A read/check transaction must not rotate a useful backup or fsync an
+        # unchanged document. Recovery still writes when the main file failed.
+        if error is None and encoded == current_raw:
+            return result
+
         if backup and current_raw is not None:
             try:
                 _atomic_replace_bytes(

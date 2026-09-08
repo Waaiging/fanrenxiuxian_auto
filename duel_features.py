@@ -2,6 +2,7 @@
 """Shared duel schedulers for the all-identity rotation and one-to-many plans."""
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from automation_settings import current_sub_yinluo_identity
+from automation_settings import current_sub_yinluo_identity, automation_account_identities
 
 try:
     import fcntl
@@ -171,7 +172,12 @@ def duel_identity_for_username(username):
     return None
 
 
-def duel_identity_options():
+def duel_identity_options(refresh=True):
+    if refresh:
+        # Keep automatic roster refreshes from leaving the persisted duel state
+        # with retired participant keys.  This also covers callers such as the
+        # surprise-raid dashboard that do not otherwise load duel state.
+        load_duel_state(refresh_roster=True)
     rows = []
     for account, identities in DUEL_IDENTITIES.items():
         for item in identities:
@@ -181,6 +187,91 @@ def duel_identity_options():
                 "label": f"{config['account_name']} · {config['identity']} · @{config['username']}",
             })
     return rows
+
+
+def refresh_duel_identity_roster():
+    """Sync DUEL_IDENTITIES with rebirth Dao names before reading options.
+
+    Dashboard 与 cultivator 是不同进程：模块加载时的静态表不会跟随重生，
+    每次读取前按 state_main/state_sub/state_xiaohao 的槽位道号刷新。
+    """
+    live = automation_account_identities()
+    changes = {}
+    for account in ("main", "sub", "xiaohao", "waaiging"):
+        live_names = tuple(live.get(account) or ())
+        rows = DUEL_IDENTITIES.get(account) or ()
+        # The Telegram username is stable across a rebirth, while the Dao name
+        # is not.  Match rows by their stable position/username instead of the
+        # mutable name so a second rebirth is handled as well.
+        for index, item in enumerate(rows):
+            if index == 0 or index >= len(live_names):
+                continue
+            current_name = str(live_names[index] or "").strip()
+            old_name = str(item.get("identity") or "").strip()
+            if not current_name or not old_name or current_name == old_name:
+                continue
+            changes[(account, old_name)] = current_name
+            item["identity"] = current_name
+            stable_username = str(item.get("username") or "").strip().lower()
+            for queue in DUEL_QUEUES.values():
+                for participant in queue.get("participants", ()):
+                    if (
+                        participant.get("account") == account
+                        and str(participant.get("username") or "").strip().lower()
+                        == stable_username
+                    ):
+                        participant["identity"] = current_name
+    return changes
+
+
+def _rename_duel_state_identity_references(value, account, old_identity, new_identity):
+    """Rename an identity everywhere in a persisted duel state tree."""
+    old_key = duel_participant_key(account, old_identity)
+    new_key = duel_participant_key(account, new_identity)
+    if isinstance(value, list):
+        for item in value:
+            _rename_duel_state_identity_references(
+                item, account, old_identity, new_identity
+            )
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("account") == account and value.get("identity") == old_identity:
+        value["identity"] = new_identity
+    if value.get("target_account") == account and value.get("target_identity") == old_identity:
+        value["target_identity"] = new_identity
+    if value.get("initiator_account") == account and value.get("initiator_identity") == old_identity:
+        value["initiator_identity"] = new_identity
+    if value.get("owner") == account and value.get("target_identity") == old_identity:
+        value["target_identity"] = new_identity
+    if value.get("participant_key") == old_key:
+        value["participant_key"] = new_key
+    for key, child in tuple(value.items()):
+        if key == old_key:
+            existing = value.get(new_key)
+            moved = value.pop(key)
+            if existing is None:
+                value[new_key] = moved
+            elif isinstance(existing, dict) and isinstance(moved, dict):
+                # Prefer the already-current key when both are present, while
+                # retaining any fields only stored under the retired key.
+                merged = dict(moved)
+                merged.update(existing)
+                value[new_key] = merged
+            else:
+                value[new_key] = existing
+            child = value[new_key]
+        _rename_duel_state_identity_references(
+            child, account, old_identity, new_identity
+        )
+
+
+def _apply_duel_roster_changes(data, changes):
+    for (account, old_identity), new_identity in (changes or {}).items():
+        _rename_duel_state_identity_references(
+            data, account, old_identity, new_identity
+        )
+    return data
 
 
 def refresh_duel_identity_name(account, old_identity, new_identity):
@@ -204,37 +295,15 @@ def refresh_duel_identity_name(account, old_identity, new_identity):
     if not changed:
         return False
 
-    old_key = duel_participant_key(account, old_identity)
-    new_key = duel_participant_key(account, new_identity)
-
-    def update_plan_references(value):
-        if isinstance(value, list):
-            for item in value:
-                update_plan_references(item)
-            return
-        if not isinstance(value, dict):
-            return
-        if value.get("account") == account and value.get("identity") == old_identity:
-            value["identity"] = new_identity
-        if value.get("target_account") == account and value.get("target_identity") == old_identity:
-            value["target_identity"] = new_identity
-        if value.get("initiator_account") == account and value.get("initiator_identity") == old_identity:
-            value["initiator_identity"] = new_identity
-        if value.get("owner") == account and value.get("target_identity") == old_identity:
-            value["target_identity"] = new_identity
-        if value.get("participant_key") == old_key:
-            value["participant_key"] = new_key
-        for key, child in tuple(value.items()):
-            if key == old_key:
-                value[new_key] = value.pop(key)
-                child = value[new_key]
-            update_plan_references(child)
-
     with duel_state_lock():
         data = _read_duel_state_unlocked()
         if isinstance(data, dict):
-            update_plan_references(data)
-            data = _ensure_duel_state_shape(data)
+            _rename_duel_state_identity_references(
+                data, account, old_identity, new_identity
+            )
+            # The account snapshot may not have been saved yet. This explicit
+            # rename is authoritative; refreshing from disk here would undo it.
+            data = _ensure_duel_state_shape(data, refresh_roster=False)
             data["updated_at"] = duel_time()
             _atomic_write_json(DUEL_STATE_FILE, data)
     return True
@@ -326,6 +395,8 @@ def _new_multi_state():
         "enabled": False,
         "initiator_account": "",
         "initiator_identity": "",
+        "target_switch_enabled": True,
+        "target_switch_explicit": False,
         "cursor": 0,
         "next_at": "",
         "last_attempt_at": "",
@@ -474,9 +545,19 @@ def _migrate_legacy_duel_queues(data):
     return data
 
 
-def _ensure_duel_state_shape(data, reset_daily=True):
+def _ensure_duel_state_shape(data, reset_daily=True, refresh_roster=True):
     if not isinstance(data, dict):
         data = duel_default_state()
+    # Always refresh the process-local roster before deriving participant keys.
+    # The dashboard and workers are separate long-lived processes: after a
+    # rebirth their module-level DUEL_IDENTITIES snapshot may still hold the
+    # retired Dao name, and unknown participant keys below would be POPPED and
+    # re-created with the default target — silently discarding the user's
+    # custom target.  Refresh first so rename-applied keys survive instead.
+    # ``refresh_roster`` parameter is kept for backwards-compatible call sites.
+    if refresh_roster:
+        roster_changes = refresh_duel_identity_roster()
+        _apply_duel_roster_changes(data, roster_changes)
     data = _migrate_legacy_duel_queues(data)
     data["version"] = DUEL_STATE_VERSION
     data.setdefault("enabled", True)
@@ -554,12 +635,29 @@ def _ensure_duel_state_shape(data, reset_daily=True):
         if queue_key not in DUEL_QUEUES:
             queues.pop(queue_key, None)
 
+    raw_multi = data.get("multi")
+    legacy_multi_mode = not isinstance(raw_multi, dict) or "target_switch_enabled" not in raw_multi
+    raw_multi_explicit = (
+        bool(raw_multi.get("target_switch_explicit"))
+        if isinstance(raw_multi, dict) and "target_switch_explicit" in raw_multi
+        else None
+    )
     multi = data.setdefault("multi", _new_multi_state())
     if not isinstance(multi, dict):
         multi = _new_multi_state()
         data["multi"] = multi
     for field, value in _new_multi_state().items():
         multi.setdefault(field, value)
+    # Older plans followed the global rotation mode.  Keep that behaviour on
+    # first load, then persist the independent choice for future runs.
+    if legacy_multi_mode:
+        multi["target_switch_enabled"] = bool(data.get("target_switch_enabled", True))
+        multi["target_switch_explicit"] = False
+    else:
+        multi["target_switch_enabled"] = bool(multi.get("target_switch_enabled"))
+        multi["target_switch_explicit"] = bool(
+            True if raw_multi_explicit is None else raw_multi_explicit
+        )
     multi["enabled"] = bool(multi.get("enabled", False))
     initiator_account = str(multi.get("initiator_account") or "").strip().lower()
     initiator_identity = str(multi.get("initiator_identity") or "").strip()
@@ -666,10 +764,12 @@ def _ensure_duel_state_shape(data, reset_daily=True):
     return data
 
 
-def load_duel_state(write_back=False):
+def load_duel_state(write_back=False, refresh_roster=False):
     with duel_state_lock():
-        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
-        if write_back or not os.path.exists(DUEL_STATE_FILE):
+        raw = _read_duel_state_unlocked()
+        before = copy.deepcopy(raw)
+        data = _ensure_duel_state_shape(raw, refresh_roster=refresh_roster)
+        if write_back or not os.path.exists(DUEL_STATE_FILE) or data != before:
             data["updated_at"] = duel_time()
             _atomic_write_json(DUEL_STATE_FILE, data)
         return data
@@ -695,6 +795,24 @@ def duel_target_switch_enabled(data):
         return bool(data.get("target_switch_enabled", True))
     except AttributeError:
         return True
+
+
+def duel_multi_target_switch_enabled(multi_or_data, fallback=True):
+    """Return the independent target-switch mode for an active multi plan.
+
+    ``multi_or_data`` may be either the ``multi`` state itself or the complete
+    duel state.  Missing fields intentionally inherit the global rotation mode
+    for backwards compatibility with plans written before the setting became
+    independent.
+    """
+    if isinstance(multi_or_data, dict) and "multi" in multi_or_data:
+        fallback = duel_target_switch_enabled(multi_or_data)
+        multi_or_data = multi_or_data.get("multi") or {}
+    if not isinstance(multi_or_data, dict):
+        return bool(fallback)
+    if not bool(multi_or_data.get("target_switch_explicit", True)):
+        return bool(fallback)
+    return bool(multi_or_data.get("target_switch_enabled", fallback))
 
 
 def _validated_duel_interval_seconds(value):
@@ -767,9 +885,18 @@ def set_duel_target_switch(enabled):
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
         data["target_switch_enabled"] = bool(enabled)
+        if not bool(data["multi"].get("target_switch_explicit", True)):
+            data["multi"]["target_switch_enabled"] = bool(enabled)
         if not enabled:
             note = "已改为直接 .斗法 @用户名"
             for queue_key, container, field in _duel_target_preparation_contexts(data):
+                # The one-to-many plan has its own mode; changing the rotation
+                # selector must not cancel a multi plan configured to switch
+                # the target identity.
+                if queue_key == "multi" and bool(container.get("target_switch_explicit", True)):
+                    continue
+                if queue_key == "multi":
+                    container["target_switch_enabled"] = False
                 preparation = container.get(field) or {}
                 if not preparation:
                     continue
@@ -784,14 +911,28 @@ def set_duel_target_switch(enabled):
                 _set_preparation_subject_status(queue_key, container, preparation, "ready", note)
         for queue in data["queues"].values():
             queue["next_at"] = ""
-        data["multi"]["next_at"] = ""
+        if not bool(data["multi"].get("target_switch_explicit", True)):
+            # Legacy one-to-many plans inherit the rotation mode, so changing
+            # that mode should wake their scheduler just like the old global
+            # setting did.  Explicitly configured plans keep their own cadence.
+            data["multi"]["next_at"] = ""
         data["updated_at"] = duel_time(now)
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
 
 
-def configure_duel_multi_plan(initiator_account, initiator_identity, targets, enabled=True):
+def configure_duel_multi_plan(
+    initiator_account,
+    initiator_identity,
+    targets,
+    enabled=True,
+    target_switch_enabled=None,
+):
     initiator = duel_identity_config(initiator_account, initiator_identity)
+    roster_changes = {}
+    if not initiator:
+        roster_changes = refresh_duel_identity_roster()
+        initiator = duel_identity_config(initiator_account, initiator_identity)
     if not initiator:
         raise ValueError("unknown duel initiator")
     if not isinstance(targets, list) or not targets:
@@ -825,12 +966,20 @@ def configure_duel_multi_plan(initiator_account, initiator_identity, targets, en
         normalized.append(_new_multi_target_state(username, count))
 
     with duel_state_lock():
-        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        raw = _apply_duel_roster_changes(
+            _read_duel_state_unlocked(), roster_changes
+        )
+        data = _ensure_duel_state_shape(raw)
+        mode_explicit = target_switch_enabled is not None
+        if target_switch_enabled is None:
+            target_switch_enabled = duel_target_switch_enabled(data)
         multi = _new_multi_state()
         multi.update({
             "enabled": bool(enabled),
             "initiator_account": initiator["account"],
             "initiator_identity": initiator["identity"],
+            "target_switch_enabled": bool(target_switch_enabled),
+            "target_switch_explicit": mode_explicit,
             "last_result": "已保存，等待调度" if enabled else "已保存并暂停",
             "targets": normalized,
         })
@@ -869,8 +1018,17 @@ def set_duel_participant_control(enabled, participant_key, target_username=None)
     if not participant_key:
         raise ValueError("missing duel participant")
     target = None if target_username is None else normalize_duel_target(target_username)
+    roster_changes = {}
+    if not any(
+        duel_participant_config(queue_key, participant_key)
+        for queue_key in DUEL_QUEUES
+    ):
+        roster_changes = refresh_duel_identity_roster()
     with duel_state_lock():
-        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        raw = _apply_duel_roster_changes(
+            _read_duel_state_unlocked(), roster_changes
+        )
+        data = _ensure_duel_state_shape(raw)
         found = None
         for queue_key, config in DUEL_QUEUES.items():
             if duel_participant_config(queue_key, participant_key):
@@ -1080,11 +1238,22 @@ def claim_duel_target_preparation(account):
     now = duel_now()
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
-        if not data.get("enabled") or not duel_target_switch_enabled(data):
+        if not data.get("enabled"):
             return None
         for queue_key, container, field in _duel_target_preparation_contexts(data):
             preparation = container.get(field) or {}
             if (
+                (
+                    queue_key == "multi"
+                    and not duel_multi_target_switch_enabled(
+                        container, fallback=duel_target_switch_enabled(data)
+                    )
+                )
+                or (
+                    queue_key != "multi"
+                    and not duel_target_switch_enabled(data)
+                )
+                or
                 not container.get("enabled")
                 or str(preparation.get("owner") or "") != account
                 or str(preparation.get("status") or "") != "pending"
@@ -1245,7 +1414,9 @@ def _reserve_multi_duel_locked(data, account, now):
         return None, dirty
 
     target_username = normalize_duel_target(selected.get("username"))
-    require_target_switch = duel_target_switch_enabled(data)
+    require_target_switch = duel_multi_target_switch_enabled(
+        multi, fallback=duel_target_switch_enabled(data)
+    )
     activation = _duel_target_activation(target_username) if require_target_switch else None
     preparation = multi.get("preparation") or {}
     if preparation and (not require_target_switch or not _lease_active(preparation, now)):
@@ -2371,7 +2542,7 @@ def _duel_event_rows(query_date, limit):
 
 
 def duel_dashboard_payload(date="", limit=200):
-    data = load_duel_state(write_back=False)
+    data = load_duel_state(write_back=False, refresh_roster=True)
     target_switch_enabled = duel_target_switch_enabled(data)
     query_date = str(date or "").strip() or duel_date()
     titan_mode = data["queues"][DUEL_ROTATION_QUEUE_KEY].get(
@@ -2379,7 +2550,7 @@ def duel_dashboard_payload(date="", limit=200):
     )
     titan_status = titan_target_status(titan_mode)
     queues = []
-    identity_options = duel_identity_options()
+    identity_options = duel_identity_options(refresh=False)
     target_options = sorted(
         {
             *(config["target"] for config in DUEL_QUEUES.values()),
@@ -2452,6 +2623,9 @@ def duel_dashboard_payload(date="", limit=200):
         })
 
     multi_state = data["multi"]
+    multi_target_switch_enabled = duel_multi_target_switch_enabled(
+        multi_state, fallback=target_switch_enabled
+    )
     initiator = duel_identity_config(
         multi_state.get("initiator_account"),
         multi_state.get("initiator_identity"),
@@ -2469,7 +2643,7 @@ def duel_dashboard_payload(date="", limit=200):
     for index, target in enumerate(raw_multi_targets):
         target_identity = duel_identity_for_username(target.get("username"))
         multi_activation_required = bool(
-            target_switch_enabled
+            multi_target_switch_enabled
             and target_identity
             and target_identity.get("identity") != "主魂"
         )
@@ -2494,6 +2668,8 @@ def duel_dashboard_payload(date="", limit=200):
         "enabled": bool(multi_state.get("enabled")),
         "initiator_account": multi_state.get("initiator_account") or "",
         "initiator_identity": multi_state.get("initiator_identity") or "",
+        "target_switch_enabled": multi_target_switch_enabled,
+        "duel_method": "reply_switch" if multi_target_switch_enabled else "username",
         "initiator": initiator or {},
         "next_at": multi_state.get("next_at") or "",
         "last_attempt_at": multi_state.get("last_attempt_at") or "",
@@ -2672,11 +2848,29 @@ class DuelMixin:
                     if not rest_status:
                         return False, f"六翼召回失败：{rest_text[:80] or '无回复'}"
                     await asyncio.sleep(2)
-                deploy_resp = await self.send_and_wait_feedback(
-                    ".灵兽出战 六翼", timeout=60, max_retries=0, force_identity_check=True
-                )
-                last_response = self.response_text(deploy_resp) if hasattr(self, "response_text") else str(deploy_resp or "")
-                if not self.is_beast_deploy_success(last_response):
+                deploy_action = getattr(self, "deploy_beast_via_miniapp", None)
+                if callable(deploy_action):
+                    # Newer Xiaohao workers use the Mini App action; keep the
+                    # direct-command fallback for workers that have not yet
+                    # received that optional adapter.
+                    deploy_status, deploy_text = await deploy_action("六翼")
+                    last_response = str(deploy_text or "")
+                    deploy_ok = deploy_status == "出战中"
+                else:
+                    deploy_resp = await self.send_and_wait_feedback(
+                        ".灵兽出战 六翼",
+                        timeout=60,
+                        max_retries=0,
+                        force_identity_check=True,
+                    )
+                    last_response = (
+                        self.response_text(deploy_resp)
+                        if hasattr(self, "response_text")
+                        else str(deploy_resp or "")
+                    )
+                    deploy_check = getattr(self, "is_beast_deploy_success", None)
+                    deploy_ok = bool(deploy_check(last_response)) if callable(deploy_check) else "出战" in last_response
+                if not deploy_ok:
                     if hasattr(self, "record_beast_current_status_response"):
                         self.record_beast_current_status_response(last_response, "六翼", source="斗法准备")
                     return False, f"六翼出战失败：{last_response[:80] or '无回复'}"

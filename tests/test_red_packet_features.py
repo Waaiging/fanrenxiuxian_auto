@@ -210,6 +210,68 @@ class RedPacketFeatureTests(unittest.TestCase):
         )
         self.assertEqual(red_packet_features.message_topic_id(message), 42)
 
+    def test_deleted_anchor_is_confirmed_by_direct_topic_lookup(self):
+        anchor_id = red_packet_features.RED_PACKET_ANCHOR_MESSAGE_ID
+        topic_message = SimpleNamespace(
+            reply_to=SimpleNamespace(reply_to_top_id=anchor_id)
+        )
+
+        class FakeClient:
+            def __init__(self):
+                self.get_messages_calls = []
+
+            async def get_messages(self, entity, **kwargs):
+                self.get_messages_calls.append(kwargs)
+                if kwargs == {"limit": 1, "reply_to": anchor_id}:
+                    return [topic_message]
+                raise AssertionError(f"unexpected get_messages call: {kwargs}")
+
+        client = FakeClient()
+        monitor = red_packet_features.RedPacketMonitor(client, "main")
+        monitor.entity = SimpleNamespace(id=1)
+
+        confirmed = asyncio.run(monitor._confirm_deleted_anchor_topic())
+
+        self.assertTrue(confirmed)
+        self.assertEqual(
+            client.get_messages_calls,
+            [{"limit": 1, "reply_to": anchor_id}],
+        )
+
+    def test_deleted_anchor_lookup_falls_back_to_recent_messages(self):
+        anchor_id = red_packet_features.RED_PACKET_ANCHOR_MESSAGE_ID
+        topic_message = SimpleNamespace(
+            reply_to=SimpleNamespace(reply_to_top_id=anchor_id)
+        )
+
+        class FakeClient:
+            def __init__(self):
+                self.get_messages_calls = []
+
+            async def get_messages(self, entity, **kwargs):
+                self.get_messages_calls.append(kwargs)
+                if kwargs == {"limit": 1, "reply_to": anchor_id}:
+                    raise RuntimeError("direct lookup unavailable")
+                if kwargs == {"limit": 100}:
+                    return [topic_message]
+                raise AssertionError(f"unexpected get_messages call: {kwargs}")
+
+        client = FakeClient()
+        monitor = red_packet_features.RedPacketMonitor(client, "main")
+        monitor.entity = SimpleNamespace(id=1)
+
+        with self.assertLogs("red_packet_features", level="WARNING"):
+            confirmed = asyncio.run(monitor._confirm_deleted_anchor_topic())
+
+        self.assertTrue(confirmed)
+        self.assertEqual(
+            client.get_messages_calls,
+            [
+                {"limit": 1, "reply_to": anchor_id},
+                {"limit": 100},
+            ],
+        )
+
     def _message(self, button, amount="8.8"):
         return SimpleNamespace(
             id=100,

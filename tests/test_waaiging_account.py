@@ -38,7 +38,9 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertFalse(actor.enable_main_beasts)
         self.assertFalse(actor.enable_treasure_touch)
         self.assertFalse(actor.enable_nurture_spirit)
-        self.assertFalse(actor.enable_small_world)
+        # 化神境（2026-09-07）：Waaiging 启用小世界三件套（显灵/安抚信徒/神迹布道）。
+        self.assertTrue(actor.enable_small_world)
+        self.assertTrue(actor.enable_node_search)
         self.assertTrue(actor.telegram_write_restriction_retry_enabled)
         self.assertEqual(actor.account_sect_name(), "")
         with patch(
@@ -180,10 +182,11 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertNotIn("avatars", actor.state)
         self.assertTrue(saved)
         self.assertNotIn("avatars", saved[-1])
-        self.assertEqual(saved[-1]["next_small_world_time"], "")
-        self.assertEqual(saved[-1]["next_small_world_calamity_time"], "")
-        self.assertFalse(saved[-1]["small_world_calamity_pending"])
-        self.assertEqual(saved[-1]["next_miracle_preach_time"], "")
+        # 化神境启用后小世界排期保留，不清空（无缝续跑）。
+        self.assertEqual(saved[-1]["next_small_world_time"], "2026-07-22 03:00:00")
+        self.assertEqual(saved[-1]["next_small_world_calamity_time"], "2026-07-22 03:05:00")
+        self.assertTrue(saved[-1]["small_world_calamity_pending"])
+        self.assertEqual(saved[-1]["next_miracle_preach_time"], "2026-07-22 03:10:00")
 
     def test_small_world_scheduler_tasks_are_not_registered_for_waaiging(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)
@@ -241,9 +244,12 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertNotIn(".野外历练 深入", commands)
         self.assertNotIn(".野外历练", commands)
         self.assertFalse(any(command.startswith(".抚摸法宝") for command in commands))
-        self.assertNotIn(".小世界", commands)
-        self.assertNotIn(".显灵", commands)
-        self.assertNotIn(".神迹 布道", commands)
+        # 化神境（2026-09-07）：小世界三件套 + 搜寻节点已启用，Dashboard 应展示。
+        self.assertIn(".小世界", commands)
+        self.assertIn(".显灵", commands)
+        self.assertIn(".安抚信徒", commands)
+        self.assertIn(".神迹 布道", commands)
+        self.assertIn(".搜寻节点", commands)
 
     def test_sect_join_cooldown_and_success_are_persisted(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)

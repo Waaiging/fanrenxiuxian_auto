@@ -29,6 +29,7 @@ Sub Cultivator v1.0 (Star Palace / 星宫 Edition)
 # 标准库导入
 # ============================================================
 import asyncio        # 异步 I/O 框架，用于协程任务调度
+from runtime_scheduler import create_scheduler_task as register_scheduler_task
 
 import functools
 def safe_bg_task(func):
@@ -96,7 +97,7 @@ from concubine_features import ConcubineMixin, _ConcubineAtomicTask, concubine_d
 
 from fishing_features import FishingMixin
 from soul_curse_features import SoulCurseMixin
-from automation_settings import SUB_YINLUO_IDENTITY
+from automation_settings import SUB_XUNZHENZI_IDENTITY, SUB_YINLUO_IDENTITY
 from yinluo_features import YinluoMixin
 
 YINLUO_IDENTITY = SUB_YINLUO_IDENTITY
@@ -197,7 +198,7 @@ STAR_CALM_INTERVAL_SECONDS = 6 * 3600              # 安抚冷却 6 小时（机
 # -- 观星与改换星移 --
 STAR_GAZING_INTERVAL_HOURS = 3                      # 星盘显现间隔 3 小时（每 3 小时整点一次）
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60           # 在显现前 3 分钟开始监听消息
-STAR_GAZING_COMMAND_LEAD_SECONDS = 60               # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
+STAR_GAZING_COMMAND_LEAD_SECONDS = 10               # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
 STAR_GAZING_SHIFT_PROFILE = "middle"
 STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (3, 6)      # 副号抢中窗，补主号早窗之后的空档
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]  # 负数表示窗口截止在显现后
@@ -251,7 +252,7 @@ YUANYING_RETREAT_COMMAND = ".元婴闭关"              # 副号主魂改用元�
 
 # -- 探寻裂缝 --
 RIFT_SEARCH_CD_SECONDS = 12 * 3600                  # 探寻裂缝冷却 12 小时
-AVATAR_YUANYING_RIFT_AVATARS = {SUB_YINLUO_IDENTITY, "寻真子"}  # 启用化身元婴出窍/探寻裂缝
+AVATAR_YUANYING_RIFT_AVATARS = {SUB_YINLUO_IDENTITY, SUB_XUNZHENZI_IDENTITY}  # 启用化身元婴出窍/探寻裂缝
 
 # -- 抚摸法宝 --
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"      # 抚摸本命法宝指令
@@ -471,7 +472,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             "主魂": "元婴宗",
             "厚土": "星宫",
             SUB_YINLUO_IDENTITY: "阴罗宗",
-            "寻真子": "落云宗",
+            SUB_XUNZHENZI_IDENTITY: "落云宗",
         }
         self.yinluo_identity = SUB_YINLUO_IDENTITY
         self.main_star_palace_enabled = False
@@ -532,7 +533,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             self.pause_event.clear()
             log.info("Startup: is_paused=True, entering paused state.")
         # ---- 身外化身系统（炼气境，只做闭关修炼） ----
-        self.avatars = ["厚土", SUB_YINLUO_IDENTITY, "寻真子"]
+        self.avatars = ["厚土", SUB_YINLUO_IDENTITY, SUB_XUNZHENZI_IDENTITY]
         self.avatar_usernames = {
             "crayonxxin": "厚土",
             "lvdoumiao": SUB_YINLUO_IDENTITY,
@@ -1387,7 +1388,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                                           return_sent=False, delete_after=True,
                                           return_response_msg=False,
                                           suppress_no_response_alert=False,
-                                          skip_bot_activity_wait=False):
+                                          skip_bot_activity_wait=False,
+                                          retry_on_timeout=None):
         """内部发送方法（不获取 avatar_send_lock，已被外部调用方持有）"""
         try:
             return await send_and_wait_feedback_common(
@@ -1404,6 +1406,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 return_msg_role="response",
                 suppress_no_response_alert=suppress_no_response_alert,
                 skip_bot_activity_wait=skip_bot_activity_wait,
+                retry_on_timeout=retry_on_timeout,
             )
         except Exception as e:
             log.error(f"_send_and_wait_feedback_raw [{message[:40]}] crashed: {e}")
@@ -1643,8 +1646,16 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         if not await self.wait_while_identity_paused(identity, message):
             return None
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
+        force_fresh_identity_confirm = bool(kwargs.pop("force_fresh_identity_confirm", False))
+        retry_on_timeout = kwargs.pop("retry_on_timeout", None)
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
+        # 解咒等身份敏感命令可要求每次外层重试都重新发送 .切换确认。
+        force_fresh_identity_confirm = force_fresh_identity_confirm or (
+            bool(force_identity_check)
+            and identity in self.avatars
+            and str(message or "").strip() == ".观星"
+        )
         if not command_send_precheck(self, message, log, identity=identity):
             return None
 
@@ -1677,7 +1688,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                     log.info(f"[DEBUG-IDENTITY] [{identity}] avatar_send_lock acquired in {_lock_wait:.1f}s")
 
                 # 如果当前不在目标身份，先切换
-                if self.current_identity != identity:
+                if self.current_identity != identity or force_fresh_identity_confirm:
                     fishing_wait = await self.fishing_switch_wait_or_raise_due(
                         self.current_identity, target_identity=identity, command=message
                     )
@@ -1720,11 +1731,12 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                             max_retries=1 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
                             skip_bot_activity_wait=True,
+                            retry_on_timeout=retry_on_timeout,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         log.info(f"[DEBUG-IDENTITY] [{identity}] switch response: {resp_str[:120]!r}")
 
-                        passively_confirmed = self.current_identity == identity
+                        passively_confirmed = self.current_identity == identity and not force_fresh_identity_confirm
                         if passively_confirmed:
                             log.info(f"✅ Avatar switch passively confirmed: now {identity}")
                         if (not passively_confirmed) and (not resp_str or not any(k in resp_str for k in ["成功", "已切换", "当前操控", identity])):
@@ -1772,7 +1784,12 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                     # 等待反馈
                     log.info(f"[DEBUG-IDENTITY] [{identity}] sending cmd: {message!r}")
                     resp = await self._send_and_wait_feedback_raw(
-                        message, timeout=timeout, max_retries=max_retries, skip_bot_activity_wait=True, **kwargs
+                        message,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                        skip_bot_activity_wait=True,
+                        retry_on_timeout=retry_on_timeout,
+                        **kwargs,
                     )
                     resp_preview = (getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else "")[:80]
                     log.info(f"[DEBUG-IDENTITY] [{identity}] cmd response: {resp_preview!r}")
@@ -2903,7 +2920,9 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 return True
 
             send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
-            immediate_shift = True
+            # 同 xiaohao 6384：去除回归的 immediate_shift = True。
+            if now <= manifest_dt - timedelta(minutes=1):
+                immediate_shift = False
 
             async with self.star_gazing_lock:
                 self.clear_stale_star_gazing_claim_before_manifest(
@@ -3196,31 +3215,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         return stale
 
     def create_scheduler_task(self, name, coro_factory):
-        """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
-        task = asyncio.create_task(coro_factory(), name=name)
-        registry = getattr(self, "_scheduler_task_registry", None)
-        if not isinstance(registry, dict):
-            registry = {}
-            self._scheduler_task_registry = registry
-        registry[name] = task
-
-        def _on_done(done_task, task_name=name):
-            if not getattr(self, "is_running", True) or done_task.cancelled():
-                return
-            try:
-                exc = done_task.exception()
-            except asyncio.CancelledError:
-                return
-            if exc:
-                log.critical(
-                    f"Scheduler task [{task_name}] exited with exception: {exc}",
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
-            else:
-                log.critical(f"Scheduler task [{task_name}] exited unexpectedly without exception.")
-
-        task.add_done_callback(_on_done)
-        return task
+        return register_scheduler_task(self, name, coro_factory, logger=log)
 
     def dead_scheduler_tasks(self):
         dead = []
@@ -3572,181 +3567,54 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
 
     async def run_star_gazing_loop(self):
         """
-        全天候观星监听循环。
-        功能：
-          1. 启动时恢复待执行的改换星移/观星排期。
-          2. 每 10 分钟检查一次：
-             a. 是否需要执行每日备用观星（23:59 兜底）。
-             b. 更新 next_star_gazing_time 和 next_star_manifest_time 的显示。
-          3. 等待期间不阻塞显化事件监听（由 handle_game_response 处理）。
+        观星已通过 Mini App（星盘）执行，本循环仅保留状态清理兜底。
+
+        【2026-09-05 废弃说明】旧版群消息 .观星/.改换星移 调度已废弃：
+        - handle_game_response 不再调用 maybe_handle_star_gazing_opportunity（星盘显化事件已被 Mini App 接管）
+        - 本方法不再被 create_scheduler_task 启动，即使被调用也不会长时间阻塞
+        - 保留方法仅做一次性过期状态清理，避免 dashboard 一直显示 08-24 的陈旧排期
         """
         await self.startup_done.wait()
+        now = datetime.now()
+        log.info("Star gazing: Mini App 已接管；传统循环不启动，仅清理过期 pending 排期。")
 
-        self.clear_retired_star_gazing_avatar_schedule()
-
-        # ---- 启动恢复：检查待执行的改换星移 ----
-        pending_date = self.state.get("pending_star_shift_date", "")
-        pending_target = self.state.get("pending_star_shift_target_time", "")
-        pending_msg_id = int(self.state.get("pending_star_shift_msg_id") or 0)
-        if (
-            pending_date and pending_target and pending_msg_id
-            and not self.star_shift_done_today(pending_date)
-        ):
-            target_dt = str_to_dt(pending_target)
-            if datetime.now() < target_dt:
-                log.info(
-                    f"Star gazing: restoring pending shift for {pending_target}, "
-                    f"reply msg {pending_msg_id}."
-                )
-                self.star_shift_task = asyncio.create_task(
-                    self.schedule_star_shift(pending_msg_id, target_dt, pending_date)
-                )
-            else:
-                log.info(
-                    f"Star gazing: clearing expired pending shift for {pending_target}."
-                )
-                self.clear_pending_star_shift()
-                self.save_state()
-
-        pending_gazing_date = self.state.get("pending_star_gazing_date", "")
-        pending_gazing_send = (
-            self.state.get("pending_star_gazing_scheduled_time", "")
-            or self.state.get("pending_star_gazing_target_time", "")
-        )
-        pending_manifest = (
-            self.state.get("pending_star_gazing_manifest_time", "")
-            or self.state.get("star_gazing_claimed_manifest_time", "")
-        )
-        pending_avatar = self.state.get("star_gazing_claimed_avatar", "")
-        pending_fate_type = self.state.get("pending_star_gazing_fate_type", "")
-        if pending_gazing_send and pending_manifest and pending_avatar and "Good" not in pending_fate_type:
-            log.info(
-                f"Star gazing: clearing pending .观星 for {pending_manifest}; "
-                "missing confirmed Good fate marker."
-            )
-            self.clear_pending_star_gazing_schedule()
-            self.clear_star_gazing_round_claim()
+        # 清理性地移除已过期的旧观星/改换星移排期 & 认领记录
+        cleared = self.clear_retired_star_gazing_avatar_schedule()
+        if cleared:
             self.save_state()
-            pending_gazing_send = ""
-        if pending_gazing_send and pending_manifest and pending_avatar:
-            send_dt = str_to_dt(pending_gazing_send)
-            manifest_dt = str_to_dt(pending_manifest)
-            latest_send_dt = manifest_dt - timedelta(seconds=60) if manifest_dt else None
-            pending_send_is_valid = bool(
-                send_dt
-                and is_future(pending_gazing_send)
-                and (not latest_send_dt or send_dt <= latest_send_dt)
-            )
-            if not pending_send_is_valid:
-                expired_send = pending_gazing_send
-                pending_gazing_send = ""
-                log.info(
-                    f"Star gazing: clearing expired pending .观星 for {pending_avatar}; "
-                    f"send={expired_send}, manifest={pending_manifest}."
-                )
-                self.clear_pending_star_gazing_schedule()
-                self.clear_star_gazing_round_claim()
-                self.save_state()
-        if pending_gazing_send and pending_manifest and pending_avatar:
-            pending_gazing_date = pending_gazing_date or send_dt.strftime("%Y-%m-%d")
-            preferred_send_dt = manifest_dt - timedelta(
-                seconds=max(60, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
-            ) if manifest_dt else None
-            if preferred_send_dt and preferred_send_dt > datetime.now() and send_dt != preferred_send_dt:
-                send_dt = preferred_send_dt
-                pending_gazing_send = dt_to_str(send_dt)
-                self.state["pending_star_gazing_target_time"] = pending_gazing_send
-                self.state["pending_star_gazing_scheduled_time"] = pending_gazing_send
-                self.state["next_star_gazing_time"] = pending_gazing_send
-                self.save_state()
-            if self.get_avatar_state(pending_avatar).get("last_gazing_date") != pending_gazing_date:
-                restore_immediate_shift = False
-                log.info(
-                    f"Star gazing: restoring pending .观星 for {pending_avatar} "
-                    f"at {pending_gazing_send}, manifest {pending_manifest}."
-                )
-                self.star_gazing_task = asyncio.create_task(
-                    self.schedule_star_gazing_simple(
-                        send_dt,
-                        immediate_shift=restore_immediate_shift,
-                        avatar=pending_avatar,
-                        manifest_dt=manifest_dt,
-                        gazing_date=pending_gazing_date,
-                    )
-                )
-            else:
-                log.info(
-                    f"Star gazing: clearing pending .观星 for {pending_avatar}; "
-                    f"already observed on {pending_gazing_date}."
-                )
-                self.clear_pending_star_gazing_schedule()
+            log.info(f"Star gazing: cleared {cleared} stale pending schedules.")
+
+        # 如果 claim 记录已过期（manifest 时间已过），也清理
+        claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
+        claimed_avatar = self.state.get("star_gazing_claimed_avatar", "")
+        if claimed_manifest and claimed_avatar:
+            manifest_dt = str_to_dt(claimed_manifest)
+            if manifest_dt and manifest_dt < now:
+                log.info(f"Star gazing: clearing stale claimed manifest {claimed_manifest} (was assigned to {claimed_avatar}).")
                 self.clear_star_gazing_round_claim()
                 self.save_state()
 
-
-
-        # ---- 主循环 ----
-        while self.is_running:
-            await self._wait_for_main_identity()
-            now = datetime.now()
-
-            # 检查每日备用观星
-            if await self.maybe_run_daily_star_gazing_fallback(now):
-                await asyncio.sleep(5)
-                continue
-
-            # 更新状态中的 next_star_gazing_time 和 next_star_manifest_time
-            # 这些仅用于日志和外部监控显示
-            target_dt = self.next_star_manifest_dt(now)
-            pending_gazing_target = self.state.get("pending_star_gazing_target_time", "")
-            pending_gazing_scheduled = self.state.get("pending_star_gazing_scheduled_time", "")
-            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now) if self.main_star_palace_enabled else None
-
-            if pending_gazing_target and pending_gazing_scheduled:
-                # 排期已过期：清除，避免 dashboard 一直显示旧日期
-                if not is_future(pending_gazing_scheduled):
-                    log.info(f"Star gazing: expired pending schedule ({pending_gazing_scheduled}) cleared.")
-                    self.clear_pending_star_gazing_schedule()
-                    self.clear_star_gazing_round_claim()
-                    self.save_state()
-                    # 清空后 fall through 到下面的 elif/else 分支
-                    pending_gazing_target = ""
-                    pending_gazing_scheduled = ""
-                else:
-                    self.state["next_star_gazing_time"] = pending_gazing_scheduled
-            elif fallback_dt:
+        # 如果 frontend 依赖，更新时间戳字段为当前可参考值
+        if self.main_star_palace_enabled:
+            fallback_dt = self.pending_daily_star_gazing_fallback_dt(now)
+            next_dt = self.next_star_manifest_dt(now)
+            if fallback_dt:
                 self.state["next_star_gazing_time"] = dt_to_str(fallback_dt)
-            else:
+            elif next_dt:
                 self.state["next_star_gazing_time"] = ""
-            self.state["next_star_manifest_time"] = dt_to_str(target_dt)
-            self.save_state()
-
-            # 如果备用观星时间还没到，等待
-            if fallback_dt and now < fallback_dt:
-                wait_sec = (fallback_dt - now).total_seconds()
-                log.info(
-                    f"Star gazing fallback waiting {int(wait_sec)}s until "
-                    f"{self.state['next_star_gazing_time']}. "
-                    f"Good opportunity listener remains active for manifest "
-                    f"{self.state['next_star_manifest_time']}."
-                )
-                await asyncio.sleep(scheduler_sleep_seconds(wait_sec))
-                continue
-
-            log.info(
-                f"Star gazing listener active all day for "
-                f"{', '.join(STAR_GAZING_GOOD_KEYWORDS)}. "
-                f"Next manifest {self.state['next_star_manifest_time']}."
-            )
-            await asyncio.sleep(scheduler_sleep_seconds(600))
-
-    # ---- 化身星辰牵引 / 安抚 / 收集 ----
+            if next_dt:
+                self.state["next_star_manifest_time"] = dt_to_str(next_dt)
+        self.save_state()
+        # 不进入任何 while 循环；方法自然返回
+        return
 
     def response_text(self, resp):
         return self.common_response_text(resp)
 
     def recent_command_guard_wait(self, command="", max_age_seconds=15):
         return self.common_recent_command_guard_wait(command, max_age_seconds=max_age_seconds)
+
+    # ---- 化身星辰牵引 / 安抚 / 收集 代理方法（恢复删除） ----
 
     def apply_avatar_star_guard_backoff(self, avatar, command="", fields=None, reason="command guard"):
         return self.common_apply_avatar_star_guard_backoff(
@@ -3755,6 +3623,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             fields=fields,
             reason=reason,
             logger=log,
+            log_level="warning",
+            include_reason=False,
         )
 
     def compact_seconds(self, seconds):

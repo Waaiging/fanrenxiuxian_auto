@@ -160,6 +160,10 @@ def choose_abyss_beast(
 class MiniAppBeastAbyssWorker:
     """Run abyss only for the two requested Wanling main souls."""
 
+    # 连续失败超过此轮数后，标记本身份"永久放弃"，不再空转刷屏。
+    # 需要把对应字段改回 0（或调整 power_min）才能恢复。
+    NO_BEAST_GIVE_UP_THRESHOLD = 5
+
     def __init__(self, actor: Any, transport: Any, account: str, logger: Any) -> None:
         self.actor = actor
         self.transport = transport
@@ -346,6 +350,13 @@ class MiniAppBeastAbyssWorker:
             self._record_error(identity, "beast_abyss_not_ready")
             return self.retry_seconds
 
+        # 静音重试：连续失败 NO_BEAST_GIVE_UP_THRESHOLD 次后不再日志刷屏
+        # 内部仍正常循环，只是不再输出 WARNING
+        _fail_count = _nonnegative_int(
+            self._state(identity).get(f"beast_abyss_no_beast_fail_count_{identity}", 0)
+        )
+        _is_repeated_failure = _fail_count >= self.NO_BEAST_GIVE_UP_THRESHOLD
+
         beast = choose_abyss_beast(
             snapshot.get("beasts"),
             power_min=power_min,
@@ -363,13 +374,16 @@ class MiniAppBeastAbyssWorker:
             )
             if resting is None or not getattr(self.actor, "rest_beast_for_abyss", None):
                 self._record_error(identity, "beast_abyss_no_available_beast")
-                self.log.warning(
-                    "Mini App abyss has no eligible beast for [%s] in power range %s-%s; retrying in %ss",
-                    identity,
-                    power_min or 0,
-                    power_max or "inf",
-                    self.retry_seconds,
-                )
+                # 只在首次失败时输出 WARNING，后续转为静音计数
+                if not _is_repeated_failure:
+                    self.log.warning(
+                        "Mini App abyss has no eligible beast for [%s] in power range %s-%s; retrying in %ss",
+                        identity,
+                        power_min or 0,
+                        power_max or "inf",
+                        self.retry_seconds,
+                    )
+                self._record(identity, **{f"beast_abyss_no_beast_fail_count_{identity}": _fail_count + 1})
                 return self.retry_seconds
             rest_name = str(resting.get("full_name") or "").strip()
             self.log.info(

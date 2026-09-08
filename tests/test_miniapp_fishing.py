@@ -88,9 +88,12 @@ class MiniAppFishingTests(unittest.TestCase):
             automation_settings_module.automation_account_identities(),
         )
         self.account_identities_patch.start()
+        self.scan_interval_patch = patch.object(miniapp_fishing, "FISHING_SCAN_MIN_INTERVAL_SECONDS", 0)
+        self.scan_interval_patch.start()
         self.global_patch.start()
 
     def tearDown(self):
+        self.scan_interval_patch.stop()
         self.global_patch.stop()
         self.sub_state_patch.stop()
         self.account_identities_patch.stop()
@@ -272,7 +275,7 @@ class MiniAppFishingTests(unittest.TestCase):
         self.assertEqual(actor.state["miniapp_fishing_status"], "paused_state")
         self.assertEqual(
             actor.state["miniapp_fishing_last_error"],
-            "miniapp_fishing_global_lock_timeout",
+            "状态同步繁忙，稍后重试",
         )
         worker._sleep_until_next_cycle.assert_awaited_once_with(
             miniapp_fishing.FISHING_GLOBAL_LOCK_RETRY_SECONDS[0],
@@ -2676,8 +2679,340 @@ class MiniAppFishingTests(unittest.TestCase):
             requested_by="tester",
         )
 
+    def test_dashboard_translates_fishing_error_codes(self):
+        state = {"miniapp_fishing_status": "error", "miniapp_fishing_last_error": "external_action_rate_limited"}
+        with patch(
+            "dashboard_server.miniapp_fishing_settings",
+            return_value={"enabled": True, "participants": ["main|主魂"]},
+        ), patch(
+            "dashboard_server.miniapp_fishing_global_snapshot",
+            return_value={"detail": "主号｜主魂 状态暂时不可读（fishing_scan_account_busy）"},
+        ):
+            row = dashboard_server.miniapp_fishing_command(state)
+
+        self.assertIn("操作太频繁", row["detail"])
+        self.assertNotIn("external_action_rate_limited", row["detail"])
+        self.assertNotIn("fishing_scan_account_busy", row["detail"])
+        self.assertNotIn("（", row["detail"])
+        self.assertNotIn("）", row["detail"])
+
+    def test_drive_once_repairs_cross_account_force_retry_pointer(self):
+        main_avatar = "main|" + "\u65e0\u548e\u5b50"
+        sub_avatar = "sub|" + "\u539a\u571f"
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", main_avatar, sub_avatar],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        worker = MiniAppFishingAutomation(
+            SimpleNamespace(config={}, state={}, save_state=lambda: None),
+            SimpleNamespace(identity_player_ids={main_avatar.split("|", 1)[1]: 2}),
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        scan_info = {
+            "has_rod": True,
+            "definitive": True,
+            "phase": "lobby",
+            "active": False,
+            "updated_at": miniapp_fishing._now_text(),
+        }
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        runtime["participants"] = ["main|主魂", main_avatar, sub_avatar]
+        runtime["account_current_keys"] = {"main": main_avatar}
+        runtime["scans"] = {main_avatar: scan_info}
+        worker._scan_local = AsyncMock(return_value=runtime)
+        worker._scan_started = True
+        worker._run_holder_cycle = AsyncMock(return_value=7)
+
+        def seed(data):
+            data["force_retry"] = {
+                "id": "cross-account-pointer",
+                "pending": [sub_avatar, main_avatar],
+            }
+            data["account_current_keys"] = {"main": sub_avatar}
+
+        miniapp_fishing._update_global_state(seed, settings=settings)
+
+        wait = asyncio.run(worker._drive_once(settings))
+
+        self.assertEqual(wait, 7)
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        worker._run_holder_cycle.assert_awaited_once_with(
+            settings,
+            main_avatar,
+        )
+        self.assertEqual(runtime["force_retry"]["pending"], [sub_avatar, main_avatar])
+
+    def test_drive_once_scans_target_only_once_per_cycle(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+                self.is_running = True
+
+            def save_state(self):
+                pass
+
+        worker = MiniAppFishingAutomation(
+            Actor(),
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "main|缘生子"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        miniapp_fishing._update_global_state(
+            lambda data: data.update(
+                account_current_keys={"main": "main|缘生子"},
+                participants=["main|主魂", "main|缘生子"],
+            ),
+            settings=settings,
+        )
+        worker._scan_identity = AsyncMock(
+            return_value={
+                "definitive": True,
+                "has_rod": True,
+                "active": False,
+            }
+        )
+        worker._run_holder_cycle = AsyncMock(return_value=5)
+
+        wait = asyncio.run(worker._drive_once(settings))
+
+        self.assertEqual(wait, 5)
+        worker._scan_identity.assert_awaited_once_with("缘生子", settings)
+        worker._run_holder_cycle.assert_awaited_once_with(settings, "main|缘生子")
+
+    def test_repeated_fishing_rate_limits_escalate_instead_of_retrying_every_minute(self):
+        actor = SimpleNamespace(
+            state={},
+            config={},
+            is_running=True,
+            save_state=lambda: None,
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        worker._clear_irrelevant_local_statuses = Mock()
+        worker._apply_force_retry_request = Mock(return_value={})
+        worker._drive_once = AsyncMock(
+            side_effect=MiniAppBeastError("external_action_rate_limited")
+        )
+        waits = []
+
+        async def record_wait(wait, _settings, **kwargs):
+            waits.append(wait)
+            if len(waits) == len(miniapp_fishing.FISHING_RATE_LIMIT_RETRY_SECONDS):
+                actor.is_running = False
+
+        worker._sleep_until_next_cycle = AsyncMock(side_effect=record_wait)
+        asyncio.run(worker.run_loop())
+
+        self.assertEqual(
+            waits,
+            list(miniapp_fishing.FISHING_RATE_LIMIT_RETRY_SECONDS),
+        )
+
+    def test_scan_gate_is_independent_per_account(self):
+        actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
+        transport = SimpleNamespace(
+            identity_player_ids={"主魂": 1},
+            fishing_entry=AsyncMock(
+                return_value=(
+                    "fish_sub",
+                    {
+                        "session": {
+                            "phase": "lobby",
+                            "rod": {"itemId": "rod_basic", "name": "青竹钓竿"},
+                        }
+                    },
+                )
+            ),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "sub|主魂"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        miniapp_fishing._update_global_state(
+            lambda data: data.setdefault("account_scan_gates", {}).update(
+                {
+                    "main": {
+                        "started_at": miniapp_fishing._now_text(),
+                        "last_scan_at": "",
+                    }
+                }
+            ),
+            settings=settings,
+        )
+        worker = MiniAppFishingAutomation(
+            actor, transport, "sub", SimpleNamespace(warning=Mock())
+        )
+
+        info = asyncio.run(worker._scan_identity("主魂", settings))
+
+        self.assertTrue(info["definitive"])
+        transport.fishing_entry.assert_awaited_once_with("主魂")
+
+    def test_scan_local_scans_one_identity_per_cycle_and_prioritizes_target(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def save_state(self):
+                pass
+
+        worker = MiniAppFishingAutomation(
+            Actor(),
+            SimpleNamespace(),
+            "main",
+            SimpleNamespace(info=Mock(), warning=Mock(), error=Mock()),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "main|无咎子", "main|缘生子"],
+            "rod_owner": "auto",
+            "rod": "auto",
+            "start_time": "",
+        }
+        worker.settings = lambda: settings
+        miniapp_fishing._update_global_state(
+            lambda data: data.setdefault("account_current_keys", {}).update(
+                {"main": "main|缘生子"}
+            ),
+            settings=settings,
+        )
+        worker._scan_identity = AsyncMock(
+            return_value={"definitive": True, "has_rod": True}
+        )
+
+        asyncio.run(worker._scan_local(settings))
+
+        worker._scan_identity.assert_awaited_once_with("缘生子", settings)
+
+    def test_scan_staggered_within_one_account(self):
+        class Actor:
+            def __init__(self):
+                self.state = {}
+                self.config = {}
+
+            def get_avatar_state(self, identity):
+                return self.state.setdefault("avatars", {}).setdefault(identity, {})
+
+            def save_state(self):
+                pass
+
+        async def fishing_entry(identity):
+            return "fish", {
+                "session": {
+                    "phase": "lobby",
+                    "rod": {"itemId": "rod_basic", "name": "青竹钓竿"},
+                }
+            }
+
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂", "main|无咎子"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        transport = SimpleNamespace(
+            identity_player_ids={"主魂": 1, "无咎子": 2},
+            fishing_entry=AsyncMock(side_effect=fishing_entry),
+        )
+        worker = MiniAppFishingAutomation(
+            Actor(), transport, "main", SimpleNamespace(warning=Mock())
+        )
+
+        asyncio.run(worker._scan_local(settings, force=True))
+
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        first_scan = runtime["scans"]["main|主魂"]["updated_at"]
+        self.assertNotIn("main|无咎子", runtime["scans"])
+        with patch.object(miniapp_fishing, "FISHING_SCAN_MIN_INTERVAL_SECONDS", 0):
+            asyncio.run(worker._scan_local(settings))
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        self.assertNotIn("main|无咎子", runtime["scans"])
+        self.assertEqual(
+            runtime["account_scan_gates"]["main"]["started_at"],
+            "",
+        )
+
+    def test_scan_unavailable_does_not_mark_participant_no_rod(self):
+        actor = SimpleNamespace(state={}, config={}, save_state=lambda: None)
+        transport = SimpleNamespace(
+            identity_player_ids={"主魂": 1},
+            fishing_entry=AsyncMock(
+                side_effect=MiniAppBeastError("external_action_rate_limited")
+            ),
+        )
+        worker = MiniAppFishingAutomation(
+            actor,
+            transport,
+            "main",
+            SimpleNamespace(warning=lambda *args, **kwargs: None),
+        )
+        settings = {
+            "enabled": True,
+            "participants": ["main|主魂"],
+            "rod": "auto",
+            "rod_owner": "auto",
+            "pond": "qingxi",
+            "bait": "demon_blood",
+            "chum": "none",
+        }
+        miniapp_fishing._update_global_state(
+            lambda data: data.update(account_current_keys={"main": "main|主魂"}),
+            settings=settings,
+        )
+
+        wait = asyncio.run(worker._drive_once(settings))
+
+        self.assertEqual(wait, miniapp_fishing.FISHING_RATE_LIMIT_RETRY_SECONDS[0])
+        runtime = miniapp_fishing.miniapp_fishing_global_snapshot(settings)
+        self.assertNotIn("main|主魂", runtime["no_rod_today"])
+        self.assertEqual(runtime["account_statuses"]["main"]["status"], "scan_unavailable")
+        self.assertIn(
+            "操作太频繁",
+            runtime["account_statuses"]["main"]["detail"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

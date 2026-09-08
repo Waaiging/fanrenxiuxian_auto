@@ -35,6 +35,8 @@ def inventory_account_identities() -> dict[str, tuple[str, ...]]:
     dynamic = automation_account_identities()
     identities["sub"] = dynamic["sub"]
     identities["xiaohao"] = dynamic["xiaohao"]
+    # 主号化身槽位同样跟随重生道号（缘生子 -> 玄续子 等）。
+    identities["main"] = dynamic["main"]
     return identities
 
 

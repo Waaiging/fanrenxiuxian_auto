@@ -68,6 +68,17 @@ class SurpriseRaidFeatureTests(unittest.TestCase):
         self.assertEqual(state["target_identity"], "厚土")
         self.assertEqual(srf.load_surprise_raid_state()["target_identity"], "厚土")
 
+    def test_dashboard_payload_includes_waaiging_identity(self):
+        payload = srf.surprise_raid_dashboard_payload()
+
+        self.assertTrue(
+            any(
+                item.get("account") == "waaiging"
+                and item.get("identity") == "主魂"
+                for item in payload["identity_options"]
+            )
+        )
+
     def test_lifecycle_reserve_claim_prepare_execute_finish(self):
         srf.set_surprise_raid_config(True, raider_account="main", raider_identity="主魂", target_account="sub", target_identity="厚土")
         state = srf.load_surprise_raid_state()

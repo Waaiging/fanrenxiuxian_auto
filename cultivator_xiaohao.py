@@ -28,6 +28,7 @@
 - handle_game_response：所有机器人回复统一入口，手动指令回复也会在这里同步 state。
 """
 import asyncio
+from runtime_scheduler import create_scheduler_task as register_scheduler_task
 
 import functools
 def safe_bg_task(func):
@@ -65,7 +66,7 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
-from automation_settings import miniapp_beast_abyss_power_in_range
+from automation_settings import XIAOHAO_TAIYI_IDENTITY, miniapp_beast_abyss_power_in_range
 from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
     CommonCommandMixin,
@@ -139,7 +140,7 @@ from log_utils import (
 # ============================================================
 STAR_GAZING_INTERVAL_HOURS = 3                       # 显现间隔 3 小时
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60            # 提前 3 分钟开始监听
-STAR_GAZING_COMMAND_LEAD_SECONDS = 60                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
+STAR_GAZING_COMMAND_LEAD_SECONDS = 10                # Good 轮次：整点前 1 分钟发送 .观星，避免改换星移回复超时
 STAR_GAZING_DAILY_FALLBACK_HOUR = 23                 # 每日备用观星时间：23:59（当天未观星时的兜底）
 STAR_GAZING_DAILY_FALLBACK_MINUTE = 59
 STAR_GAZING_SHIFT_PROFILE = "dynamic"
@@ -163,7 +164,7 @@ FORMATION_TARGET_INITIATORS = {
     "ding303": "副号-寻真子",
 }
 FORMATION_ASSIST_AVATARS = ["素心子"]
-TAIYI_GUIDE_AVATAR = "缘生子"
+TAIYI_GUIDE_AVATAR = XIAOHAO_TAIYI_IDENTITY
 CLOUD_STAIRS_AVATAR = "问心子"
 TAIYI_GUIDE_COMMAND = ".引道 水"
 TAIYI_GUIDE_CD_SECONDS = 12 * 3600
@@ -233,7 +234,7 @@ TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 YUANYING_OUT_CD_SECONDS = 8 * 3600
 RIFT_SEARCH_CD_SECONDS = 12 * 3600
-AVATAR_YUANYING_RIFT_AVATARS = {"缘生子"}           # 启用分身元婴出窍/探寻裂缝
+AVATAR_YUANYING_RIFT_AVATARS = {XIAOHAO_TAIYI_IDENTITY}           # 启用分身元婴出窍/探寻裂缝
 MAIN_SOUL_WEAKNESS_PAUSE_SECONDS = 6 * 3600
 
 
@@ -375,7 +376,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             "主魂": "万灵宗",
             "问心子": "凌霄宫",
             "素心子": "星宫",
-            "缘生子": "太一门",
+            XIAOHAO_TAIYI_IDENTITY: "太一门",
         }
         self.field_training_command = ".野外历练 谨慎"
         self.notified_alert_ids = set()
@@ -515,7 +516,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         """加载或初始化状态文件，确保所有必需的状态键存在"""
         default_state = {
             "date": "", "done": [], "last_pasture_time": "",
-            "last_hunt_time": "", "last_steal_time": "", "last_abyss_time": "",
+            "last_hunt_time": "", "last_abyss_time": "",
             "last_beast_interaction_time": "", "next_beast_interaction_time": "",
             "last_beast_cruise_time": "", "next_beast_cruise_time": "",
             "last_beast_border_patrol_time": "", "next_beast_border_patrol_time": "",
@@ -523,7 +524,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             "beast_border_patrol_name": "", "beast_border_patrol_mode": BEAST_BORDER_PATROL_DEFAULT_MODE,
             "deep_meditation_end_time": "", "deep_meditation_guard_until": "", "in_deep_meditation": False,
             "concubine_recalled_for_meditation": False, "concubine_recalled_time": "",
-            "next_hunt_time": "", "next_steal_time": "", "next_abyss_time": "",
+            "next_hunt_time": "", "next_abyss_time": "",
             "next_pasture_time": "", "pasture_pending_count": 0,
             "pasture_returned_count": 0, "pasture_pending_since": "",
             "next_focus_pasture_after_abyss_time": "",
@@ -913,7 +914,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             # fallback: 文本特征匹配
             if not avatar:
                 if "[Avatar: 素心子]" in text: avatar = "素心子"; attribution_reliable = True
-                elif "[Avatar: 缘生子]" in text: avatar = "缘生子"; attribution_reliable = True
+                elif ("[Avatar: 缘生子]" in text or f"[Avatar: {XIAOHAO_TAIYI_IDENTITY}]" in text): avatar = XIAOHAO_TAIYI_IDENTITY; attribution_reliable = True
                 elif "[Avatar: 问心子]" in text: avatar = "问心子"; attribution_reliable = True
                 elif "神念重归主魂肉身" in text or "当前操控：主魂" in text: avatar = "主魂"; attribution_reliable = True
             # 最后 fallback: current_identity（不可靠，可能是别人的回复）
@@ -1775,6 +1776,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             log.info("Retired auto command blocked before identity alignment: %s", str(message or "").strip())
             return None
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
+        force_fresh_identity_confirm = bool(kwargs.pop("force_fresh_identity_confirm", False))
+        retry_on_timeout = kwargs.pop("retry_on_timeout", None)
         # 整体任务独占锁守卫
         current_t = asyncio.current_task()
         while self.should_wait_for_atomic_task(message):
@@ -1793,7 +1796,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             return None
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
-        force_fresh_identity_confirm = (
+        force_fresh_identity_confirm = force_fresh_identity_confirm or (
             bool(force_identity_check)
             and identity in self.avatars
             and self.command_requires_fresh_identity_confirm(message)
@@ -1881,6 +1884,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                             max_retries=1 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
                             skip_bot_activity_wait=True,
+                            retry_on_timeout=retry_on_timeout,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         log.info(f"[DEBUG-IDENTITY] [{identity}] switch response: {resp_str[:120]!r}")
@@ -1944,7 +1948,12 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 if not should_yield:
                     log.info(f"[DEBUG-IDENTITY] [{identity}] sending cmd: {message!r}")
                     resp = await self._send_and_wait_feedback_raw(
-                        message, timeout=timeout, max_retries=max_retries, skip_bot_activity_wait=True, **kwargs
+                        message,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                        skip_bot_activity_wait=True,
+                        retry_on_timeout=retry_on_timeout,
+                        **kwargs,
                     )
                     resp_preview = (getattr(resp, "text", "") if hasattr(resp, "text") else resp if isinstance(resp, str) else "")[:80]
                     log.info(f"[DEBUG-IDENTITY] [{identity}] cmd response: {resp_preview!r}")
@@ -2267,7 +2276,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             if should_yield:
                 await asyncio.sleep(wait_sec_to_sleep)
 
-    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False, skip_bot_activity_wait=False):
+    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False, skip_bot_activity_wait=False, retry_on_timeout=None):
         """内部发送方法（不获取 avatar_send_lock，已被外部调用方持有）"""
         try:
             return await send_and_wait_feedback_common(
@@ -2276,6 +2285,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 delete_after=delete_after, return_msg_role="sent",
                 suppress_no_response_alert=suppress_no_response_alert,
                 skip_bot_activity_wait=skip_bot_activity_wait,
+                retry_on_timeout=retry_on_timeout,
             )
         except Exception as e:
             log.error(f"_send_and_wait_feedback_raw [{message[:40]}] crashed: {e}")
@@ -2431,31 +2441,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         )
 
     def create_scheduler_task(self, name, coro_factory):
-        """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
-        task = asyncio.create_task(coro_factory(), name=name)
-        registry = getattr(self, "_scheduler_task_registry", None)
-        if not isinstance(registry, dict):
-            registry = {}
-            self._scheduler_task_registry = registry
-        registry[name] = task
-
-        def _on_done(done_task, task_name=name):
-            if not getattr(self, "is_running", True) or done_task.cancelled():
-                return
-            try:
-                exc = done_task.exception()
-            except asyncio.CancelledError:
-                return
-            if exc:
-                log.critical(
-                    f"Scheduler task [{task_name}] exited with exception: {exc}",
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
-            else:
-                log.critical(f"Scheduler task [{task_name}] exited unexpectedly without exception.")
-
-        task.add_done_callback(_on_done)
-        return task
+        return register_scheduler_task(self, name, coro_factory, logger=log)
 
     def dead_scheduler_tasks(self):
         dead = []
@@ -2728,10 +2714,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 if not self.can_attempt_abyss_status(status):
                     log.info(f"Abyss candidate skipped: {name} status is {status}.")
                     continue
-            elif action == "steal":
-                if not self.can_attempt_steal_status(status):
-                    log.info(f"Steal candidate skipped: {name} status is {status}.")
-                    continue
             elif action == "cruise":
                 if (
                     status == "未知"
@@ -2752,27 +2734,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             reverse=True,
         )
         return candidates
-
-    def steal_candidate_beasts(self, cache=None):
-        """偷菜候选：首选六翼，不可用时按体力/战力补位。"""
-        candidates = self.beast_action_candidates("steal", cache, BEAST_STEAL_MIN_STAMINA)
-        preferred = None
-        fallback = []
-        for beast in candidates:
-            if self.beast_name_matches(beast.get("full_name", ""), BEAST_STEAL_PREFERRED_NAME):
-                preferred = beast
-            else:
-                fallback.append(beast)
-        ordered = []
-        if preferred:
-            ordered.append(preferred)
-            log.info(f"Steal candidate priority: {BEAST_STEAL_PREFERRED_NAME}.")
-        ordered.extend(fallback)
-        return ordered
-
-    def select_beast_for_steal(self, cache=None):
-        candidates = self.steal_candidate_beasts(cache)
-        return candidates[0] if candidates else None
 
     def select_beast_for_cruise(self, cache=None):
         candidates = self.beast_action_candidates("cruise", cache, BEAST_CRUISE_MIN_STAMINA)
@@ -3062,15 +3023,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         if self.is_injury_status(status): return False
         return not any(k in status for k in ["受伤", "重伤", "治疗", "探险", "偷菜", "巡游", "巡边"])
 
-    def can_attempt_steal_status(self, status):
-        """判断灵兽状态是否允许偷菜"""
-        status = status or ""
-        if any(k in status for k in ["探险", "偷菜", "巡游", "巡边"]): return False
-        if self.is_injury_status(status): return False
-        return True
-
-    # ---- 灵兽：互动/巡游 ----
-
     def get_cached_beast_by_name(self, target_name=BEAST_FOCUS_NAME):
         """从缓存中查找指定灵兽，支持忽略括号后缀匹配。"""
         for beast in self.state.get("beasts_cache", []):
@@ -3331,15 +3283,19 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         wakeup = getattr(self, "beast_wakeup", None)
         if wake and wakeup:
             wakeup.set()
-        delayed_note = (
-            f" but next patrol had been delayed until {next_patrol}"
-            if next_patrol and is_future(next_patrol)
-            else f"; stale next patrol was {next_patrol or '<empty>'}"
-        )
-        log.warning(
-            f"Beast border patrol schedule repaired: {name} was due at {dt_to_str(due_at)}"
-            f"{delayed_note}; clearing it for immediate return."
-        )
+        if next_patrol and is_future(next_patrol):
+            # 真异常：巡边已到期但 next_patrol 仍被压在未来（状态不一致），需修复
+            log.warning(
+                f"Beast border patrol schedule repaired: {name} was due at "
+                f"{dt_to_str(due_at)} but next patrol was delayed until {next_patrol}; "
+                f"clearing it for immediate return."
+            )
+        else:
+            # 正常到期：next_patrol 已随巡边周期到期，例行清理排期准备归来（非异常）
+            log.info(
+                f"Beast border patrol due: {name} due at {dt_to_str(due_at)}; "
+                f"clearing schedule for return."
+            )
         return True
 
     def wake_overdue_beast_border_patrol(self, reason=""):
@@ -4240,194 +4196,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             return False
         return any(k in clean for k in ["偷菜成功", "获得", "收获", "带回", "战利品", "偷得"])
 
-    def handle_beast_deploy_failure_for_steal(self, beast_name, response_text, context):
-        """Handle explicit deploy failures before steal without emitting unknown alerts."""
-        if not response_text:
-            self.set_next_steal_not_before(add_seconds_str(now_str(), 1800))
-            self.save_state()
-            return False
-        if self.is_beast_pastured_response(response_text, beast_name):
-            self.defer_beast_actions_while_pastured(beast_name, context)
-            return True
-        if self.handle_no_such_beast_response(beast_name, response_text, context):
-            return True
-        injury_cd = self.record_beast_injury_from_response(beast_name, response_text, source="steal")
-        if injury_cd >= 0:
-            self.set_next_steal_not_before(add_seconds_str(now_str(), max(1800, injury_cd)))
-            self.save_state()
-            log.info(
-                f"Steal candidate skipped: {beast_name} cannot deploy while injured; "
-                f"next steal not before {self.state.get('next_steal_time', '')} ({context})."
-            )
-            return True
-        return False
-
-    async def execute_steal_with_candidate(self, cache=None):
-        """偷菜首选六翼；候选受伤/体力不足/忙碌时继续补位。"""
-        steal_cache = list(self.state.get("beasts_cache", [])) or list(cache or [])
-        candidates = self.steal_candidate_beasts(steal_cache)
-        if not candidates:
-            status_check = self.state.get("next_beast_status_check_time", "")
-            retry_at = status_check if status_check and is_future(status_check) else add_seconds_str(now_str(), 1800)
-            log.info(f"Steal: no suitable cached beast candidate; next attempt not before {retry_at}.")
-            self.set_next_steal_not_before(retry_at)
-            self.save_state()
-            return False
-
-        last_response = ""
-        for best in candidates:
-            best_name = best.get("full_name", "")
-            if not best_name:
-                continue
-            self.update_best_beast_tracking(best)
-            self.save_state()
-            best_status = self.state.get("best_beast_status") or best.get("status", "未知")
-            if not self.can_attempt_steal_status(best_status):
-                log.info(f"Steal candidate skipped: {best_name} status is {best_status}.")
-                continue
-
-            if self.is_pastured_status(best_status):
-                ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
-                last_response = recall_resp or last_response
-                if not ok:
-                    continue
-                best_status = "休息中"
-                await asyncio.sleep(3)
-
-            deploy_ok = best_status == "出战中"
-            if best_status != "出战中":
-                deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
-                last_response = deploy_resp or last_response
-                if self.is_beast_deploy_success(deploy_resp):
-                    self.set_best_beast_status(best_name, "出战中")
-                    deploy_ok = True
-                elif deploy_resp and self.is_fake_beast_status_response(deploy_resp):
-                    deploy_ok = await self.normalize_beast_for_steal(best_name)
-                elif deploy_resp and self.is_beast_pastured_response(deploy_resp, best_name):
-                    self.set_best_beast_status(best_name, "放养中")
-                    ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
-                    last_response = recall_resp or last_response
-                    if ok:
-                        await asyncio.sleep(3)
-                        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
-                        last_response = deploy_resp or last_response
-                        if self.is_beast_deploy_success(deploy_resp):
-                            self.set_best_beast_status(best_name, "出战中")
-                            deploy_ok = True
-                        else:
-                            deploy_ok = False
-                    else:
-                        deploy_ok = False
-                else:
-                    if self.handle_no_such_beast_response(best_name, deploy_resp, "偷菜前出战"):
-                        log.info(f"Steal candidate skipped: {best_name} no longer exists in beast roster.")
-                    else:
-                        injury_cd = self.record_beast_injury_from_response(best_name, deploy_resp, source="steal")
-                        if injury_cd >= 0:
-                            log.info(f"Steal candidate skipped: {best_name} injured for {injury_cd}s.")
-                        elif deploy_resp:
-                            notify_unrecognized_response(self, f".灵兽出战 {best_name}", deploy_resp, log, "偷菜前出战")
-                    deploy_ok = False
-                await asyncio.sleep(3)
-
-            if not deploy_ok:
-                continue
-
-            s_resp = await self.send_and_wait_feedback(".灵兽偷菜")
-            last_response = s_resp or last_response
-            if s_resp and self.is_fake_beast_status_response(s_resp):
-                if await self.normalize_beast_for_steal(best_name):
-                    await asyncio.sleep(3)
-                    s_resp = await self.send_and_wait_feedback(".灵兽偷菜")
-                    last_response = s_resp or last_response
-                else:
-                    s_resp = ""
-
-            if s_resp and self.is_no_beast_deployed_for_steal_response(s_resp):
-                deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
-                last_response = deploy_resp or last_response
-                retry_ok = False
-                if self.is_beast_deploy_success(deploy_resp):
-                    self.set_best_beast_status(best_name, "出战中")
-                    retry_ok = True
-                elif deploy_resp and self.is_fake_beast_status_response(deploy_resp):
-                    retry_ok = await self.normalize_beast_for_steal(best_name)
-                elif deploy_resp and self.is_beast_pastured_response(deploy_resp, best_name):
-                    self.set_best_beast_status(best_name, "放养中")
-                    ok, recall_resp = await self.recall_pastured_beast_for_action(best_name, "steal")
-                    last_response = recall_resp or last_response
-                    if ok:
-                        await asyncio.sleep(3)
-                        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {best_name}", timeout=60, max_retries=1)
-                        last_response = deploy_resp or last_response
-                        retry_ok = self.is_beast_deploy_success(deploy_resp)
-                        if retry_ok:
-                            self.set_best_beast_status(best_name, "出战中")
-                else:
-                    if self.handle_no_such_beast_response(best_name, deploy_resp, "偷菜重试出战"):
-                        log.info(f"Steal retry skipped: {best_name} no longer exists in beast roster.")
-                    else:
-                        injury_cd = self.record_beast_injury_from_response(best_name, deploy_resp, source="steal")
-                        if injury_cd >= 0:
-                            log.info(f"Steal candidate skipped on retry: {best_name} injured for {injury_cd}s.")
-                        elif deploy_resp:
-                            notify_unrecognized_response(self, f".灵兽出战 {best_name}", deploy_resp, log, "偷菜重试出战")
-                if retry_ok:
-                    await asyncio.sleep(3)
-                    s_resp = await self.send_and_wait_feedback(".灵兽偷菜")
-                    last_response = s_resp or last_response
-                else:
-                    s_resp = ""
-
-            if not s_resp:
-                continue
-            if self.is_beast_pastured_response(s_resp, best_name):
-                self.set_best_beast_status(best_name, "放养中")
-                log.info(f"Steal candidate skipped: {best_name} became pastured.")
-                continue
-            if self.is_beast_stamina_insufficient_response(s_resp):
-                self.record_beast_stamina_shortage(best_name, s_resp, "steal")
-                await asyncio.sleep(3)
-                continue
-            injury_cd = self.record_beast_injury_from_response(best_name, s_resp, source="steal")
-            if injury_cd >= 0:
-                log.info(f"Steal candidate skipped: {best_name} injured during steal for {injury_cd}s.")
-                await asyncio.sleep(3)
-                continue
-
-            s_cd = self.parse_wait_time(s_resp)
-            if s_cd > 0:
-                self.state["last_steal_time"] = add_seconds_str(now_str(), s_cd - 14400)
-                self.state["next_steal_time"] = add_seconds_str(now_str(), s_cd)
-            elif self.is_steal_accepted_response(s_resp):
-                self.state["last_steal_time"] = now_str()
-                self.state["next_steal_time"] = add_seconds_str(now_str(), 14400)
-                self.set_best_beast_status(
-                    best_name,
-                    "偷菜中" if self.is_steal_pending_response(s_resp) else "出战中",
-                )
-            else:
-                notify_unrecognized_response(self, ".灵兽偷菜", s_resp, log, f"灵兽偷菜[{best_name}]")
-                continue
-            self.save_state()
-            if self.beast_name_matches(best_name, BEAST_FOCUS_NAME):
-                if self.is_steal_pending_response(s_resp):
-                    self.schedule_focus_pasture_after_abyss(
-                        best_name,
-                        retry_seconds=BEAST_ACTION_RETRY_SECONDS,
-                    )
-                    log.info(f"Focus pasture deferred: {BEAST_FOCUS_NAME} is still stealing.")
-                else:
-                    await self.attempt_focus_pasture_after_priority_action(best_name, "steal")
-            return True
-
-        status_check = self.state.get("next_beast_status_check_time", "")
-        retry_at = status_check if status_check and is_future(status_check) else add_seconds_str(now_str(), 1800)
-        log.warning(f"Steal: all candidates failed or unavailable. Last response: {last_response[:80]}")
-        self.set_next_steal_not_before(retry_at)
-        self.save_state()
-        return False
-
     def is_abyss_success_response(self, text):
         """检测探渊是否成功"""
         return bool(text and not self.is_abyss_busy_response(text) and any(k in text for k in ["成功", "出发", "进入", "送入", "历练", "击败", "战利品", "带回"]))
@@ -4459,18 +4227,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         if last_abyss: candidates.append(str_to_dt(last_abyss) + timedelta(seconds=21600))
         chosen = max(candidates)
         self.state["next_abyss_time"] = dt_to_str(chosen)
-
-    def set_next_steal_not_before(self, target_time):
-        """设置下次偷菜不早于目标时间"""
-        if not target_time: return
-        target_dt = str_to_dt(target_time) if isinstance(target_time, str) else target_time
-        candidates = [target_dt]
-        next_steal = self.state.get("next_steal_time", "")
-        if next_steal: candidates.append(str_to_dt(next_steal))
-        last_steal = self.state.get("last_steal_time", "")
-        if last_steal: candidates.append(str_to_dt(last_steal) + timedelta(seconds=14400))
-        chosen = max(candidates)
-        self.state["next_steal_time"] = dt_to_str(chosen)
 
     def schedule_abyss_retry(self, retry_seconds=None):
         """安排探渊重试时间"""
@@ -4529,7 +4285,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         elif status_check and is_future(status_check): target_time = status_check
         else: target_time = add_seconds_str(now_str(), 600)
         if action == "abyss": self.set_next_abyss_not_before(target_time)
-        elif action == "steal": self.set_next_steal_not_before(target_time)
         self.save_state()
 
     async def rest_beast_for_abyss(self, beast_name):
@@ -4595,6 +4350,80 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             log.exception("Wan Beast Valley rest failed for %s", beast_name)
             return "", message
 
+    async def deploy_beast_via_miniapp(self, beast_name):
+        """通过万兽谷 Mini App 让灵兽出战，绝不发群指令。
+
+        游戏已把灵兽出战从群指令迁移到万兽谷 Mini App：``.灵兽出战``
+        群指令不再被机器人应答，出战必须走 ``action: "active"`` 接口。
+        返回 (状态文本, 回复文本)；失败时状态为空。
+        """
+        contract = getattr(self, "_miniapp_beast_contract", None)
+        transport = getattr(contract, "transport", None)
+        if transport is None:
+            message = "万兽谷 Mini App 未配置，无法执行灵兽出战"
+            log.error(message)
+            return "", message
+
+        beast = self.get_cached_beast_by_name(beast_name)
+        try:
+            beast_id = int((beast or {}).get("id") or 0)
+        except (TypeError, ValueError):
+            beast_id = 0
+        try:
+            if beast_id <= 0:
+                snapshot = await transport.spirit_beast_snapshot("主魂", log_operation=False)
+                beasts = list((snapshot or {}).get("beasts") or [])
+                if beasts:
+                    self.state["beasts_cache"] = beasts
+                    self.update_best_beast_tracking()
+                    self.save_state()
+                beast = next(
+                    (
+                        item for item in beasts
+                        if self.beast_name_matches(item.get("full_name", ""), beast_name)
+                    ),
+                    None,
+                )
+                beast_id = int((beast or {}).get("id") or 0)
+            if beast_id <= 0:
+                message = f"万兽谷未找到灵兽【{beast_name}】"
+                log.warning(message)
+                return "", message
+
+            result = await transport.spirit_beast_active("主魂", beast_id, beast_name)
+            beasts = list((result or {}).get("beasts") or [])
+            if beasts:
+                self.state["beasts_cache"] = beasts
+                self.update_best_beast_tracking()
+            player = (result or {}).get("player") or {}
+            active_id = 0
+            try:
+                active_id = int(player.get("activeBeastId") or 0)
+            except (TypeError, ValueError):
+                active_id = 0
+            updated = next(
+                (item for item in beasts if int(item.get("id") or 0) == beast_id),
+                None,
+            )
+            deploy_status = str((updated or {}).get("status") or "").strip()
+            deploy_resp = str((result or {}).get("message") or "").strip()
+            if active_id == beast_id or "出战" in deploy_status or bool(updated and updated.get("isActive")):
+                self.set_best_beast_status(beast_name, "出战中")
+                self.save_state()
+                return "出战中", deploy_resp or "万兽谷灵兽出战完成"
+            self.save_state()
+            return deploy_status, deploy_resp
+        except asyncio.CancelledError:
+            raise
+        except MiniAppBeastError as exc:
+            message = f"万兽谷灵兽出战失败：{exc.code}"
+            log.error("Wan Beast Valley deploy failed for %s: %s", beast_name, exc.code)
+            return "", message
+        except Exception as exc:
+            message = f"万兽谷灵兽出战失败：{type(exc).__name__}"
+            log.exception("Wan Beast Valley deploy failed for %s", beast_name)
+            return "", message
+
     async def recall_pastured_beast_for_action(self, beast_name, action=""):
         """放养中的灵兽通过万兽谷召回后继续执行任务。"""
         action_label = action or "action"
@@ -4617,34 +4446,21 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             notify_unrecognized_response(self, f"万兽谷灵兽休息 {beast_name}", rest_resp, log, f"灵兽{action_label}前召回")
         return False, rest_resp
 
-    async def normalize_beast_for_steal(self, beast_name):
-        """修复偷菜时的伪受伤状态（切换出战状态）"""
-        log.warning(f"Beast stale/fake status detected for steal. Switching {beast_name} to battle once.")
-        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {beast_name}", timeout=60, max_retries=1)
-        if self.is_beast_deploy_success(deploy_resp): self.set_best_beast_status(beast_name, "出战中"); return True
-        if self.handle_beast_deploy_failure_for_steal(beast_name, deploy_resp, "偷菜假状态切换"): return False
-        if deploy_resp and not self.is_fake_beast_status_response(deploy_resp): notify_unrecognized_response(self, f".灵兽出战 {beast_name}", deploy_resp, log, "偷菜假状态切换")
-        self.set_next_steal_not_before(add_seconds_str(now_str(), 1800)); self.save_state(); return False
-
     async def normalize_beast_for_abyss(self, beast_name):
         """
-        修复探渊时的伪受伤状态（toggle 出战→休息）。
-        先发 .灵兽出战 切换状态，再通过万兽谷回到休息中。
+        修复探渊时的伪受伤状态（toggle 出战→休息，均走万兽谷 Mini App）。
+        先切换出战状态，再通过万兽谷回到休息中。
         这种 toggle 刷新了灵兽的实际状态，清除"伪受伤"。
         """
         log.warning(f"Beast stale/fake status detected for abyss. Toggling {beast_name} battle/rest once.")
-        deploy_resp = await self.send_and_wait_feedback(f".灵兽出战 {beast_name}", timeout=60, max_retries=1)
-        if self.is_beast_deploy_success(deploy_resp): self.set_best_beast_status(beast_name, "出战中")
-        elif self.is_beast_pastured_response(deploy_resp, beast_name):
-            ok, _ = await self.recall_pastured_beast_for_action(beast_name, "abyss")
-            return ok
-        elif self.handle_no_such_beast_response(beast_name, deploy_resp, "探渊假状态出战"):
+        deploy_status, deploy_resp = await self.deploy_beast_via_miniapp(beast_name)
+        if deploy_status != "出战中":
+            if self.is_beast_pastured_response(deploy_resp, beast_name):
+                ok, _ = await self.recall_pastured_beast_for_action(beast_name, "abyss")
+                return ok
+            log.info(f"Abyss normalize deploy via Mini App failed for {beast_name}: {str(deploy_resp)[:80]}")
             self.schedule_abyss_retry(1800)
             return False
-        elif deploy_resp and not self.is_fake_beast_status_response(deploy_resp):
-            injury_cd = self.record_beast_injury_from_response(beast_name, deploy_resp, source="abyss")
-            if injury_cd >= 0: self.defer_beast_action_after_injury("abyss", injury_cd); return False
-            notify_unrecognized_response(self, f".灵兽出战 {beast_name}", deploy_resp, log, "探渊假状态出战"); self.schedule_abyss_retry(1800); return False
         await asyncio.sleep(3)
         rest_status, rest_resp = await self.rest_beast_for_abyss(beast_name)
         if rest_status == "休息中": return True
@@ -5709,8 +5525,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         return True
 
     FORMATION_PAIRS = {
-        "缘生子": "素心子",
-        "素心子": "缘生子",
+        XIAOHAO_TAIYI_IDENTITY: "素心子",
+        "素心子": XIAOHAO_TAIYI_IDENTITY,
     }
 
     async def mutual_formation_assist(self, initiator, msg_id):
@@ -6546,7 +6362,11 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 return
 
             send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
-            immediate_shift = True
+            # 上一轮无条件 immediate_shift = True 是回归 bug：通知 lookahead 3h，00:07 收到 03:00
+            # 的 Good 通知就被立刻发观星。正确逻辑：仅当通知落在当前激活窗口内才立即发
+            # （窗口内 schedule_plan 已将 send_dt 钳到 now+3s）；否则按 manifest_dt-1min 排期。
+            if now <= manifest_dt - timedelta(minutes=1):
+                immediate_shift = False
 
             async with self.star_gazing_lock:
                 claimed_manifest = self.state.get("star_gazing_claimed_manifest_time", "")
@@ -6725,7 +6545,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
 
         manifest_dt = manifest_dt_for_restore
         preferred_send_dt = manifest_dt - timedelta(
-            seconds=max(60, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
+            seconds=max(10, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
         ) if manifest_dt else None
         if preferred_send_dt and preferred_send_dt > datetime.now() and send_dt != preferred_send_dt:
             send_dt = preferred_send_dt

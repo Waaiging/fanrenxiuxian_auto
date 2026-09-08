@@ -1306,6 +1306,48 @@ class MiniAppDwellingTransport:
                 "raw": payload,
             }
 
+    async def spirit_beast_active(
+        self,
+        identity: str,
+        beast_id: int,
+        beast_name: str = "",
+    ) -> dict[str, Any]:
+        """Deploy one exact beast to battle through Wan Beast Valley.
+
+        The game migrated beast deployment from group commands to the Mini
+        App: the ``.灵兽出战`` group command no longer receives a response,
+        so deployment must go through the ``action: "active"`` endpoint.
+        """
+        try:
+            beast_id = int(beast_id)
+        except (TypeError, ValueError) as exc:
+            raise MiniAppBeastError("spirit_beast_id_invalid") from exc
+        if beast_id <= 0:
+            raise MiniAppBeastError("spirit_beast_id_invalid")
+        detail = str(beast_name or beast_id).strip()
+        async with self._lock:
+            payload = await self._logged_operation(
+                identity,
+                f"万兽谷灵兽出战（{detail}）",
+                lambda: self._external_request_unlocked(
+                    identity,
+                    "spirit_beast",
+                    "spiritbeast_",
+                    "/api/miniapp/xianxia-spirit-beast/action",
+                    payload={
+                        "action": "active",
+                        "beastId": beast_id,
+                    },
+                ),
+                summarize=miniapp_operation_result_text,
+            )
+            return {
+                "beasts": normalize_spirit_beast_roster(payload),
+                "player": payload.get("player") or {},
+                "message": miniapp_operation_result_text(payload),
+                "raw": payload,
+            }
+
     async def spirit_beast_abyss_enter(
         self,
         identity: str,

@@ -26,6 +26,7 @@ from duel_features import (
     DUEL_IDENTITIES,
     duel_identity_config,
     duel_identity_options,
+    refresh_duel_identity_roster,
 )
 from log_utils import send_text_alert
 
@@ -88,20 +89,32 @@ def classify_surprise_raid_step(command, text):
     if command == ".从万宝阁取下 风雷翅":
         if "你已将【风雷翅】从万宝阁收回储物袋" in clean:
             return "success", "已取下风雷翅", clean
+        if "你的万宝阁中并未陈列【风雷翅】" in clean:
+            return "needs_equip", "风雷翅不在万宝阁，跳过取下直接装备", clean
         if any(k in clean for k in ("没有", "不存在", "未找到", "并未拥有")) and "风雷翅" in clean:
             return "missing_item", "储物袋没有风雷翅，跳过本轮", clean
     if command == ".装备 风雷翅":
         if "当前祭出：【风雷翅】" in clean or "你已祭出【风雷翅】" in clean:
             return "success", "风雷翅已装备", clean
+        if "你的储物袋中没有【风雷翅】" in clean:
+            return "missing_item", "储物袋没有风雷翅，无法装备，停止任务", clean
         if any(k in clean for k in ("没有", "不存在", "未找到", "并未拥有")) and "风雷翅" in clean:
             return "missing_item", "没有可装备的风雷翅，跳过本轮", clean
         if "并未稳定祭出【风雷翅】" in clean:
             return "not_equipped", "风雷翅装备未确认，跳过本轮", clean
     if command == SURPRISE_RAID_COMMAND:
+        if "你的万宝阁中并未陈列【风雷翅】" in clean:
+            return "needs_equip", "万宝阁未陈列风雷翅，需先装备", clean
         if "催动【风雷翅】，对 @" in clean and "施展【夺宝】之术" in clean:
             return "pending", "奇袭已发出，等待结算", clean
         if "【惊雷一击·夺宝】" in clean:
             return "success", "奇袭夺宝完成", clean
+        # 奇袭失败是正常结果（对方识破）：视为本次已结算，本轮结束，不停止任务
+        if "奇袭失败" in clean or "未能建功" in clean or "护体灵光" in clean:
+            return "failure", "奇袭失败（对方识破），本轮结束", clean
+        # 蓄势阶段：雷光闪烁→仍是等待最终结果的中间状态.不算未知回复
+        if "雷光闪烁" in clean or "寻找对方的破绽" in clean or "奇袭成功率" in clean:
+            return "pending", "蓄势待发，等待判定结果", clean
         if "并未稳定祭出【风雷翅】" in clean:
             return "not_equipped", "风雷翅不在装备状态，跳过本轮", clean
         if "消耗过巨" in clean and "请再" in clean:
@@ -211,6 +224,9 @@ def _ensure_surprise_raid_state_shape(raw):
         min(SURPRISE_RAID_INTERVAL_MAX_SECONDS, interval),
     )
 
+    # 化身重生改名后静态 DUEL_IDENTITIES 道号会滞后，解析身份前先按实时道号刷新，
+    # 否则「寒续尘」这类改名身份 match 失败会被误判为无效 → 强制 enabled=false。
+    refresh_duel_identity_roster()
     for account_field, identity_field in (
         ("raider_account", "raider_identity"),
         ("target_account", "target_identity"),
@@ -594,10 +610,15 @@ def finish_surprise_raid_execution(reservation, result):
 
 
 def surprise_raid_dashboard_payload():
+    # Refresh the shared identity roster before normalizing the saved raid
+    # state.  A rebirth can change only the Dao name; loading the old state
+    # first would otherwise clear a valid commission before the dashboard gets
+    # a chance to migrate it.
+    duel_identity_options(refresh=True)
     state = load_surprise_raid_state()
-    runnable_accounts = {"main", "sub", "xiaohao"}
+    runnable_accounts = {"main", "sub", "xiaohao", "waaiging"}
     options = [
-        option for option in duel_identity_options()
+        option for option in duel_identity_options(refresh=False)
         if option.get("account") in runnable_accounts
     ]
     return {
@@ -758,13 +779,34 @@ class SurpriseRaidMixin:
                         continue
                     if classified[0] in {"success", "cooldown"}:
                         return candidate, classified[2]
+                    # "蓄势待发" 也是正常的中间状态，继续等待最终结果
+                    if classified[0] == "failure":
+                        return candidate, classified[2]
             except Exception:
                 pass
         return current, text
 
-    async def _disable_surprise_raid_for_unknown(
-        self, command, result, logger
-    ):
+    def _surprise_raid_step_result(self, command, response):
+        text = ""
+        if hasattr(response, "text"):
+            text = response.text or ""
+        elif isinstance(response, str):
+            text = response
+        status, outcome, clean = classify_surprise_raid_step(command, text)
+        # 蓄势待发也是正常的中间状态，不算未知回复
+        if status == "unknown" and isinstance(text, str):
+            if "雷光闪烁" in text or "寻找对方的破绽" in text or "奇袭成功率" in text:
+                status = "pending"
+                outcome = "蓄势待发，等待判定结果"
+                clean = text
+        return {
+            "status": status,
+            "outcome": outcome,
+            "text": clean,
+            "cooldown_seconds": parse_surprise_raid_cooldown_seconds(clean),
+        }
+
+    async def _disable_surprise_raid_for_unknown(self, command, result, logger):
         detail = (result.get("text") or result.get("outcome") or "无内容").replace("`", "'")
         reason = f"{command} 收到未知回复：{detail[:500]}"
         logger.error("Surprise raid stopped by unknown response: %s", reason)
@@ -822,7 +864,8 @@ class SurpriseRaidMixin:
             if result["status"] == "missing_item":
                 result.update(status="skipped", outcome="没有风雷翅，自动跳过")
                 return result
-            if result["status"] != "success":
+            # 风雷翅不在万宝阁（needs_equip）也继续进入装备步骤，不中断奇袭流程
+            if result["status"] not in {"success", "needs_equip"}:
                 return result
 
             equip_response = await self._send_surprise_raid_identity_command(
@@ -858,6 +901,47 @@ class SurpriseRaidMixin:
                 )
                 if hasattr(final_msg, "id"):
                     result["response_msg_id"] = final_msg.id
+            if result["status"] == "needs_equip":
+                logger.info(
+                    "Surprise raid attack: %s/%s needs equip first, retrying...",
+                    getattr(self, "account_key", ""), identity,
+                )
+                # 回到装备步骤：重新装备后继续奇袭
+                equip_response = await self._send_surprise_raid_identity_command(
+                    identity, ".装备 风雷翅"
+                )
+                result = self._surprise_raid_step_result(
+                    ".装备 风雷翅", equip_response
+                )
+                logger.info(
+                    "Surprise raid equip (retry): %s/%s status=%s detail=%s",
+                    getattr(self, "account_key", ""), identity, result["status"],
+                    result["outcome"],
+                )
+                if result["status"] in {"missing_item", "not_equipped"}:
+                    result.update(status="skipped", outcome=result["outcome"])
+                    return result
+                if result["status"] != "success":
+                    return result
+                # 装备成功，重新发起奇袭
+                attack_response = await self._send_surprise_raid_identity_command(
+                    identity,
+                    SURPRISE_RAID_COMMAND,
+                    reply_to=int(reservation.get("reply_to_msg_id") or 0) or None,
+                )
+                result = self._surprise_raid_step_result(
+                    SURPRISE_RAID_COMMAND, attack_response
+                )
+                if result["status"] == "pending":
+                    final_msg, final_text = await self._wait_for_surprise_raid_result(
+                        attack_response,
+                        int(reservation.get("reply_to_msg_id") or 0),
+                    )
+                    result = self._surprise_raid_step_result(
+                        SURPRISE_RAID_COMMAND, final_text
+                    )
+                    if hasattr(final_msg, "id"):
+                        result["response_msg_id"] = final_msg.id
             logger.info(
                 "Surprise raid attack: %s/%s -> @%s status=%s detail=%s",
                 getattr(self, "account_key", ""), identity,

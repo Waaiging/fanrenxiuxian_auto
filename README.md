@@ -225,16 +225,16 @@ Dashboard 斗法页包含统一身份轮换和一对多主动斗法计划：
 
 - 原“斗法轮换 A组/B组”已合并为一个轮换池，主号、副号、小号与 Waaiging 的全部 13 个身份均可独立启停并设置目标。
 - 统一轮换仍按 6 分钟间隔运行；同一个目标两次实际发送至少间隔 11 分钟。
-- 轮换或一对多计划中的所有已知目标身份都会先由目标账号发送新的 `.切换 <身份>`，并在斗法结算前保持身份锁定，避免钓鱼接力等临时切号改变实际对手。
+- 轮换中的已知目标身份会先由目标账号发送新的 `.切换 <身份>`，并在斗法结算前保持身份锁定，避免临时切号改变实际对手。
 - 已知分身由挑战者引用切换消息回复 `.斗法`；已知主魂在重新切回并锁定后仍使用 `.斗法 @用户名`。只有无法路由的外部用户名不做目标身份预切。
-- Dashboard 斗法页提供“斗法方式”选项：默认“切换指定身份后斗法”即上述流程；改为“直接 .斗法 @用户名”后，被斗法者不再预切或锁定身份（小号六翼出战门槛同样跳过），所有目标一律按用户名直接发起，切换该选项会清掉未被进行中斗法占用的准备记录。
+- Dashboard 斗法页分别提供轮换和一对多的“斗法方式”选项：默认“切换指定身份后斗法”；选择“直接 .斗法 @用户名”后，对应计划的被斗法者不再预切或锁定身份（轮换模式下小号六翼出战门槛也会跳过）。两种计划的方式互不影响。
 
 - 选择一个发起身份。
 - 添加多个 Telegram 用户名，并为每个目标设置总次数。
 - 按列表循环，每次调度间隔 6 分钟。
 - 同一目标两次实际发送至少间隔 11 分钟；目标繁忙也不会缩短该保护。
 - “24 小时内已交锋过多”的解锁时间按同一账号对该目标在当前窗口内第一次已结算斗法的时间加 24 小时计算；后续斗法或冷却回复不会把整个窗口重新延后 24 小时。
-- 已知目标对应账号会强制发送一条新的 `.切换 <身份>` 并原子保持该身份；分身目标由发起方引用切换消息回复 `.斗法`，主魂目标则在锁定后按用户名发起。
+- 选择“切换身份后斗法”时，已知目标对应账号会强制发送一条新的 `.切换 <身份>` 并原子保持该身份；分身目标由发起方引用切换消息回复 `.斗法`，主魂目标则在锁定后按用户名发起。选择直接模式时一律发送 `.斗法 @用户名`。
 - 作为确认或引用锚点的 `.切换 <身份>` 消息禁止自动删除或事后撤回，避免触发 Telegram 风控验证。
 - 分身切换始终使用当前道号。洞府 Mini App 会以稳定的 `playerId` 识别分身；夺舍重生导致道号变化时，资料同步会自动迁移该分身的身份映射和状态，再使用新道号发送切换指令。
 - 同一账号内无法同时保持发起身份和目标身份，配置时会拒绝这种组合。
@@ -323,11 +323,11 @@ cp config_sub.example.json config_sub.json
 
 Mini App 主要配置位于 `miniapp_beast`，包括固定入口、问心塔、寻宝、天机试炼时间、深入游历、星宫灵圃和重试时间；受限账号补充配置位于 `restricted_miniapp`。Dashboard“自动化设置”保存在运行时文件 `automation_settings.json`（不提交 Git），包含青元子参战身份、慕兰参数、灵溪垂钓、野外深入历练身份、天机试炼身份和天星宗闭关/天机值设置。配置文件迁移会自动补齐新增区段。
 
-风雷翅加速身份可在 `config.json` 的 `wind_thunder_identities` 中配置，格式为 `account|identity`，例如 `main|主魂`。未配置时使用内置默认身份：主号主魂、主号无咎子、副号主魂、Waaiging 主魂。
+风雷翅开关和加速身份通过 Dashboard 自动化设置保存到 `automation_settings.json`。关闭加速后仍会恢复遗留的散念、待上架收尾；上架必须有明确成功回复，未确认时按 5 / 15 / 30 分钟退避。
 
 ## 开发与验证
 
-VPS 当前使用 Python 3.12；本地开发应至少使用 Python 3.12，并从 `requirements.txt` 安装依赖。当前依赖未锁定精确版本，升级依赖前必须跑完整回归。
+VPS 当前使用 Python 3.12；本地开发使用 Python 3.12 或 3.14。`requirements.txt` 的直接依赖固定到已验证的 VPS 版本，测试依赖见 `requirements-dev.txt`；传递依赖尚未生成完整锁文件。
 
 默认采用快速处理模式：
 
@@ -343,11 +343,12 @@ VPS 当前使用 Python 3.12；本地开发应至少使用 Python 3.12，并从 
 ```powershell
 $env:PYTHONUTF8 = "1"
 python -m py_compile changed_file.py
-python -m unittest tests.test_miniapp_dwelling
-python -m unittest discover -s tests -p "test_*.py"
+python -m pip install -r requirements-dev.txt
+python tools/run_tests.py tests.test_miniapp_dwelling
+python tools/run_tests.py
 ```
 
-`PYTHONUTF8=1` 用于避免 Windows GBK 控制台在输出 emoji 日志时产生 `UnicodeEncodeError`。截至 2026-08-29，完整测试集为 858 项（含 12 项 skip），本地全量运行约 4 分钟。
+`tools/run_tests.py` 将源码和公开 fixtures 复制到临时目录，隔离真实配置、state、session 和 `.env`，输出 `test-results/` 下的 JSON 结果与详细日志。任意失败、错误或零测试均返回非零退出码。CI 对 Linux Python 3.12 和 Windows Python 3.14 执行同一入口。测试不要直接在生产运行目录用 `unittest discover` 执行。
 
 用例不得依赖线上运行态文件。断言身份/道号时必须注入固定 state 或把 `SUB_STATE_FILE` / `XIAOHAO_STATE_FILE` 改指临时路径，否则生产改名会让用例莫名转红（参见 `tests/test_automation_settings.py` 的 `setUp`）。
 
@@ -360,14 +361,16 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 已知工程债
 
-- Dashboard 登录凭据由未提交的 `.env` 提供；状态变更接口尚无独立 CSRF 令牌，公网部署仍应补充请求来源保护和登录限速。
+- Dashboard 登录凭据由未提交的 `.env` 提供；Cookie 使用 Secure、HttpOnly、SameSite=strict。登录与 Basic 认证共享按客户端地址的失败限速（5 分钟 10 次，进程重启会清空）。状态变更接口尚无独立 CSRF 令牌和 Origin 校验，旧 Basic 认证仍需兼容。
 - ~~四个账号的主 state 保存仍直接覆盖目标 JSON。~~ 已修复：四个账号的 `save_state()` 统一走 `state_io.save_json_state()`（同目录临时文件 → `fsync` → `os.replace`，保留 `.bak`），`load_json_state()` 在解析失败时自动回落 `.bak`。
-- `requirements.txt` 尚未锁定版本，仓库也没有 CI；本地 Python 与 VPS Python 版本可能不同，当前仍依赖人工执行本地全量测试和远端定向测试。
+- 直接依赖版本和跨平台 CI 已补齐；传递依赖锁定、多进程登录限速和部署自动化仍待完善。
 - 主账号脚本和解析回归文件体积较大。新增公共能力应继续下沉到共享模块，并优先拆分可独立验证的解析器和状态迁移逻辑。
 
 ## VPS 部署
 
 VPS 运行目录不是 Git 工作区，部署使用 SCP。所有 SSH/SCP 必须显式带 key：
+
+旧 `deploy-vps.yml` 使用 Git 覆盖和三账号重启，已移除。CI 只验证候选版本，不直接操作生产。完整复盘见 [2026-09-08 项目复盘](docs/project_review_20260908.md)。
 
 ```powershell
 ssh -i C:\path\to\vps-key.pem deploy@VPS_HOST
@@ -378,7 +381,7 @@ scp -O -i C:\path\to\vps-key.pem .\changed_file.py deploy@VPS_HOST:/srv/fanrenxi
 
 1. 上传到独立暂存目录。
 2. 备份即将覆盖的远端文件。
-3. 对比哈希后覆盖运行文件。
+3. 核对当前远端哈希与部署前记录一致，确认候选文件与已提交版本一致；有漂移时停止并合并。候选版本先在隔离目录运行测试，通过后以临时文件加原子替换安装，失败时恢复备份。
 4. 使用远端虚拟环境编译：
 
 ```powershell
@@ -394,7 +397,7 @@ ssh -i C:\path\to\vps-key.pem deploy@VPS_HOST "tmux respawn-window -k -t xiuxian
 该示例只适用于确认小号应运行完整脚本时；账号群发受限时应保留或恢复 `red_packet_account.py --account xiaohao`，不要用部署重启绕过可见性控制器。
 
 6. 检查 tmux、进程、部署后的错误日志和 Dashboard HTTP 响应。
-7. 成功后更新远端 `deploy_version.json`，并按项目规范同步最新 state/log 备份。
+7. 成功后更新远端 `deploy_version.json`，记录提交、文件哈希、测试、备份与重启结果；state/log 由既有同步任务备份。
 
 全量启动：
 

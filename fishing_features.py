@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until, str_to_dt
+from automation_settings import automation_account_identities
 from log_utils import (
     COMMAND_CONTROL_FILE,
     MESSAGE_EVENTS_DB_FILE,
@@ -48,9 +49,16 @@ FISHING_AUTO_CONTROL_COMMANDS = (FISHING_AUTO_CONTROL_COMMAND,)
 FISHING_AUTO_LEGACY_CONTROL_COMMANDS = tuple(f".全自动钓鱼 {bait}" for bait in FISHING_CONTROL_BAITS)
 FISHING_AUTO_CONTROL_ACCOUNTS = ("main", "sub", "xiaohao")
 FISHING_AUTO_ACCOUNT_IDENTITIES = {
-    "main": ("主魂", "无咎子", "缘生子", "素缘子"),
-    "sub": ("主魂", "厚土", "玄续玄", "寻真子"),
-    "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
+    # 化身槽位跟随重生道号（缘生子 -> 玄续子 等）；主魂固定。
+    "main": ("主魂",) + tuple(
+        automation_account_identities()["main"][1:]
+    ),
+    "sub": tuple(
+        automation_account_identities()["sub"]
+    ),
+    "xiaohao": tuple(
+        automation_account_identities()["xiaohao"]
+    ),
 }
 FISHING_ACCOUNT_SENDER_IDS = {
     "main": {"8219248252", "-1004240160265", "-1003809391782", "-1003999815554"},

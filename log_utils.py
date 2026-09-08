@@ -33,6 +33,32 @@ from functools import wraps
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from collections import deque  # 用于手动指令 ID 的固定大小队列
+from state_io import load_json_state, save_json_state, update_json_state
+
+# 风雷翅手动指令的状态同步：log_utils 不 import wind_thunder_features
+# （避免循环依赖），用 duck-typing 接口注入。
+_WIND_THUNDER_MANUAL_SYNC_HOOK = None
+
+
+def set_wind_thunder_manual_sync_hook(hook):
+    """Register the manual wind-thunder state sync callback (from
+    wind_thunder_features).  The hook signature is
+    ``hook(actor, identity, command, response_text) -> bool``.  Called for
+    manual ``.装备 风雷翅`` / ``.散念 风雷翅`` / ``.从万宝阁取下 风雷翅`` /
+    ``.上架至万宝阁 风雷翅`` replies; returns True when state changed."""
+    global _WIND_THUNDER_MANUAL_SYNC_HOOK
+    _WIND_THUNDER_MANUAL_SYNC_HOOK = hook
+
+
+def _wind_thunder_manual_sync(actor, identity, command, text):
+    hook = _WIND_THUNDER_MANUAL_SYNC_HOOK
+    if hook is None:
+        return False
+    try:
+        result = hook(actor, identity, command, text)
+    except Exception:
+        return False
+    return bool(result)
 
 
 # =====================================================================
@@ -796,6 +822,10 @@ def command_response_family(command):
         return "cloud_stairs"
     if cmd == ".探寻裂缝":
         return "rift"
+    if cmd == ".搜寻节点":
+        return "node_search"
+    if cmd.startswith(".法宝 炼焰"):
+        return "treasure_refine"
     if cmd in {".查看闭关", ".闭关修炼", ".深度闭关", ".强行出关"}:
         return "meditation"
     if cmd == ".状态":
@@ -851,7 +881,7 @@ def command_response_family(command):
     ):
         return "yinluo"
     if (
-        cmd in {".探望南宫婉", ".婉影问安", ".推演封魂咒", ".护持神魂", ".同参封魂"}
+        cmd in {".探望南宫婉", ".婉影问安", ".月下合参", ".推演封魂咒", ".护持神魂", ".同参封魂"}
         or cmd.startswith(".发布解咒委托")
         or cmd.startswith(".接取解咒委托")
         or cmd.startswith(".辨认咒纹")
@@ -904,6 +934,17 @@ def text_response_family(text):
         return "cloud_stairs"
     if any(k in clean for k in ["裂缝", "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃", "元婴遁逃"]):
         return "rift"
+    if any(k in clean for k in [
+        "神识离体", "虚空乱流", "虚空漫游", "虚空尘埃",
+        "神识尚在恢复", "后再行搜寻",
+        "神识不足", "定位需消耗", "在虚空中定位",
+    ]):
+        return "node_search"
+    if any(k in clean for k in [
+        "虚天鼎·炼焰", "炼焰中", "九转圆满", "待九转",
+        "抽离鼎外", "乾蓝寒焰", "自鼎上完整取下",
+    ]):
+        return "treasure_refine"
     if any(k in clean for k in [
         "深度闭关", "闭关修炼", "闭关成功", "闭关失败", "预计还需",
         "未处于深度闭关", "并未处于深度闭关", "灵气尚未平复", "打坐调息",
@@ -989,7 +1030,7 @@ def text_response_family(text):
     ]):
         return "yinluo"
     if any(k in clean for k in [
-        "南宫婉", "婉影问安", "同参封魂", "封魂咒", "解咒委托",
+        "南宫婉", "婉影问安", "月下合参", "月影护持", "同参封魂", "封魂咒", "解咒委托",
         "咒契协定", "辨认咒纹", "借幡镇魂", "剥离咒源", "咒源",
     ]):
         return "soul_curse"
@@ -1079,6 +1120,17 @@ def feedback_response_matches_command(command, text):
         return any(k in clean for k in [
             "裂缝", "探寻成功", "法则碎片", "法则本源", "元婴遁逃",
             "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃",
+        ])
+    if expected == "node_search":
+        return any(k in clean for k in [
+            "神识离体", "虚空乱流", "虚空漫游", "虚空尘埃",
+            "一无所获", "不虚此行", "进入了无尽", "神识尚在恢复", "后再行搜寻",
+            "神识不足", "定位需消耗", "在虚空中定位", "太一门引道",
+        ])
+    if expected == "treasure_refine":
+        return any(k in clean for k in [
+            "虚天鼎·炼焰", "炼焰中", "九转圆满", "待九转",
+            "抽离鼎外", "乾蓝寒焰", "自鼎上完整取下", "炼焰",
         ])
     if expected == "meditation":
         return any(k in clean for k in [
@@ -1186,7 +1238,7 @@ def feedback_response_matches_command(command, text):
         ])
     if expected == "soul_curse":
         return any(k in clean for k in [
-            "南宫婉", "婉影问安", "同参封魂", "封魂咒",
+            "南宫婉", "婉影问安", "月下合参", "月影护持", "同参封魂", "封魂咒",
             "护持神魂", "解咒委托", "咒契协定",
             "辨认咒纹", "借幡镇魂", "剥离咒源", "咒源",
             "煞气不足", "今日已", "请在", "后再", "冷却",
@@ -1646,37 +1698,37 @@ def _shared_bot_activity_account(actor):
 
 
 def _read_shared_bot_activity():
-    try:
-        with open(BOT_ACTIVITY_SHARED_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
+    return load_json_state(BOT_ACTIVITY_SHARED_FILE, default={}, lock_timeout=1)
 
 
 def _write_shared_bot_activity(data):
-    tmp = f"{BOT_ACTIVITY_SHARED_FILE}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, BOT_ACTIVITY_SHARED_FILE)
-    except Exception:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+        save_json_state(BOT_ACTIVITY_SHARED_FILE, data, lock_timeout=1)
+        return True
+    except (OSError, ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning("Shared bot health save failed: %s", exc)
+        return False
+
+
+def _update_shared_bot_activity(update):
+    """Merge one change under the same cross-process lock as the write."""
+    try:
+        return update_json_state(
+            BOT_ACTIVITY_SHARED_FILE, update, default={}, lock_timeout=1,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning("Shared bot health update failed: %s", exc)
+        return None
 
 
 def _clear_shared_bot_maintenance(data=None):
     """Clear the cross-script bot maintenance marker when any bot activity resumes."""
-    owns_data = data is None
     if data is None:
-        data = _read_shared_bot_activity()
-    if isinstance(data, dict) and data.pop("maintenance", None) is not None and owns_data:
-        _write_shared_bot_activity(data)
+        def clear(current):
+            current.pop("maintenance", None)
+        return _update_shared_bot_activity(clear)
+    if isinstance(data, dict):
+        data.pop("maintenance", None)
     return data
 
 
@@ -1691,32 +1743,37 @@ def _record_shared_command_probe(actor, msg=None, command="", logger=None):
         return False
     account = str(_shared_bot_activity_account(actor) or "").strip()
     now_wall = datetime.now()
-    data = _read_shared_bot_activity()
-    existing = data.get("command_probe") if isinstance(data, dict) else {}
-    response = data.get("command_response") if isinstance(data, dict) else {}
-    if isinstance(existing, dict):
-        try:
-            existing_epoch = float(existing.get("wall_epoch", 0) or 0)
-        except Exception:
-            existing_epoch = 0.0
-        try:
-            response_epoch = float((response or {}).get("wall_epoch", 0) or 0) if isinstance(response, dict) else 0.0
-        except Exception:
-            response_epoch = 0.0
-        if existing_epoch > response_epoch:
-            return False
-    data["command_probe"] = {
+    now_epoch = time.time()
+    probe = {
         "account": account,
         "command": command.splitlines()[0][:80],
         "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
         "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
         "wall": now_wall.strftime(TIME_FORMAT),
-        "wall_epoch": time.time(),
+        "wall_epoch": now_epoch,
         "pid": os.getpid(),
     }
-    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
-    _write_shared_bot_activity(data)
-    return True
+    recorded = False
+
+    def update(data):
+        nonlocal recorded
+        existing = data.get("command_probe")
+        response = data.get("command_response")
+        try:
+            existing_epoch = float(existing.get("wall_epoch", 0) or 0) if isinstance(existing, dict) else 0.0
+            response_epoch = float(response.get("wall_epoch", 0) or 0) if isinstance(response, dict) else 0.0
+        except (TypeError, ValueError):
+            existing_epoch = response_epoch = 0.0
+        # Preserve an unanswered probe only while it is still actionable.
+        # Otherwise one lost reply would prevent all subsequent probes forever.
+        if existing_epoch > response_epoch and 0 <= now_epoch - existing_epoch <= BOT_COMMAND_SILENCE_MAX_SECONDS:
+            return
+        data["command_probe"] = probe
+        data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+        recorded = True
+
+    persisted = _update_shared_bot_activity(update)
+    return recorded and persisted is not None
 
 
 def _record_shared_command_response(actor, command="", msg=None, sender=None):
@@ -1724,9 +1781,8 @@ def _record_shared_command_response(actor, command="", msg=None, sender=None):
     account = str(_shared_bot_activity_account(actor) or "").strip()
     now_wall = datetime.now()
     username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
-    data = _read_shared_bot_activity()
     command_lines = str(command or "").strip().splitlines()
-    data["command_response"] = {
+    response = {
         "account": account,
         "command": command_lines[0][:80] if command_lines else "",
         "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
@@ -1737,10 +1793,12 @@ def _record_shared_command_response(actor, command="", msg=None, sender=None):
         "wall_epoch": time.time(),
         "pid": os.getpid(),
     }
-    _clear_shared_bot_maintenance(data)
-    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
-    _write_shared_bot_activity(data)
-    return True
+    def update(data):
+        data["command_response"] = response
+        _clear_shared_bot_maintenance(data)
+        data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+
+    return _update_shared_bot_activity(update) is not None
 
 
 def _record_shared_bot_maintenance(actor, command="", pause_seconds=BOT_HEALTH_PAUSE_SECONDS):
@@ -1750,8 +1808,7 @@ def _record_shared_bot_maintenance(actor, command="", pause_seconds=BOT_HEALTH_P
         pause_seconds = max(1, int(pause_seconds))
     except Exception:
         pause_seconds = BOT_HEALTH_PAUSE_SECONDS
-    data = _read_shared_bot_activity()
-    data["maintenance"] = {
+    maintenance = {
         "account": account,
         "command": str(command or "").strip(),
         "wall": now_wall.strftime(TIME_FORMAT),
@@ -1760,29 +1817,34 @@ def _record_shared_bot_maintenance(actor, command="", pause_seconds=BOT_HEALTH_P
         "pause_seconds": pause_seconds,
         "pid": os.getpid(),
     }
-    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
-    _write_shared_bot_activity(data)
+    def update(data):
+        data["maintenance"] = maintenance
+        data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+
+    _update_shared_bot_activity(update)
 
 
 def record_shared_game_bot_activity(actor, sender=None):
     account = str(_shared_bot_activity_account(actor) or "").strip()
     if not account:
-        return
+        return False
     now_wall = datetime.now()
     username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
-    data = _read_shared_bot_activity()
-    accounts = data.get("accounts")
-    if not isinstance(accounts, dict):
-        accounts = {}
-    accounts[account] = {
+    activity = {
         "wall": now_wall.strftime(TIME_FORMAT),
         "wall_epoch": time.time(),
         "bot_username": username,
         "pid": os.getpid(),
     }
-    data["accounts"] = accounts
-    data["updated_at"] = now_wall.strftime(TIME_FORMAT)
-    _write_shared_bot_activity(data)
+    def update(data):
+        accounts = data.get("accounts")
+        if not isinstance(accounts, dict):
+            accounts = {}
+        accounts[account] = activity
+        data["accounts"] = accounts
+        data["updated_at"] = now_wall.strftime(TIME_FORMAT)
+
+    return _update_shared_bot_activity(update) is not None
 
 
 def _command_text_for_message_id(actor, msg, message_id):
@@ -5484,7 +5546,17 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             actor, text, identity=identity, logger=logger, source=f"manual {cmd}"
         )
 
-    if cmd.startswith(".野外历练"):
+    # 风雷翅家族（取下/装备/散念/上架）——手动操作必须同步 equipped 标记，
+    # 否则 state 与游戏脱节（2026-09-01 主号脱节的直接根因）。
+    if cmd in {
+        ".装备 风雷翅", ".散念 风雷翅", ".从万宝阁取下 风雷翅", ".上架至万宝阁 风雷翅",
+    }:
+        processed = _wind_thunder_manual_sync(actor, identity, cmd, text) or processed
+    elif cmd.startswith(".第二元神"):
+        # 手动查询第二元神状态：解析剩余冷却并更新排期（无时间格式不动）。
+        if hasattr(actor, "record_second_soul_manual_status"):
+            processed = bool(actor.record_second_soul_manual_status(text, identity=identity))
+    elif cmd.startswith(".野外历练"):
         processed = _manual_record_field_training_reply(actor, text, identity, logger)
     elif cmd.startswith(".掌天瓶"):
         if hasattr(actor, "record_sky_bottle_manual_response"):
@@ -5554,6 +5626,7 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
     elif (
         cmd == ".探望南宫婉"
         or cmd == ".婉影问安"
+        or cmd == ".月下合参"
         or cmd == ".推演封魂咒"
         or cmd == ".护持神魂"
         or cmd == ".同参封魂"

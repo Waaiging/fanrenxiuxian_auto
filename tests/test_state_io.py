@@ -65,6 +65,14 @@ class StateIOTests(unittest.TestCase):
         self.assertEqual(self.read(), {"version": 1})
         self.assertFalse(backup_path.exists())
 
+    def test_unchanged_transaction_keeps_previous_backup(self):
+        state_io.save_json_state(str(self.path), {"version": 1})
+        state_io.save_json_state(str(self.path), {"version": 2})
+        with patch("state_io.os.replace", side_effect=AssertionError("unexpected rewrite")):
+            result = state_io.update_json_state(str(self.path), lambda value: value)
+        self.assertEqual(result, {"version": 2})
+        self.assertEqual(json.loads(Path(f"{self.path}.bak").read_text(encoding="utf-8")), {"version": 1})
+
     def test_concurrent_transactions_do_not_lose_updates(self):
         state_io.save_json_state(str(self.path), {"count": 0})
         failures = []

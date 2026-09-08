@@ -132,6 +132,42 @@ def rift_search_plan(identity="主魂"):
     )
 
 
+# 化神境虚空漫游指令：群聊发送，固定 12 小时冷却。
+NODE_SEARCH_COMMAND = ".搜寻节点"
+
+
+# 虚天鼎炼焰指令（主号主魂专属法宝）：8 小时一次，炼焰 9/9 圆满后停止。
+TREASURE_REFINE_COMMAND = ".法宝 炼焰 虚天鼎"
+TREASURE_REFINE_MAX_STEPS = 9
+
+
+def node_search_plan(identity="主魂"):
+    identity = str(identity or "主魂").strip() or "主魂"
+    return TimedCommandPlan(
+        identity=identity,
+        command=NODE_SEARCH_COMMAND,
+        last_key="last_node_search_time",
+        next_key="next_node_search_time",
+        timeout=120,
+        max_retries=0,
+        force_identity_check=identity == "主魂",
+        return_response_msg=False,
+    )
+
+
+def treasure_refine_plan():
+    return TimedCommandPlan(
+        identity="主魂",
+        command=TREASURE_REFINE_COMMAND,
+        last_key="last_treasure_refine_time",
+        next_key="next_treasure_refine_time",
+        timeout=120,
+        max_retries=0,
+        force_identity_check=True,
+        return_response_msg=False,
+    )
+
+
 def treasure_touch_plan(command=DEFAULT_TREASURE_TOUCH_COMMAND):
     return TimedCommandPlan(
         identity="主魂",

@@ -6239,7 +6239,7 @@ class ParserFixtureTests(unittest.TestCase):
     def test_star_gazing_boundary_notice_targets_next_manifest_all_accounts(self):
         now = datetime(2026, 6, 15, 0, 0, 10)
         expected_manifest = datetime(2026, 6, 15, 3, 0, 0)
-        expected_send = datetime(2026, 6, 15, 2, 59, 0)
+        expected_send = datetime(2026, 6, 15, 2, 59, 50)
 
         for cls in (Cultivator, SubCultivator, CultivatorXiaoHao):
             actor = cls.__new__(cls)
@@ -6261,7 +6261,7 @@ class ParserFixtureTests(unittest.TestCase):
             send_dt, immediate_shift, _ = actor.star_gazing_schedule_plan(now, manifest_dt)
 
             self.assertEqual(manifest_dt, expected_manifest)
-            self.assertLessEqual(send_dt, manifest_dt - timedelta(seconds=60))
+            self.assertEqual(send_dt, manifest_dt - timedelta(seconds=10))
             self.assertFalse(immediate_shift)
 
     def test_star_gazing_shift_time_uses_layered_windows_all_accounts(self):
@@ -6633,7 +6633,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(state["star_gazing_claimed_avatar"], "厚土")
         self.assertTrue(state["pending_star_gazing_target_time"])
         self.assertEqual(len(scheduled), 1)
-        self.assertTrue(scheduled[0][1]["immediate_shift"])
+        self.assertFalse(scheduled[0][1]["immediate_shift"])
 
     def test_stale_star_gazing_claim_does_not_block_new_good_manifest(self):
         class FixedDatetime(datetime):
@@ -6696,7 +6696,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertTrue(handled)
                 self.assertEqual(state["pending_star_gazing_manifest_time"], "2026-06-24 12:00:00")
                 self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-06-24 12:00:00")
-                self.assertEqual(state["pending_star_gazing_target_time"], "2026-06-24 11:59:00")
+                self.assertEqual(state["pending_star_gazing_target_time"], "2026-06-24 11:59:50")
                 self.assertEqual(state["star_gazing_claimed_avatar"], avatar)
                 self.assertEqual(len(scheduled), 1)
                 self.assertEqual(
@@ -6863,7 +6863,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertEqual(state["pending_star_gazing_manifest_time"], "2026-06-24 12:00:00")
                 self.assertEqual(state["star_gazing_claimed_manifest_time"], "2026-06-24 12:00:00")
                 self.assertEqual(len(scheduled), 1)
-                self.assertTrue(scheduled[0][1]["immediate_shift"])
+                self.assertFalse(scheduled[0][1]["immediate_shift"])
                 self.assertEqual(
                     scheduled[0][1]["manifest_dt"].strftime("%Y-%m-%d %H:%M:%S"),
                     "2026-06-24 12:00:00",
@@ -6900,7 +6900,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(xiaohao_state["pending_star_gazing_manifest_time"], "2026-06-24 12:00:00")
         self.assertEqual(xiaohao_state["star_gazing_claimed_manifest_time"], "2026-06-24 12:00:00")
         self.assertEqual(len(xiaohao_scheduled), 1)
-        self.assertTrue(xiaohao_scheduled[0][1]["immediate_shift"])
+        self.assertFalse(xiaohao_scheduled[0][1]["immediate_shift"])
 
     def test_good_notice_after_final_report_does_not_consume_star_gazing_all_accounts(self):
         class FixedDatetime(datetime):
@@ -8279,32 +8279,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         self.assertEqual([b["full_name"] for b in candidates], ["青蛟"])
 
-    def test_beast_steal_prefers_focus_then_fallback(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        cache = [
-            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
-            {"full_name": "青蛟", "species": "二阶蛟龙", "status": "休息中", "power": 420, "exp": 8, "stamina": 90},
-            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
-        ]
 
-        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "六翼")
-
-        cache[0]["status"] = "受伤"
-        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
-
-    def test_pastured_beasts_remain_action_candidates(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        cache = [
-            {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "放养中", "power": 4096, "exp": 0, "stamina": 34},
-            {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 100},
-            {"full_name": "吞金兽", "species": "一阶噬金虫", "status": "放养中", "power": 28, "exp": 207, "stamina": 100},
-        ]
-
-        self.assertTrue(actor.can_attempt_steal_status("放养中"))
-        self.assertTrue(actor.can_attempt_abyss_status("放养中"))
-        self.assertTrue(actor.should_rest_before_abyss("放养中"))
-        self.assertEqual(actor.select_beast_for_steal(cache)["full_name"], "麻花藤")
-        self.assertEqual(actor.abyss_candidate_beasts(cache)[0]["full_name"], "麻花藤")
 
     def test_passive_pasture_dispatch_does_not_reschedule_retired_beast_actions(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -8356,7 +8331,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["beasts_cache"][0]["status"], "放养中")
         self.assertEqual(actor.state["beasts_cache"][1]["status"], "休息中")
 
-    def test_beast_not_before_helpers_preserve_last_action_times(self):
+    def test_abyss_not_before_preserves_last_action_time(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
         actor.state = {
             "last_abyss_time": "2026-06-25 16:12:39",
@@ -8366,12 +8341,11 @@ class ParserFixtureTests(unittest.TestCase):
         }
 
         actor.set_next_abyss_not_before("2026-06-26 00:32:02")
-        actor.set_next_steal_not_before("2026-06-26 00:32:02")
 
         self.assertEqual(actor.state["last_abyss_time"], "2026-06-25 16:12:39")
         self.assertEqual(actor.state["next_abyss_time"], "2026-06-26 00:32:02")
         self.assertEqual(actor.state["last_steal_time"], "2026-06-25 16:25:07")
-        self.assertEqual(actor.state["next_steal_time"], "2026-06-26 00:32:02")
+        self.assertEqual(actor.state["next_steal_time"], "2026-06-25 20:25:07")
 
     def test_avatar_yuanying_rift_checks_do_not_require_meditation_ready(self):
         async def capture_xiaohao():
@@ -8560,126 +8534,9 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(by_identity["缘生子"]["commands"][0]["status"], "元婴虚弱暂停")
         self.assertNotEqual(by_identity["素心子"]["commands"][0]["status"], "元婴虚弱暂停")
 
-    def test_steal_recalls_pastured_candidate_before_deploy(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        actor.state = {
-            "beasts_cache": [
-                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "放养中", "power": 31, "exp": 0, "stamina": 100},
-            ],
-        }
-        actor.save_state = lambda: None
-        sent = []
-        rested = []
 
-        async def fake_rest(name):
-            rested.append(name)
-            actor.set_best_beast_status(name, "休息中")
-            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
 
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            if command == ".灵兽出战 麻花藤":
-                return "已将灵兽【麻花藤】设为出战状态。"
-            if command == ".灵兽偷菜":
-                return "灵兽偷菜成功，获得【灵石】x1。"
-            return ""
 
-        actor.send_and_wait_feedback = fake_send
-        actor.rest_beast_for_abyss = fake_rest
-
-        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
-        self.assertEqual(rested, ["麻花藤"])
-        self.assertEqual(sent, [".灵兽出战 麻花藤", ".灵兽偷菜"])
-        self.assertEqual(actor.state["beasts_cache"][0]["status"], "出战中")
-        self.assertTrue(actor.state.get("next_steal_time"))
-
-    def test_steal_pending_target_lock_counts_as_accepted(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        actor.state = {
-            "beasts_cache": [
-                {"full_name": "保龄球", "species": "一阶灵兽", "status": "出战中", "power": 120, "exp": 0, "stamina": 100},
-            ],
-        }
-        actor.save_state = lambda: None
-        sent = []
-        pending_text = "灵兽已锁定目标：**@q** 的药园，其中一块灵田种着**【清灵草】**！\n正在准备动手..."
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            return pending_text
-
-        actor.send_and_wait_feedback = fake_send
-
-        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
-        self.assertEqual(sent, [".灵兽偷菜"])
-        self.assertTrue(actor.state.get("next_steal_time"))
-
-    def test_focus_beast_waits_for_steal_settlement_before_pasture(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        actor.state = {
-            "best_beast_name": "六翼",
-            "best_beast_status": "出战中",
-            "beasts_cache": [
-                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "出战中", "power": 4096, "exp": 0, "stamina": 80},
-            ],
-        }
-        actor.save_state = lambda: None
-        sent = []
-        pending_text = "灵兽已锁定目标：**@q** 的药园，其中一块灵田种着**【清灵草】**！\n正在准备动手..."
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            return pending_text
-
-        actor.send_and_wait_feedback = fake_send
-
-        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
-        self.assertEqual(sent, [".灵兽偷菜"])
-        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "偷菜中")
-        self.assertGreater(common_seconds_until(actor.state["next_focus_pasture_after_abyss_time"]), 9 * 60)
-
-        settlement = "灵兽偷菜成功，获得【灵石】x1。"
-        self.assertTrue(actor.record_manual_beast_command_response(".灵兽偷菜", settlement))
-        self.assertTrue(actor.focus_pasture_after_abyss_due())
-
-    def test_focus_beast_is_pastured_after_steal(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        actor.state = {
-            "beasts_cache": [
-                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
-                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
-            ],
-        }
-        actor.save_state = lambda: None
-        sent = []
-        rested = []
-
-        async def fake_rest(name):
-            rested.append(name)
-            actor.set_best_beast_status(name, "休息中")
-            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            if command == ".灵兽出战 六翼":
-                return "已将灵兽【六翼】设为出战状态。"
-            if command == ".灵兽偷菜":
-                return "灵兽偷菜成功，获得【灵石】x1。"
-            if command == ".一键放养":
-                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
-            return ""
-
-        actor.send_and_wait_feedback = fake_send
-        actor.rest_beast_for_abyss = fake_rest
-
-        self.assertTrue(asyncio.run(actor.execute_steal_with_candidate()))
-        self.assertEqual(rested, ["六翼"])
-        self.assertEqual(sent, [
-            ".灵兽出战 六翼",
-            ".灵兽偷菜",
-            ".一键放养",
-        ])
-        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
 
     def test_border_patrol_selects_highest_stamina_resting_beast(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -9751,63 +9608,6 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(actor.state["next_focus_pasture_after_abyss_time"], "")
         self.assertGreater(common_seconds_until(actor.state["focus_pasture_after_abyss_until"]), 3 * 3600)
 
-    def test_focus_beast_finishes_due_abyss_and_steal_before_pasture(self):
-        actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
-        actor.state = {
-            "best_beast_name": "六翼",
-            "best_beast_status": "休息中",
-            "beasts_cache": [
-                {"full_name": "六翼", "species": "四阶太古冰蜈", "status": "休息中", "power": 4096, "exp": 0, "stamina": 80},
-                {"full_name": "麻花藤", "species": "一阶噬灵花藤", "status": "休息中", "power": 31, "exp": 0, "stamina": 100},
-            ],
-        }
-        actor.save_state = lambda: None
-        actor.record_daily_reward_event = lambda *args, **kwargs: True
-        sent = []
-        rested = []
-
-        async def fake_rest(name):
-            rested.append(name)
-            actor.set_best_beast_status(name, "休息中")
-            return "休息中", f"灵兽【{name}】已返回灵兽袋。"
-
-        async def fake_update():
-            return True
-
-        async def fake_abyss(beast_name):
-            sent.append(f".探渊 {beast_name}")
-            return "你的灵兽【六翼】成功击败了对手！它带回了战利品：【兽骨】x1。"
-
-        async def fake_send(command, *args, **kwargs):
-            sent.append(command)
-            if command == ".灵兽出战 六翼":
-                return "已将灵兽【六翼】设为出战状态。"
-            if command == ".灵兽偷菜":
-                return "灵兽偷菜成功，获得【灵石】x1。"
-            if command == ".一键放养":
-                return "**六翼 等1只灵兽** 欢快地冲入了万兽谷！它将在 **4** 小时后自动归来。"
-            return ""
-
-        actor.update_beast_cache = fake_update
-        actor.send_abyss_with_busy_retry = fake_abyss
-        actor.send_and_wait_feedback = fake_send
-        actor.rest_beast_for_abyss = fake_rest
-
-        async def run_actions():
-            self.assertTrue(await actor.execute_abyss_with_fallback(defer_focus_pasture=True))
-            self.assertNotIn(".一键放养", sent)
-            self.assertTrue(await actor.execute_steal_with_candidate())
-
-        asyncio.run(run_actions())
-
-        self.assertEqual(rested, ["六翼"])
-        self.assertEqual(sent, [
-            ".探渊 六翼",
-            ".灵兽出战 六翼",
-            ".灵兽偷菜",
-            ".一键放养",
-        ])
-        self.assertEqual(actor.get_cached_beast_by_name("六翼")["status"], "放养中")
 
     def test_focus_beast_after_abyss_immediate_pasture_block_reschedules(self):
         actor = CultivatorXiaoHao.__new__(CultivatorXiaoHao)
@@ -10154,16 +9954,13 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
 
     def test_shared_command_response_accepts_empty_command(self):
-        written = []
         actor = SimpleNamespace(state_file="state_main.json", target_chat_id=-100123456)
         msg = DummyMessage(90015, text="edited response")
-        with patch.object(log_utils, "_read_shared_bot_activity", return_value={}), patch.object(
-            log_utils,
-            "_write_shared_bot_activity",
-            side_effect=lambda data: written.append(data),
-        ):
-            self.assertTrue(log_utils._record_shared_command_response(actor, command="", msg=msg))
-        self.assertEqual(written[0]["command_response"]["command"], "")
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", os.path.join(directory, "health.json")):
+                self.assertTrue(log_utils._record_shared_command_response(actor, command="", msg=msg))
+                written = log_utils._read_shared_bot_activity()
+        self.assertEqual(written["command_response"]["command"], "")
 
     def test_text_alert_resolves_numeric_target_from_dialog_cache(self):
         sent = []
@@ -11186,6 +10983,7 @@ class ParserFixtureTests(unittest.TestCase):
 
         actor.execute_concubine_voyage_return = fake_return
         actor.execute_target_concubine_search = fake_search
+        actor._falling_demon_trial_due = lambda identity: False
 
         self.assertFalse(asyncio.run(actor.execute_concubine_chain()))
         self.assertEqual(calls, ["return", "search"])

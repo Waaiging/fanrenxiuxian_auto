@@ -294,7 +294,7 @@
         .duel-multi-title { color: #bae6fd; font-size: 0.86rem; font-weight: 900; }
         .duel-multi-summary { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.7rem; }
         .duel-multi-form { padding: 0.85rem 0.9rem; }
-        .duel-multi-settings { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.75rem; align-items: end; }
+        .duel-multi-settings { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 1fr) auto; gap: 0.75rem; align-items: end; }
         .duel-multi-targets { margin-top: 0.75rem; display: grid; gap: 0.5rem; }
         .duel-multi-target-row { display: grid; grid-template-columns: minmax(10rem, 1fr) 7rem auto; gap: 0.55rem; align-items: end; padding: 0.62rem; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0,0,0,0.16); }
         .duel-multi-target-meta { margin-top: 0.22rem; color: var(--text-secondary); font-size: 0.66rem; }
@@ -312,6 +312,7 @@
         .duel-participants { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--border-color); }
         .duel-participant { min-width: 0; min-height: 8.2rem; padding: 0.62rem 0.75rem; background: rgba(4,8,14,0.94); }
         .duel-participant.is-next { background: rgba(0,210,255,0.08); box-shadow: inset 3px 0 0 var(--accent-color); }
+        .duel-participant.is-dirty { box-shadow: inset 0 0 0 1px #fbbf24; }
         .duel-participant.is-exhausted { opacity: 0.54; }
         .duel-participant.is-paused { opacity: 0.68; }
         .duel-participant-name { color: var(--text-primary); font-size: 0.78rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1521,7 +1522,7 @@
                 </label>
                 <button id="duel-settings-save" class="reward-refresh" type="button" onclick="saveDuelSettings()"><i data-lucide="save" aria-hidden="true"></i>保存间隔</button>
                 <label class="record-field">
-                    斗法方式
+                    轮换斗法方式
                     <select id="duel-target-switch" class="record-select" onchange="setDuelTargetSwitch(this.value)">
                         <option value="switch">切换指定身份后斗法</option>
                         <option value="direct">直接 .斗法 @用户名</option>
@@ -1549,13 +1550,21 @@
                             发起身份
                             <select id="duel-multi-initiator" class="record-select" onchange="markDuelMultiDirty()"></select>
                         </label>
+                        <label class="record-field">
+                            一对多斗法方式
+                            <select id="duel-multi-target-switch" class="record-select" onchange="markDuelMultiDirty(); updateDuelMultiMethodHint()">
+                                <option value="switch">切换身份后斗法</option>
+                                <option value="direct">直接斗法</option>
+                            </select>
+                        </label>
                         <button class="reward-refresh" type="button" onclick="addDuelMultiTarget()"><i data-lucide="plus" aria-hidden="true"></i>添加对象</button>
                     </div>
                     <div class="duel-multi-targets" id="duel-multi-targets"></div>
                     <div class="duel-multi-actions">
                         <button class="reward-refresh" type="button" id="duel-multi-save" onclick="saveDuelMultiPlan()"><i data-lucide="save" aria-hidden="true"></i>保存计划</button>
                         <button class="reward-refresh" type="button" onclick="resetDuelMultiDraft()">放弃修改</button>
-                        <span class="duel-multi-hint" id="duel-interval-hint">斗法间隔使用上方设置。已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。</span>
+                        <span class="duel-multi-hint" id="duel-multi-hint">已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。</span>
+                        <span class="duel-multi-hint" id="duel-interval-hint">斗法间隔使用上方设置。</span>
                     </div>
                 </div>
             </div>
@@ -1682,14 +1691,13 @@
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">天星宗 · 刷天机值</div>
-                    <div class="automation-card-hint">独立通用技能。启用后，本账号所有宗门为天星宗的身份都会分别完成本轮目标，互不共用进度。</div>
+                    <div class="automation-card-hint">自动识别当前宗门为天星宗的身份；拜入后加入，叛出后移除。</div>
                     <div class="automation-mode-options">
                         <label class="automation-option">
                             <input id="tianxing-tianji-grind-enabled" type="checkbox" onchange="syncTianxingControls(); markAutomationSettingsDirty()">
                             启用刷天机值
                         </label>
                     </div>
-                    <div class="automation-card-hint">参与身份（可多选）</div>
                     <div class="automation-account-grid" id="tianxing-tianji-participant-controls">
                         <div class="record-empty">加载中...</div>
                     </div>
@@ -1927,6 +1935,7 @@
         let dailyRewardUpdatedAt = '';
         let duelDashboardData = {enabled: false, queues: [], rows: [], summary: {}};
         let duelControlPending = false;
+        const duelParticipantDirty = new Set();
         let duelMultiDirty = false;
         let duelSettingsDirty = false;
         let redPacketDashboardData = {settings: {}, accounts: []};
@@ -2920,7 +2929,12 @@
                         ${patrolModeOptions.map(mode => `<option value="${escapeHtml(mode)}" ${mode === item.patrol_mode_value ? 'selected' : ''}>${escapeHtml(mode)}</option>`).join('')}
                     </select>
                 ` : '';
-                const controlHtml = dashboardAction === 'miniapp-beast-refresh' ? `
+                const controlHtml = dashboardAction === 'soul-curse-toggle' ? `
+                    <button class="command-action-button ${item.soul_curse_enabled ? '' : 'paused'}" ${actionPending ? 'disabled' : ''} onclick="toggleSoulCurse('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', this)" title="${item.soul_curse_enabled ? '关闭封魂咒链路' : '启用封魂咒链路'}" aria-label="切换封魂咒链路">
+                        <i data-lucide="${item.soul_curse_enabled ? 'power-off' : 'power'}" aria-hidden="true"></i>
+                    </button>
+                    <span>${item.soul_curse_enabled ? '已启用' : '已关闭'}</span>
+                ` : dashboardAction === 'miniapp-beast-refresh' ? `
                     <button class="command-action-button" ${actionPending ? 'disabled' : ''} onclick="refreshMiniappBeasts('${escapeJs(account)}', this)" title="立即同步万兽谷" aria-label="立即同步万兽谷">
                         <i data-lucide="refresh-cw" aria-hidden="true"></i>
                     </button>
@@ -3588,11 +3602,41 @@
             return 'blocked';
         }
 
+        function isSameAccountDuelTarget(participantKey, username) {
+            const account = String(participantKey || '').split('|')[0];
+            const clean = String(username || '').trim().replace(/^@+/, '').toLowerCase();
+            if (!account || !clean) return false;
+            const match = (duelDashboardData.identity_options || []).find(
+                item => String(item.username || '').toLowerCase() === clean
+            );
+            return Boolean(match && String(match.account || '') === account);
+        }
+
+        function duelMultiTargetSwitchEnabled() {
+            const select = document.getElementById('duel-multi-target-switch');
+            if (select && select.value) return select.value !== 'direct';
+            return (duelDashboardData.multi || {}).target_switch_enabled !== false;
+        }
+
+        function updateDuelMultiMethodHint() {
+            const enabled = duelMultiTargetSwitchEnabled();
+            const hint = document.getElementById('duel-multi-hint');
+            if (hint) {
+                hint.textContent = enabled
+                    ? '已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”；主魂或外部用户名使用 .斗法 @用户名。'
+                    : '当前为直接斗法模式：一律发送 .斗法 @用户名，被斗法者不切换身份。';
+            }
+            document.querySelectorAll('#duel-multi-targets .duel-multi-target-username').forEach(input => {
+                const meta = input.closest('.record-field')?.querySelector('.duel-multi-target-meta');
+                if (meta) meta.textContent = duelMultiTargetMeta(input.value);
+            });
+        }
+
         function duelMultiTargetMeta(username) {
             const clean = String(username || '').trim().replace(/^@+/, '').toLowerCase();
             const match = (duelDashboardData.identity_options || []).find(item => String(item.username || '').toLowerCase() === clean);
             if (!match) return clean ? '外部用户名 · 使用 .斗法 @用户名' : '填写 Telegram 用户名';
-            if ((duelDashboardData || {}).target_switch_enabled === false) {
+            if (!duelMultiTargetSwitchEnabled()) {
                 return `${match.account_name || match.account} · ${match.identity} · 直接 .斗法 @用户名`;
             }
             return `${match.account_name || match.account} · ${match.identity}${match.identity === '主魂' ? ' · 使用用户名定位' : ' · 自动引用新鲜的 .切换 消息'}`;
@@ -3641,6 +3685,11 @@
                     : '';
                 initiatorSelect.disabled = duelControlPending;
             }
+            const methodSelect = document.getElementById('duel-multi-target-switch');
+            if (methodSelect) {
+                methodSelect.value = multi.target_switch_enabled === false ? 'direct' : 'switch';
+                methodSelect.disabled = duelControlPending;
+            }
             const enabled = document.getElementById('duel-multi-enabled');
             if (enabled) {
                 enabled.checked = Boolean(multi.enabled);
@@ -3651,6 +3700,7 @@
                 const targets = Array.isArray(multi.targets) && multi.targets.length ? multi.targets : [{}];
                 targetBox.innerHTML = targets.map(duelMultiTargetRowHtml).join('');
             }
+            updateDuelMultiMethodHint();
             const save = document.getElementById('duel-multi-save');
             if (save) save.disabled = duelControlPending;
             refreshIcons();
@@ -3726,6 +3776,7 @@
             if (duelControlPending) return;
             const initiator = String(document.getElementById('duel-multi-initiator')?.value || '');
             const enabled = Boolean(document.getElementById('duel-multi-enabled')?.checked);
+            const targetSwitchEnabled = String(document.getElementById('duel-multi-target-switch')?.value || 'switch') !== 'direct';
             const [initiatorAccount, initiatorIdentity] = initiator.split('|');
             if (!initiatorAccount || !initiatorIdentity) {
                 alert('请选择斗法发起身份。');
@@ -3754,6 +3805,7 @@
                         enabled,
                         initiator_account: initiatorAccount,
                         initiator_identity: initiatorIdentity,
+                        target_switch_enabled: targetSwitchEnabled,
                         targets,
                     })
                 });
@@ -3805,8 +3857,8 @@
             const intervalHint = document.getElementById('duel-interval-hint');
             if (intervalHint) {
                 intervalHint.textContent = `列表每 ${duelIntervalText(data.interval_seconds || 360)}轮换；同一对象至少间隔 ${duelIntervalText(data.target_interval_seconds || 660)}。${targetSwitchEnabled
-                    ? '已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”。'
-                    : '当前为直接斗法模式：一律发送 .斗法 @用户名，被斗法者不切换身份。'}`;
+                    ? '轮换已知分身由目标账号先发送“.切换 分身”，发起者再引用该消息发送“.斗法”；一对多方式请在计划内单独选择。'
+                    : '轮换当前为直接斗法模式：一律发送 .斗法 @用户名；一对多方式请在计划内单独选择。'}`;
             }
             renderDuelMultiPlan();
 
@@ -3816,7 +3868,10 @@
             if (targetList) {
                 targetList.innerHTML = targetOptions.map(target => `<option value="${escapeHtml(target)}"></option>`).join('');
             }
-            if (queueGrid) {
+            // Keep the participant cards intact while a target is being edited;
+            // the 15-second poll must not replace the focused input before its
+            // change event can submit the new value.
+            if (queueGrid && duelParticipantDirty.size === 0) {
                 queueGrid.innerHTML = queues.map(queue => {
                     const gate = queue.target_status || {ready: true};
                     const beastMode = 'deploy';
@@ -3860,10 +3915,11 @@
                                         </div>
                                         <div class="duel-participant-controls">
                                             <label class="duel-participant-toggle">
-                                                <input type="checkbox" ${participant.enabled !== false ? 'checked' : ''} ${duelControlPending ? 'disabled' : ''} onchange="setDuelParticipantControl(this)">
+                                                <input type="checkbox" ${participant.enabled !== false ? 'checked' : ''} ${duelControlPending ? 'disabled' : ''} onchange="markDuelParticipantDirty(this); setDuelParticipantControl(this)">
                                                 参与斗法
                                             </label>
-                                            <input class="duel-target-input" type="text" value="${escapeHtml(participant.target_username || queue.target || '')}" list="duel-target-options" maxlength="64" spellcheck="false" aria-label="挑战对象" ${duelControlPending ? 'disabled' : ''} onchange="setDuelParticipantControl(this)">
+                                            <input class="duel-target-input" type="text" value="${escapeHtml(participant.target_username || queue.target || '')}" list="duel-target-options-${escapeHtml(participant.key || '')}" maxlength="64" spellcheck="false" aria-label="挑战对象" ${duelControlPending ? 'disabled' : ''} oninput="markDuelParticipantDirty(this)" onchange="setDuelParticipantControl(this)">
+                                            <datalist id="duel-target-options-${escapeHtml(participant.key || '')}">${targetOptions.filter(name => !isSameAccountDuelTarget(participant.key, name)).map(name => `<option value="${escapeHtml(name)}"></option>`).join('')}</datalist>
                                         </div>
                                         <div class="duel-participant-target-meta ${participant.activation_required ? 'reply-switch' : ''}">
                                             ${participant.activation_required
@@ -4006,12 +4062,21 @@
             }
         }
 
+        function markDuelParticipantDirty(control) {
+            const participantEl = control?.closest('.duel-participant');
+            const participantKey = participantEl?.dataset.participantKey || '';
+            if (!participantKey) return;
+            duelParticipantDirty.add(participantKey);
+            participantEl.classList.add('is-dirty');
+        }
+
         async function setDuelParticipantControl(control) {
             const participantEl = control?.closest('.duel-participant');
             if (!participantEl || duelControlPending) return;
             const checkbox = participantEl.querySelector('input[type="checkbox"]');
             const targetInput = participantEl.querySelector('.duel-target-input');
             const participantKey = participantEl.dataset.participantKey || '';
+            markDuelParticipantDirty(control);
             const target = String(targetInput?.value || '').trim().replace(/^@+/, '');
             if (!participantKey) {
                 alert('无法识别斗法身份，请刷新页面后重试。');
@@ -4022,7 +4087,13 @@
                 targetInput?.focus();
                 return;
             }
+            if (isSameAccountDuelTarget(participantKey, target)) {
+                alert('同一账号内无法斗法自己：该用户名属于本账号的身份。请选择其他账号的目标。');
+                targetInput?.focus();
+                return;
+            }
             duelControlPending = true;
+            participantEl.querySelectorAll('input').forEach(input => { input.disabled = true; });
             try {
                 const response = await fetch(apiUrl('/api/duels/control'), {
                     method: 'POST',
@@ -4031,6 +4102,7 @@
                 });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                duelParticipantDirty.delete(participantKey);
             } catch (error) {
                 console.error('Duel participant control failed:', error);
                 alert(`身份斗法设置失败：${error.message || error}`);
@@ -4231,6 +4303,41 @@
             } finally {
                 fishingAutoHomePending = false;
                 renderFishingAutoSummary(lastFishingAutoSummary || {});
+            }
+        }
+
+        async function toggleSoulCurse(panelKey, account, identity, button) {
+            const data = window.commandPanelDataMap?.[panelKey];
+            const panel = data?.panel;
+            const commands = panel?.commands || [];
+            const item = commands.find(row => row.dashboard_action === 'soul-curse-toggle');
+            if (!item) return;
+            const target = !Boolean(item.soul_curse_enabled);
+            const key = `${account}:soul-curse-toggle`;
+            if (dashboardActionPending[key]) return;
+            dashboardActionPending[key] = true;
+            if (button) button.disabled = true;
+            if (commandModalKey) renderCommandModal(commandModalKey);
+            try {
+                const r = await fetch(apiUrl('/api/soul-curse-control'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({account, identity, enabled: target})
+                });
+                const result = await r.json().catch(() => ({success: false, msg: `请求失败：HTTP ${r.status}`}));
+                if (!r.ok || result.success === false) {
+                    alert(result.msg || `操作失败：HTTP ${r.status}`);
+                    return;
+                }
+                setTimeout(() => updateStatus(), 300);
+            } catch (error) {
+                console.error('Soul curse toggle failed:', error);
+                alert('封魂咒开关请求失败。');
+            } finally {
+                window.setTimeout(() => {
+                    dashboardActionPending[key] = false;
+                    if (commandModalKey) renderCommandModal(commandModalKey);
+                }, 1500);
             }
         }
 
@@ -4873,9 +4980,12 @@
                                 `).join('')}
                             </div>
                         </div>
-                    `).join('') || '<div class="record-empty">暂无可配置的身份。</div>';
+                    `).join('') || '<div class="record-empty">当前没有天星宗身份。</div>';
                 }
                 syncTianxingControls();
+                document.querySelectorAll('#tianxing-tianji-participant-controls input[type="checkbox"]').forEach(input => {
+                    input.disabled = !tianxingGrindEnabled;
+                });
                 const abyssPowerMinControl = document.getElementById('miniapp-beast-abyss-power-min');
                 if (abyssPowerMinControl) abyssPowerMinControl.value = abyssPowerMin > 0 ? String(abyssPowerMin) : '';
                 const abyssPowerMaxControl = document.getElementById('miniapp-beast-abyss-power-max');
@@ -4958,7 +5068,9 @@
             const tianxingTianjiRuntimeControl = document.getElementById('tianxing-tianji-runtime');
             if (tianxingTianjiRuntimeControl) {
                 tianxingTianjiRuntimeControl.innerText = tianxingGrindEnabled
-                    ? `${tianxingTianjiParticipants.size} 个身份分别执行 · 每个身份目标 ${tianxingGrindTarget}`
+                    ? (tianxingTianjiParticipants.size
+                        ? `${tianxingTianjiParticipants.size} 个身份分别执行 · 每个身份目标 ${tianxingGrindTarget}`
+                        : '等待天星宗身份出现')
                     : '刷天机值已暂停';
             }
             const trialRuntimeControl = document.getElementById('miniapp-tianji-trial-runtime');
@@ -5034,21 +5146,24 @@
             const options = Array.isArray(data.identity_options) ? data.identity_options : [];
             const raiderSelect = document.getElementById('surprise-raid-raider');
             const targetSelect = document.getElementById('surprise-raid-target');
+            const preserveDraft = surpriseRaidSettingsDirty;
+            const draftRaiderValue = raiderSelect?.value || '';
+            const draftTargetValue = targetSelect?.value || '';
             if (raiderSelect) {
                 raiderSelect.innerHTML = options.map(item => `
                     <option value="${escapeHtml(surpriseRaidOptionValue(item))}">
-                        ${escapeHtml(`${item.name || item.account} · ${item.label || item.identity}`)}
+                        ${escapeHtml(`${item.account_name || item.account} · ${item.identity} · @${item.username || ''}`)}
                     </option>
                 `).join('') || '<option value="">暂无可配置身份</option>';
             }
             if (targetSelect) {
                 targetSelect.innerHTML = options.map(item => `
                     <option value="${escapeHtml(surpriseRaidOptionValue(item))}">
-                        ${escapeHtml(`${item.name || item.account} · ${item.label || item.identity}`)}
+                        ${escapeHtml(`${item.account_name || item.account} · ${item.identity} · @${item.username || ''}`)}
                     </option>
                 `).join('') || '<option value="">暂无可配置身份</option>';
             }
-            if (!surpriseRaidSettingsDirty) {
+            if (!preserveDraft) {
                 const enabled = Boolean(data.enabled);
                 document.getElementById('surprise-raid-enabled').checked = enabled;
                 const raiderValue = `${data.raider_account || ''}|${data.raider_identity || ''}`;
@@ -5063,6 +5178,12 @@
                     const matched = Array.from(select.options).some(option => option.value === select.value);
                     if (!matched) select.value = '';
                 });
+            } else {
+                // Polling rebuilds the option list; restore the in-progress
+                // selection so a newly added account (for example Waaiging)
+                // is not silently replaced by the first option.
+                if (raiderSelect) raiderSelect.value = draftRaiderValue;
+                if (targetSelect) targetSelect.value = draftTargetValue;
             }
             const runtime = document.getElementById('surprise-raid-runtime');
             if (runtime) {

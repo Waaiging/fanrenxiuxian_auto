@@ -31,11 +31,12 @@ Intelligent Cultivator v8.6 (Wanling Edition)
 """
 
 import asyncio          # 异步 I/O 框架，所有游戏交互都是异步的
+from runtime_scheduler import create_scheduler_task as register_scheduler_task
 import time             # 时间戳、sleep 等基本时间操作
 import json
 STAR_GAZING_INTERVAL_HOURS = 3
 STAR_GAZING_MONITOR_LEAD_SECONDS = 3 * 60
-STAR_GAZING_COMMAND_LEAD_SECONDS = 60
+STAR_GAZING_COMMAND_LEAD_SECONDS = 10
 STAR_GAZING_SHIFT_PROFILE = "early"
 STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS = (-3, 2)
 STAR_GAZING_SHIFT_LEAD_SECONDS = -STAR_GAZING_SHIFT_DELAY_RANGE_SECONDS[1]
@@ -58,7 +59,7 @@ STAR_ATTRACTION_AVATARS = set()  # 观星台/安抚/收集/牵引已迁入 minia
 FORMATION_TARGET_INITIATORS = {
     "crayonxxin": "副号-厚土",
     "lvdoumiao": "副号-玄续玄",
-    "ding303": "副号-寻真子",
+    "ding303": "副号-寒续尘",
 }
 FORMATION_ASSIST_AVATARS = ["素缘子"]
 
@@ -114,6 +115,7 @@ from common_command_features import (
     seconds_until_mulan_support_start,
 )
 from automation_settings import (
+    MAIN_YINLUO_IDENTITY,
     set_tianxing_heqi_pill_enabled,
     tianxing_settings,
     tianxing_tianji_identities_for_account,
@@ -136,8 +138,12 @@ from group_visibility_control import (
 from soul_curse_features import SoulCurseMixin
 from sky_bottle_features import SkyBottleMixin
 from star_gazing_collector import predicted_star_shift_dt, record_star_gazing_event
-from yinluo_features import YinluoMixin, YINLUO_IDENTITY
+from yinluo_features import YinluoMixin
 from state_io import load_json_state, save_json_state
+
+# 主号阴罗宗身份按稳定 player_id 动态解析道号（重生改名后跟随新名，如「缘生子」→「玄续子」），
+# 否则「缘生子」改名后 `if YINLUO_IDENTITY in self.avatars` 判定失败，阴罗循环整个不启动。
+YINLUO_IDENTITY = MAIN_YINLUO_IDENTITY
 from log_utils import (
     CommandLogFilter,          # 日志过滤器，过滤掉指令内容（保护隐私）
     cap_command_retries,       # 限制指令重试次数
@@ -241,6 +247,8 @@ TIANXING_DESTINY_RETRY_SECONDS = 30 * 60
 SECT_SKILL_MAX_DAILY = 3                    # 宗门传功每日上限次数
 YUANYING_OUT_CD_SECONDS = 8 * 3600          # 元婴出窍冷却：8 小时
 RIFT_SEARCH_CD_SECONDS = 12 * 3600          # 探寻裂缝冷却：12 小时
+NODE_SEARCH_COMMAND = ".搜寻节点"            # 化神境虚空漫游指令（固定 12 小时冷却）
+TREASURE_REFINE_COMMAND = ".法宝 炼焰 虚天鼎"  # 虚天鼎炼焰（8h 一次，9/9 圆满停止）
 TREASURE_TOUCH_COMMAND = ".抚摸法宝 玄天斩灵剑"  # 抚摸法宝的具体指令
 WUJIU_TREASURE_TOUCH_COMMAND = ".抚摸法宝 风雷翅"
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600        # 抚摸法宝冷却：2 小时
@@ -535,9 +543,10 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.identity_sect_names = {
             "主魂": TIANXING_SECT_NAME,
             "无咎子": "天星宗",
-            "缘生子": "阴罗宗",
+            YINLUO_IDENTITY: "阴罗宗",
             "素缘子": "星宫",
         }
+        self.yinluo_identity = YINLUO_IDENTITY
         self.lingxiao_enabled = False
         self.enable_treasure_touch = True
         self.enable_small_world = True
@@ -548,6 +557,10 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.enable_soul_curse = True
         self.enable_sky_bottle = True
         self.enable_telegram_write_permission_monitor = False
+        # 化神境 .搜寻节点：主号主魂与 Waaiging 账号启用（sub/xiaohao 独立类不受影响）。
+        self.enable_node_search = True
+        # 虚天鼎炼焰（主号主魂专属法宝，9/9 圆满自动停止）。
+        self.enable_treasure_refine = True
 
         # ------ 5. 运行控制 ------
         self.is_running = True                     # 控制所有循环的运行状态
@@ -725,6 +738,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             "yuanying_out_end_time": "",                     # 元婴归窍截止时间
             "last_rift_search_time": "",                     # 上次探寻裂缝时间
             "next_rift_search_time": "",                     # 下次探寻裂缝时间
+            "last_node_search_time": "",                     # 上次搜寻节点时间（化神虚空漫游）
+            "next_node_search_time": "",                     # 下次搜寻节点时间
+            "last_treasure_refine_time": "",                 # 上次虚天鼎炼焰时间
+            "next_treasure_refine_time": "",                 # 下次虚天鼎炼焰时间
+            "treasure_refine_progress": 0,                   # 虚天鼎炼焰进度 N/9
+            "treasure_refine_complete": False,               # 炼焰 9/9 圆满后停止发送
             "last_treasure_touch_time": "",                  # 上次抚摸法宝时间
             "next_treasure_touch_time": "",                  # 下次抚摸法宝时间
             "last_small_world_time": "",
@@ -884,7 +903,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         except:
             pass
 
-    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False, skip_bot_activity_wait=False):
+    async def _send_and_wait_feedback_raw(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, suppress_no_response_alert=False, skip_bot_activity_wait=False, retry_on_timeout=None):
         """内部发送方法（不获取 avatar_send_lock，已被外部调用方持有）"""
         try:
             return await send_and_wait_feedback_common(
@@ -893,6 +912,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 delete_after=delete_after, return_msg_role="sent",
                 suppress_no_response_alert=suppress_no_response_alert,
                 skip_bot_activity_wait=skip_bot_activity_wait,
+                retry_on_timeout=retry_on_timeout,
             )
         except Exception as e:
             log.error(f"_send_and_wait_feedback_raw [{message[:40]}] crashed: {e}")
@@ -1152,6 +1172,22 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 "神迹", "布道", "神谕", "香火", "信仰", "愿力", "传道",
                 "凡间方才承受", "需再等待",
                 "冷却", "请在", "后再", "尚未开启", "境界不足", "无法施展",
+            ))
+        if command == NODE_SEARCH_COMMAND:
+            # .搜寻节点 回复：成功（神识离体/虚空漫游）、冷却（神识尚在恢复中）、
+            # 资源门槛（神识不足：虚空定位需 100 点神识，太一门引道/小世界淬炼补充）。
+            return any(k in text for k in (
+                "神识离体", "虚空乱流", "虚空漫游", "虚空尘埃",
+                "一无所获", "不虚此行", "进入了无尽",
+                "神识尚在恢复", "后再行搜寻", "冷却", "请在", "后再",
+                "神识不足", "定位需消耗", "在虚空中定位", "太一门引道",
+            ))
+        if command == TREASURE_REFINE_COMMAND:
+            # .法宝 炼焰 虚天鼎 回复：成功（虚天鼎·炼焰+进度）、冷却、资源门槛、圆满。
+            return any(k in text for k in (
+                "虚天鼎·炼焰", "炼焰中", "九转圆满", "圆满后",
+                "抽离鼎外", "乾蓝", "炼焰",
+                "修为不足", "神识不足", "冷却", "请在", "后再", "不足",
             ))
         if main_beast_feedback_candidate(command, text):
             return True
@@ -2858,31 +2894,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         return stale
 
     def create_scheduler_task(self, name, coro_factory):
-        """启动并登记后台循环，避免 asyncio task 静默退出后无人察觉。"""
-        task = asyncio.create_task(coro_factory(), name=name)
-        registry = getattr(self, "_scheduler_task_registry", None)
-        if not isinstance(registry, dict):
-            registry = {}
-            self._scheduler_task_registry = registry
-        registry[name] = task
-
-        def _on_done(done_task, task_name=name):
-            if not getattr(self, "is_running", True) or done_task.cancelled():
-                return
-            try:
-                exc = done_task.exception()
-            except asyncio.CancelledError:
-                return
-            if exc:
-                log.critical(
-                    f"Scheduler task [{task_name}] exited with exception: {exc}",
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
-            else:
-                log.critical(f"Scheduler task [{task_name}] exited unexpectedly without exception.")
-
-        task.add_done_callback(_on_done)
-        return task
+        return register_scheduler_task(self, name, coro_factory, logger=log)
 
     def dead_scheduler_tasks(self):
         dead = []
@@ -4392,6 +4404,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
     def on_avatar_dao_name_changed(self, old_name, new_name):
         global DESTINY_AVATAR
+        global YINLUO_IDENTITY
         for configured in (
             STAR_GAZING_ROTATING_AVATARS,
             FORMATION_ASSIST_AVATARS,
@@ -4402,6 +4415,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             STAR_ATTRACTION_AVATARS.add(new_name)
         if DESTINY_AVATAR == old_name:
             DESTINY_AVATAR = new_name
+        if YINLUO_IDENTITY == old_name:
+            YINLUO_IDENTITY = new_name
+            self.yinluo_identity = new_name
+            if self.identity_sect_names.get(old_name) == "阴罗宗":
+                self.identity_sect_names[new_name] = "阴罗宗"
+                self.identity_sect_names.pop(old_name, None)
 
     def _state_impending_command_wait(self, state, identity=""):
         """Return seconds until the next command-worthy timestamp for an identity, or -1."""
@@ -4529,11 +4548,15 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             return None
         force_identity_check = bool(kwargs.pop("force_identity_check", False))
         force_meditation_check = bool(kwargs.pop("force_meditation_check", False))
+        # 某些身份敏感链路（例如解咒委托）需要在每次重试前重新发送
+        # .切换确认，不能让公共层直接复用旧身份发送重试命令。
+        force_fresh_identity_confirm = bool(kwargs.pop("force_fresh_identity_confirm", False))
+        retry_on_timeout = kwargs.pop("retry_on_timeout", None)
         high_priority_identity_command = self.time_critical_identity_command(message)
         allow_unconfirmed_switch = str(message).startswith(".改换星移")
         # 观星结果窗口很窄，缓存身份可能已被手动操作改变；强制校验时
         # 即使缓存显示目标身份，也要重新发一次 .切换 以确认机器人当前操控对象。
-        force_fresh_identity_confirm = (
+        force_fresh_identity_confirm = force_fresh_identity_confirm or (
             force_identity_check
             and identity in getattr(self, "avatars", [])
             and str(message or "").strip() == ".观星"
@@ -4614,6 +4637,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                             max_retries=0 if high_priority_identity_command else 2,
                             suppress_no_response_alert=high_priority_identity_command,
                             skip_bot_activity_wait=True,
+                            retry_on_timeout=retry_on_timeout,
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         passively_confirmed = self.current_identity == identity and not force_fresh_identity_confirm
@@ -4658,7 +4682,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
                 if not should_yield:
                     resp = await self._send_and_wait_feedback_raw(
-                        message, timeout=timeout, max_retries=max_retries, skip_bot_activity_wait=True, **kwargs
+                        message,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                        skip_bot_activity_wait=True,
+                        retry_on_timeout=retry_on_timeout,
+                        **kwargs,
                     )
                     # 解析化身境界：仅在 current_identity 与目标一致时更新，防止污染
                     if resp and identity in self.avatars and self.current_identity == identity:
@@ -5333,6 +5362,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         # 元婴期能力循环（出窍+归窍）
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())
+        # 化神境 .搜寻节点：主号主魂 + Waaiging 主魂（其余账号未启用）。
+        if getattr(self, "enable_node_search", False):
+            self.create_scheduler_task("node_search", lambda: self.run_common_node_search_loop())
+        # 虚天鼎炼焰：主号主魂专属（8h CD，9/9 圆满自动停止）。
+        if getattr(self, "enable_treasure_refine", False):
+            self.create_scheduler_task("treasure_refine", lambda: self.run_common_treasure_refine_loop())
         # Tianji grinding is an independent shared skill; the loop discovers
         # all locally configured Tianxing identities after sect membership is ready.
         self.create_scheduler_task(
@@ -6496,7 +6531,9 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                     return True
 
                 send_dt, immediate_shift, gazing_date = self.star_gazing_schedule_plan(now, manifest_dt)
-                immediate_shift = True
+                # 同 xiaohao 6384：去除回归的 immediate_shift = True。
+                if now <= manifest_dt - timedelta(minutes=1):
+                    immediate_shift = False
 
                 async with self.star_gazing_lock:
                     self.clear_stale_star_gazing_claim_before_manifest(
@@ -6703,7 +6740,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             if pending_gazing_send and pending_manifest and pending_avatar:
                 pending_gazing_date = pending_gazing_date or send_dt.strftime("%Y-%m-%d")
                 preferred_send_dt = manifest_dt - timedelta(
-                    seconds=max(60, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
+                    seconds=max(10, int(STAR_GAZING_COMMAND_LEAD_SECONDS))
                 ) if manifest_dt else None
                 if preferred_send_dt and preferred_send_dt > datetime.now() and send_dt != preferred_send_dt:
                     send_dt = preferred_send_dt
@@ -7464,5 +7501,3 @@ if __name__ == '__main__':
     except Exception as e:
         import traceback
         traceback.print_exc()
-
-

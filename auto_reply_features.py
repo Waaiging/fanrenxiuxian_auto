@@ -41,7 +41,7 @@ from log_utils import (
 # =====================================================================
 # 常量定义
 # =====================================================================
-EXCHANGE_MAIN_COMMAND = ".交换 功法"
+EXCHANGE_MAIN_COMMAND = ".交换 法宝"
 EXCHANGE_AVATAR_COMMAND = ".交换 法宝"
 CONCUBINE_PLACE_COMMAND = ".安置侍妾"
 CONCUBINE_RECALL_COMMAND = ".召回侍妾"
@@ -138,7 +138,7 @@ def _mentions_self(actor, msg, text):
 
 
 def exchange_command_for_identity(identity):
-    """三主魂换功法，所有化身换法宝。"""
+    """南陇侯交换统一回复 .交换 法宝（2026-09-07 用户指定，主魂化身一致）。"""
     return EXCHANGE_MAIN_COMMAND if (identity or "主魂") == "主魂" else EXCHANGE_AVATAR_COMMAND
 
 
@@ -1017,12 +1017,11 @@ async def maybe_auto_reply_merchant(actor, event, text=None, sender=None):
 
 async def maybe_auto_reply_exchange(actor, event, text=None, sender=None):
     """
-    交换功法/法宝的自动回复处理。
+    交换法宝的自动回复处理。
 
     触发条件：游戏机器人消息中包含".交换"关键词且提到了本账号。
     行为：按执行身份发送相应指令。
-      - 三个主魂：回复 ".交换 功法"
-      - 九个分身：回复 ".交换 法宝"
+      - 所有身份（主魂+化身）统一回复 ".交换 法宝"（2026-09-07 用户指定）
 
     通过 seen_ids 去重，避免对同一条消息重复回复。
     seen_ids 最多保留 300 条，超出时裁剪到最近 150 条。

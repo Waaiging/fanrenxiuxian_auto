@@ -322,6 +322,59 @@ class SoulCurseFlowTests(unittest.TestCase):
         self.assertEqual(assist["strip_commission_id"], "31")
         self.assertEqual(actor.state["soul_curse"]["commission_status"], "completed")
 
+    def test_identity_retry_reconfirms_avatar_after_timeout_and_manual_switch(self):
+        """A timeout must not reuse the stale identity for the retry send."""
+        class RetryActor(DummySoulCurseActor):
+            def __init__(self):
+                super().__init__("main")
+                self.current_identity = "缘生子"
+                self.identity_calls = []
+
+            async def send_and_wait_feedback_identity(self, identity, command, **kwargs):
+                self.identity_calls.append((identity, command, dict(kwargs)))
+                if len(self.identity_calls) == 1:
+                    # Simulate a manual .切换 主魂 while the first command is
+                    # waiting for a response.
+                    self.current_identity = "主魂"
+                    return ""
+                return "**【咒契协定已成】** 阴罗宗弟子已接取委托。"
+
+        actor = RetryActor()
+
+        async def fast_sleep(_seconds):
+            return None
+
+        with patch.object(soul_curse_features.asyncio, "sleep", new=fast_sleep):
+            response = asyncio.run(
+                actor.soul_curse_send_identity("缘生子", ".接取解咒委托 77")
+            )
+
+        self.assertIn("咒契协定已成", response)
+        self.assertGreaterEqual(len(actor.identity_calls), 2)
+        first = actor.identity_calls[0][2]
+        second = actor.identity_calls[1][2]
+        self.assertFalse(first["force_fresh_identity_confirm"])
+        self.assertTrue(second["force_fresh_identity_confirm"])
+        self.assertFalse(first["retry_on_timeout"])
+        self.assertFalse(second["retry_on_timeout"])
+
+    def test_identity_mismatch_is_transient_not_permanent_block(self):
+        actor = DummySoulCurseActor("main")
+        result = actor.record_soul_curse_accept_response(
+            "缘生子",
+            "78",
+            "只有阴罗宗弟子熟悉此类魂咒，可接取解咒委托。",
+            {
+                "owner_account": "waaiging",
+                "target_username": "@Waaiging",
+                "assistant_identity": "缘生子",
+            },
+        )
+        self.assertEqual(result, "identity_mismatch")
+        state = actor.get_soul_curse_assist_state("缘生子", "waaiging")
+        self.assertEqual(state["status"], "accept_identity_mismatch")
+        self.assertTrue(state["next_action_at"])
+
     def test_xiaohao_publish_writes_shared_commission_for_sub(self):
         actor = DummySoulCurseActor(
             "xiaohao",

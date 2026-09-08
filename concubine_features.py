@@ -75,6 +75,7 @@ DEFAULT_CONCUBINE_NAMES = {
         "厚土": {"霓裳"},
         "玄续玄": {"元瑶"},
         "寻真子": {"若兰"},
+        "寒续尘": {"若兰"},
     },
     "xiaohao": {
         "主魂": {"洛神"},
@@ -85,7 +86,7 @@ DEFAULT_CONCUBINE_NAMES = {
 }
 STAR_CONCUBINE_VOYAGE_IDENTITIES = {
     "main": {"素缘子"},
-    "sub": {"厚土", "玄续玄", "寻真子"},
+    "sub": {"厚土", "玄续玄", "寻真子", "寒续尘"},
     "xiaohao": {"素心子", "缘生子"},
 }
 
@@ -1454,6 +1455,7 @@ class ConcubineMixin:
                     last_concubine_voyage_error_time="",
                 )
                 log.info(f"Concubine voyage [{identity}]: return settled.")
+                self._bump_voyage_return_counter(identity)
                 return True
 
         if command.startswith(".侍妾远航") or "侍妾远航" in clean or "远航" in clean:
@@ -1599,6 +1601,102 @@ class ConcubineMixin:
             return False
         await asyncio.sleep(3)
         return True
+
+    # ---- 坠魔心劫（每两轮远航归来插入，仅主号主魂） ----
+
+    FALLING_DEMON_TRIAL_COMMAND = ".坠魔心劫"
+    # 坠魔心劫触发周期：固定 12 小时（语义 = 每两次 6h 远航归来发一次）。
+    # 不依赖 concubine_voyage_return_count 计数器——后者来自异步游戏响应，
+    # 链路 bugs 会让计数偏离真实远航次数。直接用 last_falling_demon_trial_time 计时。
+    FALLING_DEMON_TRIAL_INTERVAL_SECONDS = 12 * 3600
+
+    def _bump_voyage_return_counter(self, identity="主魂"):
+        """远航归来结算成功后递增持久化计数器（所有身份通用记录，仅作统计展示用）。"""
+        state = self._concubine_state_container(identity or "主魂")
+        try:
+            count = int(state.get("concubine_voyage_return_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        state["concubine_voyage_return_count"] = count + 1
+        self.save_state()
+
+    def _falling_demon_trial_due(self, identity="主魂"):
+        """距上次成功承劫 >= 12h 时触发 .坠魔心劫（仅主号主魂）。
+
+        侍妾必须已归来（不在远航中），否则游戏会拒绝承劫。
+        """
+        identity = identity or "主魂"
+        if str(getattr(self, "account_key", "") or "") != "main":
+            return False
+        state = self._concubine_state_container(identity)
+        if state.get("concubine_voyage_active"):
+            return False
+        # 短窗口锁：异常退避尚未解除（1800s/3600s 等短期 backoff），等到期再触发。
+        next_time = str(state.get("next_falling_demon_trial_time") or "")
+        if next_time and is_future(next_time):
+            return False
+        # 距上次成功 >= 12h 才算 due。
+        last_time = str(state.get("last_falling_demon_trial_time") or "").strip()
+        if not last_time:
+            # 从未成功过：立即补一次。
+            return True
+        # 直接计算已流逝秒数；解析失败（返回 None）按"已过期"对待，立即触发。
+        last_dt = str_to_dt(last_time)
+        if last_dt is None:
+            return True
+        elapsed_sec = (datetime.now() - last_dt).total_seconds()
+        return elapsed_sec >= self.FALLING_DEMON_TRIAL_INTERVAL_SECONDS
+
+    async def execute_falling_demon_trial(self, identity="主魂"):
+        """发送 .坠魔心劫 并记录结果（单发即时结算指令）。"""
+        identity = identity or "主魂"
+        state = self._concubine_state_container(identity)
+        if self._concubine_command_paused(self.FALLING_DEMON_TRIAL_COMMAND, identity):
+            return False
+        log.info(f"Concubine chain [{identity}]: sending {self.FALLING_DEMON_TRIAL_COMMAND} (every 2 voyage returns).")
+        _, text, _ = await self._send_concubine_identity_command(
+            identity,
+            self.FALLING_DEMON_TRIAL_COMMAND,
+            timeout=90,
+            max_retries=0,
+            delete_after=False,
+        )
+        clean = str(text or "").replace("**", "")
+        now = now_str()
+        if not clean:
+            # 无回执：短退避，不阻塞链路。
+            state["next_falling_demon_trial_time"] = add_seconds_str(now, 1800)
+            self.save_state()
+            return False
+        if "正在远航" in clean or "无法替你承接" in clean or "暂无法" in clean:
+            # 侍妾在远航（state 与游戏不一致）：30 分钟后重试。
+            state["next_falling_demon_trial_time"] = add_seconds_str(now, 1800)
+            self.save_state()
+            log.info(f"Concubine [{identity}]: falling demon trial blocked (voyage active); retry in 30min.")
+            return False
+        if any(k in clean for k in ["冷却", "后再", "尚需"]):
+            cd = parse_duration_seconds(clean)
+            state["next_falling_demon_trial_time"] = add_seconds_str(
+                now, (cd + CONCUBINE_GRACE_SECONDS) if cd > 0 else 1800
+            )
+            self.save_state()
+            return True
+        if "坠魔心劫" in clean and any(k in clean for k in ["承劫", "护持", "已成", "残痕", "增益"]):
+            # 成功结算：增益已存入，写入冷却窗口（与触发周期一致 = 12h）。
+            state["next_falling_demon_trial_time"] = add_seconds_str(now, self.FALLING_DEMON_TRIAL_INTERVAL_SECONDS)
+            state["last_falling_demon_trial_time"] = now
+            self.save_state()
+            log.info(f"Concubine [{identity}]: falling demon trial settled.")
+            return True
+        if any(k in clean for k in ["没有侍妾", "尚无侍妾", "没有可承劫"]):
+            state["next_falling_demon_trial_time"] = add_seconds_str(now, 24 * 3600)
+            self.save_state()
+            return True
+        # 未识别回执：退避并通知。
+        state["next_falling_demon_trial_time"] = add_seconds_str(now, 3600)
+        self.save_state()
+        notify_unrecognized_response(self, self.FALLING_DEMON_TRIAL_COMMAND, clean, log, f"坠魔心劫[{identity}]")
+        return False
 
     async def execute_concubine_voyage_start(self, identity="主魂", send_with_cultivation_check=None):
         """Start the configured voyage route at the end of the bound concubine chain."""
@@ -1812,6 +1910,9 @@ class ConcubineMixin:
             # 不能因此阻塞已经完成 6 小时冷却的主魂远航结算。
             if not await self.execute_concubine_voyage_return("主魂"):
                 return True
+            # 坠魔心劫：主号主魂每两轮远航归来插入一次（下一轮远航启动前）。
+            if self._falling_demon_trial_due("主魂"):
+                await self.execute_falling_demon_trial("主魂")
             if self.target_concubine_enabled("主魂") and not self.target_concubine_found("主魂"):
                 await self.execute_target_concubine_search("主魂")
                 if not self.target_concubine_found("主魂"):

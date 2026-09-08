@@ -19,7 +19,11 @@ from miniapp_dwelling import (
     normalize_pinned_entry_url,
     pinned_entry_url_candidates,
 )
-from miniapp_command_routing import MiniAppCommandRouter
+from miniapp_command_routing import (
+    MiniAppCommandRouter,
+    _claim_star_palace_attempt,
+    _finish_star_palace_attempt,
+)
 from dashboard_server import apply_command_execution_channels
 from restricted_miniapp_worker import RestrictedMiniAppWorker, _periodic_wait_seconds
 
@@ -2371,6 +2375,50 @@ class MiniAppDwellingTests(unittest.TestCase):
         transport.identity_player_ids = {"主魂": 100}
         with self.assertRaises(MiniAppBeastError):
             transport.player_id("不存在")
+
+    def test_star_palace_failure_releases_round_to_next_identity(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["素缘子"],
+            identity_sect_names={"素缘子": "星宫"},
+            is_running=False,
+            save_state=lambda: None,
+        )
+        router = MiniAppCommandRouter(actor, "main", start_background_tasks=False)
+        router.transport.identity_player_ids = {"素缘子": -103}
+        router.transport.star_palace_action = AsyncMock(
+            side_effect=MiniAppBeastError("star_palace_failed", 900)
+        )
+        router.transport.details = AsyncMock(return_value={})
+        manifest_dt = datetime.now() + timedelta(seconds=120)
+        manifest_key = manifest_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        self.assertTrue(_claim_star_palace_attempt("main", "素缘子", manifest_key))
+        self.assertFalse(asyncio.run(router.run_star_palace_cycle("素缘子", manifest_dt, "@Weeguu")))
+        _finish_star_palace_attempt("main", "素缘子", manifest_key, False)
+
+        self.assertTrue(_claim_star_palace_attempt("sub", "厚土", manifest_key))
+        self.assertFalse(_claim_star_palace_attempt("main", "素缘子", manifest_key))
+
+    def test_star_palace_waits_for_confirmed_good_keyword(self):
+        actor = SimpleNamespace(
+            client=object(),
+            config={"miniapp_beast": {"entry_url": ENTRY}},
+            state={},
+            avatars=["素缘子"],
+            identity_sect_names={"素缘子": "星宫"},
+            is_running=False,
+            save_state=lambda: None,
+        )
+        router = MiniAppCommandRouter(actor, "main", start_background_tasks=False)
+        router.transport.identity_player_ids = {"素缘子": -103}
+        router.transport.star_palace_action = AsyncMock()
+        manifest_dt = datetime.now() + timedelta(seconds=180)
+
+        self.assertFalse(asyncio.run(router._wait_for_confirmed_star_palace_good("素缘子", manifest_dt)))
+        router.transport.star_palace_action.assert_not_awaited()
 
 
 if __name__ == "__main__":

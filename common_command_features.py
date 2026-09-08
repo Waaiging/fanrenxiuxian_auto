@@ -60,6 +60,10 @@ from command_modules import (
     ask_dao_plan,
     ASK_DAO_COMMAND,
     field_training_plan_from_features,
+    NODE_SEARCH_COMMAND,
+    node_search_plan,
+    TREASURE_REFINE_COMMAND,
+    treasure_refine_plan,
     nurture_spirit_plan,
     rift_search_plan,
     treasure_touch_plan,
@@ -111,6 +115,7 @@ SECOND_SOUL_TRAIN_COMMAND = ".元神修炼"        # 第二元神修炼指令
 SECOND_SOUL_STATUS_COMMAND = ".第二元神"       # 第二元神状态查询（解析剩余冷却）
 SECOND_SOUL_INTERVAL_SECONDS = 24 * 3600       # 第二元神修炼间隔 24 小时
 SECOND_SOUL_COOLDOWN_BUFFER_SECONDS = 300      # 解析出剩余冷却后额外留 5 分钟缓冲
+SECOND_SOUL_RECHECK_SECONDS = 300              # 状态回复无时间格式时，5 分钟后重查
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
 FIELD_TRAINING_CD_SECONDS = 2 * 3600           # 野外历练冷却 2 小时
 FIELD_TRAINING_MISSING_RESPONSE_RETRY_SECONDS = 5 * 60  # 空回复短退避，避免 dashboard 长时间显示 0 秒到期
@@ -121,6 +126,10 @@ YUANYING_OUT_CD_SECONDS = 8 * 3600
 TREASURE_TOUCH_CD_SECONDS = 2 * 3600
 ASK_DAO_CD_SECONDS = 12 * 3600
 ASK_DAO_RETRY_SECONDS = 10 * 60
+# 化神境 .搜寻节点 固定冷却：12 小时（+5 分钟缓冲，游戏冷却从结算时刻起算）。
+NODE_SEARCH_CD_SECONDS = 12 * 3600 + 300
+# 虚天鼎炼焰冷却：8 小时（+5 分钟缓冲）。炼焰 9/9 圆满后停止发送。
+TREASURE_REFINE_CD_SECONDS = 8 * 3600 + 300
 SECT_SKILL_MAX_DAILY = 3
 MEDITATION_SETTLEMENT_GRACE_SECONDS = 3 * 60      # 闭关到点后给机器人结算状态留 3 分钟余量
 SECT_WAR_STATUS_COMMAND = ".宗门战况"           # 查询宗门战况
@@ -694,6 +703,13 @@ class CommonCommandMixin:
         handler = getattr(self, "on_avatar_dao_name_changed", None)
         if callable(handler):
             handler(old_name, dao_name)
+        # Publish the authoritative account snapshot before updating the shared
+        # duel roster, which other processes reconcile against this snapshot.
+        if persist:
+            try:
+                self.save_state()
+            except Exception:
+                self.common_command_logger().warning("Failed to persist refreshed avatar Dao name.", exc_info=True)
         account_key = str(getattr(self, "account_key", "") or "").strip()
         if account_key:
             try:
@@ -710,11 +726,6 @@ class CommonCommandMixin:
             old_name,
             dao_name,
         )
-        if persist:
-            try:
-                self.save_state()
-            except Exception:
-                self.common_command_logger().warning("Failed to persist refreshed avatar Dao name.", exc_info=True)
         return dao_name
 
     def restore_avatar_dao_names(self):
@@ -3545,13 +3556,20 @@ class CommonCommandMixin:
                 )
                 remaining = second_soul_cooldown_seconds(check_response)
                 if remaining is None:
-                    remaining = interval_seconds
+                    # 状态回复未含时间格式（回复缺失/被截断/格式漂移）——
+                    # 不要 fallback 到整个间隔，5 分钟后重新查询。
                     log.info(
-                        "Second soul cooldown not parsed; falling back to %ss.",
-                        interval_seconds,
+                        "Second soul status had no parseable cooldown; "
+                        "retrying .第二元神 in %ss.",
+                        SECOND_SOUL_RECHECK_SECONDS,
                     )
-                else:
-                    remaining += SECOND_SOUL_COOLDOWN_BUFFER_SECONDS
+                    self.state["next_second_soul_time"] = (
+                        datetime.now() + timedelta(seconds=SECOND_SOUL_RECHECK_SECONDS)
+                    ).strftime(TIME_FORMAT)
+                    self.save_state()
+                    await asyncio.sleep(5)
+                    continue
+                remaining += SECOND_SOUL_COOLDOWN_BUFFER_SECONDS
                 next_dt = datetime.now() + timedelta(seconds=remaining)
             else:
                 next_dt = datetime.now() + timedelta(seconds=interval_seconds)
@@ -3563,6 +3581,33 @@ class CommonCommandMixin:
                 next_dt.strftime(TIME_FORMAT),
             )
             await asyncio.sleep(5)
+
+    def record_second_soul_manual_status(self, text, identity="主魂"):
+        """同步手动 `.第二元神` 查询结果到排期（无时间格式不动 state）。
+
+        手动查询返回剩余冷却时，把 next_second_soul_time 对齐到真实
+        冷却结束时刻（+缓冲），避免脚本按旧排期盲发 `.元神修炼`。
+        回复无时间格式时返回 False，不修改 state。
+        """
+        try:
+            remaining = second_soul_cooldown_seconds(text)
+        except Exception:
+            return False
+        if remaining is None:
+            return False
+        remaining += SECOND_SOUL_COOLDOWN_BUFFER_SECONDS
+        next_dt = datetime.now() + timedelta(seconds=remaining)
+        old = str(self.state.get("next_second_soul_time") or "")
+        new = next_dt.strftime(TIME_FORMAT)
+        if old == new:
+            return False
+        self.state["next_second_soul_time"] = new
+        self.save_state()
+        self.common_command_logger().info(
+            "Second soul schedule synced from manual .第二元神 for %s: next at %s (was %s).",
+            identity, new, old or "(none)",
+        )
+        return True
 
     async def run_custom_command_loop(self):
         """Dashboard 自定义指令调度循环。"""
@@ -3692,13 +3737,7 @@ class CommonCommandMixin:
             if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
                 return await self.send_and_wait_feedback_identity(identity, plan.command, **kwargs)
             return await self.send_and_wait_feedback(plan.command, **kwargs)
-        try:
-            wind_internal = int(getattr(self, "_wind_thunder_internal_depth", 0) or 0)
-        except (TypeError, ValueError):
-            wind_internal = 0
-        if wind_internal <= 0:
-            return await wind_thunder_send(self, identity, plan.command, send_once)
-        return await send_once()
+        return await wind_thunder_send(self, identity, plan.command, send_once)
 
     def allow_retired_auto_command(self, command):
         """Only revive Tianxing exploration commands inside the rift prefix chain."""
@@ -4030,6 +4069,18 @@ class CommonCommandMixin:
             log.warning(f"{prefix}{command}: response missing; retry scheduled at {state[next_key]}.")
             return False
 
+        if command == NODE_SEARCH_COMMAND and any(
+            k in resp for k in ("神识不足", "定位需消耗", "在虚空中定位")
+        ):
+            # 资源门槛失败：神识不足（虚空定位需 100 点神识，经太一门引道/小世界淬炼补充）。
+            # 非冷却也非成功——按 1 小时退避重试，避免落入 unrecognized 的 10 分钟空转刷屏。
+            state[next_key] = add_seconds_str(now_str(), 3600)
+            self.save_state()
+            log.warning(
+                f"{prefix}{command}: 神识不足（需太一门引道/小世界淬炼补充），1 小时后重试。"
+            )
+            return False
+
         success_with_actual_cd = command == ".探寻裂缝" and self.is_rift_success_response(resp)
         cd = self.parse_wait_time(resp)
         if cd > 0 and any(k in resp for k in ["冷却", "后再", "尚未", "剩余", "请在"]) and not success_with_actual_cd:
@@ -4055,6 +4106,12 @@ class CommonCommandMixin:
             "成功", "探寻", "裂缝", "收获", "空间", "发现",
             "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃",
         ]
+        if command == NODE_SEARCH_COMMAND:
+            # .搜寻节点 成功响应：神识离体/虚空漫游/虚空尘埃等（日志实测格式）。
+            success_keywords = success_keywords + [
+                "神识离体", "虚空乱流", "虚空漫游", "虚空尘埃",
+                "一无所获", "不虚此行", "进入了无尽",
+            ]
         if not any(k in resp for k in success_keywords):
             state[next_key] = add_seconds_str(now, 600)
             self.save_state()
@@ -4444,6 +4501,127 @@ class CommonCommandMixin:
             self.save_state()
             wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
             await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+
+    async def run_common_node_search_loop(self, sleep_func=None):
+        """Run the shared main-soul .搜寻节点 12h fixed-cooldown loop (Huashen void wandering)."""
+        await self.startup_done.wait()
+        plan = node_search_plan("主魂")
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            if self.dashboard_command_paused(NODE_SEARCH_COMMAND, "主魂"):
+                await self.wait_for_dashboard_command_control_change(300)
+                continue
+            if not getattr(self, "enable_node_search", True):
+                await asyncio.sleep(600)
+                continue
+
+            await self._wait_for_main_identity()
+            next_time = self.state.get(plan.next_key, "")
+            if next_time and is_future(next_time):
+                wait_time = seconds_until(next_time)
+                log.info(f"Node search loop complete. Sleep {int(min(wait_time, 600))}s.")
+                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+                continue
+
+            log.info(f"Node search due: sending {plan.command}.")
+            resp = await self.send_timed_command_plan(plan, "主魂")
+            self.record_identity_fixed_cd_command_response(
+                "主魂",
+                self.timed_command_response_text(resp),
+                plan.command,
+                plan.last_key,
+                plan.next_key,
+                NODE_SEARCH_CD_SECONDS,
+            )
+            wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
+            await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+
+    def treasure_refine_progress(self, resp):
+        """Parse '炼焰 `N/9`' progress from a Xutian Ding refine response. -1 = not found."""
+        match = re.search(r"炼焰\s*`?(\d+)\s*/\s*9`?", str(resp or "").replace("**", ""))
+        return int(match.group(1)) if match else -1
+
+    async def run_common_treasure_refine_loop(self, sleep_func=None):
+        """Run the main-soul .法宝 炼焰 虚天鼎 loop: 8h CD, stop at 9/9.
+
+        响应解析（2026-09-07 日志实测格式）：
+        - 成功: 【虚天鼎·炼焰】…炼焰 `N/9` | 通宝 `0/6`…本次消耗：修为 `180000` / 神识 `240`
+        - 冷却: 含「冷却/请在/后再」+ 可解析等待时间
+        - 资源门槛: 修为/神识不足 → 1 小时退避
+        - 圆满: N/9 == 9 → 置 treasure_refine_complete=True，循环自动停止发送
+        """
+        await self.startup_done.wait()
+        plan = treasure_refine_plan()
+        log = self.common_command_logger()
+        while getattr(self, "is_running", True):
+            if self.dashboard_command_paused(TREASURE_REFINE_COMMAND, "主魂"):
+                await self.wait_for_dashboard_command_control_change(300)
+                continue
+            if not getattr(self, "enable_treasure_refine", False):
+                await asyncio.sleep(600)
+                continue
+
+            await self._wait_for_main_identity()
+            if self.state.get("treasure_refine_complete"):
+                log.info("Treasure refine complete (9/9); loop sleeping permanently.")
+                await asyncio.sleep(3600)
+                continue
+
+            next_time = self.state.get(plan.next_key, "")
+            if next_time and is_future(next_time):
+                wait_time = seconds_until(next_time)
+                log.info(f"Treasure refine loop complete. Sleep {int(min(wait_time, 600))}s.")
+                await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+                continue
+
+            log.info(f"Treasure refine due: sending {plan.command}.")
+            resp = await self.send_timed_command_plan(plan, "主魂")
+            resp_text = self.timed_command_response_text(resp)
+            self.record_treasure_refine_response(resp_text, plan)
+            wait_time = seconds_until(self.state.get(plan.next_key, "")) or 600
+            await asyncio.sleep(self.common_scheduler_sleep_seconds(wait_time, sleep_func=sleep_func))
+
+    def record_treasure_refine_response(self, resp, plan):
+        """Persist refine progress and schedule the next attempt."""
+        log = self.common_command_logger()
+        now = now_str()
+        if not resp:
+            self.state[plan.next_key] = add_seconds_str(now, 600)
+            self.save_state()
+            log.warning(f"{plan.command}: response missing; retry scheduled at {self.state[plan.next_key]}.")
+            return
+        clean = str(resp).replace("**", "")
+        progress = self.treasure_refine_progress(clean)
+        if progress >= 9:
+            self.state["treasure_refine_complete"] = True
+            self.state["treasure_refine_progress"] = progress
+            self.state[plan.last_key] = now
+            self.state[plan.next_key] = ""
+            self.save_state()
+            log.info(f"{plan.command}: 炼焰 {progress}/9 圆满，停止发送。")
+            return
+        if progress >= 0:
+            self.state["treasure_refine_progress"] = progress
+            self.state[plan.last_key] = now
+            self.state[plan.next_key] = add_seconds_str(now, TREASURE_REFINE_CD_SECONDS)
+            self.save_state()
+            log.info(f"{plan.command}: 炼焰 {progress}/9 记录成功，下次 {self.state[plan.next_key]}。")
+            return
+        cd = self.parse_wait_time(resp)
+        if cd > 0 and any(k in clean for k in ["冷却", "后再", "尚未", "剩余", "请在"]):
+            self.state[plan.next_key] = add_seconds_str(now, cd)
+            self.save_state()
+            log.info(f"{plan.command}: cooldown from response {cd}s, next at {self.state[plan.next_key]}.")
+            return
+        if any(k in clean for k in ["不足", "无法", "缺少"]):
+            self.state[plan.next_key] = add_seconds_str(now, 3600)
+            self.save_state()
+            log.warning(f"{plan.command}: 资源不足（修为/神识），1 小时后重试。")
+            return
+        self.state[plan.next_key] = add_seconds_str(now, 600)
+        self.save_state()
+        notify_unrecognized_response(self, plan.command, resp, log, "法宝炼焰")
+        log.warning(f"{plan.command}: unrecognized response; retry scheduled at {self.state[plan.next_key]}.")
 
     def main_level_has_yuanying(self, level):
         return any(k in str(level or "") for k in ["元婴", "化神", "合体", "大乘", "渡劫", "仙"])
@@ -6244,7 +6422,7 @@ class CommonCommandMixin:
 
     def common_star_gazing_schedule_plan(self, now, manifest_dt, command_lead_seconds=60):
         """Return (.观星 send time, immediate_shift flag, consumed gazing date)."""
-        min_lead_seconds = 60
+        min_lead_seconds = 10
         lead_seconds = max(min_lead_seconds, int(command_lead_seconds))
         latest_send_dt = manifest_dt - timedelta(seconds=min_lead_seconds)
         send_dt = manifest_dt - timedelta(seconds=lead_seconds)

@@ -41,6 +41,10 @@ from log_utils import (
     send_text_alert,              # 异常报警发送
     force_command_guard_block,     # 响应异常时强制暂停当前指令
 )
+from automation_settings import (
+    SUB_YINLUO_IDENTITY,
+    canonical_automation_identity,
+)
 
 # 统一无响应策略：每条自动指令最多等待 1 分钟，随后只重试 1 次。
 # 这里集中执行，覆盖各业务计划中遗留的 max_retries=0/2 配置。
@@ -82,10 +86,10 @@ RETIRED_AUTO_COMMANDS_BY_ACCOUNT_IDENTITY = {
         ".安置侍妾",
         ".我的侍妾",
     ),
-    ("sub", "玄续玄"): (
+    ("sub", SUB_YINLUO_IDENTITY): (
         ".强行出关",
     ),
-    ("sub", "寻真子"): (
+    ("sub", canonical_automation_identity("sub", "寻真子")): (
         ".启阵",
         ".观星",
         ".改换星移",
@@ -408,6 +412,7 @@ async def send_and_wait_feedback_common(
     return_msg_role="sent",
     suppress_no_response_alert=False,
     skip_bot_activity_wait=False,
+    retry_on_timeout=None,
 ):
     """
     发送指令并等待机器人回复的核心函数。
@@ -424,6 +429,9 @@ async def send_and_wait_feedback_common(
         return_response_msg: 是否返回响应消息对象
         return_msg_role: "sent"=返回发送的消息 / "response"=返回机器人的回复
         suppress_no_response_alert: 超时时是否抑制"无响应"警报
+        retry_on_timeout: 是否启用核心层的隐式超时重试。默认 None 保持
+            全局统一策略；显式 False 由调用方自行处理重试（身份敏感
+            指令需要先重新确认当前身份）。
 
     返回值：
         取决于 return_* 参数：
@@ -452,9 +460,17 @@ async def send_and_wait_feedback_common(
     async with actor.cmd_lock:
         _func_start = time.monotonic()
         logger.info(f"[DEBUG-FEEDBACK] ENTER send_and_wait_feedback, cmd={message!r}, identity={getattr(actor, 'current_identity', '?')}")
-        # 统一覆盖调用方的旧参数：无响应只允许一次重试，避免有的指令不重试、
-        # 有的指令连续重试多次，行为不一致。
-        max_retries = NO_RESPONSE_RETRY_COUNT
+        # 默认沿用全局统一策略；身份敏感链路可以显式关闭核心层重试，
+        # 由外层在每次重试前重新对齐身份，避免把同一条指令发到错误身份。
+        if retry_on_timeout is False:
+            max_retries = 0
+        elif retry_on_timeout is True:
+            try:
+                max_retries = max(0, int(max_retries))
+            except (TypeError, ValueError):
+                max_retries = NO_RESPONSE_RETRY_COUNT
+        else:
+            max_retries = NO_RESPONSE_RETRY_COUNT
         timeout = NO_RESPONSE_TIMEOUT_SECONDS
         retries = 0
         resp_text = ""
@@ -503,7 +519,6 @@ async def send_and_wait_feedback_common(
                 sent_msg = await actor.client.send_message(target_chat, message, reply_to=target_reply)
                 if not sent_msg:
                     break
-                await record_telegram_send_success(actor, logger=logger)
                 sent_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 remember_script_sent_message(actor, sent_msg)
                 if delete_after:
@@ -561,6 +576,12 @@ async def send_and_wait_feedback_common(
             actor.feedback_identities = getattr(actor, "feedback_identities", {})
             actor.feedback_identities[msg_id] = _identity or "主魂"
             try:
+                # Register the waiter before yielding to recovery alerts; a fast
+                # bot reply can arrive while the private notification is sent.
+                try:
+                    await record_telegram_send_success(actor, logger=logger)
+                except Exception:
+                    logger.warning("Failed to record Telegram send recovery", exc_info=True)
                 # 等待机器人回复；统一 60 秒无响应后重试一次
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] waiting for response (timeout={timeout}s)...")
                 await asyncio.wait_for(evt.wait(), timeout=timeout)

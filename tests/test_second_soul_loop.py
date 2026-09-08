@@ -16,6 +16,7 @@ import common_command_features
 from common_command_features import (
     SECOND_SOUL_COOLDOWN_BUFFER_SECONDS,
     SECOND_SOUL_INTERVAL_SECONDS,
+    SECOND_SOUL_RECHECK_SECONDS,
     SECOND_SOUL_STATUS_COMMAND,
     SECOND_SOUL_TRAIN_COMMAND,
     TIME_FORMAT,
@@ -93,12 +94,12 @@ class SecondSoulLoopTests(unittest.TestCase):
         )
         self.assertTrue(actor.save_calls)
 
-    def test_busy_reply_with_unparsable_status_falls_back_to_interval(self):
+    def test_busy_reply_with_unparsable_status_schedules_short_recheck(self):
         actor = _StubActor([BUSY_REPLY, "查询失败，请稍后再试。"])
         self._run(actor)
 
         self.assertEqual(actor.sent, [SECOND_SOUL_TRAIN_COMMAND, SECOND_SOUL_STATUS_COMMAND])
-        self._assert_next_within(actor, SECOND_SOUL_INTERVAL_SECONDS)
+        self._assert_next_within(actor, SECOND_SOUL_RECHECK_SECONDS)
 
     def test_successful_training_skips_status_query(self):
         actor = _StubActor([SUCCESS_REPLY])
