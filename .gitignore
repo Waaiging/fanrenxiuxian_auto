@@ -34,6 +34,8 @@ red_packet_status_*.json
 red_packet_claim_coordination.json
 red_packet_claim_coordination.lock
 automation_settings.json
+xuangu_quiz_state.json
+xuangu_quiz_state.json.lock
 _remote_automation_settings.json
 miniapp_fishing_global.json
 miniapp_fishing_global.json.lock

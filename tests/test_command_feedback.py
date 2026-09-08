@@ -73,6 +73,60 @@ class FeedbackRegistrationTests(unittest.IsolatedAsyncioTestCase):
             await self._send()
         self._assert_cleaned()
 
+    async def test_event_command_returns_sent_message_without_generic_retry_waiter(self):
+        allowed, on_sent = MagicMock(return_value=True), MagicMock()
+        recovery = AsyncMock()
+        self._patch("record_telegram_send_success", recovery)
+        with feedback.guarded_one_shot_send(".作答 A", allowed, on_sent):
+            result = await feedback.send_and_wait_feedback_common(
+                self.actor, MagicMock(), ".作答 A", delete_after=False,
+            )
+        self.assertIs(result, self.sent)
+        allowed.assert_called_once_with(self.actor, ".作答 A")
+        on_sent.assert_called_once_with(self.actor, ".作答 A", self.sent)
+        recovery.assert_awaited_once()
+        self.actor.client.send_message.assert_awaited_once()
+        self.assertEqual(self.actor.feedback_events, {})
+
+    async def test_non_answer_inside_event_context_still_waits_for_feedback(self):
+        allowed, on_sent = MagicMock(return_value=True), MagicMock()
+        async def notify(*args, **kwargs):
+            self._reply()
+        self._patch("record_telegram_send_success", notify)
+        with feedback.guarded_one_shot_send(".作答 A", allowed, on_sent):
+            self.assertEqual(await self._send(), "reply fixture")
+        allowed.assert_called_once_with(self.actor, ".问道")
+        on_sent.assert_not_called()
+        self._assert_cleaned()
+
+    async def test_event_guard_is_local_to_its_async_task(self):
+        ready, release = asyncio.Event(), asyncio.Event()
+        blocked = MagicMock(return_value=False)
+        on_sent = MagicMock()
+        async def event_task():
+            with feedback.guarded_one_shot_send(".作答 A", blocked, on_sent):
+                ready.set()
+                await release.wait()
+                return await feedback.send_and_wait_feedback_common(
+                    self.actor, MagicMock(), ".作答 A", delete_after=False,
+                )
+        async def notify(*args, **kwargs):
+            self._reply()
+        self._patch("record_telegram_send_success", notify)
+        task = asyncio.create_task(event_task())
+        try:
+            await ready.wait()
+            self.assertEqual(await self._send(), "reply fixture")
+            blocked.assert_not_called()
+            release.set()
+            self.assertFalse(await task)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        blocked.assert_called_once_with(self.actor, ".作答 A")
+        on_sent.assert_not_called()
+        self.actor.client.send_message.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,7 @@ COMMAND_CATALOG = (
     CatalogEntry("mulan", "支援慕兰", "general", "世界活动", (".支援慕兰 <方式>",), trigger="每日"),
     CatalogEntry("huanglong", "黄龙山报名", "general", "世界活动", (".报名黄龙山",), trigger="事件"),
     CatalogEntry("exchange", "南陇侯交换", "general", "世界活动", (".交换 <物品类型>",), trigger="事件"),
+    CatalogEntry("xuangu-quiz", "玄骨答题", "general", "世界活动", (".作答 <选项>",), trigger="事件", condition="点名已启用身份且题库答案已确认"),
     CatalogEntry("merchant-look", "神秘商人查看货品", "general", "世界活动", (".查看货品",), trigger="事件"),
     CatalogEntry("merchant-buy", "神秘商人购买商品", "general", "世界活动", (".购买商品 <商品>",), trigger="流程"),
     CatalogEntry("sect-war", "宗门战况", "general", "宗门事务", (".宗门战况",), trigger="查询"),

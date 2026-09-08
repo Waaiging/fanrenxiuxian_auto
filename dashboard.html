@@ -1196,6 +1196,9 @@
         }
         .automation-save { min-width: 5.5rem; }
         .automation-save:disabled { opacity: 0.55; cursor: wait; }
+        #xuangu-quiz-pending { grid-template-columns: 1fr; }
+        #xuangu-quiz-pending .record-select { width: 100%; min-width: 0; margin: 0.5rem 0; }
+        #xuangu-quiz-pending .automation-card-hint { overflow-wrap: anywhere; }
         .automation-retry { min-width: 7.5rem; }
         .red-packet-controls {
             display: grid;
@@ -1703,6 +1706,20 @@
                     <div class="automation-card-hint" id="wind-thunder-runtime">等待运行状态...</div>
                 </div>
                 <div class="automation-card">
+                    <div class="automation-card-title">玄骨自动答题</div>
+                    <div class="automation-card-hint">支持考校、窥鼎和夺焰。只回答点名所选身份的题目；未知题保存后等待补充答案。</div>
+                    <div class="automation-mode-options">
+                        <label class="automation-option"><input type="checkbox" id="xuangu-quiz-enabled" onchange="markAutomationSettingsDirty()">启用自动答题</label>
+                    </div>
+                    <div class="automation-card-hint">参与身份（可多选）</div>
+                    <div class="automation-account-grid" id="xuangu-quiz-participant-controls"></div>
+                    <div class="automation-card-hint" id="xuangu-quiz-runtime">等待运行状态...</div>
+                    <details>
+                        <summary class="automation-card-hint">待补答案（补充后用于后续题目）</summary>
+                        <div id="xuangu-quiz-pending" class="automation-account-grid"></div>
+                    </details>
+                </div>
+                <div class="automation-card">
                     <div class="automation-card-title">慕兰支援参数</div>
                     <div class="automation-card-hint">每日 10:00 执行，四个参数均可切换。</div>
                     <div class="automation-mode-options" id="mulan-support-mode-controls">
@@ -2005,6 +2022,7 @@
         let surpriseRaidSettingsDirty = false;
         let surpriseRaidSavePending = false;
         let automationSettingsDirty = false;
+        const xuanguAnswerDrafts = {};
         let automationSavePending = false;
         let miniappFishingForceRetryPending = false;
         let worldBossTurnstileRequests = [];
@@ -4938,6 +4956,46 @@
             if (worldBossTurnstilePopups.size) updateWorldBossTurnstileDashboard();
         }, 3000);
 
+        function renderXuanguQuizRuntime(runtime) {
+            runtime = runtime || {};
+            const status = document.getElementById('xuangu-quiz-runtime');
+            const outcomes = {queued: '等待发送', sending: '正在发送', awaiting_result: '等待判题', correct: '答对', incorrect: '答错', timeout: '超时', invalid: '题面失效', manual: '已手动作答', expired: '已过期', skipped: '已跳过', send_uncertain: '发送未确认，不重发', unconfirmed: '判题未确认，不重发'};
+            const latest = (runtime.recent_events || [])[0];
+            if (status) status.innerText = runtime.error || `题库 ${runtime.known_count || 0} 道 · 待补 ${runtime.pending_count || 0} 道${latest ? ` · 最近：${latest.identity} ${outcomes[latest.status] || latest.status}` : ''}`;
+            const container = document.getElementById('xuangu-quiz-pending');
+            if (!container) return;
+            container.innerHTML = (runtime.pending || []).filter(item => /^[0-9a-f]{24}$/.test(item.key || '')).map(item => `
+                <div class="automation-account">
+                    <div class="automation-account-name">${escapeHtml(item.event_type || '')}</div>
+                    <div class="automation-card-hint">${escapeHtml(item.question || '')}</div>
+                    ${Object.entries(item.options || {}).map(([letter, answer]) => `<div class="automation-card-hint">${escapeHtml(letter)}. ${escapeHtml(answer)}</div>`).join('')}
+                    ${item.observed_answer ? `<div class="automation-card-hint">群内回执提示：${escapeHtml(item.observed_answer)}（待确认）</div>` : ''}
+                    <select class="record-select" data-xuangu-answer="${item.key}" aria-label="确认玄骨题目答案" onchange="xuanguAnswerDrafts[this.dataset.xuanguAnswer] = this.value">
+                        <option value="">请选择已确认的答案</option>
+                        ${Object.entries(item.options || {}).map(([letter, answer]) => `<option value="${escapeHtml(answer)}" ${xuanguAnswerDrafts[item.key] === answer ? 'selected' : ''}>${escapeHtml(letter)}. ${escapeHtml(answer)}</option>`).join('')}
+                    </select>
+                    <button class="red-packet-save automation-save" type="button" onclick="saveXuanguQuizAnswer('${item.key}', this)">保存答案</button>
+                </div>
+            `).join('') || '<div class="record-empty">暂无待补答案。</div>';
+        }
+
+        async function saveXuanguQuizAnswer(key, button) {
+            const answer = xuanguAnswerDrafts[key];
+            if (!answer) { alert('请先选择已确认的答案'); return; }
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/xuangu-quiz/answers', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({question_key: key, answer})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.msg || '答案保存失败');
+                delete xuanguAnswerDrafts[key];
+                renderXuanguQuizRuntime(data.runtime);
+            } catch (error) { alert(error.message || '答案保存失败'); }
+            finally { button.disabled = false; }
+        }
+
         function renderAutomationDashboard(data) {
             automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, wind_thunder: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
@@ -4947,6 +5005,7 @@
             const starGazingLeadSeconds = Number(starGazing.lead_seconds ?? settings.star_gazing?.lead_seconds ?? 10);
             const abyss = automationDashboardData.miniapp_beast_abyss || {};
             const windThunder = automationDashboardData.wind_thunder || {};
+            const xuanguQuiz = automationDashboardData.xuangu_quiz || {};
             const fishing = automationDashboardData.miniapp_fishing || {};
             const journey = automationDashboardData.miniapp_journey || {};
             const trial = automationDashboardData.miniapp_tianji_trial || {};
@@ -4970,6 +5029,8 @@
             const windThunderEnabled = Boolean(windThunder.enabled ?? windThunderSettings.enabled ?? false);
             const windThunderParticipants = new Set(windThunder.participants || windThunderSettings.participants || []);
             const windThunderAccounts = Array.isArray(windThunder.accounts) ? windThunder.accounts : [];
+            const quizEnabled = Boolean(xuanguQuiz.enabled ?? settings.xuangu_quiz?.enabled ?? false);
+            const quizParticipants = new Set(xuanguQuiz.participants || settings.xuangu_quiz?.participants || []);
             const fishingEnabled = Boolean(fishing.enabled ?? fishingSettings.enabled ?? true);
             const fishingParticipants = new Set(fishing.participants || fishingSettings.participants || []);
             const fishingRod = String(fishing.rod || fishingSettings.rod || 'auto');
@@ -5041,6 +5102,17 @@
                         `;
                     }).join('') || '<div class="record-empty">暂无可配置身份。</div>';
                 }
+                const quizEnabledControl = document.getElementById('xuangu-quiz-enabled');
+                if (quizEnabledControl) quizEnabledControl.checked = quizEnabled;
+                const quizControls = document.getElementById('xuangu-quiz-participant-controls');
+                if (quizControls) quizControls.innerHTML = (xuanguQuiz.accounts || []).map(account => `
+                    <div class="automation-account">
+                        <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                        <div class="automation-identity-options">
+                            ${(account.identities || []).map(item => `<label class="automation-option"><input type="checkbox" value="${escapeHtml(item.key || '')}" ${quizParticipants.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">${escapeHtml(item.name || '')}</label>`).join('')}
+                        </div>
+                    </div>
+                `).join('');
                 const windThunderEnabledControl = document.getElementById('wind-thunder-enabled');
                 if (windThunderEnabledControl) windThunderEnabledControl.checked = windThunderEnabled;
                 const windThunderParticipantControls = document.getElementById('wind-thunder-participant-controls');
@@ -5231,6 +5303,7 @@
                 ];
                 fishingRuntimeControl.innerText = runtimeParts.join(' · ');
             }
+            renderXuanguQuizRuntime(xuanguQuiz.runtime);
             const windThunderRuntimeControl = document.getElementById('wind-thunder-runtime');
             if (windThunderRuntimeControl) {
                 windThunderRuntimeControl.innerText = windThunderEnabled
@@ -5506,6 +5579,8 @@
                 .map(input => input.value)
                 .filter(Boolean);
             const windThunderEnabled = Boolean(document.getElementById('wind-thunder-enabled')?.checked);
+            const quizEnabled = Boolean(document.getElementById('xuangu-quiz-enabled')?.checked);
+            const quizParticipants = Array.from(document.querySelectorAll('#xuangu-quiz-participant-controls input[type="checkbox"]:checked')).map(input => input.value).filter(Boolean);
             const windThunderParticipants = Array.from(document.querySelectorAll('#wind-thunder-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
@@ -5543,6 +5618,10 @@
             }
             if (journeyEnabled && !journeyParticipants.length) {
                 alert('启用野外深入历练时至少选择一个参与身份。');
+                return;
+            }
+            if (quizEnabled && !quizParticipants.length) {
+                alert('启用玄骨自动答题时至少选择一个身份');
                 return;
             }
             if (windThunderEnabled && !windThunderParticipants.length) {
@@ -5599,6 +5678,10 @@
                         wind_thunder: {
                             enabled: windThunderEnabled,
                             participants: windThunderParticipants
+                        },
+                        xuangu_quiz: {
+                            enabled: quizEnabled,
+                            participants: quizParticipants
                         },
                         tianxing: {
                             meditation_mode: tianxingMeditationMode,

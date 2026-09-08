@@ -355,6 +355,7 @@ WIND_THUNDER_SUPPORTED_IDENTITIES = {
 }
 DEFAULT_WIND_THUNDER_ENABLED = False
 DEFAULT_WIND_THUNDER_PARTICIPANTS: tuple[str, ...] = ()
+DEFAULT_XUANGU_QUIZ_ENABLED = False
 DEFAULT_MINIAPP_FISHING_ENABLED = True
 DEFAULT_MINIAPP_FISHING_POND = "qingxi"
 DEFAULT_MINIAPP_FISHING_BAIT = "demon_blood"
@@ -551,7 +552,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 13,
+        "version": 14,
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -567,6 +568,14 @@ def default_automation_settings() -> dict[str, Any]:
         "wind_thunder": {
             "enabled": DEFAULT_WIND_THUNDER_ENABLED,
             "participants": list(DEFAULT_WIND_THUNDER_PARTICIPANTS),
+        },
+        "xuangu_quiz": {
+            "enabled": DEFAULT_XUANGU_QUIZ_ENABLED,
+            "participants": [
+                automation_participant_key(account, identity)
+                for account, identities in automation_account_identities().items()
+                for identity in identities
+            ],
         },
         "miniapp_fishing": {
             "enabled": DEFAULT_MINIAPP_FISHING_ENABLED,
@@ -665,6 +674,19 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             power_max = DEFAULT_MINIAPP_BEAST_ABYSS_POWER_MAX
         result["miniapp_beast_abyss"]["power_min"] = power_min
         result["miniapp_beast_abyss"]["power_max"] = power_max
+
+    quiz = source.get("xuangu_quiz")
+    if isinstance(quiz, dict):
+        result["xuangu_quiz"]["enabled"] = quiz.get("enabled") is True
+        if isinstance(quiz.get("participants"), list):
+            participants = []
+            for item in quiz["participants"]:
+                normalized = _normalize_participant(item)
+                if normalized is not None:
+                    key = automation_participant_key(*normalized)
+                    if key not in participants:
+                        participants.append(key)
+            result["xuangu_quiz"]["participants"] = participants
 
     wind_thunder = source.get("wind_thunder")
     if isinstance(wind_thunder, dict):
@@ -864,6 +886,8 @@ def save_automation_settings(
     tianxing_tianji_grind_target: Any = None,
     wind_thunder_enabled: Any = None,
     wind_thunder_participants: Any = None,
+    xuangu_quiz_enabled: Any = None,
+    xuangu_quiz_participants: Any = None,
     tianxing_tianji_grind_participants: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
@@ -1051,6 +1075,25 @@ def save_automation_settings(
     if power_max > 0 and power_min > 0 and power_max < power_min:
         raise ValueError("invalid Mini App beast abyss power range")
 
+    current_quiz = current_settings["xuangu_quiz"]
+    quiz_enabled = current_quiz["enabled"] if xuangu_quiz_enabled is None else xuangu_quiz_enabled
+    if not isinstance(quiz_enabled, bool):
+        raise ValueError("invalid Xuangu quiz enabled flag")
+    raw_quiz_participants = (current_quiz["participants"] if xuangu_quiz_participants is None
+                             else xuangu_quiz_participants)
+    if not isinstance(raw_quiz_participants, list):
+        raise ValueError("Xuangu quiz participants must be a list")
+    quiz_participants = []
+    for item in raw_quiz_participants:
+        normalized = _normalize_participant(item)
+        if normalized is None:
+            raise ValueError("invalid Xuangu quiz participant")
+        key = automation_participant_key(*normalized)
+        if key not in quiz_participants:
+            quiz_participants.append(key)
+    if quiz_enabled and not quiz_participants:
+        raise ValueError("Xuangu quiz participants required")
+
     current_wind_thunder = current_settings.get("wind_thunder") or {}
     wt_enabled = (
         bool(current_wind_thunder.get("enabled", DEFAULT_WIND_THUNDER_ENABLED))
@@ -1160,6 +1203,10 @@ def save_automation_settings(
             "wind_thunder": {
                 "enabled": wt_enabled,
                 "participants": wt_participants,
+            },
+            "xuangu_quiz": {
+                "enabled": quiz_enabled,
+                "participants": quiz_participants,
             },
             "miniapp_fishing": {
                 "enabled": fishing_enabled,
@@ -1278,6 +1325,16 @@ def miniapp_beast_abyss_power_in_range(
     if power_max > 0 and current > power_max:
         return False
     return True
+
+
+def xuangu_quiz_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    return dict(source["xuangu_quiz"])
+
+
+def xuangu_quiz_enabled(account: str, identity: str, settings: dict[str, Any] | None = None) -> bool:
+    config = xuangu_quiz_settings(settings)
+    return config["enabled"] and automation_participant_key(account, identity) in config["participants"]
 
 
 def wind_thunder_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1480,6 +1537,15 @@ def automation_dashboard_payload() -> dict[str, Any]:
                     ],
                 }
                 for account, identities in WIND_THUNDER_SUPPORTED_IDENTITIES.items()
+            ],
+        },
+        "xuangu_quiz": {
+            **xuangu_quiz_settings(settings),
+            "accounts": [
+                {"key": account, "name": ACCOUNT_NAMES[account],
+                 "identities": [{"key": automation_participant_key(account, identity), "name": identity}
+                                for identity in identities]}
+                for account, identities in account_identities.items()
             ],
         },
         "miniapp_fishing": {

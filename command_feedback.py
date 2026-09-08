@@ -17,8 +17,11 @@
 - _handle_telegram_send_protection：Telegram 自身限流/禁言等发送异常的保护。
 """
 import asyncio
+import inspect
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 
 from log_utils import (
@@ -50,6 +53,25 @@ from automation_settings import (
 # 这里集中执行，覆盖各业务计划中遗留的 max_retries=0/2 配置。
 NO_RESPONSE_TIMEOUT_SECONDS = 60
 NO_RESPONSE_RETRY_COUNT = 1
+
+# Event handlers with their own result correlation can use the identity/command
+# locks without inheriting the generic response timeout and retry policy.
+_ONE_SHOT_SEND = ContextVar("guarded_one_shot_send", default=None)
+
+
+@contextmanager
+def guarded_one_shot_send(command, before_send, on_sent):
+    """Check every send at dispatch; return immediately after this one command.
+
+    Identity switches still use normal feedback. The guard also sees switches,
+    so a cancelled or expired event cannot cause a late identity change.
+    ContextVars keep the guard local to the event's asyncio task.
+    """
+    token = _ONE_SHOT_SEND.set((str(command).strip(), before_send, on_sent))
+    try:
+        yield
+    finally:
+        _ONE_SHOT_SEND.reset(token)
 
 SECOND_SOUL_BUSY_MARKERS = ("无法分心修炼", "无法分心")
 SECOND_SOUL_COOLDOWN_PATTERN = re.compile(
@@ -513,6 +535,14 @@ async def send_and_wait_feedback_common(
                 if callable(before_auto_send) and not before_auto_send(message):
                     logger.warning(f"[DEBUG-FEEDBACK] [{message}] blocked by actor send quota")
                     break
+                one_shot = _ONE_SHOT_SEND.get()
+                if one_shot is not None:
+                    allowed = one_shot[1](actor, message)
+                    if inspect.isawaitable(allowed):
+                        allowed = await allowed
+                    if not allowed:
+                        logger.info("Event dispatch guard blocked [%s]", message)
+                        break
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] sending message to chat...")
@@ -563,6 +593,15 @@ async def send_and_wait_feedback_common(
                 break
 
             actor.last_sent_id = msg_id
+            if one_shot is not None and str(message).strip() == one_shot[0]:
+                # The event journal was claimed before the network call. Never
+                # register a generic retry waiter for an event-owned command.
+                one_shot[2](actor, message, sent_msg)
+                try:
+                    await record_telegram_send_success(actor, logger=logger)
+                except Exception:
+                    logger.warning("Failed to record Telegram send recovery", exc_info=True)
+                return sent_msg
             # 记录指令发送者的 account ID，供宽松匹配排除命令回声并保留审计线索
             actor.feedback_senders = getattr(actor, "feedback_senders", {})
             actor.feedback_senders[msg_id] = sent_msg.sender_id

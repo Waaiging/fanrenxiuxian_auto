@@ -66,6 +66,7 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from red_packet_features import install_red_packet_monitor
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
+from xuangu_quiz_features import maybe_handle_xuangu_quiz, resume_pending_xuangu_quiz_events
 from automation_settings import XIAOHAO_TAIYI_IDENTITY, miniapp_beast_abyss_power_in_range
 from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
@@ -5386,6 +5387,9 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             )
             record_message_event(self, msg, text=text, sender=sender, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("xiaohao", msg, text, sender=sender, logger=log)
+            if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender):
+                record_game_bot_activity(self, sender, log, msg=msg, text=text)
+                return
             if is_game_bot_sender(self, sender):
                 record_game_bot_activity(self, sender, log, msg=msg, text=text)
                 self.record_star_gazing_final_report_if_needed(msg, text, source="new message")
@@ -7552,6 +7556,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 sender = await e.get_sender()
                 if is_game_bot_sender(self, sender):
                     record_game_bot_activity(self, sender, log, msg=msg, text=text)
+                    if await maybe_handle_xuangu_quiz(self, e, text=text, sender=sender):
+                        return
                     record_star_gazing_event("xiaohao", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
@@ -7637,6 +7643,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             self.save_state(); self.startup_done.set(); log.info("Startup Sync: Finished. All loops released.")
         asyncio.create_task(startup_sync())
         asyncio.create_task(resume_pending_exchange_events(self))
+        asyncio.create_task(resume_pending_xuangu_quiz_events(self))
         asyncio.create_task(periodic_log_prune(LOG_FILE))
         asyncio.create_task(self.run_telegram_write_permission_monitor())
         asyncio.create_task(self.run_health_watchdog_loop())

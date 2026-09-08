@@ -107,6 +107,7 @@ from miniapp_dwelling import (
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
+from xuangu_quiz_features import maybe_handle_xuangu_quiz, resume_pending_xuangu_quiz_events
 from wind_thunder_features import recover_wind_thunder_sessions
 from common_command_features import (
     CommonCommandMixin,
@@ -1314,6 +1315,9 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             sender_cache = await event.get_sender()
             record_message_event(self, msg, text=text, sender=sender_cache, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event(self.account_key, msg, text, sender=sender_cache, logger=log)
+            if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender_cache):
+                record_game_bot_activity(self, sender_cache, log, msg=msg, text=text)
+                return
 
             # 如果是脚本自己手动发出的消息，记录但不处理
             if log_manual_outgoing_if_needed(self, msg, text=text):
@@ -5585,6 +5589,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
                     record_game_bot_activity(self, sender, log, msg=msg, text=text)
+                    if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender):
+                        return
                     self.maybe_queue_small_world_calamity(msg, text, source="edited message")
                     record_star_gazing_event(self.account_key, msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
@@ -5632,6 +5638,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
         # 进入主循环（会阻塞直到脚本停止）
         asyncio.create_task(resume_pending_exchange_events(self))
+        asyncio.create_task(resume_pending_xuangu_quiz_events(self))
         await self.run_cultivation_loop()
 
 

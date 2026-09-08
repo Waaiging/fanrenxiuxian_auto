@@ -49,7 +49,7 @@ def copy_test_sources(destination: Path) -> None:
     ]
     sources.extend((ROOT / "tests").rglob("*.py"))
     sources.extend(ROOT.glob("*.example.json"))
-    sources.extend(ROOT / name for name in ("dashboard.html", "start_all.sh"))
+    sources.extend(ROOT / name for name in ("dashboard.html", "start_all.sh", "xuangu_question_bank.json"))
     for source in sources:
         if not source.is_file() or source.is_symlink():
             continue

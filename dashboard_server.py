@@ -61,6 +61,7 @@ from automation_settings import (
 )
 from log_utils import command_control_key
 from dashboard_command_catalog import apply_command_classifications, command_catalog_payload
+from xuangu_quiz_features import confirm_quiz_answer, quiz_dashboard_payload
 from command_modules import (
     ASK_DAO_COMMAND,
     DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
@@ -5724,7 +5725,23 @@ def automation_settings_dashboard(username: str = Depends(authenticate)):
             "transfer": {},
         }
     payload["miniapp_fishing"] = fishing
+    try:
+        payload["xuangu_quiz"]["runtime"] = quiz_dashboard_payload()
+    except Exception:
+        payload["xuangu_quiz"]["runtime"] = {"error": "暂时无法读取玄骨答题状态"}
     return payload
+
+
+@app.post("/api/xuangu-quiz/answers")
+def xuangu_quiz_answer_control(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Confirm an observed unknown answer for subsequent quiz events."""
+    try:
+        saved = confirm_quiz_answer(payload.get("question_key"), payload.get("answer"), username)
+    except ValueError as exc:
+        messages = {"invalid quiz question": "题目编号无效", "quiz question not found": "未找到待补题目",
+                    "invalid quiz answer": "答案无效", "answer must be an observed option": "请从题目已有选项中选择答案"}
+        return {"success": False, "msg": messages.get(str(exc), "答案保存失败")}
+    return {"success": True, "answer": saved, "runtime": quiz_dashboard_payload()}
 
 
 @app.get("/api/world-boss/turnstile")
@@ -5794,6 +5811,8 @@ async def automation_settings_control(
     abyss = abyss if isinstance(abyss, dict) else {}
     wind_thunder = payload.get("wind_thunder")
     wind_thunder = wind_thunder if isinstance(wind_thunder, dict) else {}
+    quiz = payload.get("xuangu_quiz")
+    quiz = quiz if isinstance(quiz, dict) else {}
     fishing = payload.get("miniapp_fishing")
     fishing = fishing if isinstance(fishing, dict) else {}
     journey = payload.get("miniapp_journey")
@@ -5814,6 +5833,8 @@ async def automation_settings_control(
                 miniapp_beast_abyss_power_max=abyss.get("power_max"),
                 wind_thunder_enabled=wind_thunder.get("enabled"),
                 wind_thunder_participants=wind_thunder.get("participants"),
+                xuangu_quiz_enabled=quiz.get("enabled"),
+                xuangu_quiz_participants=quiz.get("participants"),
                 miniapp_fishing_enabled=fishing.get("enabled"),
                 miniapp_fishing_pond=fishing.get("pond"),
                 miniapp_fishing_bait=fishing.get("bait"),
@@ -5837,6 +5858,10 @@ async def automation_settings_control(
             )
     except ValueError as exc:
         messages = {
+            "invalid Xuangu quiz enabled flag": "玄骨答题开关必须是启用或关闭",
+            "Xuangu quiz participants must be a list": "玄骨答题参与身份列表格式错误",
+            "invalid Xuangu quiz participant": "玄骨答题参与身份无效",
+            "Xuangu quiz participants required": "启用玄骨答题时至少选择一个身份",
             "world boss participants must be a list": "Boss 参战身份列表格式错误",
             "invalid world boss participant": "Boss 参战身份无效",
             "multiple world boss identities per account": "每个账号最多选择一个 Boss 参战身份",

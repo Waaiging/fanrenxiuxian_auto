@@ -76,6 +76,7 @@ from world_boss_features import install_world_boss_monitor
 # 项目内部模块导入
 # ============================================================
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
+from xuangu_quiz_features import maybe_handle_xuangu_quiz, resume_pending_xuangu_quiz_events
 #   自动回复辅助：判断消息是否为自动回复链的一部分，并处理私聊互动
 
 from wind_thunder_features import recover_wind_thunder_sessions
@@ -3079,6 +3080,9 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             # 记录手动发出的消息（不是脚本发的），用于调试和日志追溯
             record_message_event(self, msg, text=text, sender=sender_check, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("sub", msg, text, sender=sender_check, logger=log)
+            if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender_check):
+                record_game_bot_activity(self, sender_check, log, msg=msg, text=text)
+                return
             if log_manual_outgoing_if_needed(self, msg, text=text):
                 return
 
@@ -5796,6 +5800,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 sender = await event.get_sender()
                 if is_game_bot_sender(self, sender):
                     record_game_bot_activity(self, sender, log, msg=msg, text=text)
+                    if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender):
+                        return
                     record_star_gazing_event("sub", msg, text, sender=sender, is_edited=True, logger=log)
                     self.record_star_gazing_final_report_if_needed(msg, text, source="edited message")
                     self.record_star_shift_attempt_if_needed(msg, text, source="edited message")
@@ -6013,6 +6019,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
 
         asyncio.create_task(startup_sync())
         asyncio.create_task(resume_pending_exchange_events(self))
+        asyncio.create_task(resume_pending_xuangu_quiz_events(self))
         asyncio.create_task(periodic_log_prune(LOG_FILE))
         asyncio.create_task(self.run_sub_health_watchdog_loop())
 
