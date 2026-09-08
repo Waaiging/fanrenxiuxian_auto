@@ -88,6 +88,7 @@ from miniapp_beast import (
     miniapp_circuit_wait_seconds,
 )
 from miniapp_dwelling import apply_dwelling_snapshot, command_result_text
+from sect_task_features import SectTaskMixin
 from wind_thunder_features import wind_thunder_enabled, wind_thunder_send, wind_thunder_target_cooldown
 from reward_parsing import (
     clean_reward_text as shared_clean_reward_text,
@@ -408,7 +409,7 @@ class _CommonAtomicTask:
         return False
 
 
-class CommonCommandMixin:
+class CommonCommandMixin(SectTaskMixin):
     """通用固定冷却指令混入类。
 
     这里的方法尽量只依赖继承方暴露的统一接口，不直接区分主号/副号/小号。
@@ -4836,54 +4837,56 @@ class CommonCommandMixin:
             return True
         return "获得" in clean and any(k in clean for k in ["感悟", "道心", "贡献"])
 
-    def record_ask_dao_response(self, resp, source=None):
+    def record_ask_dao_response(self, resp, source=None, identity="主魂"):
         """Record .问道 response; success may be followed by an actual-cooldown probe."""
+        identity = self.resolve_avatar_identity(identity)
         source = source or ASK_DAO_COMMAND
         now = now_str()
         plan = self.ask_dao_plan(source)
         log = self.common_command_logger()
+        state = self.identity_state_for_timed_command(identity)
         next_key = plan.next_key
         last_key = plan.last_key
         if not resp:
-            self.state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
-            log.info(f"{source}: no response; retry at {self.state[next_key]}.")
+            state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
+            log.info(f"{source}: no response; retry at {state[next_key]}.")
             return False
 
         cd = self.parse_wait_time(resp)
         if self.is_ask_dao_cooldown_response(resp):
             delay = cd if cd > 0 else self.ask_dao_retry_seconds()
-            self.state[next_key] = add_seconds_str(now, delay)
-            log.info(f"{source}: cooldown from response {delay}s, next at {self.state[next_key]}.")
+            state[next_key] = add_seconds_str(now, delay)
+            log.info(f"{source}: cooldown from response {delay}s, next at {state[next_key]}.")
             return True
 
         if any(k in resp for k in ["未加入", "不是元婴宗", "无法问道", "条件不足", "境界不足", "修为不足"]):
-            self.state[next_key] = add_seconds_str(now, 60 * 60)
-            self.state["last_ask_dao_error"] = resp[:200]
-            self.state["last_ask_dao_error_time"] = now
-            log.info(f"{source}: unavailable; retry at {self.state[next_key]}.")
+            state[next_key] = add_seconds_str(now, 60 * 60)
+            state["last_ask_dao_error"] = resp[:200]
+            state["last_ask_dao_error_time"] = now
+            log.info(f"{source}: unavailable; retry at {state[next_key]}.")
             return True
 
         if self.is_ask_dao_response(resp):
             actual_cd = self.ask_dao_success_cooldown_seconds(resp)
-            self.record_daily_reward_event("主魂", plan.command, resp, source=source, final=True)
-            self.state[last_key] = now
+            self.record_daily_reward_event(identity, plan.command, resp, source=source, final=True)
+            state[last_key] = now
             cooldown = actual_cd if actual_cd > 0 else self.ask_dao_cd_seconds()
-            if wind_thunder_enabled(self, "主魂"):
+            if wind_thunder_enabled(self, identity):
                 cooldown = wind_thunder_target_cooldown(plan.command, cooldown)
-            self.state[next_key] = add_seconds_str(
+            state[next_key] = add_seconds_str(
                 now,
                 cooldown,
             )
-            self.state["last_ask_dao_error"] = ""
+            state["last_ask_dao_error"] = ""
             if actual_cd > 0:
-                log.info(f"{source}: recorded response with actual cooldown {actual_cd}s, next at {self.state[next_key]}.")
+                log.info(f"{source}: recorded response with actual cooldown {actual_cd}s, next at {state[next_key]}.")
             else:
-                log.info(f"{source}: recorded response, next at {self.state[next_key]}.")
+                log.info(f"{source}: recorded response, next at {state[next_key]}.")
             return True
 
-        self.state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
+        state[next_key] = add_seconds_str(now, self.ask_dao_retry_seconds())
         notify_unrecognized_response(self, ASK_DAO_COMMAND, resp, log, source)
-        log.info(f"{source}: unrecognized response; retry at {self.state[next_key]}.")
+        log.info(f"{source}: unrecognized response; retry at {state[next_key]}.")
         return False
 
     def ask_dao_needs_actual_cooldown_probe(self, resp, command=None):
@@ -4972,25 +4975,28 @@ class CommonCommandMixin:
         log.warning(f"[{identity}] {source}: .查看闭关 did not return a usable remaining time: {text[:120]}")
         return -1
 
-    async def common_ask_dao_tick(self, command=None):
-        """Run one main-soul .问道 scheduling step and return next wait seconds."""
+    async def common_ask_dao_tick(self, command=None, identity="主魂"):
+        """Run one identity's .问道 scheduling step and return next wait seconds."""
+        identity = self.resolve_avatar_identity(identity)
         plan = self.ask_dao_plan(command)
-        await self._wait_for_main_identity()
-        if self.dashboard_command_paused(plan.command, "主魂"):
+        if identity == "主魂":
+            await self._wait_for_main_identity()
+        if self.dashboard_command_paused(plan.command, identity):
             return 300
 
-        next_time = self.state.get(plan.next_key, "")
+        state = self.identity_state_for_timed_command(identity)
+        next_time = state.get(plan.next_key, "")
         if next_time and is_future(next_time):
             return seconds_until(next_time)
 
         log = self.common_command_logger()
         log.info(f"Ask Dao due: sending {plan.command}.")
-        resp = await self.send_timed_command_plan(plan, "主魂")
+        resp = await self.send_timed_command_plan(plan, identity)
         if resp is None and await self.sleep_after_blocked_command(plan.command, "Ask Dao"):
             return 0
         resp_text = self.timed_command_response_text(resp)
-        self.record_ask_dao_response(resp_text, plan.command)
-        if self.ask_dao_needs_actual_cooldown_probe(resp_text, plan.command):
+        self.record_ask_dao_response(resp_text, plan.command, identity=identity)
+        if identity == "主魂" and self.ask_dao_needs_actual_cooldown_probe(resp_text, plan.command):
             await self.probe_ask_dao_actual_cooldown(plan)
         self.save_state()
         return 5
@@ -6850,11 +6856,9 @@ class CommonCommandMixin:
     def sync_identity_sect_from_text(self, identity="主魂", text=""):
         """Learn an identity's current sect from an authoritative game reply.
 
-        Sect-bound schedulers consult ``identity_sect_name`` on every pass, so
-        changing this mapping immediately retires commands belonging to the
-        previous sect and enables the new sect's features.
+        Wake the shared sect scheduler after a confirmed membership change.
         """
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity or "主魂")
         text = str(text or "").replace("**", "").replace("`", "")
         if not text:
             return ""
@@ -6863,21 +6867,27 @@ class CommonCommandMixin:
         # mentions in reward or battle text.
         explicit_patterns = (
             r"(?:所属宗门|当前宗门|宗门)\s*[:：]?\s*[【\[]?([^】\]，,。\s]+)",
-            r"(?:成功)?(?:拜入|加入|加入了|转入)\s*[【\[]?([^】\]，,。\s]+)",
+            r"(?:你已|你成功|成功|正式|你)(?:拜入|加入|转入)(?:了)?\s*[【\[]?([^】\]，,。\s]+)",
             r"(?:宗门身份|门派)\s*[:：]?\s*[【\[]?([^】\]，,。\s]+)",
         )
         for pattern in explicit_patterns:
-            match = re.search(pattern, text)
-            if match:
+            for match in re.finditer(pattern, text):
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                prefix = text[line_start:match.start()]
+                if re.search(r"无法|不能|尚未|未能|未曾|请先|是否|若要|想要|如需|未加入|并非", prefix):
+                    continue
                 candidate = str(match.group(1) or "").strip("【】[]()（） ：:，,。")
                 if candidate in KNOWN_SECTS:
                     sect = candidate
                     break
+            if sect:
+                break
         if not sect:
             # Defection replies often contain only the old sect and a generic
             # phrase; mark the identity as 散修 so no sect-specific command is
             # accidentally sent while waiting for the next membership sync.
-            if re.search(r"叛出宗门|退出宗门|离开宗门|斩断与.{0,12}尘缘|脱离宗门", text):
+            if (re.search(r"(?:你已|你成功|成功|你)(?:叛出宗门|退出宗门|离开宗门|脱离宗门)|斩断与.{0,12}尘缘", text)
+                    and not re.search(r"无法|不能|未能|失败", text)):
                 sect = "散修"
         if not sect:
             return ""
@@ -6894,6 +6904,9 @@ class CommonCommandMixin:
                 state_mapping[identity] = sect
             if identity == "主魂":
                 state["sect_name"] = sect
+            container = self.identity_state_for_timed_command(identity)
+            container["sect_name"] = sect
+            container["miniapp_sect_name"] = sect
         if identity == "主魂" and hasattr(self, "sect_name"):
             self.sect_name = sect
         if changed:
@@ -6902,6 +6915,7 @@ class CommonCommandMixin:
             except Exception:
                 self.common_command_logger().warning("Failed to persist sect learned from reply.", exc_info=True)
             self.common_command_logger().info("Sect refreshed from reply: %s -> %s", identity, sect)
+            self.wake_sect_tasks()
         return sect
 
     def identity_sect_name(self, identity="主魂"):

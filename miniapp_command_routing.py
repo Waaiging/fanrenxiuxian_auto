@@ -1442,6 +1442,9 @@ class MiniAppCommandRouter:
             self._log_route_blocked(identity, command)
             return None
         try:
+            sect_allowed = getattr(self.actor, "sect_command_allowed", None)
+            if callable(sect_allowed) and not sect_allowed(command, identity):
+                return None
             response = await self.transport.command(command, identity=identity)
             apply_dwelling_snapshot(self.actor, identity, response.payload)
             self._record(

@@ -515,6 +515,10 @@ async def send_and_wait_feedback_common(
                 else:
                     logger.info(f"[DEBUG-FEEDBACK] [{message}] bot activity prechecked, skipping lock-held wait")
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] bot active, checking guard...")
+                sect_allowed = getattr(actor, "sect_command_allowed", None)
+                if callable(sect_allowed) and not sect_allowed(message):
+                    logger.info("Sect membership no longer permits [%s]; send skipped.", message)
+                    break
                 # 检查指令守卫（过快的发送会被阻止）
                 if not command_send_allowed(actor, message, logger):
                     block = getattr(actor, "_last_command_guard_block", {}) or {}
@@ -644,6 +648,11 @@ async def send_and_wait_feedback_common(
                         sync_sect(_identity or "主魂", resp_text)
                     except Exception:
                         logger.warning("Failed to sync sect from command reply", exc_info=True)
+                if str(message).startswith(".引道 ") and hasattr(actor, "record_avatar_taiyi_guide_response"):
+                    actor.record_avatar_taiyi_guide_response(
+                        _identity or "主魂", resp_text, source=message,
+                        observed_at=getattr(final_resp_msg, "date", None),
+                    )
                 _record_timed_response_guard(
                     actor, message, resp_text, logger=logger, identity=_identity or "主魂"
                 )

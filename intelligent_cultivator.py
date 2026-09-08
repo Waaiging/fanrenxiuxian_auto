@@ -5458,6 +5458,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
         # 通用固定冷却指令循环（继承自 CommonCommandMixin）
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
+        self.create_scheduler_task("sect_daily", lambda: self.run_sect_daily_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=35))
         self.create_scheduler_task(
             "surprise_raid",

@@ -59,6 +59,15 @@ class FeedbackRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.actor.client.send_message.assert_awaited_once()
         self._assert_cleaned()
 
+    async def test_membership_rechecked_after_waiting_for_bot_activity(self):
+        self.actor.sect_command_allowed = MagicMock(return_value=True)
+        async def wait(*args):
+            self.actor.sect_command_allowed.return_value = False
+            return True
+        self._patch("wait_for_bot_activity_before_send", wait)
+        self.assertFalse(await self._send())
+        self.actor.client.send_message.assert_not_awaited()
+
     async def test_recovery_logging_failure_does_not_discard_reply(self):
         async def notify(*args, **kwargs):
             self._reply()

@@ -1920,6 +1920,7 @@ def _sync_identity_sect(actor: Any, identity: str, sect_name: str) -> None:
     if not isinstance(mapping, dict):
         mapping = state.get("identity_sect_names")
     mapping = dict(mapping) if isinstance(mapping, dict) else {}
+    changed = mapping.get(identity) != sect_name
     mapping[identity] = sect_name
     state["identity_sect_names"] = dict(mapping)
     try:
@@ -1932,6 +1933,11 @@ def _sync_identity_sect(actor: Any, identity: str, sect_name: str) -> None:
             actor.sect_name = sect_name
         except (AttributeError, TypeError):
             pass
+
+    if changed:
+        wake = getattr(actor, "wake_sect_tasks", None)
+        if callable(wake):
+            wake()
 
 
 def apply_dwelling_snapshot(actor: Any, identity: str, payload: dict[str, Any]) -> bool:

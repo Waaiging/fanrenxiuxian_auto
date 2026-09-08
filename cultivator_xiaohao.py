@@ -1103,10 +1103,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         if avatar in STAR_ATTRACTION_AVATARS:
             self.record_avatar_star_response_from_text(avatar, text, source="passive star sync")
 
-        # 12. 太一门：缘生子引道，手动/脚本回执都同步冷却。
-        if avatar == TAIYI_GUIDE_AVATAR and ("引道" in text or "太一门" in text):
-            self.record_avatar_taiyi_guide_response(avatar, text, source="passive taiyi sync")
-
     def update_completed_weeks_from_text(self, text, source="Cloud stairs"):
         if not text:
             return False
@@ -6590,105 +6586,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
     def response_text(self, resp):
         return self.common_response_text(resp)
 
-    def record_avatar_taiyi_guide_response(self, avatar, resp, source=TAIYI_GUIDE_COMMAND):
-        """记录太一门引道回执；成功按 12 小时冷却，冷却提示按回执时间排程。"""
-        text = self.response_text(resp)
-        now = now_str()
-        updates = {
-            "last_taiyi_guide_response": (text or "")[:500],
-        }
-        clean = str(text or "").replace("**", "")
-
-        if not clean:
-            updates["next_taiyi_guide_time"] = add_seconds_str(now, TAIYI_GUIDE_RETRY_SECONDS)
-            self.update_avatar_states(avatar, updates)
-            log.warning(f"Avatar [{avatar}] Taiyi guide: no response; retry in {TAIYI_GUIDE_RETRY_SECONDS}s.")
-            return "empty"
-
-        cd = self.parse_wait_time(clean)
-        cooldown_keywords = ("冷却", "后再", "还需", "尚需", "间隔", "稍后", "请在")
-        if cd > 0 and any(keyword in clean for keyword in cooldown_keywords):
-            updates["next_taiyi_guide_time"] = add_seconds_str(now, cd + 60)
-            self.update_avatar_states(avatar, updates)
-            log.info(f"Avatar [{avatar}] Taiyi guide: cooldown {cd}s from {source}.")
-            return "cooldown"
-
-        blocked_keywords = (
-            "非太一门",
-            "不是太一门",
-            "并非太一门",
-            "不属于太一门",
-            "无法引道",
-            "不能引道",
-            "修为不足",
-        )
-        if any(keyword in clean for keyword in blocked_keywords):
-            updates["next_taiyi_guide_time"] = add_seconds_str(now, 3600)
-            self.update_avatar_states(avatar, updates)
-            notify_unrecognized_response(self, TAIYI_GUIDE_COMMAND, text, log, f"太一门引道/{avatar}/{source}")
-            log.warning(f"Avatar [{avatar}] Taiyi guide blocked; retry in 1h.")
-            return "blocked"
-
-        updates.update({
-            "last_taiyi_guide_time": now,
-            "next_taiyi_guide_time": add_seconds_str(now, TAIYI_GUIDE_CD_SECONDS),
-        })
-        self.update_avatar_states(avatar, updates)
-        log.info(f"Avatar [{avatar}] Taiyi guide recorded; next at {updates['next_taiyi_guide_time']}.")
-        return "success"
-
-    async def run_avatar_taiyi_guide_loop(self, avatar, initial_delay=0):
-        """太一门缘生子专属引道循环：.引道 水，12 小时冷却。"""
-        await self.startup_done.wait()
-        self._avatar_loop_count += 1
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay)
-
-        while self.is_running:
-            avatar = self.resolve_avatar_identity(avatar)
-            try:
-                pause_left = self.identity_pause_seconds(avatar)
-                if pause_left > 0:
-                    await asyncio.sleep(scheduler_sleep_seconds(pause_left, minimum=60))
-                    continue
-                state = self.get_avatar_state(avatar)
-                next_time = state.get("next_taiyi_guide_time", "")
-                if next_time and is_future(next_time):
-                    await asyncio.sleep(scheduler_sleep_seconds(min(seconds_until(next_time), 1800), minimum=30))
-                    continue
-                if self.dashboard_command_paused(TAIYI_GUIDE_COMMAND, avatar):
-                    await asyncio.sleep(scheduler_sleep_seconds(600))
-                    continue
-                if self.identity_sect_name(avatar) != "太一门":
-                    # Dao names can change sects at runtime.  Keep the task
-                    # alive so a later re-entry is picked up, but never emit
-                    # the old Taiyi-only command while the identity is out.
-                    await asyncio.sleep(scheduler_sleep_seconds(600))
-                    continue
-
-                async with AtomicTaskContext(self, f"TaiyiGuide-{avatar}"):
-                    state = self.get_avatar_state(avatar)
-                    next_time = state.get("next_taiyi_guide_time", "")
-                    if next_time and is_future(next_time):
-                        continue
-                    resp = await self.send_and_wait_feedback_identity(
-                        avatar,
-                        TAIYI_GUIDE_COMMAND,
-                        timeout=60,
-                        max_retries=1,
-                        force_identity_check=True,
-                    )
-                    self.record_avatar_taiyi_guide_response(avatar, resp)
-
-                state = self.get_avatar_state(avatar)
-                next_time = state.get("next_taiyi_guide_time", "")
-                sleep_for = min(seconds_until(next_time), 1800) if next_time and is_future(next_time) else 600
-                await asyncio.sleep(scheduler_sleep_seconds(sleep_for, minimum=30))
-            except Exception as e:
-                log.error(f"Avatar [{avatar}] Taiyi guide loop error: {e}", exc_info=True)
-                self.set_avatar_state(avatar, "next_taiyi_guide_time", add_seconds_str(now_str(), TAIYI_GUIDE_RETRY_SECONDS))
-                await asyncio.sleep(scheduler_sleep_seconds(60))
-
     def recent_command_guard_wait(self, command="", max_age_seconds=15):
         return self.common_recent_command_guard_wait(command, max_age_seconds=max_age_seconds)
 
@@ -7655,6 +7552,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         self.create_scheduler_task("meditation", lambda: self.run_meditation_timer())
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
+        self.create_scheduler_task("sect_daily", lambda: self.run_sect_daily_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=25))
         self.create_scheduler_task(
             "surprise_raid",
@@ -7676,8 +7574,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
-            if self.identity_sect_name(avatar) == "太一门":
-                self.create_scheduler_task(f"avatar_taiyi_guide_{avatar}", lambda avatar=avatar: self.run_avatar_taiyi_guide_loop(avatar, initial_delay=0))
             if avatar == CLOUD_STAIRS_AVATAR:
                 self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")

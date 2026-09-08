@@ -820,6 +820,8 @@ def command_response_family(command):
         return "star"
     if cmd in {".天阶状态", ".登天阶", ".引九天罡风", ".问心台"}:
         return "cloud_stairs"
+    if cmd.startswith(".引道 "):
+        return "taiyi_guide"
     if cmd == ".探寻裂缝":
         return "rift"
     if cmd == ".搜寻节点":
@@ -932,6 +934,8 @@ def text_response_family(text):
         "云阶禁制不会为你显现", "你并非凌霄宫弟子",
     ]):
         return "cloud_stairs"
+    if re.search(r"引动[【\[][^】\]]+之道[】\]]", clean) or "引道" in clean and "神识不足" not in clean:
+        return "taiyi_guide"
     if any(k in clean for k in ["裂缝", "时空异兽", "不敌败退", "身受重创", "元婴险些崩溃", "元婴遁逃"]):
         return "rift"
     if any(k in clean for k in [
@@ -1116,6 +1120,9 @@ def feedback_response_matches_command(command, text):
             "云阶禁制不会为你显现", "你并非凌霄宫弟子",
             "可立即登阶", "未再聚", "后再试",
         ])
+    if expected == "taiyi_guide":
+        return (bool(re.search(r"引动[【\[][^】\]]+之道[】\]]", clean))
+                or any(word in clean for word in ("引道", "并非太一门", "不是太一门", "参悟大道本源")))
     if expected == "rift":
         return any(k in clean for k in [
             "裂缝", "探寻成功", "法则碎片", "法则本源", "元婴遁逃",
@@ -5537,6 +5544,9 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
 
     cmd = command.strip()
     processed = False
+    sync_sect = getattr(actor, "sync_identity_sect_from_text", None)
+    if callable(sync_sect):
+        processed = bool(sync_sect(identity, text)) or processed
     if hasattr(actor, "record_identity_yuanying_recovery_from_text"):
         processed = bool(actor.record_identity_yuanying_recovery_from_text(
             identity, text, source=f"manual {cmd}", command=cmd
@@ -5622,7 +5632,12 @@ async def record_manual_command_reply_state_if_needed(actor, msg, text=None, sen
             processed = bool(actor.record_yuanying_out_start_response(text))
     elif cmd == ".问道":
         if hasattr(actor, "record_ask_dao_response"):
-            processed = bool(actor.record_ask_dao_response(text, source="manual .问道"))
+            processed = bool(actor.record_ask_dao_response(text, source="manual .问道", identity=identity))
+    elif cmd.startswith(".引道 "):
+        if hasattr(actor, "record_avatar_taiyi_guide_response"):
+            processed = bool(actor.record_avatar_taiyi_guide_response(
+                identity, text, source="manual " + cmd, observed_at=getattr(msg, "date", None),
+            ))
     elif (
         cmd == ".探望南宫婉"
         or cmd == ".婉影问安"

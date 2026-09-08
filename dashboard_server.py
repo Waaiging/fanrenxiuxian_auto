@@ -3139,6 +3139,17 @@ def build_command_panels(account, state):
     custom_commands = load_custom_commands()
     result = []
     for panel in panels:
+        identity = panel["identity"]
+        identity_state = state if identity == "主魂" else avatars.get(identity, {}) or {}
+        sect = str((state.get("identity_sect_names") or {}).get(identity)
+                   or identity_state.get("sect_name") or "").strip()
+        panel["commands"] = [row for row in panel["commands"]
+                             if row.get("command") not in {".引道 水", ".问道"}]
+        if sect == "太一门":
+            panel["commands"].append(taiyi_guide_command(identity_state))
+        elif sect == "元婴宗":
+            panel["commands"].append(time_command(identity_state, "next_ask_dao_time", ".问道", "问道",
+                                                  ready="可问道", missing="可问道", group="元婴宗"))
         append_custom_commands(account, panel, custom_commands, root_state=state)
         panel = apply_command_execution_channels(panel, root_state=state)
         panel = apply_command_controls(account, panel)

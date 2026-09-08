@@ -3245,6 +3245,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         stale = []
         now = datetime.now()
         for key, command, identity in specs:
+            if self.identity_sect_name(identity) and not self.sect_command_allowed(command, identity):
+                continue
             if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
                 continue
             value = str(self.state.get(key) or "").strip()
@@ -6038,7 +6040,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         )
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())    # dashboard 自定义指令
         self.create_scheduler_task("daily_reward_summary", lambda: self.run_daily_reward_summary_loop(initial_delay=40))
-        self.create_scheduler_task("ask_dao", lambda: self.run_ask_dao_loop())           # 元婴宗问道
+        self.create_scheduler_task("sect_daily", lambda: self.run_sect_daily_loop())
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())     # 元婴出窍
         self.create_scheduler_task("rift_search", lambda: self.run_rift_search_loop())      # 探寻裂缝
         if self.main_star_palace_enabled:
