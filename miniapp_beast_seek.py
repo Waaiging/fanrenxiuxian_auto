@@ -15,7 +15,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
-from miniapp_beast_contract import main_soul_is_wanling
+from miniapp_dwelling import identity_state
+from sect_rules import SectTaskStopped, identity_sect, require_command, resolve_identity, task_paused
 from wind_thunder_features import (
     wind_thunder_enabled,
     wind_thunder_send,
@@ -115,8 +116,10 @@ class MiniAppBeastSeekWorker:
         transport: Any,
         account: str,
         logger: logging.Logger | None = None,
+        identity: str = "主魂",
     ) -> None:
         self.actor = actor
+        self._identity = identity
         self.transport = transport
         self.account = str(account or "").strip()
         self.log = logger or logging.getLogger(f"miniapp_beast_seek.{self.account}")
@@ -124,11 +127,10 @@ class MiniAppBeastSeekWorker:
         if not isinstance(settings, dict):
             settings = {}
         entry_url = str(settings.get("entry_url") or "").strip()
-        self.enabled = (
+        self.configured_enabled = (
             bool(entry_url)
             and bool(settings.get("enabled", True))
             and bool(settings.get("beast_seek_enabled", True))
-            and main_soul_is_wanling(actor)
         )
         self.interval_seconds = max(
             5 * 60,
@@ -143,11 +145,16 @@ class MiniAppBeastSeekWorker:
         ).strip() or DEFAULT_TARGET_BEAST
 
     @property
+    def identity(self) -> str:
+        return resolve_identity(self.actor, self._identity)
+
+    @property
+    def enabled(self) -> bool:
+        return self.configured_enabled and identity_sect(self.actor, self.identity) == "万灵宗"
+
+    @property
     def state(self) -> dict[str, Any]:
-        state = getattr(self.actor, "state", None)
-        if not isinstance(state, dict):
-            raise RuntimeError("actor_state_missing")
-        return state
+        return identity_state(self.actor, self.identity)
 
     def _save(self) -> None:
         self.actor.save_state()
@@ -171,7 +178,7 @@ class MiniAppBeastSeekWorker:
         if not callable(checker):
             return False
         try:
-            return bool(checker(".寻觅灵兽", "主魂"))
+            return bool(checker(".寻觅灵兽", self.identity))
         except Exception:
             return False
 
@@ -187,7 +194,7 @@ class MiniAppBeastSeekWorker:
         updater = getattr(self.actor, "update_main_best_beast", None)
         if not callable(updater):
             updater = getattr(self.actor, "update_best_beast_tracking", None)
-        if callable(updater):
+        if self.identity == "主魂" and callable(updater):
             updater()
 
     def _schedule_wake(self, target: datetime) -> None:
@@ -196,7 +203,7 @@ class MiniAppBeastSeekWorker:
     def _mark_seek_attempt(self, attempted_at: datetime) -> datetime:
         now = datetime.now()
         interval = self.interval_seconds
-        if wind_thunder_enabled(self.actor, "主魂"):
+        if wind_thunder_enabled(self.actor, self.identity):
             interval = wind_thunder_target_cooldown(".寻觅灵兽", interval)
         next_time = attempted_at + timedelta(seconds=interval)
         if next_time <= now:
@@ -274,14 +281,15 @@ class MiniAppBeastSeekWorker:
             )
             return True
 
+        require_command(self.actor, self.identity, ".寻觅灵兽")
         released = await self.transport.spirit_beast_release(
-            "主魂",
+            self.identity,
             pending_id,
             beast_name=name,
         )
         beasts = list((released or {}).get("beasts") or [])
         if any(_beast_id(item) == pending_id for item in beasts):
-            refreshed = await self.transport.spirit_beast_snapshot("主魂", log_operation=False)
+            refreshed = await self.transport.spirit_beast_snapshot(self.identity, log_operation=False)
             beasts = list((refreshed or {}).get("beasts") or [])
         if any(_beast_id(item) == pending_id for item in beasts):
             raise MiniAppBeastError("beast_release_not_confirmed")
@@ -408,8 +416,9 @@ class MiniAppBeastSeekWorker:
             return False
         self.state["beast_seek_miniapp_paused"] = False
 
+        require_command(self.actor, self.identity, ".寻觅灵兽")
         await self.transport.initialize()
-        snapshot = await self.transport.spirit_beast_snapshot("主魂", log_operation=False)
+        snapshot = await self.transport.spirit_beast_snapshot(self.identity, log_operation=False)
         beasts = list((snapshot or {}).get("beasts") or [])
         self._update_cache(beasts)
         self._save()
@@ -464,11 +473,12 @@ class MiniAppBeastSeekWorker:
         })
         self._save()
 
+        require_command(self.actor, self.identity, ".寻觅灵兽")
         sought = await wind_thunder_send(
             self.actor,
-            "主魂",
+            self.identity,
             ".寻觅灵兽",
-            lambda: self.transport.spirit_beast_seek("主魂"),
+            lambda: self.transport.spirit_beast_seek(self.identity),
         )
         post_beasts = list((sought or {}).get("beasts") or [])
         self._update_cache(post_beasts)
@@ -483,7 +493,7 @@ class MiniAppBeastSeekWorker:
                 MIN_COOLDOWN_RETRY_SECONDS,
                 cooldown_seconds + COOLDOWN_RETRY_GRACE_SECONDS,
             )
-            if wind_thunder_enabled(self.actor, "主魂"):
+            if wind_thunder_enabled(self.actor, self.identity):
                 wait_seconds = min(
                     wait_seconds,
                     wind_thunder_target_cooldown(".寻觅灵兽", DEFAULT_INTERVAL_SECONDS),
@@ -531,6 +541,8 @@ class MiniAppBeastSeekWorker:
         return False
 
     async def run_cycle(self) -> bool:
+        if not self.enabled or task_paused(self.actor, self.identity, ".寻觅灵兽"):
+            return False
         try:
             lock = getattr(self.actor, "beast_lock", None)
             if lock is not None:
@@ -539,6 +551,8 @@ class MiniAppBeastSeekWorker:
             return await self._run_cycle_unlocked()
         except asyncio.CancelledError:
             raise
+        except SectTaskStopped:
+            return False
         except MiniAppCircuitOpenError as exc:
             wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
             self.state.update({
@@ -589,6 +603,9 @@ class MiniAppBeastSeekWorker:
             self.interval_seconds,
         )
         while getattr(self.actor, "is_running", True):
+            if not self.enabled or task_paused(self.actor, self.identity, ".寻觅灵兽"):
+                await asyncio.sleep(60)
+                continue
             pause = getattr(self.actor, "pause_event", None)
             if pause is not None:
                 await pause.wait()

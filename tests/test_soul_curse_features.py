@@ -38,6 +38,10 @@ class DummySoulCurseActor(SoulCurseMixin):
         self.account_key = account_key
         assistant_identity = SUB_YINLUO_IDENTITY if account_key == "sub" else "缘生子"
         self.state = {"avatars": {assistant_identity: {}}}
+        self.state["identity_sect_names"] = {
+            "主魂": {"main": "天星宗", "sub": "元婴宗", "xiaohao": "万灵宗", "waaiging": "合欢宗"}[account_key],
+            assistant_identity: "阴罗宗" if account_key in {"main", "sub"} else "太一门",
+        }
         self.avatars = [assistant_identity]
         self.main_responses = {key: list(value) for key, value in (main_responses or {}).items()}
         self.identity_responses = {key: list(value) for key, value in (identity_responses or {}).items()}
@@ -55,7 +59,7 @@ class DummySoulCurseActor(SoulCurseMixin):
     def identity_pause_seconds(self, identity):
         return 0
 
-    def soul_curse_identity_enabled(self, account=None, identity="主魂"):
+    def soul_curse_identity_enabled(self, account=None, identity="主魂", *, assistant=False):
         # 流程测试：身份开关默认视为开启（开关行为由专门测试覆盖）
         return True
 

@@ -587,6 +587,10 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
 
     def migrate_main_soul_sect_state(self):
         """副号主魂从星宫迁入元婴宗后，清理主魂星宫专属排程。"""
+        self.sect_name = str((self.state.get("identity_sect_names") or {}).get("主魂")
+                             or self.state.get("miniapp_sect_name") or self.sect_name).strip()
+        if isinstance(getattr(self, "identity_sect_names", None), dict):
+            self.identity_sect_names["主魂"] = self.sect_name
         changed = False
         if self.state.get("sect_name") != self.sect_name:
             self.state["sect_name"] = self.sect_name
@@ -6052,8 +6056,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 self.create_scheduler_task(f"avatar_yuanying_rift_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_yuanying_rift_loop(avatar_name, initial_delay=i * 10))
             if avatar_name in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
-        if YINLUO_IDENTITY in self.avatars:
-            self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
+        self.create_scheduler_task("tianxing_tianji_grind", lambda: self.run_tianxing_tianji_grind_loop())
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=120, sleep_func=scheduler_sleep_seconds))
 
         recover_wind_thunder_sessions(self)

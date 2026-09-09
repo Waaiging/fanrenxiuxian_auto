@@ -100,6 +100,7 @@ class SoulCurseIdentitySwitchTests(unittest.TestCase):
                 return self.state["avatars"].setdefault(identity, {})
 
         actor = _RenamedActor()
+        actor.state["identity_sect_names"] = {"玄续子": "阴罗宗", "无咎子": "天星宗"}
         self.assertEqual(actor.soul_curse_yinluo_identity(), "玄续子")
         self.assertTrue(actor.soul_curse_identity_enabled(identity="玄续子"))
         self.assertTrue(actor.soul_curse_identity_enabled(identity="缘生子"))

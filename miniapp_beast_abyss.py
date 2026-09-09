@@ -158,7 +158,7 @@ def choose_abyss_beast(
 
 
 class MiniAppBeastAbyssWorker:
-    """Run abyss only for the two requested Wanling main souls."""
+    """Run abyss for current Wanling identities using their independent state."""
 
     # 连续失败超过此轮数后，标记本身份"永久放弃"，不再空转刷屏。
     # 需要把对应字段改回 0（或调整 power_min）才能恢复。
@@ -174,8 +174,7 @@ class MiniAppBeastAbyssWorker:
             settings = {}
         entry_url = str(settings.get("entry_url") or "").strip()
         self.enabled = (
-            self.account in ACCOUNT_IDENTITY_SCOPE
-            and self.transport is not None
+            self.transport is not None
             and bool(entry_url)
             and bool(settings.get("enabled", True))
             and bool(settings.get("beast_abyss_enabled", True))
@@ -196,7 +195,8 @@ class MiniAppBeastAbyssWorker:
             self.log.warning("Mini App abyss state save failed", exc_info=True)
 
     def _state(self, identity: str = "主魂") -> dict[str, Any]:
-        return identity_state(self.actor, identity)
+        from sect_rules import resolve_identity
+        return identity_state(self.actor, resolve_identity(self.actor, identity))
 
     def _record(self, identity: str = "主魂", **updates: Any) -> None:
         self._state(identity).update(updates)
@@ -226,9 +226,10 @@ class MiniAppBeastAbyssWorker:
             return []
         ids = getattr(self.transport, "identity_player_ids", {}) or {}
         result = []
-        for identity in ACCOUNT_IDENTITY_SCOPE.get(self.account, ()):
+        from sect_rules import identity_names, identity_sect
+        for identity in identity_names(self.actor):
             mapped = identity in ids or identity.casefold() in ids
-            if mapped and self._identity_sect(identity) == "万灵宗":
+            if mapped and identity_sect(self.actor, identity) == "万灵宗":
                 result.append(identity)
         return result
 
@@ -286,7 +287,7 @@ class MiniAppBeastAbyssWorker:
         updater = getattr(self.actor, "update_main_best_beast", None)
         if not callable(updater):
             updater = getattr(self.actor, "update_best_beast_tracking", None)
-        if callable(updater):
+        if identity == "主魂" and callable(updater):
             updater()
         self._save()
 
@@ -310,6 +311,10 @@ class MiniAppBeastAbyssWorker:
     async def run_once(self, identity: str = "主魂", now: datetime | None = None) -> int:
         """Read one page state and enter once only when its cooldown is ready."""
         now = now or datetime.now()
+        from sect_rules import resolve_identity, task_paused
+        identity = resolve_identity(self.actor, identity)
+        if task_paused(self.actor, identity, "miniapp:spirit-beast-abyss"):
+            return 60
         initializer = getattr(self.transport, "initialize", None)
         if callable(initializer):
             await initializer()
@@ -327,6 +332,8 @@ class MiniAppBeastAbyssWorker:
         return await self._run_once_unlocked(identity, now)
 
     async def _run_once_unlocked(self, identity: str, now: datetime) -> int:
+        from sect_rules import require_command
+        require_command(self.actor, identity, "miniapp:spirit-beast-abyss")
         selection = miniapp_beast_abyss_settings()
         power_min = _nonnegative_int(selection.get("power_min"))
         power_max = _nonnegative_int(selection.get("power_max"))
@@ -372,7 +379,7 @@ class MiniAppBeastAbyssWorker:
                 power_max=power_max,
                 include_active=True,
             )
-            if resting is None or not getattr(self.actor, "rest_beast_for_abyss", None):
+            if resting is None:
                 self._record_error(identity, "beast_abyss_no_available_beast")
                 # 只在首次失败时输出 WARNING，后续转为静音计数
                 if not _is_repeated_failure:
@@ -392,21 +399,19 @@ class MiniAppBeastAbyssWorker:
                 rest_name,
             )
             try:
-                rest_status, rest_resp = await self.actor.rest_beast_for_abyss(rest_name)
+                require_command(self.actor, identity, "miniapp:spirit-beast-rest")
+                rest_payload = await self.transport.spirit_beast_rest(identity, _nonnegative_int(resting.get("id")))
+                if isinstance(rest_payload, dict) and rest_payload.get("ok") is False:
+                    return self.retry_seconds
             except asyncio.CancelledError:
+                raise
+            except SectTaskStopped:
                 raise
             except Exception as exc:
                 self.log.warning(
                     "Mini App abyss: rest %s failed (%s); retry later",
                     rest_name,
                     type(exc).__name__,
-                )
-                return self.retry_seconds
-            if "休息" not in str(rest_status or ""):
-                self.log.warning(
-                    "Mini App abyss: rest %s unconfirmed (%s); retry later",
-                    rest_name,
-                    str(rest_resp or "")[:80],
                 )
                 return self.retry_seconds
             snapshot = await self._snapshot(identity)
@@ -433,6 +438,7 @@ class MiniAppBeastAbyssWorker:
 
         beast_id = _nonnegative_int(beast.get("id"))
         beast_name = str(beast.get("full_name") or beast_id).strip()
+        require_command(self.actor, identity, "miniapp:spirit-beast-abyss")
         payload = await self.transport.spirit_beast_abyss_enter(
             identity,
             beast_id,

@@ -9,6 +9,7 @@ import random
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from sect_rules import SectTaskStopped, identity_sect
 
 from concubine_features import (
     CONCUBINE_GRACE_SECONDS,
@@ -123,6 +124,7 @@ class RestrictedMiniAppWorker:
             self.transport,
             logger=self.log,
         )
+        self.transport.sect_actor = actor
         self.daily_activities = MiniAppDailyActivities(
             actor,
             self.transport,
@@ -262,10 +264,8 @@ class RestrictedMiniAppWorker:
         self._spawn("fate_cards", self.daily_activities.run_fate_cards_loop())
         if self.tianxing_journey.enabled:
             self._spawn("journey", self.tianxing_journey.run_loop())
-        if self.beast_abyss.enabled:
-            self._spawn("beast_abyss", self.beast_abyss.run_loop())
-        if self.beast_seek.enabled:
-            self._spawn("beast_seek", self.beast_seek.run_loop())
+        self._spawn("sect_daily", self.actor.run_sect_daily_loop())
+        self._spawn("tianxing_tianji", self.actor.run_tianxing_tianji_grind_loop())
 
         if self.account == "xiaohao":
             for avatar in getattr(self.actor, "avatars", []) or []:
@@ -276,19 +276,10 @@ class RestrictedMiniAppWorker:
             for avatar in XIAOHAO_YUANYING_AVATARS:
                 if avatar in (getattr(self.actor, "avatars", []) or []):
                     self._spawn(f"yuanying_{avatar}", self.run_avatar_yuanying_loop(avatar))
-            if "问心子" in (getattr(self.actor, "avatars", []) or []):
-                self._spawn(
-                    "cloud_stairs_问心子",
-                    self.actor.run_avatar_cloud_stairs_loop("问心子", initial_delay=0),
-                )
             if self.star_enabled and STAR_IDENTITY in (getattr(self.actor, "avatars", []) or []):
                 self._spawn("star_farm", self.run_star_farm_loop())
             if self.beast_enabled:
                 self._spawn("beast_sync", self.run_beast_sync_loop())
-            if self.beast_contract.enabled:
-                self._spawn("beast_contract", self.beast_contract.run())
-        elif self.account == "waaiging":
-            self._spawn("destiny", self.actor.run_tianxing_destiny_loop())
 
 
         self.log.warning(
@@ -365,7 +356,7 @@ class RestrictedMiniAppWorker:
             response = await self.transport.command(
                 command,
                 identity=identity,
-                meditation_prefix=(self.account == "waaiging"),
+                meditation_prefix=(identity_sect(self.actor, identity) == "天星宗"),
             )
             apply_dwelling_snapshot(self.actor, identity, response.payload)
             self._sync_concubine_response(identity, command, response.text)
@@ -386,6 +377,8 @@ class RestrictedMiniAppWorker:
                 restricted_miniapp_last_error="",
                 restricted_miniapp_retry_at="",
             )
+        except SectTaskStopped:
+            return None
         except MiniAppCircuitOpenError as exc:
             previous_retry_at = str(
                 self.actor.state.get("restricted_miniapp_retry_at") or ""

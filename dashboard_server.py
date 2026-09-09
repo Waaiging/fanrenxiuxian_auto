@@ -59,7 +59,10 @@ from automation_settings import (
     mulan_support_mode,
     save_automation_settings,
 )
-from log_utils import command_control_key
+from log_utils import (
+    command_control_key, command_control_identity_candidates,
+    command_control_matches, command_control_entry_disabled,
+)
 from dashboard_command_catalog import apply_command_classifications, command_catalog_payload
 from xuangu_quiz_features import confirm_quiz_answer, quiz_dashboard_payload
 from command_modules import (
@@ -112,6 +115,10 @@ from miniapp_inventory import (
     write_inventory_request,
 )
 from state_io import load_json_state, save_json_state, update_json_state
+from sect_rules import command_sect
+from hehuan_features import (
+    DUAL_CULTIVATION_COMMAND, dual_cultivation_default_target, normalize_dual_cultivation_target,
+)
 from reward_parsing import (
     compact_reward_summary,
     daily_reward_items_for_command,
@@ -1003,27 +1010,14 @@ def append_custom_commands(account, panel, custom_commands, root_state=None):
     return panel
 
 
-def command_control_entry(controls, account, identity, control_key):
-    account_controls = controls.get(account, {}) if isinstance(controls, dict) else {}
-    if not isinstance(account_controls, dict):
-        return None
-    for ident in (identity or "主魂", "*"):
-        ident_controls = account_controls.get(ident, {})
-        if not isinstance(ident_controls, dict):
-            continue
-        if control_key not in ident_controls:
-            continue
-        return ident_controls.get(control_key)
-    return None
+def command_control_entry(controls, account, identity, control_key, root_state=None):
+    matches = command_control_matches(controls, account, identity, control_key, root_state)
+    return matches[0][1] if matches else None
 
 
-def command_control_disabled(controls, account, identity, control_key, default_disabled=False):
-    entry = command_control_entry(controls, account, identity, control_key)
-    if isinstance(entry, dict):
-        return bool(entry.get("disabled"))
-    if entry is not None:
-        return bool(entry)
-    return bool(default_disabled)
+def command_control_disabled(controls, account, identity, control_key, default_disabled=False, root_state=None):
+    matches = command_control_matches(controls, account, identity, control_key, root_state)
+    return any(command_control_entry_disabled(entry) for _, entry in matches) if matches else bool(default_disabled)
 
 
 def normalize_beast_border_patrol_mode(mode):
@@ -1043,20 +1037,21 @@ def fishing_auto_control_entry(account):
     return entry if isinstance(entry, dict) else {}
 
 
-def apply_command_controls(account, panel):
+def apply_command_controls(account, panel, root_state=None):
     controls = load_command_controls()
     identity = panel.get("identity") or "主魂"
     commands = panel.get("commands") or []
     for row in commands:
         control_key = command_control_key(row.get("command", ""))
         row["control_key"] = control_key
-        entry = command_control_entry(controls, account, identity, control_key)
+        entry = command_control_entry(controls, account, identity, control_key, root_state)
         row["control_disabled"] = command_control_disabled(
             controls,
             account,
             identity,
             control_key,
             default_disabled=bool(row.get("default_paused")),
+            root_state=root_state,
         )
         if row["control_disabled"] and row.get("actionable", True):
             row["status"] = "已暂停"
@@ -1414,7 +1409,7 @@ def miniapp_beast_abyss_command(state):
     target = parse_state_time(next_time)
     now = datetime.now()
     next_seconds = max(0, int((target - now).total_seconds())) if target and target > now else 0
-    detail_parts = ["每 6 小时", "以 Mini App 页面冷却为准", "仅主魂"]
+    detail_parts = ["每 6 小时", "以 Mini App 页面冷却为准", "按当前万灵宗身份执行"]
     if power_min > 0 or power_max > 0:
         detail_parts.append(f"战力 {power_min or 0}-{power_max or '∞'}")
     else:
@@ -2289,18 +2284,13 @@ def _soul_curse_dashboard_identity_candidates(account, identity, state=None):
     elif account == "sub":
         legacy_yinluo_names.append("缘生子")
         legacy_yinluo_names.extend([SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY])
-    if state_sect == "阴罗宗":
-        # The sect snapshot is authoritative for a renamed/current Dao name.
-        # Include the historical names only for this confirmed Yinluo avatar.
-        for name in legacy_yinluo_names:
-            add(name)
-    elif any(name in yinluo_names for name in candidates):
+    if any(name in yinluo_names for name in candidates):
         for name in legacy_yinluo_names:
             add(name)
     return candidates
 
 
-def soul_curse_identity_enabled_for_dashboard(account, identity, state=None):
+def soul_curse_identity_enabled_for_dashboard(account, identity, state=None, *, assistant=False):
     """Dashboard 侧读运行时同一份 soul_curse_settings.json 开关。"""
     import json
 
@@ -2319,7 +2309,10 @@ def soul_curse_identity_enabled_for_dashboard(account, identity, state=None):
         for candidate in _soul_curse_dashboard_identity_candidates(account, identity, state=state):
             if candidate in account_map:
                 return bool(account_map.get(candidate))
-    return False
+    if isinstance(account_map, list):
+        return any(candidate in account_map for candidate in
+                   _soul_curse_dashboard_identity_candidates(account, identity, state=state))
+    return bool(assistant)
 
 
 def soul_curse_switch_row(identity, enabled, group="南宫婉", account=None):
@@ -2471,7 +2464,7 @@ def soul_curse_assist_commands(state, account=None, identity=None):
     assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
     if not isinstance(assist, dict):
         assist = {}
-    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state):
+    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state, assistant=True):
         return [soul_curse_switch_row(identity, False, group="阴罗宗")]
     commission_id = str(assist.get("commission_id") or "").strip()
     target = str(assist.get("target_username") or "").strip()
@@ -3126,6 +3119,63 @@ def avatar_commands(account, name, state, root_state=None):
     return rows
 
 
+def current_sect_commands(account, identity, state, root_state):
+    sect = str((root_state.get("identity_sect_names") or {}).get(identity)
+               or state.get("sect_name") or state.get("miniapp_sect_name") or "").strip()
+    if sect == "太一门":
+        return [taiyi_guide_command(state)]
+    if sect == "元婴宗":
+        return [time_command(state, "next_ask_dao_time", ".问道", "问道",
+                             ready="可问道", missing="可问道", group=sect)]
+    if sect == "凌霄宫":
+        return [
+            time_command(state, "next_stairs_time", ".登天阶", "登天阶", group=sect),
+            time_command(state, "nine_heaven_wind_cd_time", ".引九天罡风", "引九天罡风", group=sect),
+            time_command(state, "next_heart_time", ".问心台", "问心台", group=sect,
+                         detail="优先在 8–11 阶使用；23:50 起每日兜底"),
+            flow_command(".天阶状态", "天阶状态", "首次或缓存缺失时同步", sect),
+        ]
+    if sect == "阴罗宗":
+        rows = yinluo_commands(state)
+        rows.extend(soul_curse_assist_commands(state, account=account, identity=identity))
+        if not any(row.get("dashboard_action") == "soul-curse-toggle" for row in rows):
+            rows.insert(0, soul_curse_switch_row(identity, True, group=sect, account=account))
+        for row in rows:
+            if row.get("dashboard_action") == "soul-curse-toggle":
+                row["detail"] = "阴罗宗解咒：接取→辨认→借幡→剥离；保留原有身份开关"
+        return rows
+    if sect == "天星宗":
+        return [
+            daily_done_command(state, ".观命", "观命", date_key="last_destiny_observation_date",
+                               detail="每日观命，按后续动作选择命星", group=sect),
+            flow_command(".定命 <命星>", "定命", "闭关、游历或炼器前按命星候选自动选择", sect),
+            flow_command(".推命 闭关", "推命闭关", "服从当前闭关模式与指令开关", sect),
+            flow_command(".推命 炼制", "刷天机值", "服从自动化设置中的身份选择、目标次数和开关", sect),
+            flow_command(".改命 探索", "改命探索", "服从野外历练参与设置", sect),
+        ]
+    if sect == "万灵宗":
+        contract = miniapp_beast_contract_command(state)
+        contract["actionable"] = True
+        return [
+            time_command(state, "beast_seek_miniapp_next_time", ".寻觅灵兽", "寻觅灵兽", group=sect),
+            contract, miniapp_beast_abyss_command(state),
+            flow_command("miniapp:spirit-beast-rest", "灵兽休息", "探渊等流程按灵兽状态处理", sect),
+        ]
+    if sect == "合欢宗":
+        entry = command_control_entry(load_command_controls(), account, identity, DUAL_CULTIVATION_COMMAND, root_state)
+        target = (entry.get("target_username") if isinstance(entry, dict) and "target_username" in entry
+                  else dual_cultivation_default_target(account, identity, state))
+        target = str(target or "").strip().lstrip("@")
+        row = time_command(state, "next_dual_cultivation_time", DUAL_CULTIVATION_COMMAND, "温养双修",
+                           waiting="1小时冷却", ready="可双修", missing="可双修", group=sect,
+                           detail=f"双修对象：@{target}" if target else "请配置双修对象")
+        row["dual_cultivation_target"] = target
+        if not target:
+            row.update(status="待配置对象", tone="pending", next_seconds=None)
+        return [row]
+    return []
+
+
 def build_command_panels(account, state):
     """Build identity-scoped command status panels from the state JSON."""
     panels = [main_soul_panel(account, state)]
@@ -3144,15 +3194,14 @@ def build_command_panels(account, state):
         sect = str((state.get("identity_sect_names") or {}).get(identity)
                    or identity_state.get("sect_name") or "").strip()
         panel["commands"] = [row for row in panel["commands"]
-                             if row.get("command") not in {".引道 水", ".问道"}]
-        if sect == "太一门":
-            panel["commands"].append(taiyi_guide_command(identity_state))
-        elif sect == "元婴宗":
-            panel["commands"].append(time_command(identity_state, "next_ask_dao_time", ".问道", "问道",
-                                                  ready="可问道", missing="可问道", group="元婴宗"))
+                             if (not command_sect(row.get("command"))
+                                 or (command_sect(row.get("command")) == "星宫" and sect == "星宫"))
+                             and row.get("group") != "阴罗宗"
+                             and not (sect == "阴罗宗" and row.get("group") == "南宫婉")]
+        panel["commands"].extend(current_sect_commands(account, identity, identity_state, state))
         append_custom_commands(account, panel, custom_commands, root_state=state)
         panel = apply_command_execution_channels(panel, root_state=state)
-        panel = apply_command_controls(account, panel)
+        panel = apply_command_controls(account, panel, root_state=state)
         panel = apply_identity_pause(panel, state)
         panel = apply_command_classifications(panel)
         result.append(panel)
@@ -6228,6 +6277,7 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         return {"success": False, "msg": "未知账号"}
     if not command or not control_key:
         return {"success": False, "msg": "指令为空"}
+    root_state = get_state(account)
     if not FISHING_AUTOMATION_ENABLED and (
         command in FISHING_AUTO_CONTROL_COMMANDS
         or command in FISHING_CONTROL_COMMANDS
@@ -6277,9 +6327,10 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
             }
         account_controls = data.setdefault(account, {})
         identity_controls = account_controls.setdefault(identity, {})
-        old_entry = identity_controls.get(control_key, {})
+        old_entry = command_control_entry(data, account, identity, control_key, root_state)
         stored_entry = dict(old_entry) if isinstance(old_entry, dict) else {}
-        persist_entry = control_key == BEAST_BORDER_PATROL_CONTROL_KEY
+        persist_entry = (control_key in {BEAST_BORDER_PATROL_CONTROL_KEY, DUAL_CULTIVATION_COMMAND}
+                         or len(command_control_identity_candidates(identity, root_state)) > 1)
         if disabled or default_paused or persist_entry:
             stored_entry.update({
                 "disabled": disabled,
@@ -6288,7 +6339,7 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
                 "updated_at": datetime.now().strftime(TIME_FORMAT),
                 "updated_by": username,
             })
-            if persist_entry:
+            if control_key == BEAST_BORDER_PATROL_CONTROL_KEY:
                 stored_entry["patrol_mode"] = normalize_beast_border_patrol_mode(
                     payload.get("patrol_mode") or stored_entry.get("patrol_mode")
                 )
@@ -6309,6 +6360,36 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "control_key": control_key,
         "disabled": disabled,
     }
+
+
+@app.post("/api/dual-cultivation-target")
+async def set_dual_cultivation_target(payload: dict = Body(...), username: str = Depends(authenticate)):
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "主魂").strip() or "主魂"
+    if account not in WINDOW_MAP:
+        return {"success": False, "msg": "未知账号"}
+    state = get_state(account)
+    if identity != "主魂" and identity not in (state.get("avatars") or {}):
+        return {"success": False, "msg": "身份已变化，请刷新后重试"}
+    try:
+        target = normalize_dual_cultivation_target(payload.get("target_username"))
+    except ValueError as exc:
+        return {"success": False, "msg": str(exc)}
+    own_names = account_profile_usernames(account, state).get("主魂") or []
+    if target and identity == "主魂" and target.casefold() in {str(name).lstrip("@").casefold() for name in own_names}:
+        return {"success": False, "msg": "双修对象不能是当前主魂本人"}
+    with COMMAND_CONTROL_LOCK:
+        data = load_command_controls()
+        controls = data.setdefault(account, {}).setdefault(identity, {})
+        old = command_control_entry(data, account, identity, DUAL_CULTIVATION_COMMAND, state)
+        entry = dict(old) if isinstance(old, dict) else {"disabled": bool(old)}
+        entry.update(command=DUAL_CULTIVATION_COMMAND, label="温养双修", target_username=target,
+                     updated_at=datetime.now().strftime(TIME_FORMAT), updated_by=username)
+        controls[DUAL_CULTIVATION_COMMAND] = entry
+        save_command_controls(data)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {"success": True, "account": account, "identity": identity, "target_username": target}
 
 
 @app.post("/api/beast-border-patrol-mode")

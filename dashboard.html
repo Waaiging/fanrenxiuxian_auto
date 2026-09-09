@@ -158,6 +158,9 @@
         .command-row { display: grid; grid-template-columns: minmax(9rem, 1.6fr) minmax(8rem, 1fr) minmax(5.5rem, auto) minmax(5.8rem, auto); gap: 0.75rem; align-items: center; padding: 0.78rem 0.75rem; border-top: 1px solid rgba(255,255,255,0.055); font-size: 0.92rem; }
         .command-row:first-child { border-top: 0; }
         .command-main { min-width: 0; display: flex; flex-direction: column; gap: 0.22rem; }
+        .command-target-form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.3rem; }
+        .command-target-form label { display: flex; align-items: center; gap: 0.35rem; min-width: 0; color: var(--text-secondary); font-size: 0.74rem; }
+        .command-target-form .command-custom-input { width: 170px; max-width: 100%; padding: 0.3rem 0.4rem; }
         .command-name-line { min-width: 0; display: flex; align-items: center; gap: 0.42rem; }
         .command-name { font-weight: 800; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
         .command-channel { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 999px; padding: 0.12rem 0.38rem; font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; font-weight: 900; line-height: 1.15; white-space: nowrap; }
@@ -2034,6 +2037,7 @@
         let fishingAutoHomePending = false;
         let fishingAutoHolderPending = false;
         const commandPausePending = {};
+        const dualCultivationDrafts = {};
         const dashboardActionPending = {};
 
         function apiUrl(path) {
@@ -3117,6 +3121,14 @@
                         ${patrolModeOptions.map(mode => `<option value="${escapeHtml(mode)}" ${mode === item.patrol_mode_value ? 'selected' : ''}>${escapeHtml(mode)}</option>`).join('')}
                     </select>
                 ` : '';
+                const targetKey = `${account}|${identity}`;
+                const targetValue = dualCultivationDrafts[targetKey] ?? item.dual_cultivation_target ?? '';
+                const targetEditor = Object.hasOwn(item, 'dual_cultivation_target') ? `
+                    <form class="command-target-form" onsubmit="saveDualCultivationTarget(event, '${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}')">
+                        <label>对象 <input class="command-custom-input" name="target_username" aria-label="双修对象 Telegram 用户名" placeholder="@用户名；留空等待" value="${escapeHtml(targetValue)}" autocomplete="off" maxlength="33" oninput="dualCultivationDrafts['${escapeJs(targetKey)}'] = this.value"></label>
+                        <button class="command-action-button" style="width:auto;padding:0 0.4rem" type="submit" title="保存双修对象" aria-label="保存双修对象">保存</button>
+                    </form>
+                ` : '';
                 const controlHtml = dashboardAction === 'soul-curse-toggle' ? `
                     <button class="command-action-button ${item.soul_curse_enabled ? '' : 'paused'}" ${actionPending ? 'disabled' : ''} onclick="toggleSoulCurse('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', this)" title="${item.soul_curse_enabled ? '关闭封魂咒链路' : '启用封魂咒链路'}" aria-label="切换封魂咒链路">
                         <i data-lucide="${item.soul_curse_enabled ? 'power-off' : 'power'}" aria-hidden="true"></i>
@@ -3141,6 +3153,7 @@
                                 <span class="command-channel execution-${executionChannel}" title="${escapeHtml(executionTitle)}">${escapeHtml(executionLabel)}</span>
                             </div>
                             ${commandClassification(item).pending ? '<div class="command-classification-note">归属待确认</div>' : ''}
+                            ${targetEditor}
                         </div>
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
                         <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
@@ -4410,6 +4423,35 @@
                 await updateStatus();
             } finally {
                 if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            }
+        }
+
+        async function saveDualCultivationTarget(event, panelKey, account, identity) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const targetKey = `${account}|${identity}`;
+            const target = String(form.elements.target_username.value || '').trim();
+            const button = form.querySelector('button');
+            button.disabled = true;
+            try {
+                const response = await fetch(apiUrl('/api/dual-cultivation-target'), {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({account, identity, target_username: target})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    alert(data.msg || '保存双修对象失败');
+                    return;
+                }
+                if (String(dualCultivationDrafts[targetKey] ?? target).trim() === target) {
+                    delete dualCultivationDrafts[targetKey];
+                }
+                await updateStatus();
+                if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            } catch (error) {
+                alert('保存双修对象失败，请稍后重试');
+            } finally {
+                button.disabled = false;
             }
         }
 

@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timedelta
 
 from common_command_features import add_seconds_str, is_future, now_str, seconds_until
+from sect_rules import SectTaskStopped, identity_sect, require_command, resolve_identity, task_paused
 
 
 YINLUO_IDENTITY = "缘生子"
@@ -328,6 +329,7 @@ class YinluoMixin:
         return str(getattr(self, "yinluo_identity", "") or YINLUO_IDENTITY).strip()
 
     def get_yinluo_state(self, identity=YINLUO_IDENTITY):
+        identity = resolve_identity(self, identity)
         target = self.state if identity == "主魂" else self.get_avatar_state(identity)
         state = target.get("yinluo")
         if not isinstance(state, dict):
@@ -364,8 +366,10 @@ class YinluoMixin:
 
     async def send_yinluo_command(self, identity, command, timeout=60, edited_wait=0):
         async def _send_and_refresh():
+            identity_now = resolve_identity(self, identity)
+            require_command(self, identity_now, command)
             msg = await self.send_and_wait_feedback_identity(
-                identity,
+                identity_now,
                 command,
                 timeout=timeout,
                 max_retries=0,
@@ -909,11 +913,10 @@ class YinluoMixin:
                 self.save_state()
 
     async def yinluo_tick(self, identity=None):
-        expected_identity = self.yinluo_identity_name()
-        identity = str(identity or expected_identity).strip()
-        if identity != expected_identity:
+        identity = resolve_identity(self, identity or self.yinluo_identity_name())
+        if identity_sect(self, identity) != "阴罗宗":
             return 3600
-        if self.identity_pause_seconds(identity) > 0:
+        if task_paused(self, identity):
             return 60
 
         impending = self.yinluo_impending_wait(identity)

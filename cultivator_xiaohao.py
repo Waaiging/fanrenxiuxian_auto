@@ -93,6 +93,7 @@ from miniapp_beast import MiniAppBeastError
 from miniapp_beast_contract import MiniAppBeastContractWorker
 from miniapp_beast_abyss import MiniAppBeastAbyssWorker
 from miniapp_beast_seek import MiniAppBeastSeekWorker
+from yinluo_features import YinluoMixin
 from miniapp_daily_activities import MiniAppDailyActivities
 from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_inventory import MiniAppInventoryWorker
@@ -352,7 +353,7 @@ class AtomicTaskContext:
 # CultivatorXiaoHao 主类
 # =====================================================================
 
-class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, SoulCurseMixin):
+class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineMixin, FishingMixin, YinluoMixin, SoulCurseMixin):
     """
     万灵宗小号脚本主类。
     继承 CommonCommandMixin（通用指令）和 ConcubineMixin（侍妾功能）。
@@ -443,6 +444,10 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
 
         self.state_file = STATE_FILE
         self.state = self.load_state()
+        self.sect_name = str((self.state.get("identity_sect_names") or {}).get("主魂")
+                             or self.state.get("miniapp_sect_name") or self.state.get("sect_name")
+                             or self.sect_name).strip()
+        self.identity_sect_names["主魂"] = self.sect_name
         self.restore_avatar_dao_names()
         persisted_sects = self.state.get("identity_sect_names")
         if isinstance(persisted_sects, dict):
@@ -454,6 +459,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             })
             self.identity_sect_names = merged_sects
             self.state["identity_sect_names"] = dict(merged_sects)
+        self.sect_name = self.account_sect_name()
+        self.state["sect_name"] = self.sect_name
         # startup: restore paused state
         if self.state.get("is_paused", False):
             self.pause_event.clear()
@@ -7302,21 +7309,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                 "miniapp_fishing",
                 lambda: self._miniapp_fishing.run_loop(),
             )
-        if self._miniapp_beast_contract.enabled:
-            register_once(
-                "beast_contract",
-                lambda: self._miniapp_beast_contract.run(),
-            )
-        if self._miniapp_beast_abyss.enabled:
-            register_once(
-                "miniapp_beast_abyss",
-                lambda: self._miniapp_beast_abyss.run_loop(),
-            )
-        if self._miniapp_beast_seek.enabled:
-            register_once(
-                "miniapp_beast_seek",
-                lambda: self._miniapp_beast_seek.run_loop(),
-            )
         if self._miniapp_daily_activities is not None:
             if self._miniapp_daily_activities.pagoda_enabled:
                 register_once(
@@ -7553,6 +7545,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         self.create_scheduler_task("concubine", lambda: self.run_concubine_loop())
         self.create_scheduler_task("sect_war", lambda: self.run_sect_war_loop())
         self.create_scheduler_task("sect_daily", lambda: self.run_sect_daily_loop())
+        self.create_scheduler_task("tianxing_tianji_grind", lambda: self.run_tianxing_tianji_grind_loop())
         self.create_scheduler_task("duel", lambda: self.run_duel_scheduler(initial_delay=25))
         self.create_scheduler_task(
             "surprise_raid",
@@ -7574,8 +7567,6 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             self.create_scheduler_task(f"avatar_star_palace_{avatar}", lambda avatar=avatar: self.run_avatar_star_palace_loop(avatar, initial_delay=0))
             if avatar in STAR_ATTRACTION_AVATARS:
                 self.create_scheduler_task(f"avatar_star_attraction_{avatar}", lambda avatar=avatar: self.run_avatar_star_attraction_loop(avatar, initial_delay=0))
-            if avatar == CLOUD_STAIRS_AVATAR:
-                self.create_scheduler_task(f"avatar_cloud_stairs_{avatar}", lambda avatar=avatar: self.run_avatar_cloud_stairs_loop(avatar, initial_delay=0))
         log.info(f"Avatar loops started for: {', '.join(self.avatars)} (concurrent lock mode)")
         recover_wind_thunder_sessions(self)
 

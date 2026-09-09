@@ -445,6 +445,9 @@ class MiniAppJourneyTests(unittest.TestCase):
             async def run_tianxing_destiny_loop(self):
                 return None
 
+            run_sect_daily_loop = run_tianxing_destiny_loop
+            run_tianxing_tianji_grind_loop = run_tianxing_destiny_loop
+
         actor = Actor()
         worker = RestrictedMiniAppWorker(actor, "waaiging", logger=FakeLogger())
         worker.transport.identity_player_ids = {"主魂": 100}

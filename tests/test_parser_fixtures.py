@@ -131,7 +131,7 @@ class DummyAvatarCommon(DummyCommon):
     avatars = ["缘生子"]
 
     def __init__(self):
-        self.state = {"avatars": {"缘生子": {}}}
+        self.state = {"avatars": {"缘生子": {}}, "identity_sect_names": {"缘生子": "阴罗宗"}}
 
     def get_avatar_state(self, identity):
         return self.state.setdefault("avatars", {}).setdefault(identity, {})
@@ -5589,7 +5589,7 @@ class ParserFixtureTests(unittest.TestCase):
             task = asyncio.create_task(
                 actor.send_yinluo_command("缘生子", YINLUO_CONVERT_COMMAND, timeout=60, edited_wait=0.01)
             )
-            await actor.fetch_started.wait()
+            await asyncio.wait_for(actor.fetch_started.wait(), timeout=3)
             try:
                 self.assertTrue(actor.should_wait_for_atomic_task(".元婴出窍"))
                 self.assertFalse(actor.should_wait_for_atomic_task(".观星"))
@@ -5823,6 +5823,7 @@ class ParserFixtureTests(unittest.TestCase):
 
     def test_dashboard_main_yuanshengzi_yinluo_commands_enabled_by_default(self):
         state = {
+            "identity_sect_names": {"缘生子": "阴罗宗"},
             "avatars": {
                 "缘生子": {
                     "yinluo": {

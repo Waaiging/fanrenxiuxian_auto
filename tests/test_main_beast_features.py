@@ -408,7 +408,7 @@ class MainBeastFeatureTests(unittest.TestCase):
         actor.state_time_command_paused = lambda key, identity="": False
         self.assertFalse(actor.priority_due_work_summary())
 
-    def test_main_account_initializes_tianxing_and_suspends_wanling_runtime(self):
+    def test_main_account_restores_current_sect_and_suspends_legacy_wanling_runtime(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = os.path.join(tmpdir, "state_main.json")
             with open(state_file, "w", encoding="utf-8") as handle:
@@ -423,12 +423,14 @@ class MainBeastFeatureTests(unittest.TestCase):
             ), patch.object(intelligent_cultivator, "TelegramClient", return_value=object()):
                 actor = intelligent_cultivator.Cultivator(session_name="fixture")
 
-            self.assertEqual(actor.sect_name, "天星宗")
-            self.assertEqual(actor.identity_sect_names["主魂"], "天星宗")
+            self.assertEqual(actor.sect_name, "凌霄宫")
+            self.assertEqual(actor.identity_sect_names["主魂"], "凌霄宫")
+            self.assertTrue(actor.sect_command_allowed(".登天阶", "主魂"))
+            self.assertFalse(actor.tianxing_identity_enabled("主魂"))
             self.assertFalse(actor.lingxiao_enabled)
             self.assertFalse(actor.enable_main_beasts)
             self.assertFalse(actor._miniapp_beast_contract.enabled)
-            self.assertEqual(actor.state["sect_name"], "天星宗")
+            self.assertEqual(actor.state["sect_name"], "凌霄宫")
             self.assertIn("next_abyss_time", actor.state)
             self.assertIn("next_beast_border_patrol_time", actor.state)
 

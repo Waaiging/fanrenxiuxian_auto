@@ -483,7 +483,7 @@ class MainTianxingTests(unittest.TestCase):
                 )
 
             async def forge_treasure(
-                self, identity, target_item_id, times=1, log_operation=True
+                self, identity, target_item_id, times=1, log_operation=True, required_command=""
             ):
                 calls.append(
                     ("forge", identity, target_item_id, times, log_operation)

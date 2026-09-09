@@ -22,6 +22,8 @@ from automation_settings import (
 )
 from common_command_features import add_seconds_str, dt_to_str, is_future, now_str, seconds_until
 from yinluo_features import YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY
+from sect_rules import command_sect, identity_names, identity_sect, task_paused
+from state_io import json_file_lock
 
 
 SOUL_CURSE_VISIT_COMMAND = ".探望南宫婉"
@@ -451,17 +453,32 @@ def write_soul_curse_shared_state(data):
 
 
 def upsert_soul_curse_shared_commission(owner_account, updates):
-    data = read_soul_curse_shared_state()
     key = str(owner_account or "").strip()
     if not key:
         return {}
-    item = data.get(key, {}) if isinstance(data.get(key), dict) else {}
-    item.update(updates or {})
-    item["owner_account"] = key
-    item["updated_at"] = now_str()
-    data[key] = item
-    write_soul_curse_shared_state(data)
+    with json_file_lock(SOUL_CURSE_SHARED_FILE):
+        data = read_soul_curse_shared_state()
+        item = data.get(key, {}) if isinstance(data.get(key), dict) else {}
+        item.update(updates or {})
+        item["owner_account"] = key
+        item["updated_at"] = now_str()
+        data[key] = item
+        write_soul_curse_shared_state(data)
     return item
+
+
+def claim_soul_curse_commission(owner, commission_id, account, identity):
+    with json_file_lock(SOUL_CURSE_SHARED_FILE):
+        data = read_soul_curse_shared_state()
+        item = data.get(owner) or {}
+        if (str(item.get("commission_id") or "") != str(commission_id)
+                or item.get("status") in {"completed", "gone", "blocked", "no_contract"}
+                or item.get("assistant_account")):
+            return False
+        item.update(assistant_account=account, assistant_identity=identity,
+                    claimed_at=now_str(), updated_at=now_str())
+        write_soul_curse_shared_state(data)
+        return True
 
 
 @contextlib.asynccontextmanager
@@ -529,55 +546,19 @@ class SoulCurseMixin:
             resolved = canonical
         return resolved
 
-    def soul_curse_yinluo_identity(self):
-        """Return this account's current Yinluo identity, including renames."""
-        account = self.soul_curse_account_key()
-        if account not in {"main", "sub"}:
-            # xiaohao/waaiging have no Yinluo assistant identity.  Returning
-            # the main account's historical name here would make a Taiyi
-            # avatar named 缘生子 look like an assistant after a rename.
-            return ""
-        configured = (
-            getattr(self, "yinluo_identity", "")
-            if account == "sub"
-            else ""
-        )
-        defaults = (
-            [configured, SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY]
-            if account == "sub"
-            else [configured, YINLUO_IDENTITY]
-        )
-        known = {
-            str(name).strip()
-            for name in (getattr(self, "avatars", []) or [])
-            if str(name).strip()
-        }
-        state = getattr(self, "state", {}) or {}
-        avatar_states = state.get("avatars") if isinstance(state, dict) else None
-        if isinstance(avatar_states, dict):
-            known.update(str(name).strip() for name in avatar_states if str(name).strip())
-        for candidate in defaults:
-            candidate = str(candidate or "").strip()
-            if not candidate:
-                continue
-            resolved = self.soul_curse_resolve_identity(candidate, account)
-            if not known or resolved in known:
-                return resolved
+    def soul_curse_yinluo_identities(self):
+        """Discover current Yinluo members across main souls and avatars."""
+        return [name for name in identity_names(self)
+                if identity_sect(self, name) == "阴罗宗"]
 
-        # If the static Yinluo name is stale and no alias was persisted, the
-        # sect assignment is still an authoritative signal.
-        sects = getattr(self, "identity_sect_names", {}) or {}
-        if isinstance(sects, dict):
-            for name in known:
-                if str(sects.get(name) or "").strip() == "阴罗宗":
-                    return name
-        state_sects = getattr(self, "state", {}) or {}
-        if isinstance(state_sects, dict) and isinstance(state_sects.get("identity_sect_names"), dict):
-            for name in known:
-                if str(state_sects["identity_sect_names"].get(name) or "").strip() == "阴罗宗":
-                    return name
-        fallback = next((str(x).strip() for x in defaults if str(x or "").strip()), "")
-        return self.soul_curse_resolve_identity(fallback or YINLUO_IDENTITY, account)
+    def soul_curse_yinluo_identity(self):
+        """Compatibility accessor for a preferred local assistant."""
+        identities = self.soul_curse_yinluo_identities()
+        preferred = self.soul_curse_resolve_identity(
+            getattr(self, "yinluo_identity", "") or
+            (SUB_YINLUO_IDENTITY if self.soul_curse_account_key() == "sub" else YINLUO_IDENTITY)
+        )
+        return preferred if preferred in identities else next(iter(identities), "")
 
     def soul_curse_identity_setting_candidates(self, account, identity):
         """Build current/legacy names accepted by the per-identity switch."""
@@ -594,22 +575,11 @@ class SoulCurseMixin:
         add(resolved_identity)
         add(original)
         if original != "主魂":
-            current_yinluo = ""
-            if account == self.soul_curse_account_key():
-                current_yinluo = self.soul_curse_yinluo_identity()
-            yinluo_names = {current_yinluo}
-            if account == "main":
-                yinluo_names.add(YINLUO_IDENTITY)
-            elif account == "sub":
-                yinluo_names.update({SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY})
-            is_yinluo = original in yinluo_names or resolved_identity in yinluo_names
-            if is_yinluo:
-                add(current_yinluo)
-                if account == "main":
-                    add(YINLUO_IDENTITY)
-                elif account == "sub":
-                    add(SUB_YINLUO_IDENTITY)
-                    add(DEFAULT_SUB_YINLUO_IDENTITY)
+            legacy_names = {"main": (YINLUO_IDENTITY,),
+                            "sub": (SUB_YINLUO_IDENTITY, DEFAULT_SUB_YINLUO_IDENTITY)}
+            for candidate in legacy_names.get(account, ()):
+                if self.soul_curse_resolve_identity(candidate, account) == resolved_identity:
+                    add(candidate)
 
         state = getattr(self, "state", {}) or {}
         aliases = state.get("avatar_dao_name_aliases") if isinstance(state, dict) else None
@@ -632,12 +602,11 @@ class SoulCurseMixin:
                         changed = True
         return candidates
 
-    def soul_curse_identity_enabled(self, account=None, identity="主魂"):
+    def soul_curse_identity_enabled(self, account=None, identity="主魂", *, assistant=False):
         """Per-identity kill switch backed by soul_curse_settings.json.
 
-        Defaults to disabled: the whole soul-curse chain (visit / infer /
-        protect / publish) only runs for identities explicitly enabled in the
-        settings file, so the owner can opt each identity in manually.
+        Publisher chains require explicit opt-in. New Yinluo assistants follow
+        membership, while existing identity switches and the global stop win.
         """
         account = str(account or self.soul_curse_account_key()).strip()
         identity = str(identity or "主魂").strip() or "主魂"
@@ -650,6 +619,8 @@ class SoulCurseMixin:
             return False
         if data.get("enabled") is False:
             return False
+        default = bool(assistant and account == self.soul_curse_account_key()
+                       and self.soul_curse_resolve_identity(identity) in self.soul_curse_yinluo_identities())
         identities = data.get("identities")
         if not isinstance(identities, dict):
             return False
@@ -658,47 +629,41 @@ class SoulCurseMixin:
             for candidate in self.soul_curse_identity_setting_candidates(account, identity):
                 if candidate in entry:
                     return bool(entry.get(candidate))
-            return False
+            return default
         if isinstance(entry, list):
             enabled = {str(item).strip() for item in entry}
             return any(candidate in enabled for candidate in self.soul_curse_identity_setting_candidates(account, identity))
-        return False
+        return default
+
+    def soul_curse_assistant_enabled(self, identity, command=SOUL_CURSE_ACCEPT_COMMAND):
+        identity = self.soul_curse_resolve_identity(identity)
+        return (identity in self.soul_curse_yinluo_identities()
+                and not task_paused(self, identity, command)
+                and self.soul_curse_identity_enabled(identity=identity, assistant=True))
 
     def soul_curse_publisher_profile(self):
+        if identity_sect(self, "主魂") == "阴罗宗":
+            return None
         return SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
 
     def soul_curse_assistant_profile(self):
-        profile = SOUL_CURSE_ASSISTANTS.get(self.soul_curse_account_key())
-        if not profile:
+        identity = self.soul_curse_yinluo_identity()
+        publisher = SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
+        if not identity or not publisher:
             return None
-        profile = dict(profile)
-        profile["assistant_identity"] = self.soul_curse_yinluo_identity()
-        return profile
+        return {"owner_account": publisher["owner_account"],
+                "target_username": publisher["target_username"],
+                "assistant_identity": identity}
 
     def soul_curse_shared_assistant_profiles(self):
-        """共享池竞争者监听所有账号的委托（含本账号）。"""
-        profiles = []
-        yinluo_identity = self.soul_curse_yinluo_identity()
-        for profile in SOUL_CURSE_SHARED_ASSISTANTS.get(self.soul_curse_account_key(), ()):
-            profile = dict(profile)
-            profile["assistant_identity"] = yinluo_identity
-            profiles.append(profile)
-        publisher = SOUL_CURSE_PUBLISHERS.get(self.soul_curse_account_key())
-        # xiaohao/waaiging 只有发布身份，没有阴罗接取身份；不要把它们
-        # 自己的 publisher 条目伪装成 assistant 候选，否则会先占用共享
-        # 委托却无法执行接取动作，反而阻塞主号/副号阴罗身份。
-        if publisher and publisher.get("shared") and yinluo_identity:
-            own = {
-                "owner_account": publisher.get("owner_account"),
-                "target_username": publisher.get("target_username"),
-                "assistant_identity": (
-                    yinluo_identity
-                ),
-                "shared": True,
-            }
-            if not any(p.get("owner_account") == own["owner_account"] for p in profiles):
-                profiles.append(own)
-        return profiles
+        """Each current Yinluo member may assist any configured account."""
+        return [
+            {"owner_account": profile["owner_account"],
+             "target_username": profile["target_username"],
+             "assistant_identity": identity, "shared": True}
+            for identity in self.soul_curse_yinluo_identities()
+            for profile in SOUL_CURSE_PUBLISHERS.values()
+        ]
 
     def soul_curse_assistant_profiles(self):
         profiles = []
@@ -872,6 +837,9 @@ class SoulCurseMixin:
                 # Give any manual identity command a chance to finish before
                 # acquiring the serialized avatar send lock again.
                 await asyncio.sleep(1)
+            identity = self.soul_curse_resolve_identity(identity)
+            if command_sect(command) == "阴罗宗" and not self.soul_curse_assistant_enabled(identity, command):
+                return last_response
             force_fresh = attempt > 0
             response = await self.send_and_wait_feedback_identity(
                 identity,
@@ -1470,20 +1438,10 @@ class SoulCurseMixin:
         requested_identity = str(
             commission.get("assistant_identity") or self.soul_curse_yinluo_identity() or ""
         ).strip()
-        # Accounts without an Yinluo avatar (for example xiaohao/waaiging)
-        # must never fall back to ``主魂`` and execute assistant actions.
-        if not requested_identity or requested_identity == "主魂":
+        if not requested_identity:
             return 600
         identity = self.soul_curse_resolve_identity(requested_identity)
-        known_avatars = {
-            str(name).strip()
-            for name in (getattr(self, "avatars", []) or [])
-            if str(name).strip()
-        }
-        actor_state = getattr(self, "state", {}) or {}
-        if isinstance(actor_state, dict) and isinstance(actor_state.get("avatars"), dict):
-            known_avatars.update(str(name).strip() for name in actor_state["avatars"] if str(name).strip())
-        if identity not in known_avatars:
+        if not self.soul_curse_assistant_enabled(identity):
             return 3600
         commission_id = str(commission.get("commission_id") or "").strip()
         if not commission_id:
@@ -1502,6 +1460,9 @@ class SoulCurseMixin:
             return 300
 
         async with self.soul_curse_atomic_task(f"SoulCurseAssist-{identity}"):
+            identity = self.soul_curse_resolve_identity(identity)
+            if not self.soul_curse_assistant_enabled(identity):
+                return 300
             state = self.get_soul_curse_assist_state(identity, owner_account)
             state["owner_account"] = profile.get("owner_account")
             state["target_username"] = profile.get("target_username")
@@ -1653,8 +1614,13 @@ class SoulCurseMixin:
             return 600
         resolver = getattr(self, "soul_curse_resolve_identity", None)
         identity = resolver(configured_identity) if callable(resolver) else str(configured_identity).strip()
+        if not self.soul_curse_assistant_enabled(identity):
+            return 300
         profile["assistant_identity"] = identity
-        if item.get("assistant_account") and item.get("assistant_account") != self.soul_curse_account_key():
+        if item.get("assistant_account") and (
+            item.get("assistant_account") != self.soul_curse_account_key()
+            or self.soul_curse_resolve_identity(item.get("assistant_identity")) != identity
+        ):
             # 已被其他阴罗身份认领——它冷却中就等它，不抢。
             other_next = str(item.get("next_action_at") or "")
             if other_next and is_future(other_next):
@@ -1670,11 +1636,9 @@ class SoulCurseMixin:
             if self.identity_pause_seconds(identity) > 0:
                 return 300
             # 认领：原子写入自己账号，抢到即锁定
-            upsert_soul_curse_shared_commission(owner_key, {
-                "assistant_account": self.soul_curse_account_key(),
-                "assistant_identity": identity,
-                "claimed_at": now_str(),
-            })
+            if not claim_soul_curse_commission(owner_key, item.get("commission_id"),
+                                              self.soul_curse_account_key(), identity):
+                return 600
             item = read_soul_curse_shared_state().get(owner_key, {})
             if not isinstance(item, dict) or (
                 item.get("assistant_account") and item.get("assistant_account") != self.soul_curse_account_key()
@@ -1683,12 +1647,18 @@ class SoulCurseMixin:
                 return 600
         item.setdefault("owner_account", item.get("_owner_key") or owner)
         item.setdefault("target_username", profile.get("target_username"))
-        item.setdefault("assistant_identity", identity)
+        item["assistant_identity"] = identity
         return await self.soul_curse_process_assist_commission(item, source="shared")
 
     def soul_curse_avatar_publisher_profiles(self):
         """本账号化身 publisher 候选名单（settings 未启用的会被 tick 过滤）。"""
-        return list(SOUL_CURSE_AVATAR_PUBLISHERS.get(self.soul_curse_account_key(), ()))
+        profiles = []
+        for original in SOUL_CURSE_AVATAR_PUBLISHERS.get(self.soul_curse_account_key(), ()):
+            profile = dict(original)
+            profile["identity"] = self.soul_curse_resolve_identity(profile.get("identity"))
+            if identity_sect(self, profile["identity"]) != "阴罗宗" and profile not in profiles:
+                profiles.append(profile)
+        return profiles
 
     def soul_curse_avatar_publisher_profile(self, identity):
         for profile in self.soul_curse_avatar_publisher_profiles():
@@ -1917,9 +1887,7 @@ class SoulCurseMixin:
             assistant["assistant_identity"] = self.soul_curse_resolve_identity(
                 assistant.get("assistant_identity") or self.soul_curse_yinluo_identity()
             )
-            if not self.soul_curse_identity_enabled(
-                identity=assistant.get("assistant_identity") or self.soul_curse_yinluo_identity(),
-            ):
+            if not self.soul_curse_assistant_enabled(assistant["assistant_identity"]):
                 continue
             wait = await self.soul_curse_shared_assist_tick(assistant)
             if wait <= 10:

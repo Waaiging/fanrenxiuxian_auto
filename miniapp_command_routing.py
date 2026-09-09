@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from automation_settings import star_gazing_settings
+from sect_rules import SectTaskStopped, identity_sect
 from miniapp_beast import (
     MiniAppBeastError,
     MiniAppCircuitOpenError,
@@ -302,6 +303,7 @@ class MiniAppCommandRouter:
             entry_chat=getattr(actor, "target_chat_id", "fanrenxxz"),
         )
         self.start_background_tasks = bool(start_background_tasks)
+        self.transport.sect_actor = actor
         self.daily_activities = MiniAppDailyActivities(
             actor,
             self.transport,
@@ -517,20 +519,6 @@ class MiniAppCommandRouter:
                     asyncio.create_task(
                         self.tianxing_journey.run_loop(),
                         name=f"miniapp_{self.account}_journey",
-                    )
-                )
-            if self.beast_abyss.enabled:
-                self._daily_activity_tasks.append(
-                    asyncio.create_task(
-                        self.beast_abyss.run_loop(),
-                        name=f"miniapp_{self.account}_beast_abyss",
-                    )
-                )
-            if self.beast_seek.enabled:
-                self._daily_activity_tasks.append(
-                    asyncio.create_task(
-                        self.beast_seek.run_loop(),
-                        name=f"miniapp_{self.account}_beast_seek",
                     )
                 )
             if self.fishing.supported:
@@ -1445,7 +1433,10 @@ class MiniAppCommandRouter:
             sect_allowed = getattr(self.actor, "sect_command_allowed", None)
             if callable(sect_allowed) and not sect_allowed(command, identity):
                 return None
-            response = await self.transport.command(command, identity=identity)
+            if command == ".闭关修炼" and identity_sect(self.actor, identity) == "天星宗":
+                response = await self.transport.command(command, identity=identity, meditation_prefix=True)
+            else:
+                response = await self.transport.command(command, identity=identity)
             apply_dwelling_snapshot(self.actor, identity, response.payload)
             self._record(
                 miniapp_route_last_command=command,
@@ -1455,6 +1446,8 @@ class MiniAppCommandRouter:
             )
         except asyncio.CancelledError:
             raise
+        except SectTaskStopped:
+            return None
         except MiniAppCircuitOpenError as exc:
             self._record(
                 miniapp_route_active=False,

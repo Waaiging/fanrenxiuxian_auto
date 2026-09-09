@@ -9,6 +9,9 @@ import sqlite3
 
 from command_modules import TimedCommandPlan
 from log_utils import MESSAGE_EVENTS_DB_FILE, actor_account_key
+from hehuan_features import HehuanMixin
+from lingxiao_features import LingxiaoMixin
+from sect_rules import SectTaskStopped, command_sect, identity_names, task_paused
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -49,25 +52,151 @@ def task_for_command(command):
     return next((task for task in SECT_DAILY_TASKS if root and root[0] == task.command.split()[0]), None)
 
 
-class SectTaskMixin:
+class SectTaskMixin(LingxiaoMixin, HehuanMixin):
     def wake_sect_tasks(self):
         signal = getattr(self, "_sect_tasks_changed", None)
         if signal is not None:
+            signal.set()
+        for signal in getattr(self, "_sect_identity_signals", {}).values():
             signal.set()
         router = getattr(self, "_miniapp_command_router", None)
         if router is not None and getattr(router, "_route_active", False):
             router._reconcile_star_palace_tasks()
 
     def sect_task_identities(self):
-        return list(dict.fromkeys(self.resolve_avatar_identity(name)
-                                 for name in ["主魂", *(getattr(self, "avatars", []) or [])]))
+        return identity_names(self)
 
     def sect_command_allowed(self, command, identity=None):
-        task = task_for_command(command)
-        if task is None:
+        sect = command_sect(command)
+        if not sect:
             return True
         identity = self.resolve_avatar_identity(identity or getattr(self, "current_identity", "主魂"))
-        return identity in self.sect_task_identities() and self.identity_sect_name(identity) == task.sect
+        return identity in self.sect_task_identities() and self.identity_sect_name(identity) == sect
+
+    def sect_operation_allowed(self, identity, command):
+        if getattr(self, "_restricted_miniapp_worker", None) is not None:
+            from miniapp_dwelling import miniapp_command_allowed
+            if not str(command).startswith("miniapp:") and not miniapp_command_allowed(command):
+                return False
+        return self.sect_command_allowed(command, identity) and not task_paused(self, identity, command)
+
+    def reconcile_sect_features(self):
+        tasks = getattr(self, "_sect_identity_tasks", {})
+        signals = getattr(self, "_sect_identity_signals", {})
+        self._sect_identity_tasks, self._sect_identity_signals = tasks, signals
+        for identity in self.sect_task_identities():
+            key = next((name for name in tasks if self.resolve_avatar_identity(name) == identity), identity)
+            if key in tasks and not tasks[key].done():
+                continue
+            signals[key] = asyncio.Event()
+            register = getattr(self, "create_scheduler_task", None)
+            if callable(register):
+                tasks[key] = register("sect_features_" + key, lambda key=key: self.run_sect_identity_features(key))
+            else:
+                tasks[key] = asyncio.create_task(self.run_sect_identity_features(key), name="sect_features_" + key)
+
+    async def run_sect_identity_features(self, original_identity):
+        signal = self._sect_identity_signals[original_identity]
+        while self.is_running:
+            signal.clear()
+            identity = self.resolve_avatar_identity(original_identity)
+            wait = 60
+            if identity not in self.sect_task_identities():
+                await asyncio.sleep(60)
+                continue
+            try:
+                if not task_paused(self, identity):
+                    sect = self.identity_sect_name(identity)
+                    state = self.identity_state_for_timed_command(identity)
+                    runtime = state.setdefault("sect_task_runtime", {})
+                    retry = parse_time(runtime.get("retry_at"))
+                    if runtime.get("sect") == sect and retry and retry > datetime.now():
+                        await asyncio.sleep(min(60, (retry - datetime.now()).total_seconds()))
+                        continue
+                    runtime.update({"sect": sect, "checked_at": datetime.now().strftime(TIME_FORMAT)})
+                    runtime.pop("retry_at", None)
+                    if sect == "凌霄宫":
+                        wait = await self.lingxiao_tick(identity)
+                    elif sect == "阴罗宗":
+                        wait = await self.yinluo_tick(identity)
+                    elif sect == "合欢宗" and self.sect_operation_allowed(identity, ".双修 温养"):
+                        next_time = parse_time(state.get("next_dual_cultivation_time"))
+                        wait = max(0, (next_time - datetime.now()).total_seconds()) if next_time else 0
+                        if wait <= 0:
+                            async with self.common_atomic_task("Hehuan-" + identity, log_lifecycle=False):
+                                await self.execute_dual_cultivation_once(identity)
+                            wait = 30
+                    elif sect == "天星宗":
+                        if state.get("last_destiny_observation_date") != datetime.now().strftime("%Y-%m-%d"):
+                            now = datetime.now()
+                            defer = now < now.replace(hour=0, minute=15, second=59)
+                            if defer:
+                                defer = self.daily_one_shot_should_defer(identity, ".观命", logger=self.common_command_logger())
+                            if not defer and self.tianxing_destiny_retry_wait_seconds(identity) <= 0:
+                                async with self.common_atomic_task("Tianxing-" + identity, log_lifecycle=False):
+                                    await self.observe_tianxing_destiny(identity)
+                                if state.get("last_destiny_observation_date") != datetime.now().strftime("%Y-%m-%d"):
+                                    state["next_tianxing_destiny_retry_time"] = (datetime.now() + timedelta(minutes=10)).strftime(TIME_FORMAT)
+                                    self.save_state()
+                    elif sect == "万灵宗":
+                        wait = await self.run_wanling_identity_once(identity)
+                    runtime["status"] = "active" if sect in {"天星宗", "阴罗宗", "凌霄宫", "万灵宗", "合欢宗"} else "idle"
+                    self.save_state()
+            except asyncio.CancelledError:
+                raise
+            except SectTaskStopped:
+                wait = 60
+            except Exception:
+                wait = 300
+                state = self.identity_state_for_timed_command(self.resolve_avatar_identity(original_identity))
+                state.setdefault("sect_task_runtime", {}).update({
+                    "status": "retry", "retry_at": (datetime.now() + timedelta(seconds=wait)).strftime(TIME_FORMAT),
+                })
+                self.save_state()
+                self.common_command_logger().exception("Sect workflow [%s] failed.", identity)
+            if not self.is_running:
+                return
+            try:
+                await asyncio.wait_for(signal.wait(), timeout=max(5, min(float(wait or 5), 60)))
+            except asyncio.TimeoutError:
+                pass
+
+    async def run_wanling_identity_once(self, identity):
+        from miniapp_beast_abyss import MiniAppBeastAbyssWorker
+        from miniapp_beast_contract import MiniAppBeastContractWorker
+        from miniapp_beast_seek import MiniAppBeastSeekWorker
+        identity = self.resolve_avatar_identity(identity)
+        router = getattr(self, "_miniapp_command_router", None)
+        restricted = getattr(self, "_restricted_miniapp_worker", None)
+        transport = getattr(router, "transport", None) if getattr(router, "_route_active", False) else None
+        if transport is None and restricted is not None and self.state.get("restricted_miniapp_active"):
+            transport = restricted.transport
+        if transport is None:
+            return 60
+        cache = getattr(self, "_sect_wanling_workers", {})
+        self._sect_wanling_workers = cache
+        key = next((name for name in cache if self.resolve_avatar_identity(name) == identity), identity)
+        if key not in cache or cache[key][0] is not transport:
+            logger = self.common_command_logger()
+            cache[key] = (transport,
+                MiniAppBeastContractWorker(self, transport, logger, identity=identity),
+                MiniAppBeastAbyssWorker(self, transport, actor_account_key(self), logger),
+                MiniAppBeastSeekWorker(self, transport, actor_account_key(self), logger, identity=identity))
+        _, contract, abyss, seek = cache[key]
+        for worker, command, next_key, runner in (
+            (contract, "miniapp:spirit-beast-contract", "beast_contract_interaction_next_time", contract.run_cycle),
+            (abyss, "miniapp:spirit-beast-abyss", "beast_abyss_miniapp_next_time", lambda: abyss.run_once(identity)),
+            (seek, ".寻觅灵兽", "beast_seek_miniapp_next_time", seek.run_cycle),
+        ):
+            identity = self.resolve_avatar_identity(identity)
+            state = self.identity_state_for_timed_command(identity)
+            due = parse_time(state.get(next_key))
+            if worker.enabled and self.sect_operation_allowed(identity, command) and (not due or due <= datetime.now()):
+                try:
+                    await runner()
+                except SectTaskStopped:
+                    return 60
+        return 60
 
     def record_avatar_taiyi_guide_response(self, identity, response, source=TAIYI_GUIDE_COMMAND, *, observed_at=None):
         identity = self.resolve_avatar_identity(identity)
@@ -146,7 +275,7 @@ class SectTaskMixin:
 
     def sect_daily_wait(self, task, identity):
         identity = self.resolve_avatar_identity(identity)
-        if not self.sect_command_allowed(task.command, identity):
+        if not self.sect_operation_allowed(identity, task.command):
             return 60
         if (self.state.get("is_paused") or self.identity_pause_seconds(identity) > 0
                 or self.dashboard_command_paused(task.command, identity)):
@@ -172,11 +301,22 @@ class SectTaskMixin:
                 self.record_avatar_taiyi_guide_response(identity, response)
 
     async def run_sect_daily_loop(self):
+        try:
+            await self._run_sect_daily_loop()
+        finally:
+            tasks = list(getattr(self, "_sect_identity_tasks", {}).values())
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_sect_daily_loop(self):
         await self.startup_done.wait()
         self._sect_tasks_changed = asyncio.Event()
         self.restore_sect_command_cooldowns()
         while self.is_running:
             self._sect_tasks_changed.clear()
+            self.reconcile_sect_features()
             wait = 60
             for identity in self.sect_task_identities():
                 for task in SECT_DAILY_TASKS:

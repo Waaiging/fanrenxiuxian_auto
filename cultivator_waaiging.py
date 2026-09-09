@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-soul Tianxing cultivator for the restricted @Waaiging account."""
+"""Single-soul cultivator for the restricted @Waaiging account."""
 
 import asyncio
 import os
@@ -31,7 +31,9 @@ DUAL_CULTIVATION_RETRY_SECONDS = 60
 
 
 class WaaigingCultivator(core.Cultivator):
-    """Run only @Waaiging's Tianxing main soul; this account has no avatars."""
+    """Run @Waaiging's main soul using its current sect; it has no avatars."""
+
+    initial_sect_name = ""
 
     def __init__(self, session_name=SESSION_NAME):
         core.configure_runtime_files(CONFIG_FILE, LOG_FILE, STATE_FILE)
@@ -39,8 +41,10 @@ class WaaigingCultivator(core.Cultivator):
 
         self.account_key = "waaiging"
         self.expected_username = "Waaiging"
-        self.sect_name = "天星宗"
-        self.identity_sect_names = {"主魂": "天星宗"}
+        self.sect_name = str((self.state.get("identity_sect_names") or {}).get("主魂")
+                             or self.state.get("miniapp_sect_name") or self.state.get("sect_name")
+                             or ("天星宗" if self.state.get("sect_join_confirmed") else "")).strip()
+        self.identity_sect_names = {"主魂": self.sect_name}
         self.identity_usernames = {"主魂": ["Waaiging"]}
         self.field_training_command = DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND
         self.lingxiao_enabled = False
@@ -110,7 +114,7 @@ class WaaigingCultivator(core.Cultivator):
         self.xiaohao_visibility_control_enabled = False
         self.enable_avatar_tasks = False
         # The shared Mini App configuration enables Star Palace workers for
-        # other accounts; this account is always a single Tianxing main soul.
+        # other accounts; this account has no Star Palace avatar workers.
         self.enable_miniapp_star_palace = False
         self.enable_main_beasts = False
         self.enable_soul_curse = True
@@ -196,12 +200,11 @@ class WaaigingCultivator(core.Cultivator):
         return WAAIGING_MEDITATION_SWITCH_ID
 
     def account_sect_name(self):
-        if not self.state.get("sect_join_confirmed"):
-            return ""
         return str(
-            getattr(self, "sect_name", "")
+            (self.state.get("identity_sect_names") or {}).get("主魂")
+            or self.state.get("miniapp_sect_name")
             or self.state.get("sect_name")
-            or "天星宗"
+            or getattr(self, "sect_name", "")
         ).strip()
 
     def identity_sect_name(self, identity="主魂"):
@@ -246,7 +249,7 @@ class WaaigingCultivator(core.Cultivator):
         command = str(message or "").strip()
         prefixes = ()
         action = ""
-        if self.state.get("sect_join_confirmed"):
+        if self.account_sect_name() == "天星宗":
             if command.startswith(".闭关修炼"):
                 prefixes = (".推命 闭关",)
                 action = "meditation"
@@ -310,7 +313,7 @@ class WaaigingCultivator(core.Cultivator):
         core.log.info("Tianxing destiny deferred until %s: %s.", retry_at, reason)
 
     async def _tianxing_destiny_check(self):
-        if not self.state.get("sect_join_confirmed"):
+        if self.account_sect_name() != "天星宗":
             return False
         if self.dashboard_command_paused(".观命", "主魂"):
             return False
@@ -342,7 +345,7 @@ class WaaigingCultivator(core.Cultivator):
         await self.startup_done.wait()
         while self.is_running:
             try:
-                if not self.state.get("sect_join_confirmed"):
+                if self.account_sect_name() != "天星宗":
                     await asyncio.sleep(300)
                     continue
                 wait_seconds = self.tianxing_destiny_wait_seconds()
@@ -366,6 +369,7 @@ class WaaigingCultivator(core.Cultivator):
             self.state["sect_joined_at"] = core.now_str()
             self.state["next_sect_join_time"] = ""
             self.state["sect_join_not_before"] = ""
+            self.sync_identity_sect_from_text("主魂", "当前宗门：天星宗")
             done = self.state.setdefault("done", [])
             if ".宗门点卯" in done:
                 done.remove(".宗门点卯")
@@ -404,7 +408,7 @@ class WaaigingCultivator(core.Cultivator):
         await self.startup_done.wait()
         await asyncio.sleep(20)
         while self.is_running:
-            if self.state.get("sect_join_confirmed"):
+            if self.account_sect_name() or self.state.get("sect_join_confirmed"):
                 await asyncio.sleep(300)
                 continue
             next_attempt = str(self.state.get("next_sect_join_time") or "")
@@ -427,7 +431,7 @@ class WaaigingCultivator(core.Cultivator):
 
     async def run_daily_tasks(self):
         await self.startup_done.wait()
-        while self.is_running and not self.state.get("sect_join_confirmed"):
+        while self.is_running and not (self.account_sect_name() or self.state.get("sect_join_confirmed")):
             await asyncio.sleep(300)
         if self.is_running:
             return await super().run_daily_tasks()
@@ -435,173 +439,15 @@ class WaaigingCultivator(core.Cultivator):
 
     async def run_cultivation_loop(self):
         self.create_scheduler_task("sect_join", lambda: self.run_sect_join_loop())
-        self.create_scheduler_task("tianxing_destiny", lambda: self.run_tianxing_destiny_loop())
-        self.create_scheduler_task("dual_cultivation", lambda: self.run_dual_cultivation_loop())
         self.create_scheduler_task("second_soul", lambda: self.run_second_soul_loop())
         self.create_scheduler_task("soul_curse", lambda: self.run_soul_curse_loop(initial_delay=90))
         return await super().run_cultivation_loop()
 
 
-    async def _find_main_soul_recent_message(self):
-        """Reuse a valid main-soul anchor or search that sender's history."""
-        chat_id, _ = core.actor_message_target(self)
 
-        async def is_main_soul(msg):
-            if msg is None or not getattr(msg, "id", None):
-                return False
-            sender = getattr(msg, "sender", None)
-            if sender is None:
-                sender = await msg.get_sender()
-            return str(getattr(sender, "username", "") or "").lstrip("@").casefold() == "weeguu"
 
-        cached_id = self.state.get("dual_cultivation_target_message_id")
-        if cached_id and self.state.get("dual_cultivation_target_chat_id") == chat_id:
-            try:
-                cached = await self.client.get_messages(chat_id, ids=int(cached_id))
-                if await is_main_soul(cached):
-                    return cached
-            except Exception:
-                pass
-        try:
-            messages = await self.client.get_messages(
-                chat_id, from_user="Weeguu", limit=5,
-            )
-            for msg in messages or []:
-                if await is_main_soul(msg):
-                    self.state["dual_cultivation_target_message_id"] = msg.id
-                    self.state["dual_cultivation_target_chat_id"] = chat_id
-                    self.save_state()
-                    return msg
-        except Exception as exc:
-            core.log.warning("Dual cultivation: main-soul history lookup failed: %s", exc)
-        self.state.pop("dual_cultivation_target_message_id", None)
-        self.state.pop("dual_cultivation_target_chat_id", None)
-        return None
 
-    @staticmethod
-    def _dual_cultivation_pending(response):
-        text = command_response_text(response)
-        return "准备进行温养双修" in text or "开始进行温养双修" in text
 
-    def _schedule_dual_cultivation_retry(self, seconds, status, response=""):
-        self.state["next_dual_cultivation_time"] = core.add_seconds_str(core.now_str(), seconds)
-        self.state["dual_cultivation_last_status"] = status
-        self.state["dual_cultivation_last_response"] = command_response_text(response)[:700]
-        self.save_state()
-
-    async def execute_dual_cultivation_once(self):
-        """Wait for the edited settlement before starting the one-hour clock."""
-        pending_id = self.state.get("dual_cultivation_pending_response_id")
-        if pending_id:
-            # A restart or a slow edit must not cause another accepted action.
-            try:
-                response = await self.client.get_messages(
-                    self.state["dual_cultivation_pending_chat_id"], ids=int(pending_id),
-                )
-            except Exception:
-                response = None
-        else:
-            target_msg = await self._find_main_soul_recent_message()
-            if target_msg is None:
-                self._schedule_dual_cultivation_retry(DUAL_CULTIVATION_RETRY_SECONDS, "target_unavailable")
-                core.log.warning("Dual cultivation 温养: main-soul anchor unavailable; retry in 1m.")
-                return False
-            core.log.info("Dual cultivation 温养 due; replying to main-soul msg %s.", target_msg.id)
-            self.state["last_dual_cultivation_attempt_time"] = core.now_str()
-            self.save_state()
-            response = await self.send_and_wait_feedback(
-                ".双修 温养", timeout=45, max_retries=0,
-                reply_to=target_msg.id, return_response_msg=True,
-            )
-            if self._dual_cultivation_pending(response) and getattr(response, "id", None):
-                self.state["dual_cultivation_pending_response_id"] = response.id
-                self.state["dual_cultivation_pending_chat_id"] = getattr(response, "chat_id", None) or self.target_chat_id
-                self.state["dual_cultivation_pending_since"] = self.message_effective_time_str(response)
-                self.save_state()
-
-        for _ in range(10):
-            if not self._dual_cultivation_pending(response) or not getattr(response, "id", None):
-                break
-            await asyncio.sleep(2)
-            try:
-                updated = await self.client.get_messages(
-                    getattr(response, "chat_id", None) or self.target_chat_id, ids=response.id,
-                )
-            except Exception:
-                break
-            if updated is not None:
-                response = updated
-
-        text = command_response_text(response)
-        if ("温养双修·" in text or "温养双修成功" in text) and not any(
-            marker in text for marker in ("失败", "无法", "未能")
-        ):
-            settled_at = self.message_effective_time_str(response)
-            self.state["last_dual_cultivation_time"] = settled_at
-            self.state["next_dual_cultivation_time"] = core.add_seconds_str(
-                settled_at, DUAL_CULTIVATION_INTERVAL_SECONDS + DUAL_CULTIVATION_BUFFER_SECONDS,
-            )
-            self.state["dual_cultivation_last_status"] = "completed"
-            self.state["dual_cultivation_last_response"] = text[:700]
-            core.log.info("Dual cultivation 温养 settled; next at %s.", self.state["next_dual_cultivation_time"])
-        elif any(k in text for k in ("心神尚未恢复", "冷却中", "冷却")):
-            remaining = re.search(r"(?:剩余|还需|还要|等待)\s*((?:\d+\s*(?:小时|分钟|分|秒)\s*)+)", text)
-            seconds = sum(
-                int(value) * {"小时": 3600, "分钟": 60, "分": 60, "秒": 1}[unit]
-                for value, unit in re.findall(r"(\d+)\s*(小时|分钟|分|秒)", remaining.group(1))
-            ) if remaining else 0
-            self._schedule_dual_cultivation_retry(
-                seconds + DUAL_CULTIVATION_BUFFER_SECONDS if seconds else DUAL_CULTIVATION_RETRY_SECONDS,
-                "cooldown", response,
-            )
-        elif self.state.get("dual_cultivation_pending_response_id") or self._dual_cultivation_pending(response):
-            since = self.state.get("dual_cultivation_pending_since") or core.now_str()
-            try:
-                elapsed = max(0, (datetime.now() - datetime.strptime(since, core.TIME_FORMAT)).total_seconds())
-            except (TypeError, ValueError):
-                since = core.now_str()
-                elapsed = 60
-            if elapsed < 60 and self.state.get("dual_cultivation_pending_response_id"):
-                self._schedule_dual_cultivation_retry(30, "awaiting_settlement", response)
-                return False
-            # The bot accepted the action, but the edited result is unavailable.
-            # Preserve its cooldown without recording a fictitious success.
-            ready_at = core.add_seconds_str(since, DUAL_CULTIVATION_INTERVAL_SECONDS + 20)
-            self._schedule_dual_cultivation_retry(max(60, core.seconds_until(ready_at)), "unconfirmed", response)
-        else:
-            self._schedule_dual_cultivation_retry(300, "no_result", response)
-
-        for key in ("dual_cultivation_pending_response_id", "dual_cultivation_pending_chat_id", "dual_cultivation_pending_since"):
-            self.state.pop(key, None)
-        self.save_state()
-        return self.state["dual_cultivation_last_status"] == "completed"
-
-    async def run_dual_cultivation_loop(self):
-        await self.startup_done.wait()
-        if self.state.get("dual_cultivation_schedule_version") != 1:
-            old_next = str(self.state.get("next_dual_cultivation_time") or "")
-            try:
-                # Legacy schedules used the initial reply + 65 minutes. Retain
-                # ten seconds for that reply's later settlement during migration.
-                next_dt = datetime.strptime(old_next, core.TIME_FORMAT) - timedelta(seconds=290)
-                self.state["next_dual_cultivation_time"] = next_dt.strftime(core.TIME_FORMAT)
-            except (ValueError, TypeError):
-                self.state["next_dual_cultivation_time"] = core.now_str()
-            self.state["dual_cultivation_schedule_version"] = 1
-            self.save_state()
-        while self.is_running:
-            next_time = str(self.state.get("next_dual_cultivation_time") or "")
-            wait = core.seconds_until(next_time) if next_time else 0
-            if wait > 0:
-                await asyncio.sleep(min(wait, 30))
-                continue
-            try:
-                await self.execute_dual_cultivation_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                core.log.warning("Dual cultivation 温养 failed: %s", exc)
-                self._schedule_dual_cultivation_retry(300, "error")
 
     async def run_telegram_write_permission_monitor(self):
         await run_telegram_write_permission_monitor(self, core.log)
@@ -615,5 +461,3 @@ if __name__ == "__main__":
         pass
     except Exception as exc:
         core.log.error("Waaiging cultivator fatal error: %s", exc, exc_info=True)
-
-

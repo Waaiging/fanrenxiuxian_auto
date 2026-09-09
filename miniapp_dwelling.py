@@ -9,12 +9,14 @@ import math
 import os
 import re
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from telethon import types
+from sect_rules import SectTaskStopped
 
 from miniapp_beast import (
     MiniAppBeastError,
@@ -671,7 +673,7 @@ class MiniAppDwellingTransport:
             payload = await callback()
         except asyncio.CancelledError:
             raise
-        except MiniAppCircuitOpenError:
+        except (MiniAppCircuitOpenError, SectTaskStopped):
             raise
         except Exception as exc:
             code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
@@ -775,6 +777,10 @@ class MiniAppDwellingTransport:
         return payload
 
     def player_id(self, identity: str = "主魂") -> int:
+        actor = getattr(self, "sect_actor", None)
+        if actor is not None:
+            from sect_rules import resolve_identity
+            identity = resolve_identity(actor, identity)
         key = str(identity or "主魂").strip() or "主魂"
         value = self.identity_player_ids.get(key)
         if value is None:
@@ -782,6 +788,12 @@ class MiniAppDwellingTransport:
         if value is None:
             raise MiniAppBeastError("miniapp_identity_unknown")
         return int(value)
+
+    def _check_sect_operation(self, identity, command):
+        actor = getattr(self, "sect_actor", None)
+        if actor is not None:
+            from sect_rules import require_command
+            require_command(actor, identity, command)
 
     async def _request_unlocked(
         self,
@@ -792,9 +804,14 @@ class MiniAppDwellingTransport:
         include_player_id: bool = True,
         *,
         time_critical: bool = False,
+        required_command: str = "",
     ) -> dict[str, Any]:
         if not self.init_data or not self.start_payload:
             await self._initialize_unlocked()
+        if required_command:
+            self._check_sect_operation(identity, required_command)
+        if path.endswith("/command-center"):
+            self._check_sect_operation(identity, (payload or {}).get("command"))
         body = {
             "token": self.entry_token,
             "initData": self.init_data,
@@ -824,6 +841,7 @@ class MiniAppDwellingTransport:
                     retry_auth=False,
                     include_player_id=include_player_id,
                     time_critical=time_critical,
+                    required_command=required_command,
                 )
             raise
 
@@ -916,6 +934,7 @@ class MiniAppDwellingTransport:
         target_item_id: str,
         times: int = 1,
         log_operation: bool = True,
+        required_command: str = "",
     ) -> dict[str, Any]:
         """Forge a learned treasure recipe from the Mini App storage bag."""
         target_item_id = str(target_item_id or "").strip()
@@ -935,6 +954,7 @@ class MiniAppDwellingTransport:
                     "/api/miniapp/xianxia-dwelling/forge/craft",
                     {"targetItemId": target_item_id, "times": times},
                     identity=identity,
+                    required_command=required_command,
                 ),
                 log_operation=log_operation,
             )
@@ -1027,9 +1047,16 @@ class MiniAppDwellingTransport:
                     "/api/miniapp/xianxia-dwelling/journey",
                     {"action": "wild_experience", "mode": mode},
                     identity=identity,
+                    required_command=prefix_command,
                 ),
             )
             return prefix, journey_payload
+
+    def _cultivation_prefix_ok(self, payload):
+        checker = getattr(getattr(self, "sect_actor", None), "tianxing_prefix_response_ok", None)
+        if callable(checker):
+            return bool(checker(".推命 闭关", command_result_text(payload)))
+        return command_result_ok(payload)
 
     async def command(
         self,
@@ -1042,7 +1069,11 @@ class MiniAppDwellingTransport:
         if not miniapp_command_allowed(command):
             raise MiniAppBeastError("miniapp_command_not_allowed")
         async with self._lock:
-            if meditation_prefix and command == ".闭关修炼":
+            prefixes = getattr(self, "_cultivation_prefixes", {})
+            self._cultivation_prefixes = prefixes
+            prefix_ready_at = prefixes.pop(identity, 0) if command == ".闭关修炼" else 0
+            prefix_required = meditation_prefix and command == ".闭关修炼"
+            if prefix_required and (not prefix_ready_at or time.monotonic() - prefix_ready_at > 30):
                 prefix = await self._logged_operation(
                     identity,
                     "指令 .推命 闭关（闭关前置）",
@@ -1053,7 +1084,7 @@ class MiniAppDwellingTransport:
                     ),
                     log_operation=log_operation,
                 )
-                if not command_result_ok(prefix):
+                if not self._cultivation_prefix_ok(prefix):
                     return MiniAppCommandResponse(command_result_text(prefix), prefix)
 
             if command == ".闭关修炼":
@@ -1079,9 +1110,14 @@ class MiniAppDwellingTransport:
             result = await self._logged_operation(
                 identity,
                 f"指令 {command}",
-                lambda: self._request_unlocked(path, payload, identity=identity),
+                lambda: self._request_unlocked(
+                    path, payload, identity=identity,
+                    required_command=".推命 闭关" if prefix_required else "",
+                ),
                 log_operation=log_operation,
             )
+            if command == ".推命 闭关" and self._cultivation_prefix_ok(result):
+                prefixes[identity] = time.monotonic()
             if command == ".查看闭关":
                 deep = (
                     ((result.get("dwelling") or {}).get("meditation") or {}).get("deepSeclusion")
@@ -1137,7 +1173,17 @@ class MiniAppDwellingTransport:
         timeout: int | None = None,
         retry_auth: bool = True,
     ) -> dict[str, Any]:
+        def check_sect():
+            if action == "spirit_beast":
+                operation = (payload or {}).get("action")
+                command = {"seek": ".寻觅灵兽", "release": "miniapp:spirit-beast-release",
+                           "rest": "miniapp:spirit-beast-rest", "interact": "miniapp:spirit-beast-contract"}.get(
+                               operation, "miniapp:spirit-beast-abyss" if path.endswith("/abyss/enter")
+                               else "miniapp:spirit-beast")
+                self._check_sect_operation(identity, command)
+        check_sect()
         token = await self._external_token_unlocked(identity, action, expected_prefix)
+        check_sect()
         body = {"token": token, "initData": self.init_data}
         body.update(payload or {})
         try:
@@ -1172,6 +1218,7 @@ class MiniAppDwellingTransport:
                 expected_prefix,
                 force=True,
             )
+            check_sect()
             body = {"token": token, "initData": self.init_data}
             body.update(payload or {})
             return await _post_json(

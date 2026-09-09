@@ -540,9 +540,9 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.notify_bot_username = self.config.get('notify_bot', 'waaiging_bot')  # 告警机器人
 
         # ------ 4. 宗派信息 ------
-        self.sect_name = TIANXING_SECT_NAME
+        self.sect_name = getattr(self, "initial_sect_name", TIANXING_SECT_NAME)
         self.identity_sect_names = {
-            "主魂": TIANXING_SECT_NAME,
+            "主魂": self.sect_name,
             "无咎子": "天星宗",
             YINLUO_IDENTITY: "阴罗宗",
             "素缘子": "星宫",
@@ -620,6 +620,11 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.state = self.load_state()             # 从文件加载持久化状态
         self.restore_avatar_dao_names()
         self.initialize_main_beast_runtime()
+        self.sect_name = str(
+            (self.state.get("identity_sect_names") or {}).get("主魂")
+            or self.state.get("miniapp_sect_name") or self.state.get("sect_name") or self.sect_name
+        ).strip()
+        self.identity_sect_names["主魂"] = self.sect_name
         sect_state_changed = False
         if self.state.get("sect_name") != self.sect_name:
             self.state["sect_name"] = self.sect_name
@@ -3236,139 +3241,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 log.error("Main Tianxing destiny loop error: %s", exc, exc_info=True)
                 await asyncio.sleep(60)
 
-    async def _run_tianxing_tianji_identity_round(self, identity, target, round_id, transport):
-        """Run at most one forge round for one Tianxing identity."""
-        state = self.tianxing_identity_state(identity)
-        if state.get("tianxing_tianji_round_id") != round_id:
-            state.update(
-                {
-                    "tianxing_tianji_round_id": round_id,
-                    "tianxing_tianji_completed": 0,
-                    "tianxing_tianji_last_result": "",
-                    "tianxing_tianji_error": "",
-                    "tianxing_tianji_retry_time": "",
-                }
-            )
-            self.save_state()
-
-        retry_time = str(state.get("tianxing_tianji_retry_time") or "")
-        if retry_time and is_future(retry_time):
-            return False
-        completed = max(0, int(state.get("tianxing_tianji_completed") or 0))
-        if completed >= target:
-            return False
-        if not await self.ensure_tianxing_destiny_for_action(identity, "crafting"):
-            state["tianxing_tianji_error"] = "命星未确认"
-            retry_seconds = max(
-                300,
-                self.tianxing_destiny_retry_wait_seconds(identity),
-            )
-            state["tianxing_tianji_retry_time"] = add_seconds_str(now_str(), retry_seconds)
-            self.save_state()
-            return True
-
-        try:
-            async with self.common_atomic_task(
-                f"Tianxing-tianji-round-{identity}", log_lifecycle=False
-            ):
-                prefix = await transport.command(
-                    TIANXING_TIANJI_PREFIX_COMMAND,
-                    identity=identity,
-                    log_operation=False,
-                )
-                apply_dwelling_snapshot(self, identity, prefix.payload)
-                prefix_text = command_result_text(prefix.payload) or prefix.text
-                # The command-center may report a business response with
-                # actionResult.ok=false even when the returned text confirms
-                # that the prediction was created.  The semantic text check
-                # is authoritative here, including the pending-prediction
-                # response that the game treats as a normal continuation.
-                if not self.tianxing_prefix_response_ok(
-                    TIANXING_TIANJI_PREFIX_COMMAND, prefix_text
-                ):
-                    wait_seconds = self.tianxing_prefix_wait_seconds(prefix_text)
-                    if wait_seconds > 0:
-                        raise MiniAppBeastError(
-                            f"tianji_destiny_prefix_wait:{wait_seconds}"
-                        )
-                    raise MiniAppBeastError("tianji_destiny_prefix_failed")
-                forged = await transport.forge_treasure(
-                    identity,
-                    "treasure_001",
-                    times=1,
-                    log_operation=False,
-                )
-                apply_dwelling_snapshot(self, identity, forged)
-                result = forged.get("actionResult") if isinstance(forged, dict) else {}
-                if isinstance(result, dict) and result.get("ok") is False:
-                    raise MiniAppBeastError(
-                        str(result.get("error") or "tianji_forge_failed")
-                    )
-                state.update(
-                    {
-                        "tianxing_tianji_completed": completed + 1,
-                        "tianxing_tianji_last_time": now_str(),
-                        "tianxing_tianji_last_result": (
-                            str(result.get("rawMessage") or result.get("message") or "玄铁剑炼制完成")
-                            if isinstance(result, dict)
-                            else "玄铁剑炼制完成"
-                        )[:240],
-                        "tianxing_tianji_error": "",
-                        "tianxing_tianji_retry_time": "",
-                    }
-                )
-                self.save_state()
-            return True
-        except asyncio.CancelledError:
-            raise
-        except MiniAppCircuitOpenError as exc:
-            retry_seconds = miniapp_circuit_wait_seconds(exc, 300)
-            state.update(
-                {
-                    "tianxing_tianji_error": exc.code,
-                    "tianxing_tianji_last_time": now_str(),
-                    "tianxing_tianji_retry_time": add_seconds_str(
-                        now_str(), retry_seconds
-                    ),
-                }
-            )
-            self.save_state()
-            log.info(
-                "Tianxing Tianji grind [%s] paused by upstream circuit until %s",
-                identity,
-                exc.retry_at or f"in {retry_seconds}s",
-            )
-            return False
-        except Exception as exc:
-            error_text = str(exc)
-            match = re.fullmatch(r"tianji_destiny_prefix_wait:(\d+)", error_text)
-            if match:
-                retry_seconds = max(1, int(match.group(1)))
-                state.update(
-                    {
-                        "tianxing_tianji_error": "",
-                        "tianxing_tianji_last_result": f"推命冷却，{retry_seconds} 秒后重试",
-                        "tianxing_tianji_last_time": now_str(),
-                        "tianxing_tianji_retry_time": add_seconds_str(now_str(), retry_seconds),
-                    }
-                )
-                self.save_state()
-                log.info(
-                    "Tianxing Tianji prefix [%s] is cooling down; retrying in %ss.",
-                    identity,
-                    retry_seconds,
-                )
-                return True
-            state.update(
-                {
-                    "tianxing_tianji_error": error_text[:240],
-                    "tianxing_tianji_last_time": now_str(),
-                    "tianxing_tianji_retry_time": add_seconds_str(now_str(), 300),
-                }
-            )
-            self.save_state()
-            log.error("Tianxing Tianji grind [%s] error: %s", identity, exc, exc_info=True)
-            return True
 
     def _summarize_tianxing_tianji_round_if_complete(
         self, identities, target, round_id
@@ -5031,7 +4903,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             return
 
         async with AtomicTaskContext(self, f"Destiny-{avatar}"):
-            await self.observe_tianxing_destiny(avatar, force=True)
+            await self.observe_tianxing_destiny(avatar)
 
     async def _avatar_meditation_check(self, avatar):
         """
@@ -5411,13 +5283,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
         self.create_scheduler_task("daily_support", lambda: self.run_daily_support_tasks())
 
-        if self.lingxiao_enabled:
-            # 云阶问心循环（凌霄宫）
-            self.create_scheduler_task("cloud_stairs", lambda: self.run_cloud_stairs_loop())
-            # 九天罡风循环（独立于登天阶循环）
-            self.create_scheduler_task("nine_heaven_wind", lambda: self.run_nine_heaven_wind_loop())
-        else:
-            log.info("Lingxiao cloud stairs / wind loops disabled for current sect.")
 
         # 元婴期能力循环（出窍+归窍）
         self.create_scheduler_task("yuanying_out", lambda: self.run_yuanying_out_loop())
@@ -5434,11 +5299,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             "tianxing_tianji_grind",
             lambda: self.run_tianxing_tianji_grind_loop(),
         )
-        if self.main_soul_is_tianxing():
-            self.create_scheduler_task(
-                "tianxing_destiny_main",
-                lambda: self.run_main_tianxing_destiny_loop(),
-            )
 
         # 抚摸法宝依赖账号的具体法宝名称，新账号未配置时不启动。
         if self.enable_treasure_touch:
@@ -5466,11 +5326,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         )
         if self.enable_main_beasts:
             self.create_scheduler_task("main_beast_miniapp", lambda: self.run_main_beast_miniapp_timer())
-            if self._miniapp_beast_contract.enabled:
-                self.create_scheduler_task(
-                    "main_beast_contract",
-                    lambda: self._miniapp_beast_contract.run(),
-                )
             self.create_scheduler_task("main_beast_action", lambda: self.run_main_beast_action_timer())
         self.create_scheduler_task("custom_command", lambda: self.run_custom_command_loop())
         self.create_scheduler_task("second_soul", lambda: self.run_second_soul_loop())
@@ -5486,8 +5341,6 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             for i, avatar_name in enumerate(self.avatars):
                 if avatar_name in STAR_ATTRACTION_AVATARS:
                     self.create_scheduler_task(f"avatar_star_attraction_{avatar_name}", lambda avatar_name=avatar_name, i=i: self.run_avatar_star_attraction_loop(avatar_name, initial_delay=i * 10))
-            if YINLUO_IDENTITY in self.avatars:
-                self.create_scheduler_task(f"yinluo_{YINLUO_IDENTITY}", lambda: self.run_yinluo_loop(YINLUO_IDENTITY, initial_delay=45))
         else:
             log.info("Avatar scheduler disabled for this account.")
         if self.enable_soul_curse:

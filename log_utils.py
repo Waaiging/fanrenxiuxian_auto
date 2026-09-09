@@ -2900,24 +2900,64 @@ def command_control_entry_disabled(entry):
     return bool(entry)
 
 
+def command_control_identity_candidates(identity, root_state=None):
+    """Read controls under the current Dao name before its persisted aliases."""
+    identity = str(identity or "主魂").strip() or "主魂"
+    if identity in {"主魂", "*"}:
+        return [identity]
+    aliases = (root_state or {}).get("avatar_dao_name_aliases")
+    if not isinstance(aliases, dict):
+        return [identity]
+
+    def resolve(name):
+        current, seen = name, set()
+        while current not in seen:
+            seen.add(current)
+            target = str(aliases.get(current) or "").strip()
+            if not target or target == current:
+                return current
+            current = target
+        return name
+
+    current = resolve(identity)
+    candidates = [current]
+    # New aliases are appended on rebirth, so prefer the most recent name.
+    candidates.extend(name for name in reversed(aliases) if resolve(name) == current)
+    return list(dict.fromkeys(candidates))
+
+
+def command_control_matches(controls, account, identity, command, root_state=None):
+    """Use the nearest identity entry, keeping account-wide pauses effective."""
+    account_controls = controls.get(account, {}) if isinstance(controls, dict) else {}
+    if not isinstance(account_controls, dict):
+        return []
+    candidates = command_control_identity_candidates(identity, root_state)
+    keys = command_control_candidate_keys(command)
+    matches = []
+    groups = [candidates] if candidates == ["*"] else [candidates, ["*"]]
+    for group in groups:
+        for name in group:
+            entries = account_controls.get(name, {})
+            if not isinstance(entries, dict):
+                continue
+            found = [(key, entries[key]) for key in keys if key in entries]
+            if found:
+                matches.extend(found)
+                break
+    return matches
+
+
 def dashboard_command_control_entry(actor, command, identity=None):
     """Return the first matching dashboard control entry for one command."""
     account = actor_account_key(actor)
     if not account:
         return None
-    controls = load_command_controls().get(account, {})
-    if not isinstance(controls, dict):
-        return None
-    identities = [str(identity or getattr(actor, "current_identity", "主魂") or "主魂"), "*"]
-    keys = command_control_candidate_keys(command)
-    for ident in identities:
-        ident_controls = controls.get(ident, {})
-        if not isinstance(ident_controls, dict):
-            continue
-        for key in keys:
-            if key in ident_controls:
-                return ident_controls.get(key)
-    return None
+    matches = command_control_matches(
+        load_command_controls(), account,
+        identity or getattr(actor, "current_identity", "主魂"), command,
+        root_state=getattr(actor, "state", None),
+    )
+    return matches[0][1] if matches else None
 
 
 def dashboard_command_control_value(actor, command, field, default=None, identity=None):
@@ -2934,10 +2974,9 @@ def dashboard_command_disabled(actor, command, identity=None):
     account = actor_account_key(actor)
     if not account:
         return False, "", None
-    controls = load_command_controls().get(account, {})
-    if not isinstance(controls, dict):
-        return False, "", None
-    identities = [str(identity or getattr(actor, "current_identity", "主魂") or "主魂"), "*"]
+    identity = identity or getattr(actor, "current_identity", "主魂")
+    root_state = getattr(actor, "state", None)
+    identities = [*command_control_identity_candidates(identity, root_state), "*"]
     keys = command_control_candidate_keys(command)
     bypass = getattr(actor, "_dashboard_command_bypass", None)
     if bypass:
@@ -2945,14 +2984,9 @@ def dashboard_command_disabled(actor, command, identity=None):
             for key in keys:
                 if (ident, key) in bypass or ("*", key) in bypass or (ident, "*") in bypass:
                     return False, "", None
-    for ident in identities:
-        ident_controls = controls.get(ident, {})
-        if not isinstance(ident_controls, dict):
-            continue
-        for key in keys:
-            entry = ident_controls.get(key)
-            if command_control_entry_disabled(entry):
-                return True, key, entry
+    for key, entry in command_control_matches(load_command_controls(), account, identity, command, root_state):
+        if command_control_entry_disabled(entry):
+            return True, key, entry
     return False, "", None
 
 

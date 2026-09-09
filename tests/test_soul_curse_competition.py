@@ -19,13 +19,15 @@ from soul_curse_features import (
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-class _Actor:
+class _Actor(scf.SoulCurseMixin):
     """Minimal actor for shared-commission competition tests."""
 
     def __init__(self, account, avatars):
         self.account_key = account
         self.avatars = avatars
-        self.state = {}
+        self.state = {"identity_sect_names": {
+            name: "阴罗宗" if name in {"缘生子", "玄续玄"} else "散修" for name in avatars
+        }}
         self.pause_event = asyncio.Event()
         self.pause_event.set()
 
@@ -155,7 +157,7 @@ class SharedCommissionCompetitionTests(unittest.TestCase):
 
     def test_publisher_only_account_is_not_an_assistant_candidate(self):
         """没有阴罗身份的发布账号不能先占用自己的共享委托。"""
-        class _SoulActor(scf.SoulCurseMixin, _Actor):
+        class _SoulActor(_Actor):
             pass
 
         actor = _SoulActor("xiaohao", avatars=["问心子"])

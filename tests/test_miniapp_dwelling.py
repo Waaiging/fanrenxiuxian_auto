@@ -2088,6 +2088,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             async def run_yuanying_out_loop(self):
                 pass
 
+            run_sect_daily_loop = run_custom_command_loop
+            run_tianxing_tianji_grind_loop = run_custom_command_loop
+
         async def exercise():
             actor = Actor()
             worker = RestrictedMiniAppWorker(actor, "xiaohao")
@@ -2098,9 +2101,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             worker.daily_activities.hunt_enabled = False
             worker.tianxing_journey.enabled = False
             worker.beast_abyss.enabled = False
-            worker.beast_seek.enabled = False
+            worker.beast_seek.configured_enabled = False
             worker.beast_enabled = False
-            worker.beast_contract.enabled = False
+            worker.beast_contract.configured_enabled = False
             spawned = []
 
             def capture(name, coroutine):
@@ -2115,6 +2118,8 @@ class MiniAppDwellingTests(unittest.TestCase):
 
         self.assertTrue(worker.fishing.supported)
         self.assertIn("fishing", spawned)
+        self.assertEqual(spawned.count("sect_daily"), 1)
+        self.assertNotIn("beast_seek", spawned)
 
     def test_restricted_worker_routes_puzzle_through_miniapp(self):
         class Actor:
@@ -2192,7 +2197,7 @@ class MiniAppDwellingTests(unittest.TestCase):
         worker.transport.command.assert_awaited_once_with(
             ".安置侍妾",
             identity="主魂",
-            meditation_prefix=True,
+            meditation_prefix=False,
         )
 
     def test_restricted_worker_recovers_previously_blocked_puzzle(self):

@@ -13,7 +13,7 @@ from miniapp_command_routing import MiniAppCommandRouter
 
 
 class WaaigingAccountTests(unittest.TestCase):
-    def test_profile_has_one_tianxing_main_soul_and_no_avatar_tasks(self):
+    def test_profile_without_saved_sect_waits_for_membership_and_has_no_avatar_tasks(self):
         def fake_base_init(actor, session_name):
             actor.mc = {}
             actor.state = {}
@@ -31,7 +31,7 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertEqual(actor.expected_username, "Waaiging")
         self.assertEqual(actor.field_training_command, DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND)
         self.assertEqual(actor.field_training_plan("主魂").command, ".野外历练 深入")
-        self.assertEqual(actor.identity_sect_names, {"主魂": "天星宗"})
+        self.assertEqual(actor.identity_sect_names, {"主魂": ""})
         self.assertEqual(actor.avatars, [])
         self.assertFalse(actor.enable_avatar_tasks)
         self.assertFalse(actor.enable_miniapp_star_palace)
@@ -79,6 +79,23 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertEqual(actor.state["pending_star_shift_msg_id"], 0)
         self.assertEqual(actor.state["miniapp_star_farm_identities"], [])
         self.assertTrue(saved)
+
+    def test_constructor_preserves_confirmed_sect_without_legacy_join_flag(self):
+        for source in ("identity_sect_names", "miniapp_sect_name", "sect_name"):
+            with self.subTest(source=source):
+                def fake_base_init(actor, session_name):
+                    actor.mc = {}
+                    actor.state = {source: {"主魂": "合欢宗"} if source == "identity_sect_names" else "合欢宗"}
+                    actor.save_state = lambda: None
+
+                with patch.object(intelligent_cultivator, "configure_runtime_files"), patch.object(
+                    intelligent_cultivator.Cultivator, "__init__", fake_base_init,
+                ):
+                    actor = WaaigingCultivator()
+                self.assertEqual(actor.account_sect_name(), "合欢宗")
+                self.assertEqual(actor.identity_sect_names, {"主魂": "合欢宗"})
+                self.assertEqual(actor.state["sect_name"], "合欢宗")
+                self.assertFalse(actor.state["sect_join_confirmed"])
 
     def test_identity_sect_name_ignores_stale_non_tianxing_mapping(self):
         actor = WaaigingCultivator.__new__(WaaigingCultivator)
@@ -428,6 +445,7 @@ class WaaigingAccountTests(unittest.TestCase):
         actor.state = {
             "sect_join_confirmed": True,
             "last_destiny_date": "",
+            "identity_sect_names": {"主魂": "天星宗"},
             "next_tianxing_destiny_retry_time": "",
         }
         actor.active_atomic_task = None

@@ -89,6 +89,7 @@ from miniapp_beast import (
 )
 from miniapp_dwelling import apply_dwelling_snapshot, command_result_text
 from sect_task_features import SectTaskMixin
+from sect_rules import SectTaskStopped, require_command
 from wind_thunder_features import wind_thunder_enabled, wind_thunder_send, wind_thunder_target_cooldown
 from reward_parsing import (
     clean_reward_text as shared_clean_reward_text,
@@ -980,25 +981,28 @@ class CommonCommandMixin(SectTaskMixin):
         return avatars.setdefault(identity, {})
 
     def tianxing_identity_enabled(self, identity="主魂"):
-        return self.identity_sect_name(identity) == "天星宗"
+        return self.identity_sect_name(self.resolve_avatar_identity(identity)) == "天星宗"
 
     def tianxing_identity_names(self):
         """Return every locally configured identity currently belonging to Tianxing."""
-        identities = ["主魂"]
-        for identity in getattr(self, "avatars", []) or []:
-            if identity not in identities:
-                identities.append(identity)
-        return [identity for identity in identities if self.tianxing_identity_enabled(identity)]
+        return [identity for identity in self.sect_task_identities()
+                if self.tianxing_identity_enabled(identity)]
 
     def miniapp_small_world_transport(self):
         router = getattr(self, "_miniapp_command_router", None)
         transport = getattr(router, "transport", None)
+        if transport is None:
+            restricted = getattr(self, "_restricted_miniapp_worker", None)
+            transport = getattr(restricted, "transport", None)
         if transport is None:
             raise MiniAppBeastError("miniapp_route_unavailable")
         return transport
 
     async def _run_tianxing_tianji_identity_round(self, identity, target, round_id, transport):
         """Run at most one forge round for one Tianxing identity."""
+        identity = self.resolve_avatar_identity(identity)
+        if not self.sect_operation_allowed(identity, TIANXING_TIANJI_PREFIX_COMMAND):
+            return False
         state = self.tianxing_identity_state(identity)
         if state.get("tianxing_tianji_round_id") != round_id:
             state.update(
@@ -1032,6 +1036,7 @@ class CommonCommandMixin(SectTaskMixin):
             async with self.common_atomic_task(
                 f"Tianxing-tianji-round-{identity}", log_lifecycle=False
             ):
+                require_command(self, identity, TIANXING_TIANJI_PREFIX_COMMAND)
                 prefix = await transport.command(
                     TIANXING_TIANJI_PREFIX_COMMAND,
                     identity=identity,
@@ -1053,11 +1058,13 @@ class CommonCommandMixin(SectTaskMixin):
                             f"tianji_destiny_prefix_wait:{wait_seconds}"
                         )
                     raise MiniAppBeastError("tianji_destiny_prefix_failed")
+                require_command(self, identity, TIANXING_TIANJI_PREFIX_COMMAND)
                 forged = await transport.forge_treasure(
                     identity,
                     "treasure_001",
                     times=1,
                     log_operation=False,
+                    required_command=TIANXING_TIANJI_PREFIX_COMMAND,
                 )
                 apply_dwelling_snapshot(self, identity, forged)
                 result = forged.get("actionResult") if isinstance(forged, dict) else {}
@@ -1082,6 +1089,8 @@ class CommonCommandMixin(SectTaskMixin):
             return True
         except asyncio.CancelledError:
             raise
+        except SectTaskStopped:
+            return False
         except MiniAppCircuitOpenError as exc:
             retry_seconds = miniapp_circuit_wait_seconds(exc, 300)
             state.update(
@@ -1271,13 +1280,17 @@ class CommonCommandMixin(SectTaskMixin):
         return max(0, int(wait_seconds or 0))
 
     async def send_tianxing_identity_command(self, identity, command, **kwargs):
-        identity = str(identity or "主魂").strip() or "主魂"
+        identity = self.resolve_avatar_identity(identity)
+        if not self.sect_operation_allowed(identity, command):
+            return None
         if identity != "主魂" and hasattr(self, "send_and_wait_feedback_identity"):
             return await self.send_and_wait_feedback_identity(identity, command, **kwargs)
         return await self.send_and_wait_feedback(command, **kwargs)
 
     def tianxing_miniapp_route_unavailable(self):
         state = getattr(self, "state", {})
+        if getattr(self, "_restricted_miniapp_worker", None) is not None:
+            return not state.get("restricted_miniapp_active")
         return isinstance(state, dict) and state.get("miniapp_route_active") is False
 
     def tianxing_destiny_retry_wait_seconds(self, identity="主魂"):
@@ -6851,7 +6864,9 @@ class CommonCommandMixin(SectTaskMixin):
 
     def account_sect_name(self):
         """获取本账号的宗门名称"""
-        return (getattr(self, "sect_name", "") or self.state.get("sect_name", "") or "").strip()
+        mapping = getattr(self, "identity_sect_names", None) or self.state.get("identity_sect_names") or {}
+        return str(mapping.get("主魂") or self.state.get("miniapp_sect_name")
+                   or self.state.get("sect_name") or getattr(self, "sect_name", "") or "").strip()
 
     def sync_identity_sect_from_text(self, identity="主魂", text=""):
         """Learn an identity's current sect from an authoritative game reply.

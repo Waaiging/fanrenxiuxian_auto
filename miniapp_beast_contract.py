@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from miniapp_beast import MiniAppBeastError, MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
-from miniapp_dwelling import MiniAppDwellingTransport
+from miniapp_dwelling import MiniAppDwellingTransport, identity_state
+from sect_rules import SectTaskStopped, identity_sect, require_command, resolve_identity, task_paused
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -121,17 +122,18 @@ class MiniAppBeastContractWorker:
         actor: Any,
         transport: MiniAppDwellingTransport | None,
         logger: logging.Logger | None = None,
+        identity: str = "主魂",
     ) -> None:
         self.actor = actor
+        self._identity = identity
         self.transport = transport
         self.log = logger or logging.getLogger("MiniAppBeastContract")
         settings = (getattr(actor, "config", {}) or {}).get("miniapp_beast") or {}
         entry_url = str(settings.get("entry_url") or "").strip()
-        self.enabled = (
+        self.configured_enabled = (
             bool(settings.get("enabled", bool(entry_url)))
             and bool(entry_url)
             and bool(settings.get("contract_interaction_enabled", True))
-            and main_soul_is_wanling(actor)
         )
         self.interval_seconds = max(
             5 * 60,
@@ -145,6 +147,18 @@ class MiniAppBeastContractWorker:
         if delay_value is None:
             delay_value = DEFAULT_ACTION_DELAY_SECONDS
         self.action_delay_seconds = max(0, min(60, int(delay_value)))
+
+    @property
+    def identity(self) -> str:
+        return resolve_identity(self.actor, self._identity)
+
+    @property
+    def enabled(self) -> bool:
+        return self.configured_enabled and identity_sect(self.actor, self.identity) == "万灵宗"
+
+    @property
+    def state(self) -> dict[str, Any]:
+        return identity_state(self.actor, self.identity)
 
     @classmethod
     def from_actor(
@@ -167,36 +181,40 @@ class MiniAppBeastContractWorker:
             if entry_url
             else None
         )
+        if transport is not None:
+            transport.sect_actor = actor
         return cls(actor, transport, logger=logger)
 
     def _save(self) -> None:
         self.actor.save_state()
 
     def _results(self) -> dict[str, dict[str, Any]]:
-        value = self.actor.state.get("beast_contract_interaction_results")
+        value = self.state.get("beast_contract_interaction_results")
         if not isinstance(value, dict):
             value = {}
-            self.actor.state["beast_contract_interaction_results"] = value
+            self.state["beast_contract_interaction_results"] = value
         return value
 
     def _record_enabled_state(self) -> None:
-        self.actor.state.update({
+        self.state.update({
             "beast_contract_interaction_enabled": bool(self.enabled),
             "beast_contract_interaction_interval_seconds": self.interval_seconds,
             "beast_contract_interaction_transport": "miniapp_http_only",
         })
 
     def _update_cache(self, beasts: list[dict[str, Any]]) -> None:
-        self.actor.state["beasts_cache"] = beasts
-        self.actor.state["beast_contract_roster_time"] = contract_time()
-        self.actor.state["beast_contract_roster_count"] = len(beasts)
+        self.state["beasts_cache"] = beasts
+        self.state["beast_contract_roster_time"] = contract_time()
+        self.state["beast_contract_roster_count"] = len(beasts)
         updater = getattr(self.actor, "update_main_best_beast", None)
         if not callable(updater):
             updater = getattr(self.actor, "update_best_beast_tracking", None)
-        if callable(updater):
+        if self.identity == "主魂" and callable(updater):
             updater()
 
     async def run_cycle(self) -> bool:
+        if not self.enabled or task_paused(self.actor, self.identity, "miniapp:spirit-beast-contract"):
+            return False
         lock = getattr(self.actor, "beast_lock", None)
         if lock is not None:
             async with lock:
@@ -204,7 +222,8 @@ class MiniAppBeastContractWorker:
         return await self._run_cycle_unlocked()
 
     async def _run_cycle_unlocked(self) -> bool:
-        state = self.actor.state
+        require_command(self.actor, self.identity, "miniapp:spirit-beast-contract")
+        state = self.state
         self._record_enabled_state()
         state["beast_contract_interaction_last_attempt_time"] = contract_time()
         state["beast_contract_interaction_last_error"] = ""
@@ -212,12 +231,14 @@ class MiniAppBeastContractWorker:
         try:
             if self.transport is None:
                 raise MiniAppBeastError("invalid_entry_url")
-            snapshot = await self.transport.spirit_beast_snapshot("主魂")
+            snapshot = await self.transport.spirit_beast_snapshot(self.identity)
             beasts = list((snapshot or {}).get("beasts") or [])
             if not beasts:
                 raise MiniAppBeastError("beast_roster_empty")
         except asyncio.CancelledError:
             raise
+        except SectTaskStopped:
+            return False
         except MiniAppCircuitOpenError as exc:
             wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
             state["beast_contract_interaction_last_error"] = exc.code
@@ -298,8 +319,9 @@ class MiniAppBeastContractWorker:
                 "stamina_before": before,
             })
             try:
+                require_command(self.actor, self.identity, "miniapp:spirit-beast-contract")
                 payload = await self.transport.spirit_beast_interaction(
-                    "主魂",
+                    self.identity,
                     beast_id,
                     "安抚",
                 )
@@ -324,7 +346,7 @@ class MiniAppBeastContractWorker:
                 results[result_key] = item_state
                 self._save()
                 raise
-            except MiniAppCircuitOpenError:
+            except (MiniAppCircuitOpenError, SectTaskStopped):
                 results[result_key] = item_state
                 self._save()
                 raise
@@ -378,9 +400,9 @@ class MiniAppBeastContractWorker:
             f"：{'；'.join(batch_details)}"
         )
         if failed:
-            self.log.error("Mini App [主魂] 万兽谷灵兽安抚部分失败：%s", summary)
+            self.log.error("Mini App [%s] 万兽谷灵兽安抚部分失败：%s", self.identity, summary)
         else:
-            self.log.info("IN [Mini App | 主魂]:\n万兽谷灵兽安抚 -> %s", summary)
+            self.log.info("IN [Mini App | %s]:\n万兽谷灵兽安抚 -> %s", self.identity, summary)
         return failed == 0
 
     async def run(self) -> None:
@@ -396,12 +418,15 @@ class MiniAppBeastContractWorker:
             self.retry_seconds,
         )
         while getattr(self.actor, "is_running", True):
+            if not self.enabled or task_paused(self.actor, self.identity, "miniapp:spirit-beast-contract"):
+                await asyncio.sleep(60)
+                continue
             pause_event = getattr(self.actor, "pause_event", None)
             if pause_event is not None and not pause_event.is_set():
                 await asyncio.sleep(60)
                 continue
             wait = contract_seconds_until(
-                self.actor.state.get("beast_contract_interaction_next_time")
+                self.state.get("beast_contract_interaction_next_time")
             )
             if wait > 0:
                 await asyncio.sleep(min(wait, 300))
@@ -410,11 +435,13 @@ class MiniAppBeastContractWorker:
                 await self.run_cycle()
             except asyncio.CancelledError:
                 raise
+            except SectTaskStopped:
+                await asyncio.sleep(60)
             except MiniAppCircuitOpenError as exc:
                 wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
-                self.actor.state["beast_contract_interaction_last_error"] = exc.code
-                self.actor.state["beast_contract_interaction_last_error_time"] = contract_time()
-                self.actor.state["beast_contract_interaction_next_time"] = contract_add_seconds(wait)
+                self.state["beast_contract_interaction_last_error"] = exc.code
+                self.state["beast_contract_interaction_last_error_time"] = contract_time()
+                self.state["beast_contract_interaction_next_time"] = contract_add_seconds(wait)
                 self._save()
                 self.log.info(
                     "Wan Beast Valley contract paused by upstream circuit until %s",

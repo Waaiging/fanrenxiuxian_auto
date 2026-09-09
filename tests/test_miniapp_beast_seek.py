@@ -348,6 +348,7 @@ class MiniAppBeastSeekTests(unittest.TestCase):
         state = {
             "restricted_miniapp_active": True,
             "next_hunt_time": "2099-01-01 00:00:00",
+            "sect_name": "万灵宗",
             "avatars": {},
         }
 

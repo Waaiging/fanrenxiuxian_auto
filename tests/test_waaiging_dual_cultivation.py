@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import cultivator_waaiging as waaiging
 import intelligent_cultivator as core
+import hehuan_features as hehuan
 
 
 NOW = datetime(2026, 9, 8, 7, 3, 45)
@@ -29,12 +30,17 @@ def message(text, *, edited=None, username="Weeguu", msg_id=123):
 
 class DualCultivationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        for target in (core, waaiging):
+        for target in (core, waaiging, hehuan):
             clock = patch.object(target, "datetime", Clock)
             clock.start()
             self.addCleanup(clock.stop)
         self.actor = waaiging.WaaigingCultivator.__new__(waaiging.WaaigingCultivator)
-        self.actor.state = {"dual_cultivation_schedule_version": 1}
+        self.actor.state = {"dual_cultivation_schedule_version": 1, "sect_name": "合欢宗",
+                            "identity_sect_names": {"主魂": "合欢宗"}}
+        self.actor.account_key = "waaiging"
+        self.actor.avatars = []
+        self.actor.dashboard_command_paused = Mock(return_value=False)
+        self.actor.identity_pause_seconds = Mock(return_value=0)
         self.actor.save_state = Mock()
         self.actor.target_chat_id = CHAT
         self.actor.client = SimpleNamespace(get_messages=AsyncMock())

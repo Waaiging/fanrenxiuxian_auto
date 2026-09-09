@@ -228,11 +228,9 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
         actor = FakeActor()
         rested = []
 
-        async def rest(name):
-            rested.append(name)
-            return "休息中", "万兽谷灵兽休息完成"
-
-        actor.rest_beast_for_abyss = rest
+        async def rest(identity, beast_id):
+            rested.append((identity, beast_id))
+            return {"ok": True, "message": "万兽谷灵兽休息完成"}
         action = {
             "ok": True,
             "message": "探渊胜利",
@@ -244,11 +242,12 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
             snapshot([beast(1, "六翼霜蚣", 59150, can_explore=False, status="出战中")]),
             snapshot([beast(1, "六翼霜蚣", 59150, can_explore=True, status="休息中")]),
         ], action_payload=action)
+        transport.spirit_beast_rest = rest
         worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
 
         wait = asyncio.run(worker.run_once())
 
-        self.assertEqual(rested, ["六翼霜蚣"])
+        self.assertEqual(rested, [("主魂", 1)])
         self.assertEqual(transport.enter_calls, [("主魂", 1, "六翼霜蚣")])
         self.assertEqual(actor.state["beast_abyss_miniapp_last_error"], "")
         self.assertEqual(actor.state["beast_abyss_miniapp_last_beast"], "六翼霜蚣")
@@ -257,13 +256,12 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
         """召回休息未确认成功（如响应异常）→ 不探渊，退避重试。"""
         actor = FakeActor()
 
-        async def rest(name):
-            return "", "万兽谷灵兽休息失败"
-
-        actor.rest_beast_for_abyss = rest
+        async def rest(identity, beast_id):
+            return {"ok": False, "message": "万兽谷灵兽休息失败"}
         transport = FakeTransport([
             snapshot([beast(1, "六翼霜蚣", 59150, can_explore=False, status="出战中")]),
         ])
+        transport.spirit_beast_rest = rest
         worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
 
         wait = asyncio.run(worker.run_once())
@@ -276,14 +274,13 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
         actor = FakeActor()
         rested = []
 
-        async def rest(name):
-            rested.append(name)
-            return "休息中", "ok"
-
-        actor.rest_beast_for_abyss = rest
+        async def rest(identity, beast_id):
+            rested.append((identity, beast_id))
+            return {"ok": True}
         transport = FakeTransport([
             snapshot([beast(1, "巨兽", 99999, can_explore=False, status="出战中")]),
         ])
+        transport.spirit_beast_rest = rest
         worker = MiniAppBeastAbyssWorker(actor, transport, "xiaohao", FakeLogger())
         worker.retry_seconds = 900
         # power_max 限 1000：巨兽 99999 超范围，不在召回之列
@@ -336,12 +333,12 @@ class MiniAppBeastAbyssTests(unittest.TestCase):
         next_time = datetime.strptime(actor.state["next_abyss_time"], "%Y-%m-%d %H:%M:%S")
         self.assertGreater((next_time - datetime.now()).total_seconds(), 5 * 3600)
 
-    def test_only_requested_wanling_accounts_are_enabled(self):
+    def test_any_account_may_enable_its_current_wanling_identities(self):
         for account, expected in (
             ("main", True),
             ("xiaohao", True),
-            ("sub", False),
-            ("waaiging", False),
+            ("sub", True),
+            ("waaiging", True),
         ):
             actor = FakeActor(account=account)
             worker = MiniAppBeastAbyssWorker(
