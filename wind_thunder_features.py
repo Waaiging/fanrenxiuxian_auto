@@ -20,6 +20,7 @@ The item is deliberately managed as a per-identity session:
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
@@ -27,6 +28,7 @@ from typing import Any, Awaitable, Callable
 from automation_settings import load_automation_settings, wind_thunder_identities_for_account
 
 _INTERNAL_ACTORS = ContextVar("wind_thunder_internal_actors", default=frozenset())
+log = logging.getLogger("WindThunder")
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 WIND_THUNDER_HOLD_SECONDS = 30 * 60
@@ -371,6 +373,7 @@ async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bo
             "wind_thunder_cleanup_due_at": "",
             "wind_thunder_last_cleanup_time": _now().strftime(TIME_FORMAT),
             "wind_thunder_last_cleanup_error": "",
+            "wind_thunder_last_cleanup_detail": "",
             "wind_thunder_last_defer_reason": "",
             "wind_thunder_list_pending": False,
             "wind_thunder_list_fail_count": 0,
@@ -380,12 +383,22 @@ async def _retry_listing(actor: Any, identity: str, state: dict[str, Any]) -> bo
     except Exception as exc:
         if _pause_disabled_cleanup(actor, identity):
             return False
+        _record_cleanup_exception(actor, identity, state, "上架", exc)
         state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
         state["wind_thunder_list_pending"] = True
         state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
         _save(actor)
         _schedule_cleanup(actor, identity)
         return False
+
+
+def _record_cleanup_exception(actor: Any, identity: str, state: dict[str, Any], phase: str, exc: Exception) -> None:
+    detail = f"{phase}: {type(exc).__name__}: {exc}"[:500]
+    first_occurrence = state.get("wind_thunder_last_cleanup_detail") != detail
+    state["wind_thunder_last_cleanup_detail"] = detail
+    log.error("Wind-Thunder cleanup [%s] %s failed: %s", identity, phase, exc, exc_info=True)
+    if first_occurrence:
+        _wind_thunder_notify(actor, f"[{identity}] 风雷翅{phase}异常，尚未确认入阁，仍有追杀风险。5 分钟后重试。{detail}")
 
 
 async def _cleanup(actor: Any, identity: str) -> bool:
@@ -463,6 +476,7 @@ async def _cleanup_locked(actor: Any, identity: str) -> bool:
     except Exception as exc:
         if _pause_disabled_cleanup(actor, identity):
             return False
+        _record_cleanup_exception(actor, identity, state, "散念", exc)
         state["wind_thunder_last_cleanup_error"] = type(exc).__name__.lower()
         state["wind_thunder_cleanup_due_at"] = (_now() + timedelta(minutes=5)).strftime(TIME_FORMAT)
         _save(actor)
@@ -501,6 +515,7 @@ def _schedule_cleanup(actor: Any, identity: str) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
+            log.exception("Wind-Thunder cleanup timer [%s] failed.", key)
             return
 
     try:
@@ -522,7 +537,7 @@ def recover_wind_thunder_sessions(actor: Any) -> None:
         due = _parse_dt(state.get("wind_thunder_cleanup_due_at"))
         if not (state.get("wind_thunder_equipped") or state.get("wind_thunder_list_pending")):
             continue
-        if due is None:
+        if due is None or state.get("wind_thunder_last_cleanup_error") == "typeerror":
             due = _now()
             state["wind_thunder_cleanup_due_at"] = due.strftime(TIME_FORMAT)
             _save(actor)

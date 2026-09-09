@@ -1419,7 +1419,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                                       return_response_msg=False,
                                       suppress_no_response_alert=False,
                                       force_identity_check=False,
-                                      force_meditation_check=False):
+                                      force_meditation_check=False, retry_on_timeout=None):
         """
         发送指令并等待游戏机器人的回复反馈。
         这是本脚本中最核心的通信方法，几乎所有自动化操作都通过此方法完成。
@@ -1512,7 +1512,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                     if not should_yield:
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command: {message})")
                         switch_resp = await self._send_and_wait_feedback_raw(
-                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True
+                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True, retry_on_timeout=retry_on_timeout
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         passively_confirmed = self.current_identity == "主魂"
@@ -1561,7 +1561,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                         delete_after=delete_after,
                         return_response_msg=return_response_msg,
                         suppress_no_response_alert=suppress_no_response_alert,
-                        skip_bot_activity_wait=True,
+                        skip_bot_activity_wait=True, retry_on_timeout=retry_on_timeout,
                     )
 
             if should_yield:

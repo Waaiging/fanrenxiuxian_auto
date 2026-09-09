@@ -211,6 +211,67 @@ class CleanupPlanningTests(WindThunderFixture):
         for call in actor.send_and_wait_feedback.await_args_list:
             self.assertIs(call.kwargs["retry_on_timeout"], False)
 
+    def test_cleanup_reaches_real_main_soul_senders_on_all_accounts(self):
+        import intelligent_cultivator as main
+        import sub_cultivator as sub
+        import cultivator_xiaohao as xiaohao
+        from cultivator_waaiging import WaaigingCultivator
+
+        for account, module, cls in (
+            ("main", main, main.Cultivator), ("sub", sub, sub.SubCultivator),
+            ("xiaohao", xiaohao, xiaohao.CultivatorXiaoHao), ("waaiging", main, WaaigingCultivator),
+        ):
+            with self.subTest(account=account):
+                async def verify():
+                    actor = cls.__new__(cls)
+                    actor.account_key = account
+                    actor.state = {"wind_thunder_equipped": True}
+                    actor.avatars = []
+                    actor._current_identity = "主魂"
+                    actor._main_confirmed = True
+                    actor.avatar_send_lock = asyncio.Lock()
+                    actor.pause_event = asyncio.Event()
+                    actor.pause_event.set()
+                    actor.should_wait_for_atomic_task = lambda command: False
+                    actor.wait_while_identity_paused = AsyncMock(return_value=True)
+                    actor.time_critical_defer_wait = lambda *args, **kwargs: -1
+                    actor.save_state = lambda: None
+                    actor._send_and_wait_feedback_raw = AsyncMock(side_effect=[
+                        self.actor.responses[".散念 风雷翅"], self.actor.responses[".上架至万宝阁 风雷翅"],
+                    ])
+                    with patch.object(wt, "wind_thunder_enabled", return_value=True), patch.object(
+                        module, "wait_for_bot_activity_before_send", new=AsyncMock(return_value=True)
+                    ):
+                        self.assertTrue(await wt._cleanup(actor, "主魂"))
+                    calls = actor._send_and_wait_feedback_raw.await_args_list
+                    self.assertEqual([call.args[0] for call in calls], [".散念 风雷翅", ".上架至万宝阁 风雷翅"])
+                    self.assertTrue(all(call.kwargs["retry_on_timeout"] is False for call in calls))
+                    self.assertFalse(actor.state["wind_thunder_equipped"])
+                    self.assertFalse(actor.state["wind_thunder_list_pending"])
+                _run(verify())
+
+    def test_cleanup_exception_is_logged_and_notified_without_losing_exposure(self):
+        actor = self.actor
+        actor.state["wind_thunder_equipped"] = True
+        actor.send_and_wait_feedback = AsyncMock(side_effect=TypeError("incompatible sender"))
+        with patch.object(wt, "log") as logger, patch.object(wt, "_wind_thunder_notify") as notify:
+            self.assertFalse(_run(wt._cleanup(actor, "主魂")))
+            self.assertFalse(_run(wt._cleanup(actor, "主魂")))
+        self.assertTrue(actor.state["wind_thunder_equipped"])
+        self.assertEqual(actor.state["wind_thunder_last_cleanup_error"], "typeerror")
+        self.assertIn("incompatible sender", actor.state["wind_thunder_last_cleanup_detail"])
+        self.assertEqual(logger.error.call_count, 2)
+        notify.assert_called_once()
+
+    def test_restart_retries_previous_interface_error_immediately(self):
+        actor = self.actor
+        actor.state.update(wind_thunder_equipped=True, wind_thunder_last_cleanup_error="typeerror",
+                           wind_thunder_cleanup_due_at=(datetime.now() + timedelta(minutes=5)).strftime(TIME_FORMAT))
+        with patch.object(wt, "_schedule_cleanup") as schedule:
+            wt.recover_wind_thunder_sessions(actor)
+        schedule.assert_called_once_with(actor, "主魂")
+        self.assertLessEqual(datetime.strptime(actor.state["wind_thunder_cleanup_due_at"], TIME_FORMAT), datetime.now())
+
 
 class WindThunderSendTests(WindThunderFixture):
     """Equip-execute flow keeps one cycle per burst of commands."""

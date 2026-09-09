@@ -2122,7 +2122,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             )
             return None
 
-    async def send_and_wait_feedback(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, force_identity_check=False, suppress_no_response_alert=False, force_meditation_check=False):
+    async def send_and_wait_feedback(self, message, timeout=45, max_retries=2, reply_to=None, return_msg=False, return_response_msg=False, delete_after=True, force_identity_check=False, suppress_no_response_alert=False, force_meditation_check=False, retry_on_timeout=None):
         """
         发送指令并等待回复（带 avatar_send_lock 保护）。
         所有主魂业务通过此方法发送。如果当前身份不是主魂，自动切回主魂再发送。
@@ -2205,7 +2205,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
 
                         log.info(f"🔄 Auto switch back to 主魂 from {self.current_identity} (before main command)")
                         switch_resp = await self._send_and_wait_feedback_raw(
-                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True
+                            ".切换 主魂", timeout=30, max_retries=2, skip_bot_activity_wait=True, retry_on_timeout=retry_on_timeout
                         )
                         resp_str = getattr(switch_resp, "text", "") if hasattr(switch_resp, "text") else switch_resp if isinstance(switch_resp, str) else ""
                         
@@ -2265,7 +2265,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                         reply_to=reply_to, return_msg=return_msg, return_response_msg=return_response_msg,
                         delete_after=delete_after,
                         suppress_no_response_alert=suppress_no_response_alert,
-                        skip_bot_activity_wait=True,
+                        skip_bot_activity_wait=True, retry_on_timeout=retry_on_timeout,
                     )
                     # 主魂境界由 maybe_record_avatar_passive_states 统一更新（有归属校验，防污染）
                     return resp
