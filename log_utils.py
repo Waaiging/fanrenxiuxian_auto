@@ -315,7 +315,7 @@ PARAM_COMMAND_ROOTS = {
     ".侍妾远航",
     ".支援慕兰",
 }
-_COMMAND_CONTROLS_CACHE = {"mtime": None, "data": {}}
+_COMMAND_CONTROLS_CACHE = {"signature": None, "data": {}}
 
 # 机器人健康检测参数
 BOT_HEALTH_FAILURE_THRESHOLD = 2            # 连续 N 次无响应触发暂停
@@ -2862,14 +2862,18 @@ def load_command_controls():
     try:
         stat = os.stat(path)
     except FileNotFoundError:
-        _COMMAND_CONTROLS_CACHE["mtime"] = None
+        _COMMAND_CONTROLS_CACHE["signature"] = None
         _COMMAND_CONTROLS_CACHE["data"] = {}
         return {}
     except Exception:
         return _COMMAND_CONTROLS_CACHE.get("data") or {}
 
-    mtime = stat.st_mtime
-    if _COMMAND_CONTROLS_CACHE.get("mtime") == mtime:
+    # Windows can retain the same second-level mtime for rapid dashboard writes.
+    # Include size and nanosecond precision so a successful toggle is visible immediately.
+    signature = (os.path.abspath(path),
+                 getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+                 stat.st_size, getattr(stat, "st_ino", 0))
+    if _COMMAND_CONTROLS_CACHE.get("signature") == signature:
         return _COMMAND_CONTROLS_CACHE.get("data") or {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -2878,7 +2882,7 @@ def load_command_controls():
             data = {}
     except Exception:
         data = {}
-    _COMMAND_CONTROLS_CACHE["mtime"] = mtime
+    _COMMAND_CONTROLS_CACHE["signature"] = signature
     _COMMAND_CONTROLS_CACHE["data"] = data
     return data
 
