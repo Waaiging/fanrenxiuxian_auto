@@ -581,11 +581,11 @@ async def wind_thunder_send(
             equipped_at = _parse_dt(state.get("wind_thunder_equipped_at"))
             if equipped_at and 0 <= (now - equipped_at).total_seconds() <= WIND_THUNDER_HOLD_SECONDS:
                 result = await sender()
-                # 第二条指令执行完毕 → 同样短延迟重新评估持有必要性。
+                # Reuse the original session deadline.  Recomputing it from
+                # ``now`` makes rapid consecutive calls cross a wall-clock
+                # second on Windows and extends the same equipment session.
                 state = _identity_state(actor, identity)
-                state["wind_thunder_cleanup_due_at"] = (
-                    _now() + timedelta(seconds=WIND_THUNDER_REASSESS_SECONDS)
-                ).strftime(TIME_FORMAT)
+                state["wind_thunder_cleanup_due_at"] = due.strftime(TIME_FORMAT)
                 _save(actor)
                 _schedule_cleanup(actor, identity)
                 return result
