@@ -1,10 +1,10 @@
 """
 【封魂咒 / 解咒委托自动化】
 
-主号、副号和小号主魂负责南宫婉、封魂咒推演、护持神魂和发布解咒委托；
-各自配置的阴罗宗身份负责接取委托并执行辨认、借幡、剥离三步。
-小号发布的委托仍由副号玄续玄接取，因此玄续玄会为副号与小号分别保存状态，
-并通过共享 JSON 接收小号委托 ID。
+启用的主魂和化身负责南宫婉、封魂咒推演、护持神魂和发布解咒委托；
+阴罗宗身份还可接取其他身份的委托，执行辨认、借幡、剥离三步。
+主号、副号的阴罗化身可同时启用发布链和解咒助手，独立保存两类进度，
+并通过共享委托池交接；同一身份不接取自己的委托。
 """
 import asyncio
 import contextlib
@@ -129,17 +129,18 @@ SOUL_CURSE_SHARED_ASSISTANTS = {
 SOUL_CURSE_AVATAR_PUBLISHERS = {
     # 每账号化身 publisher 候选名单；实际启用由 soul_curse_settings.json 按身份开关。
     # visit_minute 逐身份错开，避免同账号多个身份同分钟探望刷屏。
-    # 注意：阴罗宗身份（main 缘生子 / sub 玄续玄）不在此名单——它们的开关
-    # 只控制 assist 链（接取→辨认→借幡→剥离）。给它们挂 publisher 链会以
-    # 阴罗身份发探望/推演/护持/发布等无资格发送的前置指令。
+    # 两个阴罗化身明确接入发布链；道号经别名解析，开关同时约束解咒助手。
+    # 新候选放在末尾，保留其他化身既有的探望分钟。
     "main": (
         {"identity": "无咎子", "target_username": "@wuxinglinggen"},
         {"identity": "素缘子", "target_username": "@oldeinstein"},
+        {"identity": YINLUO_IDENTITY, "target_username": "@kulipabp", "allow_yinluo_publisher": True},
     ),
     "sub": (
         {"identity": "厚土", "target_username": "@crayonxxin"},
         {"identity": "寻真子", "target_username": "@ding303"},
         {"identity": "寒续尘", "target_username": "@ding303"},
+        {"identity": DEFAULT_SUB_YINLUO_IDENTITY, "target_username": "@lvdoumiao", "allow_yinluo_publisher": True},
     ),
     "xiaohao": (
         {"identity": "问心子", "target_username": "@lianqi10000"},
@@ -1584,6 +1585,17 @@ class SoulCurseMixin:
     async def soul_curse_shared_assist_tick(self, profile):
         profile = dict(profile or {})
         owner = profile.get("owner_account")
+        configured_identity = profile.get("assistant_identity")
+        if not configured_identity:
+            yinluo_identity = getattr(self, "soul_curse_yinluo_identity", None)
+            configured_identity = yinluo_identity() if callable(yinluo_identity) else YINLUO_IDENTITY
+        if not str(configured_identity or "").strip():
+            return 600
+        resolver = getattr(self, "soul_curse_resolve_identity", None)
+        identity = resolver(configured_identity) if callable(resolver) else str(configured_identity).strip()
+        if not self.soul_curse_assistant_enabled(identity):
+            return 300
+        profile["assistant_identity"] = identity
         # 化身 publisher 发布的委托 key 为 "account:identity"，主魂为 "account"。
         # assist 池遍历该账号所有 key，逐个检查是否有待接委托。
         data = read_soul_curse_shared_state()
@@ -1592,6 +1604,13 @@ class SoulCurseMixin:
         item = None
         terminal_statuses = {"completed", "gone", "blocked", "no_contract"}
         for key in owner_keys:
+            publisher_account, _, publisher_identity = str(key).partition(":")
+            publisher_identity = publisher_identity or "主魂"
+            if callable(resolver):
+                publisher_identity = resolver(publisher_identity)
+            if publisher_account == self.soul_curse_account_key() and publisher_identity == identity:
+                # 阴罗化身也能发布委托，但不能认领自己的；继续寻找其他委托。
+                continue
             candidate = data.get(key)
             if (
                 isinstance(candidate, dict)
@@ -1606,17 +1625,6 @@ class SoulCurseMixin:
         status = str(item.get("status") or "")
         if status in {"completed", "gone", "blocked", "no_contract"}:
             return 600
-        configured_identity = profile.get("assistant_identity")
-        if not configured_identity:
-            yinluo_identity = getattr(self, "soul_curse_yinluo_identity", None)
-            configured_identity = yinluo_identity() if callable(yinluo_identity) else YINLUO_IDENTITY
-        if not str(configured_identity or "").strip():
-            return 600
-        resolver = getattr(self, "soul_curse_resolve_identity", None)
-        identity = resolver(configured_identity) if callable(resolver) else str(configured_identity).strip()
-        if not self.soul_curse_assistant_enabled(identity):
-            return 300
-        profile["assistant_identity"] = identity
         if item.get("assistant_account") and (
             item.get("assistant_account") != self.soul_curse_account_key()
             or self.soul_curse_resolve_identity(item.get("assistant_identity")) != identity
@@ -1656,7 +1664,8 @@ class SoulCurseMixin:
         for original in SOUL_CURSE_AVATAR_PUBLISHERS.get(self.soul_curse_account_key(), ()):
             profile = dict(original)
             profile["identity"] = self.soul_curse_resolve_identity(profile.get("identity"))
-            if identity_sect(self, profile["identity"]) != "阴罗宗" and profile not in profiles:
+            allowed = identity_sect(self, profile["identity"]) != "阴罗宗" or profile.get("allow_yinluo_publisher")
+            if allowed and profile not in profiles:
                 profiles.append(profile)
         return profiles
 

@@ -155,6 +155,7 @@ from fishing_features import (
 )
 from concubine_features import CONCUBINE_DISMISS_COMMAND, CONCUBINE_SEARCH_COMMAND, TARGET_CONCUBINE_NAME
 from soul_curse_features import (
+    SOUL_CURSE_AVATAR_PUBLISHERS,
     SOUL_CURSE_ACCEPT_COMMAND,
     SOUL_CURSE_CO_STUDY_COMMAND,
     SOUL_CURSE_IDENTIFY_COMMAND,
@@ -2345,11 +2346,21 @@ def soul_curse_switch_row(identity, enabled, group="南宫婉", account=None):
     return row
 
 
-def soul_curse_publisher_commands(state, account=None, identity="主魂"):
+def soul_curse_yinluo_publisher_for_dashboard(account, identity, root_state=None):
+    candidates = _soul_curse_dashboard_identity_candidates(account, identity, state=root_state)
+    return any(
+        profile.get("allow_yinluo_publisher") and profile.get("identity") in candidates
+        for profile in SOUL_CURSE_AVATAR_PUBLISHERS.get(account, ())
+    )
+
+
+def soul_curse_publisher_commands(state, account=None, identity="主魂", *, root_state=None):
     curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
     if not isinstance(curse, dict):
         curse = {}
-    if account and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state):
+    if account and not soul_curse_identity_enabled_for_dashboard(
+        account, identity, state=root_state if root_state is not None else state
+    ):
         return [soul_curse_switch_row(identity, False)]
     detail = clean_custom_text(curse.get("last_detail") or "", 120)
     commission_id = str(curse.get("commission_id") or "").strip()
@@ -2441,7 +2452,7 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂"):
             group="南宫婉",
         ),
     ]
-    publisher_profile = SOUL_CURSE_PUBLISHERS.get(str(account or ""), {})
+    publisher_profile = SOUL_CURSE_PUBLISHERS.get(str(account or ""), {}) if identity == "主魂" else {}
     if publisher_profile.get("wanying_greeting_enabled"):
         wanying_row = daily_done_command(
             curse,
@@ -2468,12 +2479,14 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂"):
     return rows
 
 
-def soul_curse_assist_commands(state, account=None, identity=None):
+def soul_curse_assist_commands(state, account=None, identity=None, *, root_state=None, include_switch=True):
     assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
     if not isinstance(assist, dict):
         assist = {}
-    if identity and not soul_curse_identity_enabled_for_dashboard(account, identity, state=state, assistant=True):
-        return [soul_curse_switch_row(identity, False, group="阴罗宗")]
+    if identity and not soul_curse_identity_enabled_for_dashboard(
+        account, identity, state=root_state if root_state is not None else state, assistant=True
+    ):
+        return [soul_curse_switch_row(identity, False, group="阴罗宗")] if include_switch else []
     commission_id = str(assist.get("commission_id") or "").strip()
     target = str(assist.get("target_username") or "").strip()
     detail = clean_custom_text(assist.get("last_detail") or "", 120)
@@ -2960,18 +2973,20 @@ def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
             state.get("miniapp_sect_name") or state.get("sect_name") or ""
         ).strip()
     # 主号阴罗化身会在夺舍/重生后改道号（例如 缘生子 -> 玄续子）。
-    # 不能只比较静态旧常量，否则当前面板会误显示 publisher 链，
-    # 而运行时实际需要的是阴罗接取链。
+    # 前置链与接取链分别按候选名单和实时宗门展示，共用身份开关。
     is_yinluo = (
         name == YINLUO_IDENTITY
         or str(sect_names.get(name) or "").strip() == "阴罗宗"
         or avatar_sect == "阴罗宗"
     )
+    has_publisher = not is_yinluo or soul_curse_yinluo_publisher_for_dashboard(account, name, root_state)
     rows.extend(global_sync_commands())
     rows.extend(meditation_commands(state, include_force_exit=(name == "素缘子")))
     if is_yinluo:
         rows.extend(yinluo_commands(state))
-        rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
+        rows.extend(soul_curse_assist_commands(
+            state, account=account, identity=name, root_state=root_state, include_switch=not has_publisher
+        ))
     if name == "无咎子":
         rows.extend([
             manual_command(".推命 闭关", "推命闭关", group="推命"),
@@ -3027,9 +3042,8 @@ def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("main", name)))
     rows.append(mulan_support_daily_command(state))
-    # 阴罗宗身份（缘生子）走 assist 链，不重复挂 publisher 行。
-    if not is_yinluo:
-        rows.extend(soul_curse_publisher_commands(state, account="main", identity=name))
+    if has_publisher:
+        rows.extend(soul_curse_publisher_commands(state, account="main", identity=name, root_state=root_state))
     return rows
 
 
@@ -3042,9 +3056,12 @@ def star_avatar_commands(name, state, root_state=None, account="sub"):
         name == current_sub_yinluo_identity(root_state)
         or str(sect_names.get(name) or "").strip() == "阴罗宗"
     )
+    has_publisher = not is_yinluo or soul_curse_yinluo_publisher_for_dashboard(account, name, root_state)
     if is_yinluo:
         rows.extend(yinluo_commands(state))
-        rows.extend(soul_curse_assist_commands(state, account=account, identity=name))
+        rows.extend(soul_curse_assist_commands(
+            state, account=account, identity=name, root_state=root_state, include_switch=not has_publisher
+        ))
     if is_yinluo or name == "寻真子" or name == stable_sub_avatar_identity(root_state, "寻真子"):
         rows.extend([
             time_command(state, "next_yuanying_out_time", YUANYING_OUT_COMMAND, "元婴出窍", group="通用"),
@@ -3061,9 +3078,8 @@ def star_avatar_commands(name, state, root_state=None, account="sub"):
         ])
     rows.append(mulan_support_daily_command(state))
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("sub", name)))
-    # 阴罗宗身份（玄续玄）走 assist 链，不重复挂 publisher 行。
-    if name != SUB_YINLUO_IDENTITY:
-        rows.extend(soul_curse_publisher_commands(state, account="sub", identity=name))
+    if has_publisher:
+        rows.extend(soul_curse_publisher_commands(state, account="sub", identity=name, root_state=root_state))
     return rows
 
 
@@ -3145,12 +3161,20 @@ def current_sect_commands(account, identity, state, root_state):
         ]
     if sect == "阴罗宗":
         rows = yinluo_commands(state)
-        rows.extend(soul_curse_assist_commands(state, account=account, identity=identity))
+        has_publisher = soul_curse_yinluo_publisher_for_dashboard(account, identity, root_state)
+        if has_publisher:
+            rows.extend(soul_curse_publisher_commands(state, account=account, identity=identity, root_state=root_state))
+        rows.extend(soul_curse_assist_commands(
+            state, account=account, identity=identity, root_state=root_state, include_switch=not has_publisher
+        ))
         if not any(row.get("dashboard_action") == "soul-curse-toggle" for row in rows):
             rows.insert(0, soul_curse_switch_row(identity, True, group=sect, account=account))
         for row in rows:
             if row.get("dashboard_action") == "soul-curse-toggle":
-                row["detail"] = "阴罗宗解咒：接取→辨认→借幡→剥离；保留原有身份开关"
+                row["detail"] = (
+                    "探望→推演→护持→发布；同时接取其他身份的委托，执行辨认→借幡→剥离"
+                    if has_publisher else "阴罗宗解咒：接取→辨认→借幡→剥离；保留原有身份开关"
+                )
         return rows
     if sect == "天星宗":
         return [

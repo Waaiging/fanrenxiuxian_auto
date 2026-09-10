@@ -30,8 +30,7 @@ class AvatarSoulCursePanelTests(unittest.TestCase):
             self.assertEqual(toggle_rows[0].get("soul_curse_identity"), name)
 
     def test_star_avatar_panel_has_soul_curse_row(self):
-        # 阴罗宗身份（玄续玄）走 assist 行；其余化身走 publisher 行
-        for name in ("厚土", "寻真子"):
+        for name in ("厚土", "寻真子", ds.DEFAULT_SUB_YINLUO_IDENTITY):
             with patch(
                 "dashboard_server.soul_curse_identity_enabled_for_dashboard",
                 return_value=False,
@@ -76,27 +75,59 @@ class AvatarSoulCursePanelTests(unittest.TestCase):
         self.assertTrue(any("探望南宫婉" in c for c in commands))
         self.assertTrue(any("推演封魂咒" in c for c in commands))
 
-    def test_renamed_main_yinluo_panel_uses_assist_chain(self):
-        """主号阴罗化身改名后，当前道号仍显示接取链而非发布链。"""
-        root_state = {
-            "identity_sect_names": {"玄续子": "阴罗宗"},
-            "avatar_dao_name_aliases": {"缘生子": "玄续子"},
-        }
-        avatar_state = {
-            "sect_name": "阴罗宗",
-            "soul_curse": {},
-            "soul_curse_assist": {},
-        }
-        with patch(
-            "dashboard_server.soul_curse_identity_enabled_for_dashboard",
-            return_value=True,
+    def test_renamed_yinluo_panels_show_publisher_and_assistant_commands(self):
+        for account, identity, legacy, panel in (
+            ("main", "玄续子", "缘生子", ds.lingxiao_avatar_commands),
+            ("sub", "岚衍子", ds.DEFAULT_SUB_YINLUO_IDENTITY, ds.star_avatar_commands),
         ):
-            rows = ds.lingxiao_avatar_commands(
-                "玄续子", avatar_state, root_state=root_state, account="main"
-            )
-        labels = [str(row.get("label", "")) for row in rows]
-        self.assertTrue(any("接取解咒委托" in label for label in labels), labels)
-        self.assertFalse(any("封魂咒链路 · 玄续子" in label for label in labels), labels)
+            with self.subTest(account=account):
+                root_state = {
+                    "identity_sect_names": {identity: "阴罗宗"},
+                    "avatar_dao_name_aliases": {legacy: identity},
+                }
+                avatar_state = {"sect_name": "阴罗宗", "soul_curse": {}, "soul_curse_assist": {}}
+                with patch.object(ds, "soul_curse_identity_enabled_for_dashboard", return_value=True):
+                    rows = panel(identity, avatar_state, root_state=root_state, account=account)
+                commands = {row.get("command", "").split()[0] for row in rows}
+                self.assertTrue({
+                    ".探望南宫婉", ".推演封魂咒", ".护持神魂", ".发布解咒委托",
+                    ".接取解咒委托", ".辨认咒纹", ".借幡镇魂", ".剥离咒源",
+                }.issubset(commands), commands)
+                self.assertNotIn(".婉影问安", commands)
+                with patch.object(ds, "soul_curse_identity_enabled_for_dashboard", return_value=False):
+                    disabled = panel(identity, avatar_state, root_state=root_state, account=account)
+                switches = [row for row in disabled if row.get("dashboard_action") == "soul-curse-toggle"]
+                self.assertEqual(len(switches), 1)
+                self.assertEqual(switches[0]["soul_curse_identity"], identity)
+                self.assertFalse(any(row.get("command", "").startswith(".推演封魂咒") for row in disabled))
+
+    def test_final_command_panels_keep_both_yinluo_chains_and_one_switch(self):
+        for account, identity, legacy in (
+            ("main", "玄续子", "缘生子"),
+            ("sub", "岚衍子", ds.DEFAULT_SUB_YINLUO_IDENTITY),
+        ):
+            root = {
+                "identity_sect_names": {"主魂": "散修", identity: "阴罗宗"},
+                "avatar_dao_name_aliases": {legacy: identity},
+                "avatars": {identity: {"sect_name": "阴罗宗"}},
+            }
+            for enabled in (True, False):
+                with self.subTest(account=account, enabled=enabled), patch.object(
+                    ds, "soul_curse_identity_enabled_for_dashboard", return_value=enabled
+                ), patch.object(ds, "load_custom_commands", return_value={}), patch.object(
+                    ds, "load_command_controls", return_value={}
+                ), patch.object(ds, "load_account_state_raw", return_value=None):
+                    panel = next(p for p in ds.build_command_panels(account, root) if p["identity"] == identity)
+                rows = panel["commands"]
+                commands = {row.get("command", "").split()[0] for row in rows}
+                for command in (
+                    ".探望南宫婉", ".推演封魂咒", ".护持神魂", ".发布解咒委托",
+                    ".接取解咒委托", ".辨认咒纹", ".借幡镇魂", ".剥离咒源",
+                ):
+                    self.assertEqual(command in commands, enabled, (account, enabled, command))
+                switches = [row for row in rows if row.get("dashboard_action") == "soul-curse-toggle"]
+                self.assertEqual(len(switches), 1)
+                self.assertEqual(switches[0]["soul_curse_enabled"], enabled)
 
     def test_dashboard_switch_accepts_renamed_main_yinluo_alias(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
