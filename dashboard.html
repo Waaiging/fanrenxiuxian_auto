@@ -1375,7 +1375,7 @@
             <div class="logo">凡人修仙监控台</div>
         </div>
         <div class="header-actions">
-            <div class="server-clock"><i data-lucide="clock-3" aria-hidden="true"></i><span id="server-time">Loading...</span></div>
+            <div class="server-clock" title="北京时间（UTC+8）"><i data-lucide="clock-3" aria-hidden="true"></i><span id="server-time">Loading...</span></div>
             <form method="post" action="/logout"><button class="logout-button" type="submit" title="退出登录" aria-label="退出登录"><i data-lucide="log-out" aria-hidden="true"></i></button></form>
         </div>
     </header>
@@ -2123,14 +2123,12 @@
             try {
                 // 日期字段（YYYY-MM-DD格式）特殊处理
                 if (isDate && /^\d{4}-\d{2}-\d{2}$/.test(t)) {
-                    const today = new Date();
-                    const todayStr = today.getFullYear() + '-' + 
-                        String(today.getMonth() + 1).padStart(2, '0') + '-' + 
-                        String(today.getDate()).padStart(2, '0');
+                    const todayStr = dashboardToday();
                     if (t === todayStr) return "✅ 已执行";
                     return "📅 " + t;  // 显示日期
                 }
-                const target = new Date(t.replace(/-/g, '/'));
+                const target = parseDashboardDate(t);
+                if (!target) return t;
                 const diff = Math.floor((target - new Date()) / 1000);
                 if (diff <= 0) return "就绪";
                 const h = Math.floor(diff/3600);
@@ -2568,9 +2566,24 @@
             openIdentityCommands(account, identity);
         }
 
+        const dashboardDateFormatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+        });
+
+        function dashboardDateParts(value = new Date()) {
+            return Object.fromEntries(dashboardDateFormatter.formatToParts(value)
+                .filter(part => part.type !== 'literal')
+                .map(part => [part.type, part.value]));
+        }
+
         function parseDashboardDate(value) {
             if (!value || typeof value !== 'string') return null;
-            const date = new Date(value.replace(/-/g, '/'));
+            // State dates without an offset are Beijing time, not browser time.
+            const match = value.trim().match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}:?\d{2})?)?$/i);
+            if (!match) return null;
+            const date = new Date(`${match[1]}T${match[2] || '00:00:00'}${match[3] || '+08:00'}`);
             return Number.isNaN(date.getTime()) ? null : date;
         }
 
@@ -2922,14 +2935,12 @@
 
         function recordDateText(value) {
             if (!value) return '--';
-            const now = new Date();
             const dt = parseDashboardDate(value);
             if (!dt) return value;
-            const pad = n => String(n).padStart(2, '0');
-            const sameDay = now.getFullYear() === dt.getFullYear()
-                && now.getMonth() === dt.getMonth()
-                && now.getDate() === dt.getDate();
-            const text = `${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+            const now = dashboardDateParts();
+            const parts = dashboardDateParts(dt);
+            const sameDay = now.year === parts.year && now.month === parts.month && now.day === parts.day;
+            const text = `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
             return sameDay ? text.slice(6) : text;
         }
 
@@ -3521,12 +3532,8 @@
         }
 
         function dashboardToday() {
-            const now = new Date();
-            return [
-                now.getFullYear(),
-                String(now.getMonth() + 1).padStart(2, '0'),
-                String(now.getDate()).padStart(2, '0')
-            ].join('-');
+            const parts = dashboardDateParts();
+            return `${parts.year}-${parts.month}-${parts.day}`;
         }
 
         function selectedDailyRewardDate() {
@@ -3740,8 +3747,8 @@
 
         function duelDateValue() {
             const input = document.getElementById('duel-date-input');
-            if (input && !input.value) input.value = new Date().toLocaleDateString('en-CA');
-            return input?.value || new Date().toLocaleDateString('en-CA');
+            if (input && !input.value) input.value = dashboardToday();
+            return input?.value || dashboardToday();
         }
 
         function duelTimeText(value) {
@@ -6415,7 +6422,7 @@
                             const timers = [];
                             if (val.in_deep_meditation && val.deep_meditation_end_time) {
                                 try {
-                                    const t = new Date(val.deep_meditation_end_time.replace(/-/g, '/'));
+                                    const t = parseDashboardDate(val.deep_meditation_end_time);
                                     if (t > now) timers.push({ label: '深度闭关', time: t });
                                 } catch(e){}
                             }
@@ -6433,7 +6440,7 @@
                             for (const [key, label] of timerFields) {
                                 if (val[key]) {
                                     try {
-                                        const t = new Date(val[key].replace(/-/g, '/'));
+                                        const t = parseDashboardDate(val[key]);
                                         if (t > now) timers.push({ label, time: t });
                                     } catch(e){}
                                 }

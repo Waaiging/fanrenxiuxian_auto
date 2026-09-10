@@ -21,6 +21,14 @@
 import os
 import json
 import time
+
+# Workers persist naive Beijing timestamps. Match their clock before importing
+# shared scheduling modules, even when a migrated VPS defaults to UTC/JST.
+DASHBOARD_TIMEZONE = "Asia/Shanghai"
+os.environ["TZ"] = DASHBOARD_TIMEZONE
+if hasattr(time, "tzset"):
+    time.tzset()
+
 import subprocess
 import secrets
 import base64
@@ -5561,6 +5569,7 @@ def status(username: str = Depends(authenticate)):
             payload = {
                 "accounts": result,
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "server_timezone": DASHBOARD_TIMEZONE,
                 "runtime": dashboard_runtime_info(runtime_accounts),
                 "fishing_auto": None if not FISHING_AUTOMATION_ENABLED else fishing_auto_dashboard_summary(states),
             }
