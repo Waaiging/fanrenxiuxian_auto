@@ -75,6 +75,10 @@ from dashboard_command_catalog import apply_command_classifications, command_cat
 from xuangu_quiz_features import confirm_quiz_answer, quiz_dashboard_payload
 from command_modules import (
     ASK_DAO_COMMAND,
+    SMALL_WORLD_MIRACLE_ACTIONS,
+    SMALL_WORLD_MIRACLE_CONTROL_KEY,
+    normalize_small_world_miracle_mode,
+    small_world_miracle_command,
     DEFAULT_WAAIGING_FIELD_TRAINING_COMMAND,
     NODE_SEARCH_COMMAND,
     NURTURE_SPIRIT_COMMAND,
@@ -1077,6 +1081,15 @@ def apply_command_controls(account, panel, root_state=None):
             detail = row.get("detail", "")
             patrol_detail = f"灵兽按体力自动选择 · 路线：{mode}"
             row["detail"] = f"{patrol_detail}{f' · {detail}' if detail else ''}"
+        if (control_key == SMALL_WORLD_MIRACLE_CONTROL_KEY and not row.get("custom")
+                and account in {"main", "waaiging"} and identity == "主魂"):
+            mode = normalize_small_world_miracle_mode(
+                entry.get("miracle_mode") if isinstance(entry, dict) else ""
+            )
+            row["miracle_mode_options"] = list(SMALL_WORLD_MIRACLE_ACTIONS)
+            row["miracle_mode_value"] = mode
+            row["command"] = small_world_miracle_command(mode)
+            row["label"] = f"神迹 {mode}"
     return panel
 
 
@@ -6362,7 +6375,8 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         identity_controls = account_controls.setdefault(identity, {})
         old_entry = command_control_entry(data, account, identity, control_key, root_state)
         stored_entry = dict(old_entry) if isinstance(old_entry, dict) else {}
-        persist_entry = (control_key in {BEAST_BORDER_PATROL_CONTROL_KEY, DUAL_CULTIVATION_COMMAND}
+        persist_entry = (control_key in {BEAST_BORDER_PATROL_CONTROL_KEY, DUAL_CULTIVATION_COMMAND,
+                                        SMALL_WORLD_MIRACLE_CONTROL_KEY}
                          or len(command_control_identity_candidates(identity, root_state)) > 1)
         if disabled or default_paused or persist_entry:
             stored_entry.update({
@@ -6393,6 +6407,33 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "control_key": control_key,
         "disabled": disabled,
     }
+
+
+@app.post("/api/small-world-miracle-mode")
+async def set_small_world_miracle_mode(payload: dict = Body(...), username: str = Depends(authenticate)):
+    """Select a miracle without changing the account's pause or shared cooldown."""
+    account = str(payload.get("account") or "").strip()
+    identity = str(payload.get("identity") or "主魂").strip() or "主魂"
+    mode = str(payload.get("mode") or "").strip()
+    if account not in {"main", "waaiging"}:
+        return {"success": False, "msg": "该账号没有自动小世界神迹"}
+    if identity != "主魂":
+        return {"success": False, "msg": "小世界神迹仅由主魂执行"}
+    if mode not in SMALL_WORLD_MIRACLE_ACTIONS:
+        return {"success": False, "msg": "神迹方式必须是布道或赈灾"}
+    with COMMAND_CONTROL_LOCK:
+        data = load_command_controls()
+        controls = data.setdefault(account, {}).setdefault(identity, {})
+        old = controls.get(SMALL_WORLD_MIRACLE_CONTROL_KEY, {})
+        entry = dict(old) if isinstance(old, dict) else {"disabled": bool(old)}
+        entry.setdefault("disabled", False)
+        entry.update(command=small_world_miracle_command(mode), label=f"神迹 {mode}", miracle_mode=mode,
+                     updated_at=datetime.now().strftime(TIME_FORMAT), updated_by=username)
+        controls[SMALL_WORLD_MIRACLE_CONTROL_KEY] = entry
+        save_command_controls(data)
+    with STATUS_LOCK:
+        STATUS_CACHE.clear()
+    return {"success": True, "account": account, "identity": identity, "mode": mode}
 
 
 @app.post("/api/dual-cultivation-target")

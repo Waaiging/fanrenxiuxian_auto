@@ -17,6 +17,7 @@ from typing import Any
 
 from telethon import types
 from sect_rules import SectTaskStopped
+from command_modules import SMALL_WORLD_MIRACLE_ACTIONS
 
 from miniapp_beast import (
     MiniAppBeastError,
@@ -134,6 +135,7 @@ EXACT_COMMANDS = {
     ".显灵",
     ".安抚信徒",
     ".神迹 布道",
+    ".神迹 赈灾",
     ".我的阴罗幡",
     ".每日献祭",
     ".血洗山林",
@@ -151,13 +153,13 @@ PREFIX_COMMANDS = {
 SMALL_WORLD_COMMAND_ACTIONS = {
     ".显灵": "manifest",
     ".安抚信徒": "soothe",
-    ".神迹 布道": "miracle_sermon",
+    **{f".神迹 {mode}": action for mode, action in SMALL_WORLD_MIRACLE_ACTIONS.items()},
 }
 SMALL_WORLD_ACTION_NAMES = {
     "collect": "小世界收割香火",
     "manifest": "小世界显灵",
     "soothe": "小世界安抚信徒",
-    "miracle_sermon": "小世界神迹布道",
+    **{action: f"小世界神迹{mode}" for mode, action in SMALL_WORLD_MIRACLE_ACTIONS.items()},
 }
 
 

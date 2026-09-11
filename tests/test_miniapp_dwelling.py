@@ -187,6 +187,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".显灵",
             ".安抚信徒",
             ".神迹 布道",
+            ".神迹 赈灾",
             ".我的阴罗幡",
             ".每日献祭",
             ".血洗山林",
@@ -222,6 +223,7 @@ class MiniAppDwellingTests(unittest.TestCase):
             ".显灵",
             ".安抚信徒",
             ".神迹 布道",
+            ".神迹 赈灾",
             ".我的阴罗幡",
             ".每日献祭",
             ".召回魔影",
@@ -590,6 +592,9 @@ class MiniAppDwellingTests(unittest.TestCase):
             manifest = asyncio.run(transport.command(".显灵", identity="主魂"))
             soothe = asyncio.run(transport.command(".安抚信徒", identity="主魂"))
             collected = asyncio.run(transport.small_world_action("主魂", "collect"))
+            relief = asyncio.run(transport.command(".神迹 赈灾", identity="主魂"))
+            sermon = asyncio.run(transport.small_world_action("主魂", "miracle_sermon"))
+            relief_action = asyncio.run(transport.small_world_action("主魂", "miracle_relief"))
 
         self.assertEqual(transport.player_id("主魂"), 100)
         self.assertEqual(transport.player_id("素心子"), -200)
@@ -613,6 +618,13 @@ class MiniAppDwellingTests(unittest.TestCase):
         self.assertEqual(calls[6][1]["action"], "soothe")
         self.assertEqual(calls[7][0], "/api/miniapp/xianxia-dwelling/small-world")
         self.assertEqual(calls[7][1]["action"], "collect")
+        self.assertEqual(relief.text, "reply:miracle_relief")
+        self.assertEqual(sermon["actionResult"]["rawMessage"], "reply:miracle_sermon")
+        self.assertEqual(relief_action["actionResult"]["rawMessage"], "reply:miracle_relief")
+        for index, action in ((8, "miracle_relief"), (9, "miracle_sermon"), (10, "miracle_relief")):
+            self.assertEqual(calls[index][0], "/api/miniapp/xianxia-dwelling/small-world")
+            self.assertEqual(calls[index][1]["action"], action)
+            self.assertEqual(calls[index][1]["playerId"], 100)
 
     def test_cultivation_endpoint_returns_top_level_message(self):
         calls = []

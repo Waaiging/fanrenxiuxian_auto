@@ -89,7 +89,7 @@ COMMAND_CATALOG = (
     CatalogEntry("node", "搜寻节点", "realm", "化神及以上", (".搜寻节点",), condition="最低境界：化神"),
     CatalogEntry("world-status", "小世界", "realm", "化神及以上", (".小世界",), channel="miniapp"),
     CatalogEntry("world-manifest", "显灵", "realm", "化神及以上", (".显灵",), channel="miniapp", trigger="流程"),
-    CatalogEntry("world-sermon", "神迹布道", "realm", "化神及以上", (".神迹 布道",), channel="miniapp"),
+    CatalogEntry("world-sermon", "神迹布道 / 赈灾", "realm", "化神及以上", (".神迹 布道", ".神迹 赈灾"), channel="miniapp"),
     CatalogEntry("world-soothe", "安抚信徒", "realm", "化神及以上", (".安抚信徒",), channel="miniapp", trigger="事件", condition="需要香火；不足时按库存与产出等待"),
     CatalogEntry("world-collect", "收割香火", "realm", "化神及以上", aliases=("小世界收割香火",), channel="miniapp", trigger="流程"),
     CatalogEntry("meditation", "闭关修炼", "general", "修炼", (".闭关修炼",), channel="miniapp"),

@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from collections import deque  # 用于手动指令 ID 的固定大小队列
 from state_io import load_json_state, save_json_state, update_json_state
+from command_modules import SMALL_WORLD_MIRACLE_CONTROL_KEY, SMALL_WORLD_MIRACLE_ACTIONS
 
 # 风雷翅手动指令的状态同步：log_utils 不 import wind_thunder_features
 # （避免循环依赖），用 duck-typing 接口注入。
@@ -2825,6 +2826,8 @@ def command_control_key(command):
     text = re.sub(r"\s+", " ", str(command or "").strip())
     if not text:
         return ""
+    if text in {f".神迹 {mode}" for mode in SMALL_WORLD_MIRACLE_ACTIONS}:
+        return SMALL_WORLD_MIRACLE_CONTROL_KEY
     if "<" in text:
         root = text.split("<", 1)[0].strip()
         return f"{root} *" if root else text

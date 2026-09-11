@@ -3108,12 +3108,14 @@
                 const scheduleText = commandScheduleText(item);
                 const paused = Boolean(item.control_disabled);
                 const controlKey = item.control_key || commandItemKey(item);
-                const pending = Boolean(commandPausePending[commandPauseKey(account, identity, controlKey)]);
+                const pendingControl = commandPausePending[commandPauseKey(account, identity, controlKey)];
+                const pending = Boolean(pendingControl);
                 const controlLabel = paused ? '暂停' : '启用';
                 const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
                 const isNextDue = dueKey && commandItemKey(item) === dueKey;
                 const baitOptions = Array.isArray(item.bait_options) ? item.bait_options : [];
                 const patrolModeOptions = Array.isArray(item.patrol_mode_options) ? item.patrol_mode_options : [];
+                const miracleModeOptions = Array.isArray(item.miracle_mode_options) ? item.miracle_mode_options : [];
                 const dashboardAction = String(item.dashboard_action || '');
                 const executionChannel = item.execution_channel === 'miniapp' ? 'miniapp' : 'group';
                 const executionLabel = executionChannel === 'miniapp' ? 'Mini App' : '群指令';
@@ -3133,6 +3135,11 @@
                     </select>
                 ` : '';
                 const targetKey = `${account}|${identity}`;
+                const miracleModeSelect = miracleModeOptions.length ? `
+                    <select class="command-bait-select" ${pending ? 'disabled' : ''} title="选择神迹方式；共用神谕冷却" aria-label="神迹方式" onchange="setSmallWorldMiracleMode('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', this)">
+                        ${miracleModeOptions.map(mode => `<option value="${escapeHtml(mode)}" ${mode === (pendingControl?.miracle_mode ?? item.miracle_mode_value) ? 'selected' : ''}>${escapeHtml(mode)}</option>`).join('')}
+                    </select>
+                ` : '';
                 const targetValue = dualCultivationDrafts[targetKey] ?? item.dual_cultivation_target ?? '';
                 const targetEditor = Object.hasOwn(item, 'dual_cultivation_target') ? `
                     <form class="command-target-form" onsubmit="saveDualCultivationTarget(event, '${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}')">
@@ -3153,6 +3160,7 @@
                 ` : `
                     ${baitSelect}
                     ${patrolModeSelect}
+                    ${miracleModeSelect}
                     <button class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
                     <span>${pending ? '处理中' : controlLabel}</span>
                 `;
@@ -4484,6 +4492,35 @@
             } finally {
                 delete commandPausePending[pendingKey];
                 await updateStatus();
+                if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            }
+        }
+
+        async function setSmallWorldMiracleMode(panelKey, account, identity, controlKey, select) {
+            const mode = String(select?.value || '');
+            const pendingKey = commandPauseKey(account, identity, controlKey);
+            if (!mode || commandPausePending[pendingKey]) return;
+            commandPausePending[pendingKey] = {miracle_mode: mode};
+            if (select) select.disabled = true;
+            if (commandModalKey === panelKey) renderCommandModal(panelKey);
+            try {
+                const response = await fetch(apiUrl('/api/small-world-miracle-mode'), {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({account, identity, mode})
+                });
+                const data = await response.json();
+                if (!response.ok || data.success === false) {
+                    throw new Error(data.msg || `HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.error('Small-world miracle mode update failed:', error);
+                alert(`设置神迹方式失败：${error.message || error}`);
+            } finally {
+                // Finish any older poll before requesting the saved choice.
+                // Keep the pending value visible while either poll renders.
+                while (pollBusy.status) await new Promise(resolve => window.setTimeout(resolve, 50));
+                await updateStatus();
+                delete commandPausePending[pendingKey];
                 if (commandModalKey === panelKey) renderCommandModal(panelKey);
             }
         }

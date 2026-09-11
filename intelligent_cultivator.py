@@ -104,6 +104,13 @@ from miniapp_dwelling import (
     small_world_data,
     small_world_incense_plan,
 )
+from command_modules import (
+    DEFAULT_SMALL_WORLD_MIRACLE_MODE,
+    SMALL_WORLD_MIRACLE_ACTIONS,
+    SMALL_WORLD_MIRACLE_CONTROL_KEY,
+    normalize_small_world_miracle_mode,
+    small_world_miracle_command,
+)
 
 # 导入各个功能模块（分离到不同文件中以降低本文件复杂度）
 from auto_reply_features import is_auto_reply_followup, maybe_auto_reply_exchange, resume_pending_exchange_events
@@ -258,7 +265,7 @@ SMALL_WORLD_MANIFEST_COMMAND = ".显灵"
 SMALL_WORLD_SOOTHE_COMMAND = ".安抚信徒"
 SMALL_WORLD_CALAMITY_KEYWORD = "【小世界·天降浩劫】"
 SMALL_WORLD_CD_SECONDS = 6 * 3600
-MIRACLE_PREACH_COMMAND = ".神迹 布道"
+MIRACLE_PREACH_COMMAND = SMALL_WORLD_MIRACLE_CONTROL_KEY
 MIRACLE_PREACH_CD_SECONDS = 3 * 3600
 SMALL_WORLD_RETRY_SECONDS = 10 * 60
 SMALL_WORLD_CALAMITY_RETRY_SECONDS = 5 * 60
@@ -2619,8 +2626,15 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         self.save_state()
         return ok
 
-    def record_miracle_preach_miniapp_state(self, payload):
-        """Persist Mini App preaching state and its exact edict cooldown."""
+    def configured_small_world_miracle_mode(self):
+        return normalize_small_world_miracle_mode(self.dashboard_command_option(
+            SMALL_WORLD_MIRACLE_CONTROL_KEY, "miracle_mode",
+            default=DEFAULT_SMALL_WORLD_MIRACLE_MODE, identity="主魂",
+        ))
+
+    def record_miracle_preach_miniapp_state(self, payload, mode=DEFAULT_SMALL_WORLD_MIRACLE_MODE):
+        """Both miracle choices retain the existing shared edict cooldown fields."""
+        mode = normalize_small_world_miracle_mode(mode)
         now = now_str()
         text = str(command_result_text(payload) or "").strip()
         ok = command_result_ok(payload)
@@ -2629,9 +2643,10 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             remaining = MIRACLE_PREACH_CD_SECONDS if ok else SMALL_WORLD_RETRY_SECONDS
         self.state["last_miracle_preach_response"] = text
         self.state["next_miracle_preach_time"] = add_seconds_str(now, remaining)
-        self.state["miniapp_miracle_preach_last_error"] = "" if ok else "miracle_sermon_failed"
+        self.state["miniapp_miracle_preach_last_error"] = "" if ok else f"{SMALL_WORLD_MIRACLE_ACTIONS[mode]}_failed"
         if ok:
             self.state["last_miracle_preach_time"] = now
+            self.state["last_small_world_miracle_mode"] = mode
         self.save_state()
         return ok
 
@@ -2702,7 +2717,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 self.active_atomic_task = None
 
     async def execute_miracle_preach_once(self):
-        """Run the main soul's Mini App miracle-sermon action once."""
+        """Run the main soul's selected sermon or relief through the Mini App."""
         if self.defer_miracle_preach_for_small_world_calamity():
             return False
         current_task = asyncio.current_task()
@@ -2730,11 +2745,14 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 return False
             if self.defer_miracle_preach_for_small_world_calamity():
                 return False
-            if self.dashboard_command_paused(MIRACLE_PREACH_COMMAND, "主魂"):
+            # Read after waiting for the atomic task and the live world snapshot,
+            # so a Dashboard choice made during either wait applies to this run.
+            mode = self.configured_small_world_miracle_mode()
+            if self.dashboard_command_paused(small_world_miracle_command(mode), "主魂"):
                 return False
-            result = await transport.small_world_action("主魂", "miracle_sermon")
+            result = await transport.small_world_action("主魂", SMALL_WORLD_MIRACLE_ACTIONS[mode])
             apply_dwelling_snapshot(self, "主魂", result)
-            ok = self.record_miracle_preach_miniapp_state(result)
+            ok = self.record_miracle_preach_miniapp_state(result, mode=mode)
             if ok and self.state.get("small_world_calamity_pending"):
                 plan = small_world_incense_plan(result)
                 if any(plan[key] is None for key in ("required", "stock")):
@@ -2745,7 +2763,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                             raise MiniAppBeastError("small_world_unavailable")
                     except Exception:
                         self.defer_small_world_calamity(300, "recheck_after_preach")
-                        log.warning("Miracle preaching completed; small-world resource refresh will retry.")
+                        log.warning("Small-world miracle %s completed; resource refresh will retry.", mode)
                         return ok
                 self.refresh_small_world_calamity_plan(result)
             return ok

@@ -20,6 +20,20 @@ RIFT_SEARCH_COMMAND = ".探寻裂缝"
 DEFAULT_TREASURE_TOUCH_COMMAND = ".抚摸法宝 青竹蜂云剑"
 NURTURE_SPIRIT_COMMAND = ".温养器灵 斩灵"
 ASK_DAO_COMMAND = ".问道"
+# Both choices share the existing control key and next_miracle_preach_time.
+# Keeping that key preserves pauses and cooldowns when the choice changes.
+SMALL_WORLD_MIRACLE_CONTROL_KEY = ".神迹 布道"
+DEFAULT_SMALL_WORLD_MIRACLE_MODE = "布道"
+SMALL_WORLD_MIRACLE_ACTIONS = {"布道": "miracle_sermon", "赈灾": "miracle_relief"}
+
+
+def normalize_small_world_miracle_mode(value):
+    mode = str(value or "").strip()
+    return mode if mode in SMALL_WORLD_MIRACLE_ACTIONS else DEFAULT_SMALL_WORLD_MIRACLE_MODE
+
+
+def small_world_miracle_command(mode):
+    return f".神迹 {normalize_small_world_miracle_mode(mode)}"
 
 
 @dataclass(frozen=True)
