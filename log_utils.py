@@ -1740,25 +1740,95 @@ def _clear_shared_bot_maintenance(data=None):
     return data
 
 
+def _shared_command_epoch(record):
+    try:
+        epoch = float(record.get("wall_epoch", 0) or 0) if isinstance(record, dict) else 0.0
+        return epoch if epoch > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _shared_message_epoch(msg, now_epoch, *, edited=False):
+    """Order Telegram events by send/edit time, independently of worker delays."""
+    dates = [getattr(msg, "date", None)]
+    if edited:
+        dates.append(getattr(msg, "edit_date", None))
+    epochs = []
+    for value in dates:
+        try:
+            if isinstance(value, datetime) and value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            epoch = float(value.timestamp())
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            continue
+        if epoch > 0:
+            epochs.append(min(epoch, now_epoch))
+    return max(epochs) if epochs else now_epoch
+
+
+def _shared_command_reference_matches(probe, other, id_field="msg_id"):
+    if not isinstance(probe, dict) or not isinstance(other, dict):
+        return False
+    command_id = _safe_message_int(probe.get("msg_id"))
+    other_id = _safe_message_int(other.get(id_field))
+    chat_id = _safe_message_int(probe.get("chat_id"))
+    other_chat = _safe_message_int(other.get("chat_id"))
+    return bool(command_id and command_id == other_id and chat_id and other_chat
+                and telegram_chat_ids_match(chat_id, other_chat))
+
+
+def _shared_message_is_newer(event, previous):
+    event_epoch = _shared_command_epoch(event)
+    previous_epoch = _shared_command_epoch(previous)
+    if event_epoch != previous_epoch:
+        return event_epoch > previous_epoch
+    if not event_epoch or not isinstance(event, dict) or not isinstance(previous, dict):
+        return False
+    # Telegram timestamps have second precision. Message IDs order events in
+    # the same chat; IDs from different chats cannot break a timestamp tie.
+    event_id = _safe_message_int(event.get("msg_id"))
+    previous_id = _safe_message_int(previous.get("msg_id"))
+    chat_id = _safe_message_int(event.get("chat_id"))
+    previous_chat = _safe_message_int(previous.get("chat_id"))
+    return bool(event_id and previous_id and event_id > previous_id
+                and chat_id and previous_chat
+                and telegram_chat_ids_match(chat_id, previous_chat))
+
+
+def _shared_command_answered(probe, response):
+    # Also repairs old files where another worker recorded the same command
+    # after its reply. A matching Telegram reply is stronger than receive time.
+    if _shared_command_reference_matches(probe, response, "reply_to_msg_id"):
+        return True
+    return _shared_command_epoch(probe) > 0 and _shared_message_is_newer(response, probe)
+
+
 def _record_shared_command_probe(actor, msg=None, command="", logger=None):
-    """Record the latest dotted command seen in the game chat."""
+    """Track an actual send by this account, never an unrelated player's input."""
     command = str(command or "").strip()
     if not is_command_message_text(command):
         return False
     if msg is not None and getattr(msg, "date", None) is None:
+        return False
+    if msg is not None and not _is_own_outgoing_sender(actor, msg):
         return False
     if command in PAUSE_CONTROL_COMMANDS or command in RESUME_CONTROL_COMMANDS:
         return False
     account = str(_shared_bot_activity_account(actor) or "").strip()
     now_wall = datetime.now()
     now_epoch = time.time()
+    sent_epoch = _shared_message_epoch(msg, now_epoch)
+    if now_epoch - sent_epoch > BOT_COMMAND_SILENCE_MAX_SECONDS:
+        return False
     probe = {
         "account": account,
         "command": command.splitlines()[0][:80],
         "chat_id": _safe_message_int(getattr(msg, "chat_id", None) or getattr(actor, "target_chat_id", None)) if msg is not None else None,
         "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
-        "wall": now_wall.strftime(TIME_FORMAT),
-        "wall_epoch": now_epoch,
+        "wall": datetime.fromtimestamp(sent_epoch).strftime(TIME_FORMAT),
+        "wall_epoch": sent_epoch,
+        "observed_epoch": now_epoch,
+        "own_command": True,
         "pid": os.getpid(),
     }
     recorded = False
@@ -1767,14 +1837,14 @@ def _record_shared_command_probe(actor, msg=None, command="", logger=None):
         nonlocal recorded
         existing = data.get("command_probe")
         response = data.get("command_response")
-        try:
-            existing_epoch = float(existing.get("wall_epoch", 0) or 0) if isinstance(existing, dict) else 0.0
-            response_epoch = float(response.get("wall_epoch", 0) or 0) if isinstance(response, dict) else 0.0
-        except (TypeError, ValueError):
-            existing_epoch = response_epoch = 0.0
+        if _shared_command_reference_matches(probe, existing) or _shared_command_answered(probe, response):
+            return
+        existing_epoch = _shared_command_epoch(existing)
         # Preserve an unanswered probe only while it is still actionable.
         # Otherwise one lost reply would prevent all subsequent probes forever.
-        if existing_epoch > response_epoch and 0 <= now_epoch - existing_epoch <= BOT_COMMAND_SILENCE_MAX_SECONDS:
+        if (not _shared_command_answered(existing, response)
+                and 0 < existing_epoch <= now_epoch
+                and now_epoch - existing_epoch <= BOT_COMMAND_SILENCE_MAX_SECONDS):
             return
         data["command_probe"] = probe
         data["updated_at"] = now_wall.strftime(TIME_FORMAT)
@@ -1788,6 +1858,8 @@ def _record_shared_command_response(actor, command="", msg=None, sender=None):
     """Record a real bot response to a dotted command and clear maintenance."""
     account = str(_shared_bot_activity_account(actor) or "").strip()
     now_wall = datetime.now()
+    now_epoch = time.time()
+    response_epoch = _shared_message_epoch(msg, now_epoch, edited=True)
     username = (getattr(sender, "username", "") or "").lstrip("@") if sender else ""
     command_lines = str(command or "").strip().splitlines()
     response = {
@@ -1797,13 +1869,25 @@ def _record_shared_command_response(actor, command="", msg=None, sender=None):
         "msg_id": _safe_message_int(_message_id(msg)) if msg is not None else None,
         "reply_to_msg_id": _safe_message_int(meaningful_reply_to_msg_id(actor, msg)) if msg is not None else None,
         "bot_username": username,
-        "wall": now_wall.strftime(TIME_FORMAT),
-        "wall_epoch": time.time(),
+        "wall": datetime.fromtimestamp(response_epoch).strftime(TIME_FORMAT),
+        "wall_epoch": response_epoch,
+        "observed_epoch": now_epoch,
         "pid": os.getpid(),
     }
     def update(data):
+        previous = data.get("command_response")
+        previous_epoch = _shared_command_epoch(previous)
+        if response_epoch < previous_epoch <= now_epoch:
+            return
+        if response_epoch == previous_epoch and not _shared_message_is_newer(response, previous):
+            # Across chats, prefer the response that answers the pending probe.
+            # An older or duplicate same-second reply must not reopen it.
+            probe = data.get("command_probe")
+            if not _shared_command_answered(probe, response) or _shared_command_answered(probe, previous):
+                return
         data["command_response"] = response
-        _clear_shared_bot_maintenance(data)
+        if now_epoch - response_epoch <= BOT_COMMAND_SILENCE_MAX_SECONDS:
+            _clear_shared_bot_maintenance(data)
         data["updated_at"] = now_wall.strftime(TIME_FORMAT)
 
     return _update_shared_bot_activity(update) is not None
@@ -1946,7 +2030,18 @@ def bot_command_response_text(actor, msg):
     replied_id = meaningful_reply_to_msg_id(actor, msg)
     if not replied_id:
         return ""
-    return _command_text_for_message_id(actor, msg, replied_id)
+    command = _command_text_for_message_id(actor, msg, replied_id)
+    if command:
+        return command
+    # A different account may receive the reply first. Use the shared Telegram
+    # reference for health only; do not attribute another account's rewards.
+    data = _read_shared_bot_activity()
+    probe = data.get("command_probe") if isinstance(data, dict) else None
+    if _shared_command_reference_matches(probe, {
+        "chat_id": getattr(msg, "chat_id", None), "reply_to_msg_id": replied_id,
+    }, "reply_to_msg_id"):
+        return str(probe.get("command") or "")
+    return ""
 
 
 def shared_bot_command_silence_status(actor, grace_seconds=BOT_COMMAND_RESPONSE_GRACE_SECONDS):
@@ -1968,11 +2063,7 @@ def shared_bot_command_silence_status(actor, grace_seconds=BOT_COMMAND_RESPONSE_
     response = data.get("command_response") if isinstance(data, dict) else {}
     if not isinstance(response, dict):
         response = {}
-    try:
-        response_epoch = float(response.get("wall_epoch", 0) or 0)
-    except Exception:
-        response_epoch = 0.0
-    if response_epoch >= probe_epoch:
+    if _shared_command_answered(probe, response):
         return {
             "active": False,
             "probe": probe,
@@ -2371,8 +2462,17 @@ async def wait_for_bot_activity_before_send(actor, command, logger=None, stale_s
                     setattr(actor, "_bot_activity_wait_log_last", now)
                 if maintenance_status.get("source") != "shared_activity_stale":
                     if logger:
+                        detail = ""
+                        if maintenance_status.get("source") == "unanswered_dot_command":
+                            silence = maintenance_status.get("command_silence") or {}
+                            pending = silence.get("probe") or {}
+                            detail = (
+                                f"; pending account={pending.get('account')} command={pending.get('command')}"
+                                f" chat_id={pending.get('chat_id')} msg_id={pending.get('msg_id')}"
+                                f" age={int(silence.get('age_seconds') or 0)}s"
+                            )
                         logger.warning(
-                            f"Bot unavailable before [{key}] ({maintenance_status.get('source')}); "
+                            f"Bot unavailable before [{key}] ({maintenance_status.get('source')}{detail}); "
                             "skipping this attempt instead of waiting or retrying continuously."
                         )
                     return False
@@ -4236,7 +4336,7 @@ def record_message_event(
                     datetime.now().strftime(TIME_FORMAT),
                 ),
             )
-        if not is_bot and is_command_message_text(text_value):
+        if is_out and not is_bot and is_command_message_text(text_value):
             _record_shared_command_probe(actor, msg, command=str(command or text_value or ""), logger=logger)
         return True
     except Exception as exc:

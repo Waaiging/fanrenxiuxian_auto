@@ -9890,7 +9890,7 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = db_path
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
                 with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
-                    command_msg = DummyMessage(90001, text=".洞府")
+                    command_msg = DummyMessage(90001, text=".洞府", out=True)
                     command_msg.date = datetime.now(timezone.utc)
                     self.assertTrue(log_utils.record_message_event(
                         actor, command_msg, text=".洞府", sender=player, event_kind="new", direction="raw"
@@ -9931,7 +9931,7 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = db_path
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
                 with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
-                    command_msg = DummyMessage(90011, text=".洞府")
+                    command_msg = DummyMessage(90011, text=".洞府", out=True)
                     command_msg.date = datetime.now(timezone.utc)
                     log_utils.record_message_event(
                         actor, command_msg, text=".洞府", sender=player, event_kind="new", direction="raw"
@@ -10068,8 +10068,8 @@ class ParserFixtureTests(unittest.TestCase):
                 log_utils.MESSAGE_EVENTS_DB_FILE = db_path
                 log_utils._MESSAGE_EVENTS_SCHEMA_READY = False
                 with patch.object(log_utils, "BOT_ACTIVITY_SHARED_FILE", shared_path):
-                    first_msg = DummyMessage(90021, text=".洞府")
-                    second_msg = DummyMessage(90022, text=".野外历练")
+                    first_msg = DummyMessage(90021, text=".洞府", out=True)
+                    second_msg = DummyMessage(90022, text=".野外历练", out=True)
                     first_msg.date = datetime.now(timezone.utc)
                     second_msg.date = datetime.now(timezone.utc)
                     log_utils.record_message_event(
