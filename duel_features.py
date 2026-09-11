@@ -14,7 +14,12 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from automation_settings import current_sub_yinluo_identity, automation_account_identities
+from automation_settings import (
+    ACCOUNT_IDENTITIES,
+    automation_account_identities,
+    canonical_automation_identity,
+    current_sub_yinluo_identity,
+)
 
 try:
     import fcntl
@@ -189,7 +194,7 @@ def duel_identity_options(refresh=True):
     return rows
 
 
-def refresh_duel_identity_roster():
+def refresh_duel_identity_roster(preserve_identities=()):
     """Sync DUEL_IDENTITIES with rebirth Dao names before reading options.
 
     Dashboard 与 cultivator 是不同进程：模块加载时的静态表不会跟随重生，
@@ -208,6 +213,9 @@ def refresh_duel_identity_roster():
                 continue
             current_name = str(live_names[index] or "").strip()
             old_name = str(item.get("identity") or "").strip()
+            if (account, old_name) in preserve_identities:
+                # An explicit rebirth callback may precede its account snapshot.
+                continue
             if not current_name or not old_name or current_name == old_name:
                 continue
             changes[(account, old_name)] = current_name
@@ -274,6 +282,51 @@ def _apply_duel_roster_changes(data, changes):
     return data
 
 
+def _reconcile_duel_state_identity_aliases(data):
+    """Resolve persisted names even when another caller already refreshed the roster."""
+    changes = {}
+
+    def collect(account, identity):
+        account = str(account or "").strip()
+        identity = str(identity or "").strip()
+        if not identity or duel_identity_config(account, identity):
+            return
+        current = canonical_automation_identity(account, identity)
+        if not duel_identity_config(account, current):
+            # Stable slot names can outlive the alias history in account state.
+            slots = ACCOUNT_IDENTITIES.get(account, ())
+            rows = DUEL_IDENTITIES.get(account, ())
+            if identity in slots and slots.index(identity) < len(rows):
+                current = rows[slots.index(identity)]["identity"]
+        if current != identity and duel_identity_config(account, current):
+            changes[(account, identity)] = current
+
+    def visit(value):
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, dict):
+            for account_field, identity_field in (
+                ("account", "identity"),
+                ("target_account", "target_identity"),
+                ("initiator_account", "initiator_identity"),
+                ("owner", "target_identity"),
+            ):
+                collect(value.get(account_field), value.get(identity_field))
+            participant_key = str(value.get("participant_key") or "")
+            if "|" in participant_key:
+                account, identity = participant_key.split("|", 1)
+                collect(account, identity)
+            for key, child in value.items():
+                if "|" in key:
+                    account, identity = key.split("|", 1)
+                    collect(account, identity)
+                visit(child)
+
+    visit(data)
+    return _apply_duel_roster_changes(data, changes)
+
+
 def refresh_duel_identity_name(account, old_identity, new_identity):
     """Update a reborn avatar's Dao name in duel routing and pending plans."""
     account = str(account or "").strip().lower()
@@ -282,22 +335,29 @@ def refresh_duel_identity_name(account, old_identity, new_identity):
     if not account or not old_identity or not new_identity or old_identity == new_identity:
         return False
 
-    changed = False
-    for item in DUEL_IDENTITIES.get(account, ()):
-        if item.get("identity") == old_identity:
-            item["identity"] = new_identity
-            changed = True
-    for queue in DUEL_QUEUES.values():
-        for participant in queue.get("participants", ()):
-            if participant.get("account") == account and participant.get("identity") == old_identity:
-                participant["identity"] = new_identity
-                changed = True
-    if not changed:
-        return False
-
     with duel_state_lock():
+        changed = False
+        for item in DUEL_IDENTITIES.get(account, ()):
+            if item.get("identity") == old_identity:
+                item["identity"] = new_identity
+                changed = True
+        for queue in DUEL_QUEUES.values():
+            for participant in queue.get("participants", ()):
+                if participant.get("account") == account and participant.get("identity") == old_identity:
+                    participant["identity"] = new_identity
+                    changed = True
+        if not changed:
+            return False
+
         data = _read_duel_state_unlocked()
         if isinstance(data, dict):
+            # Restoring one account at startup must also refresh every other
+            # account before normalizing the shared state. Otherwise their live
+            # names are deleted and recreated with enabled=True/default targets.
+            roster_changes = refresh_duel_identity_roster(
+                preserve_identities={(account, new_identity)}
+            )
+            _apply_duel_roster_changes(data, roster_changes)
             _rename_duel_state_identity_references(
                 data, account, old_identity, new_identity
             )
@@ -554,10 +614,12 @@ def _ensure_duel_state_shape(data, reset_daily=True, refresh_roster=True):
     # retired Dao name, and unknown participant keys below would be POPPED and
     # re-created with the default target — silently discarding the user's
     # custom target.  Refresh first so rename-applied keys survive instead.
-    # ``refresh_roster`` parameter is kept for backwards-compatible call sites.
+    # Explicit rename callbacks refresh all other identities themselves, keeping
+    # the announced name authoritative until its account snapshot is published.
     if refresh_roster:
         roster_changes = refresh_duel_identity_roster()
         _apply_duel_roster_changes(data, roster_changes)
+    _reconcile_duel_state_identity_aliases(data)
     data = _migrate_legacy_duel_queues(data)
     data["version"] = DUEL_STATE_VERSION
     data.setdefault("enabled", True)
@@ -764,7 +826,7 @@ def _ensure_duel_state_shape(data, reset_daily=True, refresh_roster=True):
     return data
 
 
-def load_duel_state(write_back=False, refresh_roster=False):
+def load_duel_state(write_back=False, refresh_roster=True):
     with duel_state_lock():
         raw = _read_duel_state_unlocked()
         before = copy.deepcopy(raw)
