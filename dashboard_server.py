@@ -3306,7 +3306,40 @@ def incoming_log_label(header):
 def incoming_log_sender_text(header):
     """从日志头中提取发送者信息"""
     match = re.search(r"IN \[[^\]]+\]\s*(.*):\s*$", header or "")
-    return (match.group(1) if match else "").strip()
+    return re.sub(r"^\[TG [^\]]+\]\s*", "", (match.group(1) if match else "").strip())
+
+
+def telegram_log_metadata(entry):
+    """Read only our header marker, never sender-supplied message body text."""
+    match = re.search(
+        r"\bIN \[[^\]]+\] \[TG sender=(bot|human|unknown) chat=(-?\d+|None) "
+        r"msg=(\d+|None) attention=([a-z,-]+)\] ", log_entry_header(entry),
+    )
+    if not match:
+        return {}
+    return {"sender": match[1], "chat": match[2], "msg": match[3],
+            "relations": set(match[4].split(",")) - {"-"}}
+
+
+def log_sender_kind(entry):
+    if not is_incoming_log_entry(entry) or is_miniapp_transport_log_entry(entry):
+        return ""
+    metadata = telegram_log_metadata(entry)
+    if metadata:
+        return metadata["sender"]
+    # Only known historical bot signatures are recoverable; absence is unknown.
+    sender = incoming_log_sender_text(log_entry_header(entry)).casefold()
+    return "bot" if any(marker.casefold() in sender for marker in BOT_REPLY_MARKERS) else "unknown"
+
+
+def log_attention_relations(entry):
+    metadata = telegram_log_metadata(entry)
+    if metadata:
+        return metadata["relations"]
+    if not is_incoming_log_entry(entry):
+        return set()
+    label = incoming_log_label(log_entry_header(entry)).casefold()
+    return {"mention"} if label.startswith("mention ") else set()
 
 def is_outgoing_log_entry(entry):
     header = entry["lines"][0] if entry.get("lines") else ""
@@ -3348,6 +3381,9 @@ def outgoing_log_command_full(entry):
 def is_probable_bot_reply_log_entry(entry):
     """判断日志条目是否可能是游戏机器人的回复"""
     if not is_incoming_log_entry(entry):
+        return False
+    metadata = telegram_log_metadata(entry)
+    if metadata and metadata["sender"] != "bot":
         return False
     header = entry["lines"][0] if entry.get("lines") else ""
     sender_text = incoming_log_sender_text(header)
@@ -5022,12 +5058,12 @@ def is_command_reply_log_entry(entry):
 
 
 def is_dashboard_visible_log_entry(entry):
-    """Show only command traffic plus actual error diagnostics on Dashboard."""
+    """Show command traffic, mentions/replies to us, and error diagnostics."""
     header = log_entry_header(entry)
     text = str(entry.get("text") or "")
     if is_suppressed_miniapp_transport_log_entry(entry):
         return False
-    if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry):
+    if is_outgoing_log_entry(entry) or is_command_reply_log_entry(entry) or log_attention_relations(entry):
         return True
     if "刷天机值完成：总数" in text:
         return True
@@ -5042,7 +5078,10 @@ def entry_matches_log_kind(entry, kind=""):
     if kind == "out":
         return is_outgoing_log_entry(entry)
     if kind == "in":
-        return is_command_reply_log_entry(entry)
+        return is_command_reply_log_entry(entry) or bool(log_attention_relations(entry))
+    if kind in {"attention", "mention", "reply"}:
+        relations = log_attention_relations(entry)
+        return bool(relations) if kind == "attention" else kind in relations
     if kind == "warn":
         return "[WARNING]" in header
     if kind == "error":
@@ -5051,7 +5090,7 @@ def entry_matches_log_kind(entry, kind=""):
         return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))
     return True
 
-def filter_log_entries(entries, tag="", q="", kind=""):
+def filter_log_entries(entries, tag="", q="", kind="", sender=""):
     """按 Dashboard 可见范围、标签和关键词过滤日志条目"""
     tag = (tag or "").strip(); q = (q or "").strip().lower()
     filtered = []
@@ -5059,6 +5098,8 @@ def filter_log_entries(entries, tag="", q="", kind=""):
         if not is_dashboard_visible_log_entry(entry):
             continue
         if kind and not entry_matches_log_kind(entry, kind):
+            continue
+        if sender and log_sender_kind(entry) != sender:
             continue
         if tag:
             if tag == OTHER_LOG_TAG:
@@ -5095,13 +5136,16 @@ def get_log_tags(name, include_counts=True):
     ordered.sort(key=lambda item: (-item["count"], item["tag"]))
     return {"tags": ordered, "error": error}
 
-def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
+def get_log_page(name, before=None, limit=80, tag="", q="", kind="", sender=""):
     """获取分页的日志内容"""
     limit = max(20, min(int(limit or 80), 200))
     kind = (kind or "").strip().lower()
-    if kind not in {"", "out", "in", "warn", "error", "issue"}:
+    if kind not in {"", "out", "in", "warn", "error", "issue", "attention", "mention", "reply"}:
         kind = ""
-    if not (tag or q or kind):
+    sender = (sender or "").strip().lower()
+    if sender not in {"", "bot", "human", "unknown"}:
+        sender = ""
+    if not (tag or q or kind or sender):
         entries, error, meta = read_recent_log_entries(
             name,
             before_byte=before,
@@ -5123,6 +5167,7 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
             "tag": tag,
             "q": q,
             "kind": kind,
+            "sender": sender,
             "partial": True,
             "cursor_mode": meta.get("cursor_mode", "byte"),
             "log_size": meta.get("log_size", 0),
@@ -5131,7 +5176,7 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
     entries, error = read_log_entries(name)
     if error:
         return {"content": error, "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None}
-    filtered = filter_log_entries(entries, tag=tag, q=q, kind=kind)
+    filtered = filter_log_entries(entries, tag=tag, q=q, kind=kind, sender=sender)
     total = len(entries); matched = len(filtered)
     end = matched if before is None else max(0, min(int(before), matched))
     start = max(0, end - limit)
@@ -5139,7 +5184,7 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind=""):
     return {"content": "\n\n".join(entry["text"] for entry in page_entries),
             "entries": [entry["text"] for entry in page_entries],
             "start": start, "end": end, "total": total, "matched": matched,
-            "has_more": start > 0, "next_before": start if start > 0 else None, "tag": tag, "q": q, "kind": kind}
+            "has_more": start > 0, "next_before": start if start > 0 else None, "tag": tag, "q": q, "kind": kind, "sender": sender}
 
 
 # =====================================================================
@@ -6208,6 +6253,7 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
 
 @app.get("/api/logs/{name}")
 def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = "", q: str = "", kind: str = "",
+         sender: str = "",
          username: str = Depends(authenticate)):
     """获取账号的分页日志"""
     cache_key = json.dumps({
@@ -6217,13 +6263,14 @@ def logs(name: str, before: Optional[int] = None, limit: int = 80, tag: str = ""
         "tag": tag or "",
         "q": q or "",
         "kind": kind or "",
+        "sender": sender or "",
     }, sort_keys=True, ensure_ascii=False)
     now_ts = time.time()
     with LOG_PAGE_LOCK:
         cached = LOG_PAGE_CACHE.get(cache_key)
         if cached and now_ts - float(cached.get("at") or 0) < LOG_PAGE_CACHE_SECONDS:
             return cached.get("data")
-        payload = get_log_page(name, before=before, limit=limit, tag=tag, q=q, kind=kind)
+        payload = get_log_page(name, before=before, limit=limit, tag=tag, q=q, kind=kind, sender=sender)
         LOG_PAGE_CACHE[cache_key] = {"at": now_ts, "data": payload}
         if len(LOG_PAGE_CACHE) > 24:
             oldest_key = min(LOG_PAGE_CACHE, key=lambda key: LOG_PAGE_CACHE[key].get("at", 0))

@@ -16,6 +16,7 @@ from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 from world_boss_features import install_world_boss_monitor
 from xuangu_quiz_features import maybe_handle_xuangu_quiz
+from telegram_message_logging import install_addressed_message_monitor
 
 
 ACCOUNT_SESSIONS = {
@@ -155,6 +156,7 @@ async def run(account: str) -> None:
     world_boss_monitor = None
     exchange_handlers = []
     quiz_handlers = []
+    addressed_handlers = []
     surprise_raid_task = None
     await client.connect()
     try:
@@ -162,6 +164,7 @@ async def run(account: str) -> None:
             raise RuntimeError(f"Telegram session for {account} is not authorized")
         actor.my_info = await client.get_me()
         await resolve_actor_target_chats(actor, logger)
+        addressed_handlers = install_addressed_message_monitor(actor)
         quiz_handlers = install_restricted_quiz_monitor(actor)
         monitor = await install_red_packet_monitor(client, account, logger=logger)
         if not monitor.topic_id:
@@ -244,6 +247,8 @@ async def run(account: str) -> None:
         for callback, builder in exchange_handlers:
             client.remove_event_handler(callback, builder)
         for callback, builder in quiz_handlers:
+            client.remove_event_handler(callback, builder)
+        for callback, builder in addressed_handlers:
             client.remove_event_handler(callback, builder)
         if world_boss_monitor is not None:
             await world_boss_monitor.stop()

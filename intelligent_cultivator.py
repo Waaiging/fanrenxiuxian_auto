@@ -97,6 +97,7 @@ from miniapp_beast import (
 )
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
+from telegram_message_logging import log_addressed_message_if_needed
 from miniapp_dwelling import (
     apply_dwelling_snapshot,
     command_result_ok,
@@ -1309,11 +1310,12 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             sender_id = msg.sender_id
 
             # ---- 控制指令：止/启（仅管理员可触发） ----
-            sender_check = await event.get_sender()
-            # 所有主魂/化身 @ 提及先记日志，不能被控制指令、反馈匹配或其他提前返回吞掉。
-            log_mention_if_needed(
-                self, msg, text=text, sender=sender_check, mentions_only=True
-            )
+            try:
+                sender_check = await event.get_sender()
+            except Exception:
+                sender_check = None
+            # 提及与普通聊天回复均先记日志，避免控制指令等提前返回漏记。
+            await log_addressed_message_if_needed(self, msg, text=text, sender=sender_check)
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
             _chat_id_match = _chat_matches_actor_target(self, msg)
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
@@ -1324,7 +1326,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 if await self.maybe_handle_fishing_control_message(msg, text, sender_check):
                     return
 
-            sender_cache = await event.get_sender()
+            sender_cache = sender_check
             record_message_event(self, msg, text=text, sender=sender_cache, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event(self.account_key, msg, text, sender=sender_cache, logger=log)
             if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender_cache):
@@ -5501,6 +5503,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             log.info("Restricted-account visibility control is only active on VPS/Linux.")
 
         # 注册新消息事件（所有游戏消息走这里）
+        log.info("Mention/reply log capture active for chats %s", self.target_chat_ids)
         @self.client.on(events.NewMessage(chats=self.target_chat_ids))
         @routed_telegram_event_handler
         async def handler(event):

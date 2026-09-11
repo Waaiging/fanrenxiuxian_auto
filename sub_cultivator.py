@@ -71,6 +71,7 @@ from telethon import TelegramClient, events  # Telegram MTProto 客户端与事�
 from red_packet_features import install_red_packet_monitor
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
+from telegram_message_logging import log_addressed_message_if_needed
 
 # ============================================================
 # 项目内部模块导入
@@ -3066,11 +3067,12 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
             sender_id = msg.sender_id
 
             # ---- 控制指令：止/启（仅管理员可触发） ----
-            sender_check = await event.get_sender()
-            # 所有主魂/化身 @ 提及先记日志，不能被控制指令、反馈匹配或其他提前返回吞掉。
-            log_mention_if_needed(
-                self, msg, text=text, sender=sender_check, mentions_only=True
-            )
+            try:
+                sender_check = await event.get_sender()
+            except Exception:
+                sender_check = None
+            # 提及与普通聊天回复均先记日志，避免控制指令等提前返回漏记。
+            await log_addressed_message_if_needed(self, msg, text=text, sender=sender_check)
             # chat_id 比较需兼容 Telethon 的 -100 前缀（supergroup）
             _chat_id_match = _chat_matches_actor_target(self, msg)
             if not is_game_bot_sender(self, sender_check) and _chat_id_match:
@@ -3091,7 +3093,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 return
 
             # 获取发送者信息
-            sender = await event.get_sender()
+            sender = sender_check
             if await maybe_handle_han_soul_choice(self, msg, text, sender, log):
                 return
             if is_game_bot_sender(self, sender):
@@ -5790,6 +5792,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         )
 
         # 注册新消息处理器
+        log.info("Mention/reply log capture active for chats %s", self.target_chat_ids)
         @self.client.on(events.NewMessage(chats=self.target_chat_ids))
         @routed_telegram_event_handler
         async def handler(event):

@@ -7691,7 +7691,7 @@ class ParserFixtureTests(unittest.TestCase):
             dashboard_server.LOG_TAIL_INITIAL_BYTES = old_initial_bytes
             dashboard_server.LOG_TAIL_MAX_BYTES = old_max_bytes
 
-    def test_dashboard_logs_only_show_command_traffic_and_issues(self):
+    def test_dashboard_logs_show_command_traffic_mentions_and_issues(self):
         old_config_dir = dashboard_server.CONFIG_DIR
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -7728,7 +7728,7 @@ class ParserFixtureTests(unittest.TestCase):
                 page = dashboard_server.get_log_page("main", limit=20)
                 content = page.get("content") or ""
 
-                self.assertEqual(len(page.get("entries") or []), 8)
+                self.assertEqual(len(page.get("entries") or []), 9)
                 self.assertIn("OUT [主魂]", content)
                 self.assertIn("IN [.查看闭关]", content)
                 self.assertIn("OUT [Mini App | 素心子]", content)
@@ -7739,7 +7739,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertNotIn("[WARNING]", content)
                 self.assertNotIn("Meditation Step 3", content)
                 self.assertNotIn("Yuanying out active", content)
-                self.assertNotIn("IN [mention 100]", content)
+                self.assertIn("IN [mention 100]", content)
                 self.assertNotIn("同步洞府首页", content)
                 self.assertNotIn("读取宗门灵圃", content)
                 self.assertNotIn("万兽谷灵兽安抚（ID 7）", content)
@@ -7748,7 +7748,7 @@ class ParserFixtureTests(unittest.TestCase):
                 self.assertNotIn("洞府寻宝见好就收", content)
 
                 incoming = dashboard_server.get_log_page("main", limit=20, kind="in")
-                self.assertEqual(len(incoming.get("entries") or []), 4)
+                self.assertEqual(len(incoming.get("entries") or []), 5)
                 issues = dashboard_server.get_log_page("main", limit=20, kind="issue")
                 self.assertEqual(len(issues.get("entries") or []), 1)
         finally:

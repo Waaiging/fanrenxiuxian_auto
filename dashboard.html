@@ -422,6 +422,7 @@
         .log-entry-time { color: #dbeafe; white-space: nowrap; }
         .log-entry-level { color: #bae6fd; white-space: nowrap; }
         .log-entry-source { color: inherit; white-space: normal; overflow-wrap: anywhere; }
+        .log-entry-head a { color: var(--accent-color); white-space: nowrap; text-underline-offset: 2px; }
         .log-entry-dot { width: 0.54rem; height: 0.54rem; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 8px currentColor; }
         .log-entry-dot.out { color: #6ee7b7; background: #6ee7b7; }
         .log-entry-dot.in { color: #60a5fa; background: #60a5fa; }
@@ -1936,12 +1937,22 @@
                 <div class="log-field">
                     <label>类型</label>
                     <div class="log-kind-row">
-                        <button id="log-kind-all" class="log-tool-btn active" onclick="setLogKind('')">指令/错误</button>
+                        <button id="log-kind-all" class="log-tool-btn active" onclick="setLogKind('')">全部</button>
                         <button id="log-kind-out" class="log-tool-btn" onclick="setLogKind('out')">OUT</button>
                         <button id="log-kind-in" class="log-tool-btn" onclick="setLogKind('in')">IN</button>
+                        <button id="log-kind-attention" class="log-tool-btn" onclick="setLogKind('attention')">@我 / 回复我</button>
                         <button id="log-kind-issue" class="log-tool-btn warning" onclick="setLogKind('issue')">错误</button>
                         <button id="log-pause-btn" class="log-tool-btn" onclick="toggleLogPause()">暂停刷新</button>
                     </div>
+                </div>
+                <div class="log-field">
+                    <label for="log-sender-select">Telegram 发送者</label>
+                    <select id="log-sender-select" class="log-select" onchange="changeLogSender()" title="按 Telegram 账号类型筛选；旧记录无法确认类型时归为未知。">
+                        <option value="">全部</option>
+                        <option value="bot">机器人</option>
+                        <option value="human">非机器人</option>
+                        <option value="unknown">未知类型</option>
+                    </select>
                 </div>
                 <div id="log-filter-summary" class="log-filter-summary">全部日志</div>
             </div>
@@ -1954,6 +1965,9 @@
         let currentLogTag = '';
         let currentLogSearch = '';
         let currentLogKind = '';
+        let currentLogSender = '';
+        let logViewRevision = 0;
+        let logRequestId = 0;
         let logAutoRefreshPaused = false;
         let logFetchController = null;
         const LOG_PAGE_SIZE = 80;
@@ -6650,6 +6664,17 @@
 
         function renderLogEntry(entry) {
             const parsed = parseLogEntry(entry);
+            const metadata = parsed.source.match(/\[TG sender=(bot|human|unknown) chat=(-?\d+|None) msg=(\d+|None) attention=([a-z,-]+)\] /);
+            let messageLink = '';
+            if (metadata) {
+                const labels = [logSenderLabel(metadata[1])];
+                if (metadata[4].split(',').includes('mention')) labels.push('@我');
+                if (metadata[4].split(',').includes('reply')) labels.push('回复我');
+                parsed.source = parsed.source.replace(metadata[0], `[${labels.join(' · ')}] `);
+                if (/^-100\d+$/.test(metadata[2]) && /^\d+$/.test(metadata[3])) {
+                    messageLink = `<a href="https://t.me/c/${metadata[2].slice(4)}/${metadata[3]}" target="_blank" rel="noopener noreferrer">原消息</a>`;
+                }
+            }
             const dotClass = logEntryDotClass(entry);
             const body = parsed.body || '';
             return `
@@ -6659,6 +6684,7 @@
                         ${parsed.time ? `<span class="log-entry-time">${escapeHtml(parsed.time)}</span>` : ''}
                         ${parsed.level ? `<span class="log-entry-level">[${escapeHtml(parsed.level)}]</span>` : ''}
                         <span class="log-entry-source">${escapeHtml(parsed.source || '')}</span>
+                        ${messageLink}
                     </div>
                     <div class="log-entry-body ${body ? '' : 'empty'}">${escapeHtml(body)}</div>
                 </div>
@@ -6669,6 +6695,7 @@
             return {
                 out: 'OUT',
                 in: 'IN',
+                attention: '@我 / 回复我',
                 warn: 'WARNING',
                 error: 'ERROR',
                 issue: '错误'
@@ -6676,7 +6703,7 @@
         }
 
         function updateLogKindButtons() {
-            const kinds = ['', 'out', 'in', 'issue'];
+            const kinds = ['', 'out', 'in', 'attention', 'issue'];
             for (const kind of kinds) {
                 const id = kind ? `log-kind-${kind}` : 'log-kind-all';
                 const btn = document.getElementById(id);
@@ -6690,7 +6717,13 @@
         }
 
         function resetLogState() {
+            logViewRevision += 1;
+            if (logFetchController) logFetchController.abort();
             logState = {lines: [], before: null, hasMore: false, loadingOlder: false, total: 0, matched: 0, loaded: 0, partial: false};
+        }
+
+        function logSenderLabel(sender = currentLogSender) {
+            return {bot: '机器人', human: '非机器人', unknown: '未知类型'}[sender] || '全部';
         }
 
         function updateFilterSummary(statusText = '') {
@@ -6698,8 +6731,9 @@
             const parts = [];
             if (currentLogTag) parts.push(`标签 ${currentLogTag}`);
             if (currentLogKind) parts.push(`类型 ${logKindLabel()}`);
+            if (currentLogSender) parts.push(`发送者 ${logSenderLabel()}`);
             if (currentLogSearch) parts.push(`搜索 "${currentLogSearch}"`);
-            const scope = parts.length ? parts.join('，') : '指令、回复与错误';
+            const scope = parts.length ? parts.join('，') : '指令、@提及、回复与错误';
             const loaded = logState.loaded || logState.lines.length || 0;
             const countText = logState.partial
                 ? `已载入最近 ${loaded} 条${logState.hasMore ? '，向上滚动加载更多' : ''}`
@@ -6728,6 +6762,7 @@
             if (currentLogTag) params.set('tag', currentLogTag);
             if (currentLogSearch) params.set('q', currentLogSearch);
             if (currentLogKind) params.set('kind', currentLogKind);
+            if (currentLogSender) params.set('sender', currentLogSender);
             const options = {cache: 'no-store'};
             if (signal) options.signal = signal;
             const r = await fetch(apiUrl(`/api/logs/${account}?${params.toString()}`), options);
@@ -6758,6 +6793,7 @@
             const tag = currentLogTag;
             const search = currentLogSearch;
             const kind = currentLogKind;
+            const revision = logViewRevision;
             const c = document.getElementById('log-content');
             const oldHeight = c.scrollHeight;
             const oldTop = c.scrollTop;
@@ -6765,7 +6801,7 @@
             renderLogs('正在加载更早日志...');
             try {
                 const data = await fetchLogPage(account, logState.before);
-                if (account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch || kind !== currentLogKind) return;
+                if (revision !== logViewRevision || account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch || kind !== currentLogKind) return;
                 logState.lines = extractLogEntries(data).concat(logState.lines);
                 logState.before = data.next_before;
                 logState.hasMore = Boolean(data.has_more);
@@ -6776,10 +6812,11 @@
                 renderLogs();
                 c.scrollTop = c.scrollHeight - oldHeight + oldTop;
             } catch (e) {
+                if (revision !== logViewRevision) return;
                 console.error('Load older logs failed:', e);
                 renderLogs('更早日志加载失败，稍后再试');
             } finally {
-                logState.loadingOlder = false;
+                if (revision === logViewRevision) logState.loadingOlder = false;
             }
         }
 
@@ -6787,6 +6824,8 @@
             if (!force && logAutoRefreshPaused) return;
             if (!force && (document.hidden || pollBusy.logs)) return;
             pollBusy.logs = true;
+            const requestId = ++logRequestId;
+            const revision = logViewRevision;
             try {
                 const c = document.getElementById('log-content');
                 const nearBottom = c.scrollHeight - c.scrollTop <= c.clientHeight + 80;
@@ -6798,7 +6837,7 @@
                 const search = currentLogSearch;
                 const kind = currentLogKind;
                 const data = await fetchLogPage(account, null, logFetchController.signal);
-                if (account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch || kind !== currentLogKind) return;
+                if (revision !== logViewRevision || requestId !== logRequestId || account !== currentLogAccount || tag !== currentLogTag || search !== currentLogSearch || kind !== currentLogKind) return;
                 logState.lines = extractLogEntries(data);
                 logState.before = data.next_before;
                 logState.hasMore = Boolean(data.has_more);
@@ -6811,7 +6850,7 @@
             } catch(e){
                 if (e.name !== 'AbortError') console.error('Log update failed:', e);
             } finally {
-                pollBusy.logs = false;
+                if (requestId === logRequestId) pollBusy.logs = false;
             }
         }
 
@@ -6837,6 +6876,13 @@
             updateLogs(true);
         }
 
+        function changeLogSender() {
+            currentLogSender = document.getElementById('log-sender-select').value;
+            resetLogState();
+            document.getElementById('log-content').innerText = '加载中...';
+            updateLogs(true);
+        }
+
         function toggleLogPause() {
             logAutoRefreshPaused = !logAutoRefreshPaused;
             updateLogKindButtons();
@@ -6854,6 +6900,8 @@
             currentLogTag = '';
             currentLogSearch = '';
             currentLogKind = '';
+            currentLogSender = '';
+            document.getElementById('log-sender-select').value = '';
             document.getElementById('log-tag-select').value = '';
             document.getElementById('log-search-input').value = '';
             updateLogKindButtons();
@@ -6867,6 +6915,8 @@
             currentLogTag = '';
             currentLogSearch = '';
             currentLogKind = '';
+            currentLogSender = '';
+            document.getElementById('log-sender-select').value = '';
             resetLogState();
             document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
             ev.target.classList.add('active');

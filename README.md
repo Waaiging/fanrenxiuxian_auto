@@ -338,6 +338,9 @@ Dashboard 当前行为：
 - 运行状态保存在 `state_main.json`、`state_sub.json`、`state_xiaohao.json`、`state_waaiging.json`。
 - 共享斗法状态为 `duel_state.json`，当前结构版本为 3；旧 A/B 队列会自动合并并保留身份启停、剩余次数和自定义目标。
 - Mini App 会把语义操作记录为 `OUT [Mini App | 身份]` / `IN [Mini App | 身份]`。
+- 四账号在 `monitor.chat_ids` 覆盖的群内记录主魂及已配置化身的 @提及、对本人普通聊天或指令的回复，并跟踪后续编辑。小号/Waaiging 的受限待机模式也保留监听；无文字的图片、语音等回复记录媒体类型和原消息链接，不下载附件。
+- Dashboard 日志默认展示这些消息；点击「@我 / 回复我」可集中查看，并用「Telegram 发送者」筛选全部、机器人、非机器人或未知类型。支持继续叠加关键词和标签，日志标题提供「原消息」链接。Mini App 服务回执不属于 Telegram 发送者；旧日志无法确认发送者类型时保留为未知，历史未记录的消息不会自动补造。
+- 回复归属通过账号、群 ID 和原消息 ID 核对，优先读取本地消息/指令账本，必要时只读查询原消息；话题根消息不算回复。新增 `sender_is_bot` 和 `attention` 审计字段，Telegram 的通用机器人类型与游戏机器人白名单分别保存，聊天日志不会把普通用户的话当成游戏回执。
 - 普通日志保留 7 天；`message_events.sqlite3` 中的消息、指令账本和收益记录保留 15 天，每 6 小时由主号清理一次。SQLite 删除后会复用空闲页，但文件不会自动缩小。
 - 周期收益事件写入 `message_events.sqlite3`，Dashboard 可按日期、账号、身份和指令筛选。
 - 日报 Telegram 推送默认关闭；需要时在配置中显式启用 `daily_reward_summary_push`。

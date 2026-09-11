@@ -99,6 +99,7 @@ from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_inventory import MiniAppInventoryWorker
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
+from telegram_message_logging import log_addressed_message_if_needed
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
     handle_pause_control_command,
@@ -5383,11 +5384,11 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         """游戏消息处理器：检测回复、更新状态、触发自动回复"""
         try:
             msg = event.message; text = (msg.text or ""); msg_text_lower = text.lower()
-            sender = await event.get_sender()
-            # 所有主魂/化身 @ 提及先记日志，不能被反馈匹配或其他提前返回吞掉。
-            log_mention_if_needed(
-                self, msg, text=text, sender=sender, mentions_only=True
-            )
+            try:
+                sender = await event.get_sender()
+            except Exception:
+                sender = None
+            await log_addressed_message_if_needed(self, msg, text=text, sender=sender)
             record_message_event(self, msg, text=text, sender=sender, event_kind="new", direction="raw", logger=log)
             record_star_gazing_event("xiaohao", msg, text, sender=sender, logger=log)
             if await maybe_handle_xuangu_quiz(self, event, text=text, sender=sender):
@@ -7432,6 +7433,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             logger=log,
             transport=miniapp_router.transport,
         )
+        log.info("Mention/reply log capture active for chats %s", self.target_chat_ids)
         @self.client.on(events.NewMessage(chats=self.target_chat_ids))
         @routed_telegram_event_handler
         async def h(e): await self.handle_game_response(e)

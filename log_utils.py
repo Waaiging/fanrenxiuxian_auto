@@ -414,9 +414,31 @@ def sender_display_name(sender=None, msg=None):
     return f"sender:{sender_id}" if sender_id else "unknown"
 
 
-def format_in_log(label, text, sender=None, msg=None):
+def telegram_sender_kind(sender):
+    """Telegram's bot flag is independent of our trusted game-bot allowlist."""
+    bot = getattr(sender, "bot", None)
+    if bot is True:
+        return "bot"
+    if bot is False or getattr(sender, "title", None):
+        return "human"
+    return "unknown"
+
+
+def format_in_log(label, text, sender=None, msg=None, attention=None):
     """格式化收到的消息为日志行"""
-    return f"🔵 IN [{label}] {sender_display_name(sender, msg)}:\n{text or ''}"
+    metadata = ""
+    if msg is not None:
+        chat_id = _safe_message_int(getattr(msg, "chat_id", None))
+        msg_id = _safe_message_int(_message_id(msg))
+        relations = ",".join((attention or {}).get("relations", [])) or "-"
+        metadata = (f"[TG sender={telegram_sender_kind(sender)} chat={chat_id} "
+                    f"msg={msg_id} attention={relations}] ")
+    name = sender_display_name(sender, msg).replace("\r", " ").replace("\n", " ")
+    label = str(label).replace("\r", " ").replace("\n", " ")
+    # A pasted log transcript is message content, not a new log record.
+    body = re.sub(r"(?m)^(?=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[[A-Z]+\])",
+                  "\u200b", str(text or ""))
+    return f"🔵 IN [{label}] {metadata}{name}:\n{body}"
 
 
 def command_from_log_label(label):
@@ -438,6 +460,10 @@ async def _log_incoming_message_impl(actor, label, text, msg=None, sender=None, 
         except Exception:
             sender = None
     target_logger = logger or logging.getLogger(actor.__class__.__name__)
+    context = incoming_message_context_for_msg(actor, msg)
+    already_logged = (context.get("attention_raw_text") == text
+                      and context.get("command") == command_from_log_label(label)
+                      and bool(context.get("command")))
     current_id = identity or "主魂"
     if not identity and hasattr(actor, "get_identity_from_msg"):
         current_id = actor.get_identity_from_msg(msg) or getattr(actor, "current_identity", "主魂")
@@ -445,7 +471,8 @@ async def _log_incoming_message_impl(actor, label, text, msg=None, sender=None, 
         current_id = getattr(actor, "current_identity", "主魂")
     if current_id != "主魂":
         text = f"[Avatar: {current_id}]\n{text or ''}"
-    target_logger.info(format_in_log(label, text, sender=sender, msg=msg))
+    if not already_logged:
+        target_logger.info(format_in_log(label, text, sender=sender, msg=msg))
     record_message_event(
         actor,
         msg,
@@ -1287,7 +1314,7 @@ def _normalize_account_name(value):
     """标准化账号名称（去格式、去空白）"""
     value = str(value or "").lower().strip()
     value = value.replace("**", "").replace("`", "")
-    value = value.strip("@ \\t\\r\\n【】[]（）()：:,，。.!！")
+    value = value.strip("@ 【】[]（）()：:,，。.!！")
     return re.sub(r"\s+", "", value)
 
 
@@ -3442,6 +3469,11 @@ def meaningful_reply_to_msg_id(actor, msg):
     replied_id = _reply_to_msg_id(msg)
     if not replied_id:
         return None
+    peer = getattr(getattr(msg, "reply_to", None), "reply_to_peer_id", None)
+    if peer is not None:
+        from telethon import utils
+        if not telegram_chat_ids_match(utils.get_peer_id(peer), getattr(msg, "chat_id", None)):
+            return None
     topic_id = getattr(actor, "topic_id", None)
     try:
         if topic_id is not None and int(replied_id) == int(topic_id):
@@ -4063,6 +4095,8 @@ def _message_db_connect():
     conn = sqlite3.connect(MESSAGE_EVENTS_DB_FILE, timeout=2)
     try:
         if not _MESSAGE_EVENTS_SCHEMA_READY:
+            # Four account workers share this DB. Serialize first-use migrations.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS message_events (
@@ -4107,6 +4141,11 @@ def _message_db_connect():
                 )
                 """
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(message_events)")}
+            if "sender_is_bot" not in columns:
+                conn.execute("ALTER TABLE message_events ADD COLUMN sender_is_bot INTEGER")
+            if "attention" not in columns:
+                conn.execute("ALTER TABLE message_events ADD COLUMN attention TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS daily_reward_events (
@@ -4258,6 +4297,7 @@ def record_message_event(
     identity="",
     command="",
     logger=None,
+    attention=None,
 ):
     """把一条 Telegram 事件写入 SQLite，供 dashboard 和事后复盘查询。
 
@@ -4276,6 +4316,8 @@ def record_message_event(
     sender_name = sender_display_name(sender, msg)
     is_out = 1 if _is_own_outgoing_sender(actor, msg) else 0
     is_bot = 1 if (sender is not None and is_game_bot_sender(actor, sender)) else 0
+    sender_kind = telegram_sender_kind(sender)
+    sender_is_bot = {"bot": 1, "human": 0}.get(sender_kind)
 
     if not identity:
         identity = tracked_command_identity_for_reply(actor, msg) or ""
@@ -4289,8 +4331,8 @@ def record_message_event(
                 INSERT INTO message_events (
                     account, event_kind, direction, chat_id, msg_id, reply_to_msg_id,
                     sender_id, sender_username, sender_name, is_out, is_game_bot,
-                    identity, command, text, text_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    identity, command, text, text_hash, created_at, sender_is_bot, attention
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account, event_kind, chat_id, msg_id, text_hash) DO UPDATE SET
                     direction=CASE
                         WHEN message_events.direction='raw' AND excluded.direction!='raw' THEN excluded.direction
@@ -4315,7 +4357,9 @@ def record_message_event(
                         ELSE message_events.sender_name
                     END,
                     is_out=MAX(message_events.is_out, excluded.is_out),
-                    is_game_bot=MAX(message_events.is_game_bot, excluded.is_game_bot)
+                    is_game_bot=MAX(message_events.is_game_bot, excluded.is_game_bot),
+                    sender_is_bot=COALESCE(excluded.sender_is_bot, message_events.sender_is_bot),
+                    attention=CASE WHEN excluded.attention!='' THEN excluded.attention ELSE message_events.attention END
                 """,
                 (
                     account,
@@ -4334,9 +4378,11 @@ def record_message_event(
                     str(text_value or ""),
                     _message_text_hash(text_value),
                     datetime.now().strftime(TIME_FORMAT),
+                    sender_is_bot,
+                    json.dumps(attention, ensure_ascii=False) if attention else "",
                 ),
             )
-        if is_out and not is_bot and is_command_message_text(text_value):
+        if is_out and not is_bot and event_kind != "history" and is_command_message_text(text_value):
             _record_shared_command_probe(actor, msg, command=str(command or text_value or ""), logger=logger)
         return True
     except Exception as exc:
@@ -5856,12 +5902,12 @@ def mentions_self(actor, msg, text):
         return False
     if getattr(msg, "mentioned", False):
         return True
-    lower_text = (text or "").lower()
+    mentioned_usernames = set(text_username_mentions(text))
     username = (getattr(me, "username", "") or "").lower().lstrip("@")
-    if username and f"@{username}" in lower_text:
+    if username and username in mentioned_usernames:
         return True
     first_name = (getattr(me, "first_name", "") or "").lower().strip()
-    if first_name and f"@{first_name}" in lower_text:
+    if first_name and first_name in mentioned_usernames:
         return True
     if my_id:
         for entity in getattr(msg, "entities", None) or []:
@@ -5955,16 +6001,21 @@ def mentions_other_user(actor, msg, text=None):
     return has_other_mention and not mentions_me
 
 
-def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, mentions_only=False):
+def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, mentions_only=False, attention=None):
     """需要时记录提到了本账号的消息"""
     text = text if text is not None else (getattr(msg, "text", None) or "")
+    original_text = text
     msg_id = _message_id(msg)
-    mentioned_identities = managed_mention_identities(actor, msg, text)
-    if label != "edited" and was_manual_reply_logged_message(actor, msg):
+    if attention is None and (getattr(actor, "_logged_attention_message_texts", None) or {}).get(telegram_message_key(msg)) == text:
         return True
-    if mentions_only and not mentioned_identities:
+    mentioned_identities = (attention.get("mentions", []) if attention is not None
+                            else managed_mention_identities(actor, msg, text))
+    reply_identity = (attention or {}).get("reply_identity", "")
+    if attention is None and label != "edited" and was_manual_reply_logged_message(actor, msg):
+        return True
+    if mentions_only and not mentioned_identities and not attention:
         return False
-    if not mentioned_identities and sender is not None and is_game_bot_sender(actor, sender):
+    if not mentioned_identities and not attention and sender is not None and is_game_bot_sender(actor, sender):
         profile_identity = recent_profile_identity_for_text(
             actor,
             text,
@@ -6009,21 +6060,23 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
                 consume=True,
             )
             return True
-    if not mentioned_identities:
+    if not mentioned_identities and not attention:
         return False
 
     if len(mentioned_identities) == 1:
         current_id = mentioned_identities[0]
     else:
-        current_id = avatar_marker_identity_from_text(text) or "主魂"
+        current_id = reply_identity or avatar_marker_identity_from_text(text) or "主魂"
     if len(mentioned_identities) > 1:
         text = f"[Mentioned: {', '.join(mentioned_identities)}]\n{text or ''}"
-    if sender is not None and is_game_bot_sender(actor, sender) and hasattr(actor, "record_identity_yuanying_recovery_from_text"):
+    if mentioned_identities and sender is not None and is_game_bot_sender(actor, sender) and hasattr(actor, "record_identity_yuanying_recovery_from_text"):
         actor.record_identity_yuanying_recovery_from_text(
             current_id, text, source=f"mention {msg_id}", command=""
         )
-    if current_id != "主魂" and len(mentioned_identities) == 1:
+    if current_id != "主魂" and len(mentioned_identities) <= 1:
         text = f"[Avatar: {current_id}]\n{text or ''}"
+    if reply_identity:
+        text = f"[Reply to: {reply_identity} #{attention.get('reply_to_msg_id')}]\n{text or ''}"
     if label == "edited":
         cache_name = "_logged_edited_message_texts"
         seen_texts = getattr(actor, cache_name, None)
@@ -6031,7 +6084,7 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
             seen_texts = {}
             setattr(actor, cache_name, seen_texts)
         message_key = telegram_message_key(msg, msg_id)
-        if msg_id is not None and seen_texts.get(message_key) == text:
+        if attention is None and msg_id is not None and seen_texts.get(message_key) == text:
             return True
         if msg_id is not None:
             seen_texts[message_key] = text
@@ -6044,7 +6097,7 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
             seen = set()
             setattr(actor, cache_name, seen)
         key = (label, *telegram_message_key(msg, msg_id))
-        if msg_id is not None and key in seen:
+        if attention is None and msg_id is not None and key in seen:
             return True
         if msg_id is not None:
             seen.add(key)
@@ -6054,21 +6107,24 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
     is_edited = label == "edited"
     logged_command = (
         tracked_command_text_for_reply(actor, msg)
-        if is_edited
+        if is_edited or (reply_identity and sender is not None and is_game_bot_sender(actor, sender))
         else command_from_log_label(label)
     )
     log_label = (
         f"{logged_command} edited {msg_id}"
         if is_edited and logged_command
-        else f"{label} {msg_id}"
+        else f"{logged_command} reply {msg_id}" if logged_command and reply_identity
+        else f"{'reply' if not is_edited and reply_identity and not mentioned_identities else label} {msg_id}"
     )
+    if attention is None:
+        attention = {"relations": ["mention"], "mentions": mentioned_identities}
     logging.getLogger(actor.__class__.__name__).info(
-        format_in_log(log_label, text, sender=sender, msg=msg)
+        format_in_log(log_label, text, sender=sender, msg=msg, attention=attention)
     )
     record_message_event(
         actor,
         msg,
-        text=text,
+        text=original_text,
         sender=sender,
         event_kind="edited" if is_edited else "new",
         direction=(
@@ -6079,17 +6135,21 @@ def log_mention_if_needed(actor, msg, text=None, label="mention", sender=None, m
         ),
         identity=current_id,
         command=logged_command,
+        attention=attention,
     )
-    record_command_response_for_reply(
-        actor, msg, text=text, status="matched", sender=sender
-    )
-    record_command_response_for_related_event(
-        actor, msg, text=text, status="matched", sender=sender
-    )
+    if mentioned_identities or logged_command:
+        record_command_response_for_reply(
+            actor, msg, text=text, status="matched", sender=sender
+        )
+        record_command_response_for_related_event(
+            actor, msg, text=text, status="matched", sender=sender
+        )
     remember_logged_incoming_message(actor, msg, text=text)
     remember_incoming_message_context(
         actor, msg, command=logged_command, identity=current_id, text=text
     )
+    context = incoming_message_context_for_msg(actor, msg)
+    context["attention_raw_text"] = original_text
     return True
 
 
@@ -6456,7 +6516,10 @@ async def log_edited_message_if_needed(actor, event):
     try:
         msg = event.message
         text = msg.text or ""
-        sender = await event.get_sender()
+        try:
+            sender = await event.get_sender()
+        except Exception:
+            sender = None
         is_game_bot = is_game_bot_sender(actor, sender)
         logger = logging.getLogger(actor.__class__.__name__)
         record_message_event(
@@ -6470,15 +6533,11 @@ async def log_edited_message_if_needed(actor, event):
         )
         if is_game_bot:
             record_game_bot_activity(actor, sender, logger, msg=msg, text=text)
-        if managed_mention_identities(actor, msg, text):
-            return log_mention_if_needed(
-                actor,
-                msg,
-                text=text,
-                label="edited",
-                sender=sender,
-                mentions_only=True,
-            )
+        from telegram_message_logging import log_addressed_message_if_needed
+        if await log_addressed_message_if_needed(actor, msg, text=text, sender=sender, edited=True):
+            if is_game_bot:
+                record_edited_cultivation_state_if_needed(actor, msg, text=text, sender=sender, logger=logger)
+            return True
         if is_game_bot and is_relevant_game_bot_edited_message(actor, msg, text):
             record_edited_cultivation_state_if_needed(actor, msg, text=text, sender=sender, logger=logger)
             return log_edited_text_once(actor, msg, text=text, sender=sender)
