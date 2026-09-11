@@ -320,7 +320,7 @@ class WorldBossFeatureTests(unittest.TestCase):
             self.assertEqual(outcome["perfect_count"], 1)
             self.assertEqual(outcome["local_perfect_count"], 1)
             diagnostics = outcome["diagnostics"]
-            self.assertEqual(diagnostics["version"], 2)
+            self.assertEqual(diagnostics["version"], 3)
             self.assertEqual(diagnostics["player"]["attackBonus"], 1.08)
             self.assertEqual(diagnostics["hits"][0]["server_status"], "accepted")
             # main sits at slot -4 and the stagger scales with the perfect window.

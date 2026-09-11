@@ -54,6 +54,10 @@ class MiniAppBeastError(RuntimeError):
         super().__init__(self.code)
 
 
+class MiniAppReadDeadlineError(MiniAppBeastError):
+    """A read-only caller exhausted a budget shorter than the normal timeout."""
+
+
 class MiniAppCircuitOpenError(MiniAppBeastError):
     """The shared upstream circuit is open, so no HTTP request was attempted."""
 
@@ -727,7 +731,12 @@ async def _post_json(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if miniapp_upstream_failure(exc):
+        if isinstance(exc, MiniAppReadDeadlineError) and not permit.is_probe:
+            # A short UI deadline says nothing about shared service health.
+            # Neither open the circuit nor clear another request's failures.
+            raise
+        if miniapp_upstream_failure(exc) or isinstance(exc, MiniAppReadDeadlineError):
+            # An elected half-open probe still needs a real response to recover.
             await _run_blocking(
                 _MINIAPP_CIRCUIT.record_failure,
                 origin,

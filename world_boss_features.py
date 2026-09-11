@@ -30,6 +30,7 @@ from log_utils import is_game_bot_sender, resolve_actor_target_chats
 from miniapp_beast import (
     MiniAppBeastError,
     MiniAppCircuitOpenError,
+    MiniAppReadDeadlineError,
     _post_json,
     _run_blocking,
     miniapp_error_details,
@@ -78,7 +79,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 2
+WORLD_BOSS_DIAGNOSTIC_VERSION = 3
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -98,10 +99,19 @@ WORLD_BOSS_TURNSTILE_ERRORS = {
 # Mini App client's own pacing so the automation stays inside normal call rates.
 WORLD_BOSS_WINDOW_POLL_SECONDS = 0.36
 WORLD_BOSS_WINDOW_DRAIN_SECONDS = 0.05
+# A read-only poll must not monopolize the ~2 s preparation window. A timed-out
+# poll can safely fetch the same afterWindowId again; action retry policies stay
+# separate from this short read budget.
+WORLD_BOSS_WINDOW_TIMEOUT_SECONDS = 1
 WORLD_BOSS_WINDOW_STALL_SECONDS = 20.0
 WORLD_BOSS_WINDOW_LIMIT = 64
 WORLD_BOSS_WINDOW_ERROR_BUDGET = 25
 WORLD_BOSS_MAX_BATTLE_SECONDS = 320.0
+# Cross-check /begin against several recent /start responses from this event.
+# One slow token-free begin (731 ms vs ~200 ms on 2026-09-11) otherwise advances
+# both the battle epoch and the hit lead, doubling the initial timing error.
+WORLD_BOSS_CLOCK_SAMPLE_MAX_AGE_SECONDS = 90
+WORLD_BOSS_CLOCK_MIN_SAMPLES = 3
 # The server only credits a perfect hit while the reported hold sits in this range.
 WORLD_BOSS_HOLD_MIN_MS = 520
 WORLD_BOSS_HOLD_MAX_MS = 1250
@@ -249,7 +259,7 @@ class _PersistentWorldBossJsonClient:
         return connection_type(
             self.hostname,
             port=self.port,
-            timeout=max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS)),
+            timeout=max(1, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS)),
         )
 
     def _post_sync(
@@ -285,7 +295,7 @@ class _PersistentWorldBossJsonClient:
                     break
                 candidate.close()
         connection = connection or self._new_connection(timeout)
-        connection.timeout = max(5, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
+        connection.timeout = max(1, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
         if connection.sock is not None:
             connection.sock.settimeout(connection.timeout)
         reusable = False
@@ -298,9 +308,16 @@ class _PersistentWorldBossJsonClient:
         except (OSError, http.client.HTTPException) as exc:
             # A lost response may follow a successful one-shot POST. Only the
             # endpoint's explicit retry policy may decide to send again.
-            error = MiniAppBeastError(
-                "api_timeout" if isinstance(exc, TimeoutError) else "api_unreachable"
-            )
+            if (
+                isinstance(exc, TimeoutError)
+                and request_path.rstrip("/") == "/api/miniapp/xianxia-world-boss/window"
+                and connection.timeout < WORLD_BOSS_CHARGE_TIMEOUT_SECONDS
+            ):
+                error = MiniAppReadDeadlineError("boss_window_poll_timeout")
+            else:
+                error = MiniAppBeastError(
+                    "api_timeout" if isinstance(exc, TimeoutError) else "api_unreachable"
+                )
             error.details = {"transport_error": type(exc).__name__.lower()}
             raise error from exc
         finally:
@@ -1752,13 +1769,36 @@ class WorldBossMonitor:
     ) -> None:
         """Page through /window until the server reports ``done``.
 
-        Mirrors the browser: poll roughly every 360ms, treat
+        Mirrors the browser: start polls roughly every 360ms, treat
         ``boss_window_not_ready`` as "keep waiting", and stop once the server has
         no more windows. Each reveal records how much lead time it arrived with,
         which is the number needed to judge whether a full hold still fits.
         """
         error_budget = WORLD_BOSS_WINDOW_ERROR_BUDGET
         last_reveal_at = self.monotonic()
+        last_poll_at: float | None = None
+        polling = {"request_count": 0, "wait_count": 0, "max_request_ms": 0,
+                   "max_poll_gap_ms": 0, "max_queue_delay_ms": 0, "max_bookkeeping_ms": 0}
+
+        def record_poll() -> None:
+            polling["max_request_ms"] = max(
+                polling["max_request_ms"],
+                max(0, int(round((self.monotonic() - requested_at) * 1000))),
+            )
+            for attempt in trace.get("attempts", []):
+                if not isinstance(attempt, dict):
+                    continue
+                for field in ("queue_delay_ms", "bookkeeping_ms"):
+                    polling["max_" + field] = max(polling["max_" + field], int(attempt.get(field) or 0))
+
+        async def wait_for_next_poll() -> None:
+            # The official client measures the interval from request start.
+            # Adding another 360 ms after HTTP completion loses useful lead.
+            await self.sleep(max(
+                WORLD_BOSS_WINDOW_DRAIN_SECONDS,
+                WORLD_BOSS_WINDOW_POLL_SECONDS - (self.monotonic() - requested_at),
+            ))
+
         deadline = battle_start + WORLD_BOSS_MAX_BATTLE_SECONDS
         try:
             # Bound on windows actually revealed: error entries share reveal_log but
@@ -1782,6 +1822,12 @@ class WorldBossMonitor:
                     break
                 trace: dict[str, Any] = {}
                 requested_at = self.monotonic()
+                polling["request_count"] += 1
+                if last_poll_at is not None:
+                    polling["max_poll_gap_ms"] = max(
+                        polling["max_poll_gap_ms"], int(round((requested_at - last_poll_at) * 1000)),
+                    )
+                last_poll_at = requested_at
                 try:
                     data = await self._request(
                         entry.origin,
@@ -1793,13 +1839,14 @@ class WorldBossMonitor:
                             "afterWindowId": after_window_id,
                         },
                         retries=0,
-                        timeout=min(self.timeout, 5),
+                        timeout=min(self.timeout, WORLD_BOSS_WINDOW_TIMEOUT_SECONDS),
                         trace=trace,
                         time_critical=False,
                     )
                 except MiniAppCircuitOpenError:
                     raise
                 except MiniAppBeastError as exc:
+                    record_poll()
                     if exc.code == "boss_event_closed":
                         self._mark_boss_defeated("boss_event_closed")
                         break
@@ -1814,19 +1861,24 @@ class WorldBossMonitor:
                                     0, int(round((requested_at - battle_start) * 1000))
                                 ),
                                 "request": trace,
+                                "polling": dict(polling),
                             }
                         )
                         if error_budget <= 0:
                             break
-                    await self.sleep(WORLD_BOSS_WINDOW_POLL_SECONDS)
+                    else:
+                        polling["wait_count"] += 1
+                    await wait_for_next_poll()
                     continue
                 except Exception:
+                    record_poll()
                     error_budget -= 1
                     if error_budget <= 0:
                         break
-                    await self.sleep(WORLD_BOSS_WINDOW_POLL_SECONDS)
+                    await wait_for_next_poll()
                     continue
 
+                record_poll()
                 received_at = self.monotonic()
                 if self._boss_stop_requested():
                     reveal_log.append(
@@ -1867,16 +1919,18 @@ class WorldBossMonitor:
                             # i.e. how much room is left to charge and strike.
                             "lead_ms": window["centerMs"] - received_elapsed_ms,
                             "request": trace,
+                            "polling": dict(polling),
                         }
                     )
                     await queue.put(window)
+                    polling = dict.fromkeys(polling, 0)
                 if bool(data.get("done")):
                     break
-                await self.sleep(
-                    WORLD_BOSS_WINDOW_DRAIN_SECONDS
-                    if window is not None
-                    else WORLD_BOSS_WINDOW_POLL_SECONDS
-                )
+                if window is not None:
+                    await self.sleep(WORLD_BOSS_WINDOW_DRAIN_SECONDS)
+                else:
+                    polling["wait_count"] += 1
+                    await wait_for_next_poll()
         finally:
             await queue.put(None)
 
@@ -2496,6 +2550,9 @@ class WorldBossMonitor:
         charge_error = ""
         charge_trace: dict[str, Any] = {}
         charge_started_elapsed_ms = -1
+        charge_received_elapsed_ms = -1
+        charge_wake_lateness_ms = 0
+        checkpoint_duration_ms = 0
         planned_hold_ms = self._planned_hold_ms() if charge_required else 0
         hold_skew_estimate_ms = int(round(self._hold_skew_ms))
         hold_ms = planned_hold_ms
@@ -2518,10 +2575,15 @@ class WorldBossMonitor:
                 refreshed_charge_at = target - planned_hold_ms / 1000.0
                 if not await self._sleep_until(refreshed_charge_at):
                     return self._skipped_hit_result(window, window_index)
+            charge_wake_lateness_ms = max(
+                0, int(round((self.monotonic() - (target - planned_hold_ms / 1000.0)) * 1000)),
+            )
             checkpoint = getattr(self, "_checkpoint", None)
             if checkpoint is not None:
                 checkpoint["claimed_window_ids"].append(str(window["id"]))
+                checkpoint_started_at = self.monotonic()
                 await self._save_checkpoint()
+                checkpoint_duration_ms = max(0, int(round((self.monotonic() - checkpoint_started_at) * 1000)))
             charge_started_at = self.monotonic()
             charge_started_elapsed_ms = max(
                 0, int(round((charge_started_at - battle_start) * 1000))
@@ -2542,6 +2604,8 @@ class WorldBossMonitor:
                     time_critical=False,
                 )
                 charge_ticket = str(charge_payload.get("chargeTicket") or "").strip()
+                charge_received_at = charge_trace.get("response_received_monotonic", self.monotonic())
+                charge_received_elapsed_ms = max(0, int(round((charge_received_at - battle_start) * 1000)))
                 charge_boss_hp = self._boss_hp_from_response(charge_payload)
                 if charge_boss_hp is not None and charge_boss_hp <= 0:
                     self._mark_boss_defeated("boss_defeated", charge_boss_hp)
@@ -2572,16 +2636,30 @@ class WorldBossMonitor:
             target = battle_start + target_ms / 1000.0
 
         strike_ms = target_ms
+        min_hold_strike_ms = None
         if charge_required and charge_ticket and charge_started_elapsed_ms >= 0:
             # A late reveal cannot reach the minimum hold by the ideal strike time.
             # Delaying the strike buys hold, but only helps while the later moment
             # still sits inside the perfect tolerance; past that, accuracy wins.
             min_hold_strike_ms = charge_started_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS
+            if request_lead_ms > 0 and charge_received_elapsed_ms >= 0:
+                # A slow charge response may mean the ticket was only just minted.
+                # Estimate its age using the normal return + outbound delay, not
+                # half of this abnormally slow request. Buy actual holding time
+                # when it still fits; keep reporting the real press/release gap.
+                min_hold_strike_ms = max(
+                    min_hold_strike_ms,
+                    charge_received_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS + 40 - 2 * request_lead_ms,
+                )
             if min_hold_strike_ms > strike_ms:
                 perfect_deadline_ms = (
                     int(window["centerMs"]) + int(window["perfectMs"]) - 40
+                    - request_lead_ms - drift_ms
                 )
-                if min_hold_strike_ms <= perfect_deadline_ms:
+                if (
+                    min_hold_strike_ms <= perfect_deadline_ms
+                    and min_hold_strike_ms - charge_started_elapsed_ms <= WORLD_BOSS_HOLD_MAX_MS
+                ):
                     strike_ms = min_hold_strike_ms
         target = battle_start + strike_ms / 1000.0
 
@@ -2635,7 +2713,7 @@ class WorldBossMonitor:
             "sent_elapsed_ms": sent_elapsed_ms,
             "actual_elapsed_ms": elapsed_ms,
             "signed_delta_ms": signed_delta_ms,
-            "wake_lateness_ms": elapsed_ms - strike_ms,
+            "wake_lateness_ms": max(0, sent_elapsed_ms - strike_ms),
             "hold_ms": hold_ms,
             "local_matched": matched,
             "local_perfect": perfect,
@@ -2643,6 +2721,10 @@ class WorldBossMonitor:
         if charge_required:
             diagnostic["charge"] = {
                 "requested_elapsed_ms": charge_started_elapsed_ms,
+                "received_elapsed_ms": charge_received_elapsed_ms,
+                "wake_lateness_ms": charge_wake_lateness_ms,
+                "checkpoint_duration_ms": checkpoint_duration_ms,
+                "minimum_hold_target_ms": min_hold_strike_ms,
                 "granted": bool(charge_ticket),
                 "error": charge_error,
                 "request": charge_trace,
@@ -3126,6 +3208,38 @@ class WorldBossMonitor:
         # for static analyzers and unusual test doubles.
         raise MiniAppBeastError("request_failed")
 
+    @classmethod
+    def _entry_rtt_reference(cls, payload: dict[str, Any], response_at: float) -> tuple[float | None, int]:
+        """Use only fresh, successful network timings from this event's entry.
+
+        The median of the three fastest recent replies tolerates one unusually
+        small sample and avoids mistaking server work or cold connections for
+        propagation delay. No other account or previous event supplies a clock.
+        """
+        samples: list[float] = []
+        diagnostics = payload.get("_client_diagnostics")
+        observations = diagnostics.get("entry_requests") if isinstance(diagnostics, dict) else None
+        for observation in observations[-8:] if isinstance(observations, list) else []:
+            if not isinstance(observation, dict):
+                continue
+            request = observation.get("request") or {}
+            if not isinstance(request, dict):
+                continue
+            received_at = cls._finite_ms(request.get("response_received_monotonic"))
+            if received_at is None or not 0 <= response_at - received_at <= WORLD_BOSS_CLOCK_SAMPLE_MAX_AGE_SECONDS:
+                continue
+            attempts = request.get("attempts") or []
+            if not isinstance(attempts, list) or not attempts or not isinstance(attempts[-1], dict) or attempts[-1].get("ok") is not True:
+                continue
+            # Total duration includes thread queues and shared health bookkeeping.
+            # It is not an RTT fallback when the network trace is unavailable.
+            duration = cls._finite_ms(attempts[-1].get("network_duration_ms"))
+            if duration is not None and 0 < duration <= WORLD_BOSS_TIMEOUT_SECONDS * 1000:
+                samples.append(duration)
+        if len(samples) < WORLD_BOSS_CLOCK_MIN_SAMPLES:
+            return None, len(samples)
+        return statistics.median(sorted(samples)[:WORLD_BOSS_CLOCK_MIN_SAMPLES]), len(samples)
+
     async def _fight(
         self,
         entry: WorldBossEntry,
@@ -3194,6 +3308,15 @@ class WorldBossMonitor:
                 round_trip = max(0.0, clock_rtt_ms / 1000.0)
             else:
                 round_trip = max(0.0, response_at - started_request_at)
+            entry_rtt_ms, entry_sample_count = self._entry_rtt_reference(payload, response_at)
+            begin_trace["entry_rtt_sample_count"] = entry_sample_count
+            if entry_rtt_ms is not None:
+                begin_trace["entry_rtt_ms"] = self._rounded_ms(entry_rtt_ms)
+                if entry_rtt_ms < round_trip * 1000:
+                    begin_trace["begin_clock_rtt_ms"] = int(round(round_trip * 1000))
+                    round_trip = entry_rtt_ms / 1000.0
+                    begin_trace["clock_rtt_ms"] = self._rounded_ms(entry_rtt_ms)
+                    begin_trace["clock_rtt_source"] = "entry_requests"
             starts_in = max(0.0, float(sync.get("startsInMs") or 0) / 1000.0 - round_trip / 2.0)
             battle_start = response_at + starts_in
         server_starts_in_ms = max(0.0, float(sync.get("startsInMs") or 0))
