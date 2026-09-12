@@ -119,6 +119,7 @@ def yinluo_default_state():
         "reserves": {},
         "slots": {},
         "appease_suppressed_until": {},
+        "appease_sync_pending": False,
         "imprison_sync_pending": False,
         "post_summon_stage": "",
         "post_summon_target_slots": [],
@@ -336,6 +337,18 @@ class YinluoMixin:
             state = yinluo_default_state()
             target["yinluo"] = state
         else:
+            if "appease_sync_pending" not in state:
+                # Older releases kept contradicted exhausted slots and retried
+                # them whenever the 30-minute no-op suppression expired.
+                suppressed = {str(slot) for slot in (state.get("appease_suppressed_until") or {})}
+                state["appease_sync_pending"] = any(
+                    str(slot) in suppressed
+                    and isinstance(item, dict)
+                    and "魂力枯竭" in str(item.get("status") or "")
+                    for slot, item in (state.get("slots") or {}).items()
+                )
+                if state["appease_sync_pending"]:
+                    state["next_sync_at"] = ""
             defaults = yinluo_default_state()
             for key, value in defaults.items():
                 state.setdefault(key, value)
@@ -498,6 +511,8 @@ class YinluoMixin:
 
     def yinluo_exhausted_slots(self, identity):
         state = self.get_yinluo_state(identity)
+        if state.get("appease_sync_pending"):
+            return []
         slots = state.get("slots") or {}
         suppressed = state.get("appease_suppressed_until") or {}
         exhausted = []
@@ -551,10 +566,25 @@ class YinluoMixin:
                     suppressed.pop(slot, None)
         state["last_sync_at"] = now
         state["next_sync_at"] = ""
+        if state.get("appease_sync_pending"):
+            state["appease_sync_pending"] = False
+            state["next_action_at"] = ""
         state["last_status"] = "synced"
         state["last_detail"] = f"煞气 {state.get('sha_current', 0)}/{state.get('sha_max', 0)}，凶兽戾魄 {state.get('reserves', {}).get(YINLUO_SOUL, 0)}"
         self.save_state()
         return True
+
+    async def yinluo_sync_after_appease(self, identity):
+        """Confirm contradicted slot state before allowing another action."""
+        state = self.get_yinluo_state(identity)
+        if not state.get("appease_sync_pending"):
+            return True
+        if is_future(state.get("next_sync_at", "")):
+            return False
+        # Persist the retry delay before I/O, including exceptions/restarts.
+        state["next_sync_at"] = add_seconds_str(now_str(), YINLUO_RETRY_SECONDS)
+        self.save_state()
+        return await self.yinluo_sync_banner(identity)
 
     async def yinluo_daily_sacrifice(self, identity):
         text = await self.send_yinluo_command(identity, ".每日献祭", timeout=60)
@@ -827,7 +857,12 @@ class YinluoMixin:
             else:
                 for target_slot in target_slots:
                     suppressed[str(target_slot)] = add_seconds_str(now_str(), YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS)
-                detail = f"炼化槽无需安抚，{YINLUO_APPEASE_NOOP_SUPPRESS_SECONDS // 60}分钟内不重复"
+                    self.yinluo_replace_slot(identity, target_slot, {
+                        **self.yinluo_slot_item(identity, target_slot),
+                        "status": "状态待同步",
+                    })
+                state["appease_sync_pending"] = bool(target_slots)
+                detail = "炼化槽无需安抚，重新同步槽位" if target_slots else "炼化槽无需安抚"
                 self.yinluo_set_status(identity, "appease_noop", detail, 5, text)
             return True
         self.yinluo_set_status(identity, "appease_failed", "一键安抚幡灵失败", YINLUO_RETRY_SECONDS, text)
@@ -844,6 +879,8 @@ class YinluoMixin:
                 stage = str(state.get("post_summon_stage") or "").strip()
                 if not stage:
                     return True
+                if not await self.yinluo_sync_after_appease(identity):
+                    return False
 
                 if stage == "sync":
                     if not await self.yinluo_sync_banner(identity):
@@ -926,6 +963,10 @@ class YinluoMixin:
             return wait
 
         state = self.get_yinluo_state(identity)
+        if state.get("appease_sync_pending"):
+            if await self.yinluo_sync_after_appease(identity):
+                return 5
+            return max(10, min(int(seconds_until(state.get("next_sync_at", ""))), YINLUO_RETRY_SECONDS))
         if state.get("post_summon_stage"):
             if is_future(state.get("next_action_at", "")):
                 return max(

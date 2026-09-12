@@ -5816,7 +5816,8 @@ class ParserFixtureTests(unittest.TestCase):
         yinluo_state = actor.get_yinluo_state("缘生子")
 
         self.assertEqual(yinluo_state["last_status"], "appease_noop")
-        self.assertEqual(yinluo_state["slots"]["1"]["status"], "魂力枯竭")
+        self.assertEqual(yinluo_state["slots"]["1"]["status"], "状态待同步")
+        self.assertTrue(yinluo_state["appease_sync_pending"])
         self.assertGreater(common_seconds_until(yinluo_state["appease_suppressed_until"]["1"]), 60)
 
         self.assertEqual(actor.yinluo_exhausted_slots("缘生子"), [])
