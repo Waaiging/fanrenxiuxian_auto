@@ -43,6 +43,7 @@ from world_boss_turnstile import (
     default_world_boss_turnstile_broker,
 )
 from world_boss_recovery import WorldBossRecoveryStore
+from world_boss_runtime import run_isolated_battle
 
 
 WORLD_BOSS_BUTTON_TEXT = "进入真仙战场"
@@ -79,7 +80,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 3
+WORLD_BOSS_DIAGNOSTIC_VERSION = 4
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -167,6 +168,7 @@ AUTH_TOKEN_ERRORS = {
     "boss_token_used",
 }
 TRANSIENT_WORLD_BOSS_ERRORS = {
+    "boss_window_fetch_failed",
     "api_timeout",
     "api_unreachable",
     "request_failed",
@@ -656,6 +658,7 @@ class WorldBossMonitor:
         self._boss_defeat_marker: Path | None = None
         self._boss_skipped_window_count = 0
         self._http_executor: ThreadPoolExecutor | None = None
+        self._checkpoint_executor: ThreadPoolExecutor | None = None
         try:
             configured_workers = int(settings.get("http_workers") or WORLD_BOSS_HTTP_WORKERS)
         except (TypeError, ValueError):
@@ -680,6 +683,28 @@ class WorldBossMonitor:
             self._http_executor = executor
         return executor
 
+    def _world_boss_checkpoint_executor(self) -> ThreadPoolExecutor:
+        executor = getattr(self, "_checkpoint_executor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"boss-state-{self.account}",
+            )
+            self._checkpoint_executor = executor
+        return executor
+
+    async def _dispatch_fight(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Injected transports/clocks stay in the caller's loop. Only production
+        # battle I/O is isolated; Telethon and actor state remain on their owner.
+        if self.post_json is not None or self.sleep is not asyncio.sleep or self.monotonic is not time.monotonic:
+            return await self._fight(*args, **kwargs)
+
+        async def fight():
+            self._checkpoint_lock = asyncio.Lock()
+            self._battle_execution = "dedicated_thread"
+            return await self._fight(*args, **kwargs)
+
+        return await run_isolated_battle(fight, account=self.account)
+
     def _save(self) -> None:
         saver = getattr(self.actor, "save_state", None)
         if callable(saver):
@@ -691,7 +716,7 @@ class WorldBossMonitor:
         async with self._checkpoint_lock:
             snapshot = json.loads(json.dumps(self._checkpoint))
             writing = asyncio.create_task(_run_blocking(
-                self.recovery_store.save, snapshot, executor=self._world_boss_http_executor(),
+                self.recovery_store.save, snapshot, executor=self._world_boss_checkpoint_executor(),
             ))
             try:
                 await asyncio.shield(writing)
@@ -717,7 +742,7 @@ class WorldBossMonitor:
         while True:
             await asyncio.sleep(30)
             try:
-                await _run_blocking(self.recovery_store.list_pending, executor=self._world_boss_http_executor())
+                await _run_blocking(self.recovery_store.list_pending, executor=self._world_boss_checkpoint_executor())
             except Exception as exc:
                 self.log.warning("World Boss recovery cleanup failed: %s", _error_code(exc))
 
@@ -1039,6 +1064,9 @@ class WorldBossMonitor:
             # Requests have their own finite timeout; interpreter shutdown will
             # join any still-running worker naturally.
             executor.shutdown(wait=False, cancel_futures=True)
+        checkpoint_executor, self._checkpoint_executor = self._checkpoint_executor, None
+        if checkpoint_executor is not None:
+            checkpoint_executor.shutdown(wait=False, cancel_futures=True)
         remover = getattr(self.client, "remove_event_handler", None)
         if callable(remover):
             if self._new_handler is not None:
@@ -1145,7 +1173,7 @@ class WorldBossMonitor:
             await self.sleep(min(30.0, remaining))
         self._record(entry, "recovery_expired", error="world_boss_recovery_expired")
         self.log.error("World Boss recovery deadline reached for event %s", entry.message_id)
-        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_checkpoint_executor())
 
     async def _run_entry_once(
         self,
@@ -1285,7 +1313,8 @@ class WorldBossMonitor:
             if isinstance(pending_outcome, dict):
                 self.log.warning("World Boss settlement pending for %s: %s", identity, code)
                 return {**pending_outcome, "identity": identity,
-                        "status": status_map.get(code, "finish_pending"), "error": code}
+                        "status": status_map.get(code, "finish_pending" if getattr(exc, "world_boss_retryable", True) else "failed"),
+                        "error": code}
             if code == "boss_action_limit":
                 self.log.info(
                     "IN [Mini App | %s]:\n青元子世界 Boss -> 服务器确认本轮已完成",
@@ -1766,6 +1795,7 @@ class WorldBossMonitor:
         *,
         after_window_id: str = "",
         revealed_count: int = 0,
+        max_duration_ms: int | None = None,
     ) -> None:
         """Page through /window until the server reports ``done``.
 
@@ -1776,6 +1806,8 @@ class WorldBossMonitor:
         """
         error_budget = WORLD_BOSS_WINDOW_ERROR_BUDGET
         last_reveal_at = self.monotonic()
+        last_stall_notice_at = last_reveal_at
+        exit_reason = "window_count_reached"
         last_poll_at: float | None = None
         polling = {"request_count": 0, "wait_count": 0, "max_request_ms": 0,
                    "max_poll_gap_ms": 0, "max_queue_delay_ms": 0, "max_bookkeeping_ms": 0}
@@ -1800,11 +1832,15 @@ class WorldBossMonitor:
             ))
 
         deadline = battle_start + WORLD_BOSS_MAX_BATTLE_SECONDS
+        maximum = self._finite_ms(max_duration_ms)
+        if maximum is not None and maximum > 0:
+            deadline = min(deadline, battle_start + max(0.0, maximum / 1000.0 - 1.0))
         try:
             # Bound on windows actually revealed: error entries share reveal_log but
             # must never consume the budget of windows still to come.
             while revealed_count < min(expected_count, WORLD_BOSS_WINDOW_LIMIT):
                 if self._boss_stop_requested():
+                    exit_reason = "boss_stopped"
                     reveal_log.append(
                         {
                             "sequence": revealed_count + 1,
@@ -1815,11 +1851,19 @@ class WorldBossMonitor:
                     break
                 now = self.monotonic()
                 if now >= deadline:
+                    exit_reason = "battle_deadline"
                     break
-                if now - last_reveal_at >= WORLD_BOSS_WINDOW_STALL_SECONDS:
-                    # No new window for several expected intervals: the round is
-                    # over or the server stopped revealing. Do not hold the worker.
-                    break
+                if now - max(last_reveal_at, last_stall_notice_at) >= WORLD_BOSS_WINDOW_STALL_SECONDS:
+                    # Local stalls do not prove that the server ended the round.
+                    # Keep the cursor and drain later windows until an explicit
+                    # end, the bounded error budget, or the battle deadline.
+                    reveal_log.append({
+                        "status": "stalled", "sequence": revealed_count + 1,
+                        "elapsed_ms": max(0, int(round((now - battle_start) * 1000))),
+                        "since_reveal_ms": max(0, int(round((now - last_reveal_at) * 1000))),
+                        "polling": dict(polling),
+                    })
+                    last_stall_notice_at = now
                 trace: dict[str, Any] = {}
                 requested_at = self.monotonic()
                 polling["request_count"] += 1
@@ -1848,6 +1892,7 @@ class WorldBossMonitor:
                 except MiniAppBeastError as exc:
                     record_poll()
                     if exc.code == "boss_event_closed":
+                        exit_reason = "boss_event_closed"
                         self._mark_boss_defeated("boss_event_closed")
                         break
                     if exc.code not in WORLD_BOSS_WINDOW_WAIT_ERRORS:
@@ -1865,22 +1910,25 @@ class WorldBossMonitor:
                             }
                         )
                         if error_budget <= 0:
-                            break
+                            exit_reason = "error_budget_exhausted"
+                            raise MiniAppBeastError("boss_window_fetch_failed") from exc
                     else:
                         polling["wait_count"] += 1
                     await wait_for_next_poll()
                     continue
-                except Exception:
+                except Exception as exc:
                     record_poll()
                     error_budget -= 1
                     if error_budget <= 0:
-                        break
+                        exit_reason = "error_budget_exhausted"
+                        raise MiniAppBeastError("boss_window_fetch_failed") from exc
                     await wait_for_next_poll()
                     continue
 
                 record_poll()
                 received_at = self.monotonic()
                 if self._boss_stop_requested():
+                    exit_reason = "boss_stopped"
                     reveal_log.append(
                         {
                             "sequence": revealed_count + 1,
@@ -1925,13 +1973,24 @@ class WorldBossMonitor:
                     await queue.put(window)
                     polling = dict.fromkeys(polling, 0)
                 if bool(data.get("done")):
+                    exit_reason = "server_done"
                     break
                 if window is not None:
                     await self.sleep(WORLD_BOSS_WINDOW_DRAIN_SECONDS)
                 else:
                     polling["wait_count"] += 1
                     await wait_for_next_poll()
+        except BaseException as exc:
+            if exit_reason == "window_count_reached":
+                exit_reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "request_failed"
+            raise
         finally:
+            reveal_log.append({
+                "status": "finished", "reason": exit_reason,
+                "revealed_count": revealed_count, "expected_count": expected_count,
+                "elapsed_ms": max(0, int(round((self.monotonic() - battle_start) * 1000))),
+                "polling": dict(polling),
+            })
             await queue.put(None)
 
     def _reset_drift(self) -> None:
@@ -2557,6 +2616,15 @@ class WorldBossMonitor:
         hold_skew_estimate_ms = int(round(self._hold_skew_ms))
         hold_ms = planned_hold_ms
         if charge_required:
+            # Reserve the action as soon as the window arrives, while there is
+            # still preparation time. Keep the durable at-most-once guarantee,
+            # but do not start a full checkpoint write at the charge deadline.
+            checkpoint = getattr(self, "_checkpoint", None)
+            if checkpoint is not None and str(window["id"]) not in checkpoint["claimed_window_ids"]:
+                checkpoint["claimed_window_ids"].append(str(window["id"]))
+                checkpoint_started_at = self.monotonic()
+                await self._save_checkpoint()
+                checkpoint_duration_ms = max(0, int(round((self.monotonic() - checkpoint_started_at) * 1000)))
             charge_at = target - planned_hold_ms / 1000.0
             if not await self._sleep_until(charge_at):
                 return self._skipped_hit_result(window, window_index)
@@ -2578,13 +2646,24 @@ class WorldBossMonitor:
             charge_wake_lateness_ms = max(
                 0, int(round((self.monotonic() - (target - planned_hold_ms / 1000.0)) * 1000)),
             )
-            checkpoint = getattr(self, "_checkpoint", None)
-            if checkpoint is not None:
-                checkpoint["claimed_window_ids"].append(str(window["id"]))
-                checkpoint_started_at = self.monotonic()
-                await self._save_checkpoint()
-                checkpoint_duration_ms = max(0, int(round((self.monotonic() - checkpoint_started_at) * 1000)))
             charge_started_at = self.monotonic()
+            if (charge_started_at - battle_start) * 1000 + request_lead_ms > int(window["centerMs"]) + int(window["hitMs"]):
+                elapsed_ms = max(0, int(round((charge_started_at - battle_start) * 1000)))
+                return {
+                    "action": None, "ok": False, "matched": False, "perfect": False,
+                    "accepted_perfect": False, "damage": 0.0, "error": "local_window_missed",
+                    "diagnostic": {
+                        "sequence": window_index, "window_id": str(window["id"]),
+                        "center_ms": int(window["centerMs"]), "hit_ms": int(window["hitMs"]),
+                        "perfect_ms": int(window["perfectMs"]), "account_offset_ms": offset_ms,
+                        "target_ms": target_ms, "actual_elapsed_ms": elapsed_ms,
+                        "signed_delta_ms": elapsed_ms - int(window["centerMs"]),
+                        "server_status": "not_sent", "http_status": 0, "error": "local_window_missed",
+                        "charge": {"granted": False, "requested_elapsed_ms": -1,
+                                   "wake_lateness_ms": charge_wake_lateness_ms,
+                                   "checkpoint_duration_ms": checkpoint_duration_ms},
+                    },
+                }
             charge_started_elapsed_ms = max(
                 0, int(round((charge_started_at - battle_start) * 1000))
             )
@@ -3338,6 +3417,7 @@ class WorldBossMonitor:
                 "hit_results": {}, "claimed_window_ids": [],
             }
             await self._save_checkpoint()
+        self._finish_clock = (self._checkpoint["battle_start_epoch"], battle_start)
         if reveal_mode:
             # 2026-08-26 protocol: no timetable up front. Windows are revealed one
             # at a time by /window while the battle runs, so reveal and strike must
@@ -3361,6 +3441,7 @@ class WorldBossMonitor:
                     expected_count,
                     after_window_id=str(windows[-1]["id"]) if windows else "",
                     revealed_count=len(windows),
+                    max_duration_ms=challenge.get("maxDurationMs"),
                 )
             )
             # Each strike owns its own schedule: one slow /hit (retries plus timeout)
@@ -3494,11 +3575,9 @@ class WorldBossMonitor:
             (int(item.get("t") or 0) for item in actions),
             default=0,
         )
-        duration_ms = max(
-            last_end_ms + int(self.finish_grace_seconds * 1000),
-            last_action_ms,
-            elapsed_ms,
-        )
+        # Only report time that really elapsed, including after an early room
+        # close. A future window's planned end is not elapsed battle time.
+        duration_ms = max(last_action_ms, elapsed_ms)
         proof = {
             "mode": "qyz_focus_burst_v2",
             "challengeId": challenge_id,
@@ -3532,6 +3611,7 @@ class WorldBossMonitor:
             "version": WORLD_BOSS_DIAGNOSTIC_VERSION,
             "recorded_at": _now_text(),
             "strategy": {
+                "execution": getattr(self, "_battle_execution", "worker_loop"),
                 "stance": WORLD_BOSS_STANCE,
                 "hold_ms": WORLD_BOSS_HOLD_MS,
                 "planned_hold_ms": self._planned_hold_ms(),
@@ -3569,6 +3649,9 @@ class WorldBossMonitor:
             },
             "window_reveal": {
                 "mode": "reveal" if reveal_mode else "challenge",
+                "exit_reason": next((row.get("reason", "") for row in reversed(reveal_log)
+                                     if row.get("status") == "finished"), ""),
+                "stall_count": sum(row.get("status") == "stalled" for row in reveal_log),
                 "revealed_count": sum(
                     1 for item in reveal_log if item.get("status") == "revealed"
                 ),
@@ -3612,10 +3695,52 @@ class WorldBossMonitor:
         await self._save_checkpoint()
         return await self._submit_finish(entry, self._checkpoint)
 
+    async def _prepare_finish_proof(self, checkpoint: dict[str, Any]) -> None:
+        """Repair an insufficient duration by waiting real time, never by padding."""
+        proof = checkpoint["proof"]
+        challenge = (checkpoint.get("payload") or {}).get("challenge") or {}
+        minimum = max(0, int(self._finite_ms(challenge.get("minDurationMs")) or 0))
+        previous = max(0, int(self._finite_ms(proof.get("durationMs")) or 0))
+        if previous >= minimum and not checkpoint.get("refresh_finish_duration"):
+            # Retrying a valid, possibly already accepted settlement preserves
+            # its exact proof. Only a known short duration needs rebuilding.
+            return
+        epoch = self._finite_ms(checkpoint.get("battle_start_epoch"))
+        if epoch is None:
+            raise MiniAppBeastError("boss_finish_clock_missing")
+        clock = getattr(self, "_finish_clock", None)
+        if not clock or clock[0] != epoch:
+            clock = (epoch, self.monotonic() + epoch - time.time())
+            self._finish_clock = clock
+        elapsed = max(0, int((self.monotonic() - clock[1]) * 1000))
+        wait = max(0.0, (minimum - elapsed) / 1000.0)
+        expires = self._finite_ms(checkpoint.get("expires_epoch"))
+        maximum = max(0, int(self._finite_ms(challenge.get("maxDurationMs")) or 0))
+        if (expires is not None and time.time() + wait >= expires) or (maximum and max(elapsed, minimum) > maximum):
+            raise MiniAppBeastError("boss_finish_expired")
+        if wait:
+            # Settlement still needs its advertised minimum after a room stop;
+            # the attack sleeper deliberately wakes early on that stop signal.
+            await self.sleep(wait + 0.05)
+            elapsed = max(0, int((self.monotonic() - clock[1]) * 1000))
+        if elapsed < minimum:
+            raise MiniAppBeastError("boss_finish_clock_invalid")
+        if maximum and elapsed > maximum:
+            raise MiniAppBeastError("boss_finish_expired")
+        checkpoint["proof"] = {**proof, "durationMs": elapsed}
+        checkpoint.pop("refresh_finish_duration", None)
+        checkpoint["outcome"]["diagnostics"]["finish_timing"] = {
+            "previous_duration_ms": previous, "duration_ms": elapsed,
+            "minimum_duration_ms": minimum, "waited_ms": int(round(wait * 1000)),
+            "source": "elapsed_monotonic",
+        }
+        await self._save_checkpoint()
+
     async def _submit_finish(self, entry: WorldBossEntry, checkpoint: dict[str, Any]) -> dict[str, Any]:
         outcome = checkpoint["outcome"]
         trace: dict[str, Any] = {}
         try:
+            await self._prepare_finish_proof(checkpoint)
             finished = await self._request(
                 entry.origin, "/api/miniapp/xianxia-world-boss/finish",
                 {"token": checkpoint["session_token"], "initData": checkpoint["init_data"],
@@ -3626,12 +3751,25 @@ class WorldBossMonitor:
             outcome["diagnostics"]["finish"] = {
                 "request": trace, "error": exc.code, "server_details": _error_diagnostics(exc),
             }
-            if exc.code in AUTH_TOKEN_ERRORS | {"boss_action_limit", "boss_event_closed", "boss_join_closed"}:
-                await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+            terminal = exc.code in AUTH_TOKEN_ERRORS | {
+                "boss_action_limit", "boss_event_closed", "boss_join_closed",
+                "boss_finish_expired", "boss_finish_clock_missing", "boss_finish_clock_invalid",
+            }
+            if exc.code == "boss_duration_too_short":
+                checkpoint["short_finish_rejections"] = int(checkpoint.get("short_finish_rejections") or 0) + 1
+                checkpoint["refresh_finish_duration"] = True
+                terminal = checkpoint["short_finish_rejections"] > 1
+            elif exc.code == "auth_date_expired":
+                checkpoint["finish_auth_refreshes"] = int(checkpoint.get("finish_auth_refreshes") or 0) + 1
+                checkpoint["refresh_init_data"] = True
+                terminal = checkpoint["finish_auth_refreshes"] > 1
+            if terminal:
+                await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_checkpoint_executor())
                 self._checkpoint = None
             else:
                 await self._save_checkpoint()
             exc.world_boss_outcome = outcome
+            exc.world_boss_retryable = not terminal
             raise
         result = finished.get("result") if isinstance(finished.get("result"), dict) else {}
         outcome.update(
@@ -3639,7 +3777,7 @@ class WorldBossMonitor:
             player_hp=int(result.get("player_hp") if result.get("player_hp") is not None else outcome["player_hp"]),
         )
         outcome["diagnostics"]["finish"] = {"request": trace, "server_result": _diagnostic_value(result)}
-        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_http_executor())
+        await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_checkpoint_executor())
         self._checkpoint = None
         return outcome
 
@@ -3650,10 +3788,21 @@ class WorldBossMonitor:
         init_data: str = "",
     ) -> dict[str, Any]:
         resume = await _run_blocking(
-            self.recovery_store.load, entry.fingerprint, executor=self._world_boss_http_executor(),
+            self.recovery_store.load, entry.fingerprint, executor=self._world_boss_checkpoint_executor(),
         )
         if resume and resume.get("identity") == identity:
-            return await self._fight(
+            if resume.get("refresh_init_data"):
+                # Refresh only Telegram authentication on its owning loop. Keep
+                # the same session/challenge/proof; never re-enter the battle.
+                try:
+                    resume["init_data"] = await request_webview_init_data(
+                        self.client, entry.bot_username, entry.token,
+                    )
+                except MiniAppBeastError as exc:
+                    exc.world_boss_outcome = resume.get("outcome")
+                    raise
+                resume.pop("refresh_init_data", None)
+            return await self._dispatch_fight(
                 entry, resume["init_data"], resume["session_token"], resume["payload"],
                 identity=identity, resume=resume,
             )
@@ -3681,7 +3830,7 @@ class WorldBossMonitor:
         if isinstance(client_diagnostics, dict):
             client_diagnostics["requested_identity"] = identity
             client_diagnostics["fixed_player_id_available"] = player_id is not None
-        return await self._fight(
+        return await self._dispatch_fight(
             entry,
             init_data,
             session_token,

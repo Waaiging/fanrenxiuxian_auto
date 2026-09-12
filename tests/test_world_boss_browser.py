@@ -42,8 +42,9 @@ class AutomaticBrowserTests(unittest.TestCase):
             requests = [self.create(broker, account) for account in ('main', 'sub', 'xiaohao', 'waaiging')]
             browser = FakeBrowser()
             worker = AutomaticTurnstileWorker(broker, browser)
-            for _ in requests:
+            for index, _ in enumerate(requests):
                 self.assertTrue(worker.run_once())
+                self.assertEqual(browser.closed, int(index == len(requests) - 1))
             self.assertFalse(worker.run_once())
             self.assertEqual(browser.calls, 4)
             self.assertNotIn('private-browser-fixture', str(broker.list_requests()))

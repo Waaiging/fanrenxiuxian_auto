@@ -318,6 +318,11 @@ class AutomaticTurnstileWorker:
                 self.broker.submit_token(request_id, token)
                 LOG.info("[%s/%s] automatic browser token submitted", row.get("account"), row.get("identity"))
             token = ""
+            if not any(item.get("status") == "pending" for item in self.broker.list_requests()):
+                # Verification and battle share a small VPS. Once the queue is
+                # complete, release Chromium now instead of keeping its working
+                # set alive throughout another 20 seconds of combat.
+                self.browser.close()
         except (BrowserVerificationError, TurnstileRequestError) as exc:
             LOG.warning("[%s/%s] automatic verification attempt %s: %s CF=%s",
                         row.get("account"), row.get("identity"), self.attempts[request_id],

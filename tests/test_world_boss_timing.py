@@ -80,7 +80,8 @@ class WorldBossTimingTests(unittest.TestCase):
                     {"id": str(sequence), "centerMs": row[0], "hitMs": 620, "perfectMs": 210},
                     sequence, lead,
                 ))
-            self.assertEqual(results[6]["error"], "boss_window_expired")
+            self.assertEqual(results[6]["error"], "local_window_missed")
+            self.assertEqual(results[6]["diagnostic"]["server_status"], "not_sent")
             return sum(result["accepted_perfect"] for result in results)
 
         before = asyncio.run(run(100, 366))

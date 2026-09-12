@@ -186,7 +186,7 @@ class WorldBossRevealProtocolTests(unittest.TestCase):
             # A "not ready" reply is normal pacing, not an error worth recording.
             self.assertEqual(
                 [item["status"] for item in reveal_log],
-                ["revealed"],
+                ["revealed", "finished"],
             )
 
         asyncio.run(run())
@@ -453,8 +453,8 @@ class WorldBossRevealProtocolTests(unittest.TestCase):
             details = caught.exception.details
             self.assertIn("begin_response", details)
             self.assertIn("window_reveal", details)
-            # The stall guard stops the loop instead of holding the worker for the
-            # whole battle duration.
+            # Repeated not-ready replies stop at the finite battle deadline.
+            # A local pause by itself must not impersonate a server-side end.
             self.assertGreater(len(polls), 5)
 
         asyncio.run(run())
