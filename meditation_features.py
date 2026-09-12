@@ -50,6 +50,12 @@ class MeditationModeMixin:
         config = self.meditation_config(identity)
         return config["mode"] if config["enabled"] else "disabled"
 
+    def required_meditation_destiny(self, identity="主魂"):
+        identity = self.resolve_avatar_identity(identity)
+        if self.identity_sect_name(identity) == "天星宗" and self.identity_meditation_mode(identity) == "daily":
+            return "紫微"
+        return ""
+
     def meditation_command_paused(self, command, identity="主魂"):
         scope = _COMMAND_SELECTION.get()
         if scope is not None and scope[0] is self and scope[1] == identity:
@@ -61,6 +67,10 @@ class MeditationModeMixin:
             if command == ".服用 合气丹" and not current["use_heqi_pill"]:
                 return True
         command = str(command or "").strip()
+        if command.startswith(".定命 "):
+            required = self.required_meditation_destiny(identity)
+            if required and command.split(maxsplit=1)[1].strip() != required:
+                return True
         if command not in {".深度闭关", ".闭关修炼"}:
             return False
         mode = self.identity_meditation_mode(identity)
@@ -242,7 +252,7 @@ class MeditationModeMixin:
         if self.identity_sect_name(identity) == "天星宗":
             if not await self.ensure_tianxing_destiny_for_action(identity, "cultivation"):
                 self._meditation_retry(
-                    identity, config, "闭关命星未确认",
+                    identity, config, "紫微命星未确认",
                     max(300, self.tianxing_destiny_retry_wait_seconds(identity)),
                 )
                 return None

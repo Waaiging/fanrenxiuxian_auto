@@ -111,6 +111,81 @@ class MeditationModesTests(unittest.TestCase):
         }
         return state["meditation_runtime"]
 
+    def destiny_ready(self, actor, identity="主魂", options=None, choice=""):
+        actor.ensure_tianxing_destiny_for_action = CommonCommandMixin.ensure_tianxing_destiny_for_action.__get__(actor)
+        today = datetime.now().strftime("%Y-%m-%d")
+        actor.tianxing_identity_state(identity).update(
+            last_destiny_observation_date=today, tianxing_destiny_options_date=today,
+            tianxing_destiny_options=options if options is not None else ["天府", "贪狼", "紫微", "太阴"],
+            last_destiny_date=today if choice else "", last_destiny_choice=choice,
+        )
+        actor.responses.update({f".定命 {name}": f"今日命轨定在{name}" for name in ("紫微", "贪狼", "天府", "太阴")})
+
+    def test_daily_tianxing_pins_ziwei_for_every_action_and_identity(self):
+        for account, identities in settings.automation_account_identities().items():
+            for identity in identities:
+                with self.subTest(account=account, identity=identity):
+                    self.select(f"{account}|{identity}", mode="daily")
+                    actor = MeditationActor(account)
+                    actor.sects[identity] = "天星宗"
+                    self.destiny_ready(actor, identity, choice="贪狼")
+                    for action in ("exploration", "crafting", "cultivation"):
+                        self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action(identity, action)))
+                    self.assertEqual(actor.commands(identity), [".定命 紫微"])
+                    self.assertEqual(actor.tianxing_identity_state(identity)["last_destiny_choice"], "紫微")
+
+    def test_daily_tianxing_never_falls_back_if_ziwei_is_unavailable_or_unconfirmed(self):
+        self.select(mode="daily")
+        for options, response, expected in (
+            (["贪狼", "太阴"], "今日命轨定在紫微", []),
+            (["紫微", "贪狼"], "今日已定命贪狼，不可更改", [".定命 紫微"]),
+            (["紫微", "贪狼"], "", [".定命 紫微"]),
+        ):
+            with self.subTest(options=options, response=response):
+                actor = MeditationActor()
+                actor.sects["主魂"] = "天星宗"
+                self.ready(actor)
+                self.destiny_ready(actor, options=options, choice="贪狼")
+                actor.responses[".定命 紫微"] = response
+                asyncio.run(actor.configured_meditation_tick())
+                self.assertEqual(actor.commands(), expected)
+                self.assertEqual(actor.state["last_destiny_choice"], "贪狼")
+                self.assertTrue(actor._meditation_runtime("主魂")["next_retry_at"])
+
+    def test_daily_destiny_pin_does_not_change_other_souls_or_disabled_modes(self):
+        self.select(mode="daily")
+        actor = MeditationActor()
+        actor.sects.update({"主魂": "天星宗", "无咎子": "天星宗"})
+        for identity in ("主魂", "无咎子"):
+            self.destiny_ready(actor, identity)
+            self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action(identity, "exploration")))
+        self.assertEqual(actor.commands(), [".定命 紫微"])
+        self.assertEqual(actor.commands("无咎子"), [".定命 贪狼"])
+        self.select(enabled=False)
+        self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", "crafting")))
+        self.assertEqual(actor.commands(), [".定命 紫微", ".定命 天府"])
+
+    def test_daily_mode_selected_during_auth_blocks_a_queued_other_destiny(self):
+        actor = MeditationActor()
+        actor.sects["主魂"] = "天星宗"
+        post = AsyncMock(return_value={"ok": True, "actionResult": {"ok": True, "message": "今日命轨定在紫微"}})
+        transport = MiniAppDwellingTransport(object(), "https://t.me/fanrenxiuxian_bot?startapp=df_fixture", post_json=post)
+        transport.sect_actor = actor
+        transport.identity_player_ids = {"主魂": 100}
+
+        async def authenticate():
+            self.select(mode="daily")
+            transport.init_data = "fixture"
+            transport.start_payload = {"ok": True}
+
+        transport._initialize_unlocked = authenticate
+        with self.assertRaises(SectTaskStopped):
+            asyncio.run(transport.command(".定命 贪狼"))
+        post.assert_not_awaited()
+        asyncio.run(transport.command(".定命 紫微"))
+        post.assert_awaited_once()
+        self.assertEqual(post.await_args.args[2]["command"], ".定命 紫微")
+
     def test_legacy_mode_and_pill_migrate_only_to_original_main_soul(self):
         self.path.write_text(json.dumps({"tianxing": {
             "meditation_mode": "fate", "use_heqi_pill": True, "meditation_switch_id": "old-switch",
@@ -358,6 +433,7 @@ class MeditationModesTests(unittest.TestCase):
                 actor.config = {"miniapp_beast": {"entry_url": "https://t.me/fanrenxiuxian_bot?startapp=df_fixture"}}
                 actor.sects["主魂"] = "天星宗"
                 self.ready(actor, count=1)
+                self.destiny_ready(actor, choice="贪狼")
                 calls = []
 
                 async def post_json(origin, path, payload, timeout):
@@ -374,6 +450,7 @@ class MeditationModesTests(unittest.TestCase):
                     worker = RestrictedMiniAppWorker(actor, "waaiging", actor.logger)
                     worker.transport = transport
                     actor._restricted_miniapp_worker = worker
+                    actor.state["restricted_miniapp_active"] = True
                     actor.send_and_wait_feedback = worker.send_main
                     actor.send_and_wait_feedback_identity = worker.send_identity
                 else:
@@ -386,7 +463,7 @@ class MeditationModesTests(unittest.TestCase):
                     actor.send_and_wait_feedback = router._send_main
                     actor.send_and_wait_feedback_identity = router._send_identity
                 asyncio.run(actor.configured_meditation_tick())
-                self.assertEqual(calls, [(".推命 闭关", 100), (".闭关修炼", 100)] * (1 if restricted else 2))
+                self.assertEqual(calls, [(".定命 紫微", 100)] + [(".推命 闭关", 100), (".闭关修炼", 100)] * (1 if restricted else 2))
                 self.assertEqual(actor.commands(), [] if restricted else [".服用 合气丹"])
                 self.assertTrue(settings.meditation_identity_settings("waaiging")["use_heqi_pill"])
                 self.assertEqual(actor._meditation_runtime("主魂")["success_count"], 2 if restricted else 3)

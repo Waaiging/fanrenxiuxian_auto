@@ -1445,6 +1445,11 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             for name in state.get("tianxing_destiny_options", [])
             if name in TIANXING_DESTINY_CHOICES
         ]
+        # Daily meditation pins this soul to Ziwei, including when another task
+        # (exploration/crafting) is the first action to choose today's destiny.
+        required = self.required_meditation_destiny(identity)
+        if required:
+            preferences = (required,)
         choice = next((name for name in preferences if name in options), "")
         if not choice:
             self.common_command_logger().error(
