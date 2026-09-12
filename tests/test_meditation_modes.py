@@ -121,18 +121,33 @@ class MeditationModesTests(unittest.TestCase):
         )
         actor.responses.update({f".定命 {name}": f"今日命轨定在{name}" for name in ("紫微", "贪狼", "天府", "太阴")})
 
-    def test_daily_tianxing_pins_ziwei_for_every_action_and_identity(self):
+    def test_daily_tianxing_switches_destiny_for_each_action_and_identity(self):
         for account, identities in settings.automation_account_identities().items():
             for identity in identities:
                 with self.subTest(account=account, identity=identity):
                     self.select(f"{account}|{identity}", mode="daily")
                     actor = MeditationActor(account)
                     actor.sects[identity] = "天星宗"
-                    self.destiny_ready(actor, identity, choice="贪狼")
-                    for action in ("exploration", "crafting", "cultivation"):
+                    self.destiny_ready(actor, identity)
+                    for action in ("cultivation", "exploration", "crafting", "cultivation"):
                         self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action(identity, action)))
-                    self.assertEqual(actor.commands(identity), [".定命 紫微"])
+                    self.assertEqual(actor.commands(identity), [".定命 紫微", ".定命 贪狼", ".定命 天府", ".定命 紫微"])
                     self.assertEqual(actor.tianxing_identity_state(identity)["last_destiny_choice"], "紫微")
+
+    def test_daily_tianxing_uses_taiyin_when_an_actions_first_choice_is_unavailable(self):
+        self.select(mode="daily")
+        for options, expected in (
+            (["天府", "太阴", "紫微"], [".定命 太阴", ".定命 天府", ".定命 紫微"]),
+            (["贪狼", "太阴", "紫微"], [".定命 贪狼", ".定命 太阴", ".定命 紫微"]),
+            (["太阴", "紫微"], [".定命 太阴", ".定命 紫微"]),
+        ):
+            with self.subTest(options=options):
+                actor = MeditationActor()
+                actor.sects["主魂"] = "天星宗"
+                self.destiny_ready(actor, options=options)
+                for action in ("exploration", "crafting", "cultivation"):
+                    self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", action)))
+                self.assertEqual(actor.commands(), expected)
 
     def test_daily_tianxing_never_falls_back_if_ziwei_is_unavailable_or_unconfirmed(self):
         self.select(mode="daily")
@@ -152,20 +167,24 @@ class MeditationModesTests(unittest.TestCase):
                 self.assertEqual(actor.state["last_destiny_choice"], "贪狼")
                 self.assertTrue(actor._meditation_runtime("主魂")["next_retry_at"])
 
-    def test_daily_destiny_pin_does_not_change_other_souls_or_disabled_modes(self):
+    def test_unavailable_ziwei_only_defers_daily_cultivation_on_that_soul(self):
         self.select(mode="daily")
         actor = MeditationActor()
         actor.sects.update({"主魂": "天星宗", "无咎子": "天星宗"})
         for identity in ("主魂", "无咎子"):
-            self.destiny_ready(actor, identity)
-            self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action(identity, "exploration")))
-        self.assertEqual(actor.commands(), [".定命 紫微"])
+            self.destiny_ready(actor, identity, options=["贪狼", "天府", "太阴"])
+        self.assertFalse(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", "cultivation")))
+        self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("无咎子", "cultivation")))
+        self.assertEqual(actor.commands(), [])
         self.assertEqual(actor.commands("无咎子"), [".定命 贪狼"])
+        for action in ("exploration", "crafting"):
+            self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", action)))
+        self.assertEqual(actor.commands(), [".定命 贪狼", ".定命 天府"])
         self.select(enabled=False)
-        self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", "crafting")))
-        self.assertEqual(actor.commands(), [".定命 紫微", ".定命 天府"])
+        self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", "cultivation")))
+        self.assertEqual(actor.commands(), [".定命 贪狼", ".定命 天府", ".定命 贪狼"])
 
-    def test_daily_mode_selected_during_auth_blocks_a_queued_other_destiny(self):
+    def test_daily_mode_selected_during_auth_preserves_other_actions_destiny_commands(self):
         actor = MeditationActor()
         actor.sects["主魂"] = "天星宗"
         post = AsyncMock(return_value={"ok": True, "actionResult": {"ok": True, "message": "今日命轨定在紫微"}})
@@ -179,12 +198,10 @@ class MeditationModesTests(unittest.TestCase):
             transport.start_payload = {"ok": True}
 
         transport._initialize_unlocked = authenticate
-        with self.assertRaises(SectTaskStopped):
-            asyncio.run(transport.command(".定命 贪狼"))
-        post.assert_not_awaited()
-        asyncio.run(transport.command(".定命 紫微"))
-        post.assert_awaited_once()
-        self.assertEqual(post.await_args.args[2]["command"], ".定命 紫微")
+        for command in (".定命 贪狼", ".定命 天府", ".定命 太阴", ".定命 紫微"):
+            asyncio.run(transport.command(command))
+        self.assertEqual([call.args[2]["command"] for call in post.await_args_list],
+                         [".定命 贪狼", ".定命 天府", ".定命 太阴", ".定命 紫微"])
 
     def test_legacy_mode_and_pill_migrate_only_to_original_main_soul(self):
         self.path.write_text(json.dumps({"tianxing": {

@@ -51,6 +51,7 @@ class MeditationModeMixin:
         return config["mode"] if config["enabled"] else "disabled"
 
     def required_meditation_destiny(self, identity="主魂"):
+        """Return the destiny required before this soul's daily cultivation."""
         identity = self.resolve_avatar_identity(identity)
         if self.identity_sect_name(identity) == "天星宗" and self.identity_meditation_mode(identity) == "daily":
             return "紫微"
@@ -67,10 +68,6 @@ class MeditationModeMixin:
             if command == ".服用 合气丹" and not current["use_heqi_pill"]:
                 return True
         command = str(command or "").strip()
-        if command.startswith(".定命 "):
-            required = self.required_meditation_destiny(identity)
-            if required and command.split(maxsplit=1)[1].strip() != required:
-                return True
         if command not in {".深度闭关", ".闭关修炼"}:
             return False
         mode = self.identity_meditation_mode(identity)
