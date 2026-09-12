@@ -7,10 +7,11 @@ import json
 import os
 import threading
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from state_io import load_json_state
+from state_io import json_file_lock, load_json_state
 
 
 CONFIG_DIR = Path(__file__).resolve().parent
@@ -336,8 +337,9 @@ MINIAPP_FISHING_RODS = (
 )
 TIANXING_MEDITATION_MODES = (
     ("deep", "深度闭关"),
-    ("fate", "推命闭关"),
+    ("fate", "日常闭关"),
 )
+MEDITATION_MODES = (("deep", "深度闭关"), ("daily", "日常闭关"))
 DEFAULT_TIANXING_MEDITATION_MODE = "deep"
 DEFAULT_TIANXING_USE_HEQI_PILL = False
 DEFAULT_TIANXING_TIANJI_GRIND_ENABLED = False
@@ -552,7 +554,19 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 14,
+        "version": 15,
+        "meditation": {
+            "identities": {
+                automation_participant_key(account, identity): {
+                    "enabled": True,
+                    "mode": "deep",
+                    "use_heqi_pill": False,
+                    "switch_id": "",
+                }
+                for account, identities in automation_account_identities().items()
+                for identity in identities
+            },
+        },
         "world_boss": {
             "participants": [
                 automation_participant_key(account, identity)
@@ -846,6 +860,39 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
             tianxing.get("tianji_round_id") or ""
         )[:40]
 
+    # The old card only controlled main|主魂. Never copy its mode to other souls.
+    meditation_rows = result["meditation"]["identities"]
+    legacy = result["tianxing"]
+    meditation_rows["main|主魂"].update(
+        mode="daily" if legacy["meditation_mode"] == "fate" else "deep",
+        use_heqi_pill=legacy["use_heqi_pill"],
+        switch_id=legacy["meditation_switch_id"],
+    )
+    meditation = source.get("meditation")
+    raw_rows = meditation.get("identities") if isinstance(meditation, dict) else None
+    if isinstance(raw_rows, dict):
+        for raw_key, raw_config in raw_rows.items():
+            participant = _normalize_participant(raw_key)
+            if participant is None or not isinstance(raw_config, dict):
+                continue
+            key = automation_participant_key(*participant)
+            config = meditation_rows[key]
+            mode = str(raw_config.get("mode") or config["mode"]).strip()
+            if mode == "fate":
+                mode = "daily"
+            if mode in {item[0] for item in MEDITATION_MODES}:
+                config["mode"] = mode
+            for field in ("enabled", "use_heqi_pill"):
+                if isinstance(raw_config.get(field), bool):
+                    config[field] = raw_config[field]
+            config["switch_id"] = str(raw_config.get("switch_id") or "")[:40]
+    main_meditation = meditation_rows["main|主魂"]
+    legacy.update(
+        meditation_mode="fate" if main_meditation["mode"] == "daily" else "deep",
+        use_heqi_pill=main_meditation["use_heqi_pill"],
+        meditation_switch_id=main_meditation["switch_id"],
+    )
+
     result["updated_at"] = str(source.get("updated_at") or "")
     result["updated_by"] = str(source.get("updated_by") or "")
     return result
@@ -859,6 +906,15 @@ def load_automation_settings() -> dict[str, Any]:
         return default_automation_settings()
 
 
+def _settings_write_locked(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with json_file_lock(str(AUTOMATION_SETTINGS_FILE)):
+            return function(*args, **kwargs)
+    return locked
+
+
+@_settings_write_locked
 def save_automation_settings(
     *,
     world_boss_participants: Any,
@@ -889,6 +945,7 @@ def save_automation_settings(
     xuangu_quiz_enabled: Any = None,
     xuangu_quiz_participants: Any = None,
     tianxing_tianji_grind_participants: Any = None,
+    meditation_identities: Any = None,
     updated_by: str = "dashboard",
 ) -> dict[str, Any]:
     if not isinstance(world_boss_participants, list):
@@ -1131,13 +1188,6 @@ def save_automation_settings(
     ).strip()
     if meditation_mode not in {item[0] for item in TIANXING_MEDITATION_MODES}:
         raise ValueError("invalid Tianxing meditation mode")
-    meditation_switch_id = str(current_tianxing.get("meditation_switch_id") or "")
-    if (
-        not meditation_switch_id
-        or meditation_mode
-        != str(current_tianxing.get("meditation_mode") or DEFAULT_TIANXING_MEDITATION_MODE)
-    ):
-        meditation_switch_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
     use_heqi_pill = (
         bool(
             current_tianxing.get(
@@ -1150,6 +1200,47 @@ def save_automation_settings(
         if tianxing_use_heqi_pill is None
         else bool(tianxing_use_heqi_pill)
     )
+    meditation_rows = {
+        key: dict(config)
+        for key, config in current_settings["meditation"]["identities"].items()
+    }
+    meditation_updates = {}
+    if tianxing_meditation_mode is not None or tianxing_use_heqi_pill is not None:
+        meditation_updates["main|主魂"] = {
+            "mode": "daily" if meditation_mode == "fate" else "deep",
+            "use_heqi_pill": use_heqi_pill,
+        }
+    if meditation_identities is not None:
+        if not isinstance(meditation_identities, dict):
+            raise ValueError("meditation identities must be an object")
+        for raw_key, raw_config in meditation_identities.items():
+            participant = _normalize_participant(raw_key)
+            if participant is None or not isinstance(raw_config, dict):
+                raise ValueError("invalid meditation identity")
+            key = automation_participant_key(*participant)
+            update = {}
+            if "mode" in raw_config:
+                value = raw_config["mode"]
+                if not isinstance(value, str) or value not in {item[0] for item in MEDITATION_MODES}:
+                    raise ValueError("invalid meditation mode")
+                update["mode"] = value
+            for field in ("enabled", "use_heqi_pill"):
+                if field in raw_config:
+                    if not isinstance(raw_config[field], bool):
+                        raise ValueError(f"invalid meditation {field}")
+                    update[field] = raw_config[field]
+            meditation_updates[key] = update
+    for key, update in meditation_updates.items():
+        previous = meditation_rows[key]
+        config = {**previous, **update}
+        if any(config[field] != previous[field] for field in ("mode", "enabled")):
+            config["switch_id"] = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        meditation_rows[key] = config
+    # Keep legacy readers scoped to the main soul during upgrades.
+    main_meditation = meditation_rows["main|主魂"]
+    meditation_mode = "fate" if main_meditation["mode"] == "daily" else "deep"
+    meditation_switch_id = main_meditation["switch_id"]
+    use_heqi_pill = main_meditation["use_heqi_pill"]
     tianji_grind_enabled = (
         bool(current_tianxing.get("tianji_grind_enabled", DEFAULT_TIANXING_TIANJI_GRIND_ENABLED))
         if tianxing_tianji_grind_enabled is None
@@ -1230,6 +1321,7 @@ def save_automation_settings(
                 "enabled": fate_cards_enabled,
                 "participants": fate_cards_participants,
             },
+            "meditation": {"identities": meditation_rows},
             "tianxing": {
                 "meditation_mode": meditation_mode,
                 "meditation_switch_id": meditation_switch_id,
@@ -1441,6 +1533,32 @@ def tianxing_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     return dict(source.get("tianxing") or default_automation_settings()["tianxing"])
 
 
+def meditation_identity_settings(
+    account: str, identity: str = "主魂", settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    config = source["meditation"]["identities"].get(automation_participant_key(account, identity))
+    return dict(config) if config is not None else {
+        "enabled": True, "mode": "deep", "use_heqi_pill": False, "switch_id": "",
+    }
+
+
+def set_meditation_heqi_pill_enabled(
+    account: str, identity: str, enabled: bool, *, updated_by: str = "runtime",
+) -> dict[str, Any]:
+    """Change one soul's pill option under the same lock as Dashboard saves."""
+    with json_file_lock(str(AUTOMATION_SETTINGS_FILE)):
+        current = load_automation_settings()
+        return save_automation_settings.__wrapped__(
+            world_boss_participants=current["world_boss"]["participants"],
+            mulan_support_mode=current["mulan_support"]["mode"],
+            meditation_identities={
+                automation_participant_key(account, identity): {"use_heqi_pill": bool(enabled)},
+            },
+            updated_by=updated_by,
+        )
+
+
 def tianxing_tianji_identities_for_account(
     account: str,
     settings: dict[str, Any] | None = None,
@@ -1463,15 +1581,9 @@ def set_tianxing_heqi_pill_enabled(
     *,
     updated_by: str = "runtime",
 ) -> dict[str, Any]:
-    """Update the runtime pill switch without changing unrelated settings."""
-    current = load_automation_settings()
-    return save_automation_settings(
-        world_boss_participants=list(
-            (current.get("world_boss") or {}).get("participants") or []
-        ),
-        mulan_support_mode=(current.get("mulan_support") or {}).get("mode"),
-        tianxing_use_heqi_pill=bool(enabled),
-        updated_by=updated_by,
+    """Compatibility entry point for the original main-soul pill checkbox."""
+    return set_meditation_heqi_pill_enabled(
+        "main", "主魂", enabled, updated_by=updated_by,
     )
 
 
@@ -1481,6 +1593,21 @@ def automation_dashboard_payload() -> dict[str, Any]:
     account_identities = automation_account_identities()
     return {
         "settings": settings,
+        "meditation": {
+            **settings["meditation"],
+            "modes": [{"key": key, "name": name} for key, name in MEDITATION_MODES],
+            "accounts": [
+                {
+                    "key": account,
+                    "name": ACCOUNT_NAMES[account],
+                    "identities": [
+                        {"key": automation_participant_key(account, identity), "name": identity}
+                        for identity in identities
+                    ],
+                }
+                for account, identities in account_identities.items()
+            ],
+        },
         "world_boss": {
             "selected_count": len(selected),
             "accounts": [

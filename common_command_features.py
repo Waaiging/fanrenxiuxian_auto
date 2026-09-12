@@ -27,6 +27,7 @@ import random
 import re
 import sqlite3
 import time
+from meditation_features import MeditationModeMixin
 from datetime import datetime, timedelta
 from logging import getLogger
 
@@ -410,7 +411,7 @@ class _CommonAtomicTask:
         return False
 
 
-class CommonCommandMixin(SectTaskMixin):
+class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
     """通用固定冷却指令混入类。
 
     这里的方法尽量只依赖继承方暴露的统一接口，不直接区分主号/副号/小号。
@@ -1542,6 +1543,9 @@ class CommonCommandMixin(SectTaskMixin):
         deep_retries=1,
     ):
         """Run .查看闭关 -> optional prefix -> .闭关修炼 -> .深度闭关 as one identity chain."""
+        if self.identity_meditation_mode(avatar) != "deep":
+            await self.configured_meditation_tick(avatar)
+            return {"status": "deferred", "wait": 60, "text": "闭关按身份设置执行"}
         async with self.common_atomic_task(f"Meditation-{avatar}"):
             check_text = str(initial_check_text or "")
             if check_first and initial_check_text is None:

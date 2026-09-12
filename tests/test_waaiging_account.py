@@ -43,14 +43,11 @@ class WaaigingAccountTests(unittest.TestCase):
         self.assertTrue(actor.enable_node_search)
         self.assertTrue(actor.telegram_write_restriction_retry_enabled)
         self.assertEqual(actor.account_sect_name(), "")
-        with patch(
-            "intelligent_cultivator.tianxing_settings",
-            return_value={"meditation_mode": "fate", "meditation_switch_id": "main-switch"},
-        ):
-            self.assertEqual(actor.tianxing_meditation_mode(), "deep")
-            self.assertEqual(actor._tianxing_meditation_switch_id("deep"), "waaiging:deep")
-        self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "deep")
-        self.assertEqual(actor.state["tianxing_meditation_prepared_switch_id"], "waaiging:deep")
+        config = {"enabled": True, "mode": "daily", "switch_id": "own-switch", "use_heqi_pill": False}
+        with patch("meditation_features.meditation_identity_settings", return_value=config) as selected:
+            self.assertEqual(actor.identity_meditation_mode(), "daily")
+            selected.assert_called_with("waaiging", "主魂")
+        self.assertNotIn("tianxing_meditation_prepared_mode", actor.state)
 
     def test_stale_star_palace_assignment_is_cleared_for_single_soul_account(self):
         saved = []
@@ -411,7 +408,7 @@ class WaaigingAccountTests(unittest.TestCase):
             fake_base_send,
         ), patch.object(asyncio, "sleep", fake_sleep):
             asyncio.run(actor.send_and_wait_feedback(".野外历练 深入"))
-            asyncio.run(actor.send_and_wait_feedback(".闭关修炼"))
+            asyncio.run(actor.send_main_meditation_settlement())
             asyncio.run(actor.send_rift_search_plan(rift_plan, "主魂"))
 
         self.assertEqual(

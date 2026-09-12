@@ -235,12 +235,12 @@ class MainTianxingTests(unittest.TestCase):
         async def stop_after_sleep(*args, **kwargs):
             actor.is_running = False
 
-        with patch("intelligent_cultivator.tianxing_settings", return_value={
-            "meditation_mode": "fate",
-            "meditation_switch_id": "test-fate-switch",
+        with patch("meditation_features.meditation_identity_settings", return_value={
+            "enabled": True, "mode": "daily",
+            "switch_id": "test-fate-switch",
             "use_heqi_pill": True,
         }), patch("intelligent_cultivator.asyncio.sleep", new=stop_after_sleep):
-            asyncio.run(actor.run_tianxing_fate_meditation_loop())
+            asyncio.run(actor.configured_meditation_tick("主魂"))
 
         self.assertEqual(
             sent,
@@ -252,7 +252,7 @@ class MainTianxingTests(unittest.TestCase):
                 ".闭关修炼",
             ],
         )
-        self.assertEqual(actor.state["tianxing_fate_success_count"], 3)
+        self.assertEqual(actor.state["meditation_runtime"]["success_count"], 3)
 
     def test_fate_meditation_success_with_failure_loss_buff_counts(self):
         actor = self.actor()
@@ -291,16 +291,16 @@ class MainTianxingTests(unittest.TestCase):
         async def stop_after_sleep(*args, **kwargs):
             actor.is_running = False
 
-        with patch("intelligent_cultivator.tianxing_settings", return_value={
-            "meditation_mode": "fate",
-            "meditation_switch_id": "test-fate-switch",
+        with patch("meditation_features.meditation_identity_settings", return_value={
+            "enabled": True, "mode": "daily",
+            "switch_id": "test-fate-switch",
             "use_heqi_pill": False,
         }), patch("intelligent_cultivator.asyncio.sleep", new=stop_after_sleep):
-            asyncio.run(actor.run_tianxing_fate_meditation_loop())
+            asyncio.run(actor.configured_meditation_tick("主魂"))
 
         self.assertEqual(sent, [".推命 闭关", ".闭关修炼"])
-        self.assertEqual(actor.state["tianxing_fate_success_count"], 1266)
-        self.assertIn("闭关成功", actor.state["tianxing_fate_last_result"])
+        self.assertEqual(actor.state["meditation_runtime"]["success_count"], 1266)
+        self.assertIn("闭关成功", actor.state["meditation_runtime"]["last_result"])
 
     def test_post_pill_prefix_failure_blocks_followup_cultivation(self):
         actor = self.actor()
@@ -342,19 +342,19 @@ class MainTianxingTests(unittest.TestCase):
         async def stop_after_sleep(*args, **kwargs):
             actor.is_running = False
 
-        with patch("intelligent_cultivator.tianxing_settings", return_value={
-            "meditation_mode": "fate",
-            "meditation_switch_id": "test-fate-switch",
+        with patch("meditation_features.meditation_identity_settings", return_value={
+            "enabled": True, "mode": "daily",
+            "switch_id": "test-fate-switch",
             "use_heqi_pill": True,
         }), patch("intelligent_cultivator.asyncio.sleep", new=stop_after_sleep):
-            asyncio.run(actor.run_tianxing_fate_meditation_loop())
+            asyncio.run(actor.configured_meditation_tick("主魂"))
 
         self.assertEqual(
             sent,
             [".推命 闭关", ".闭关修炼", ".服用 合气丹", ".推命 闭关"],
         )
-        self.assertEqual(actor.state["tianxing_fate_success_count"], 2)
-        self.assertIn("合气丹后推命闭关未确认", actor.state["tianxing_fate_last_result"])
+        self.assertEqual(actor.state["meditation_runtime"]["success_count"], 2)
+        self.assertIn("推命尚在冷却", actor.state["meditation_runtime"]["last_result"])
 
     def test_switch_to_fate_forces_exit_and_consumes_heqi_pill(self):
         actor = self.actor()
@@ -379,17 +379,17 @@ class MainTianxingTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = send
         with patch(
-            "intelligent_cultivator.tianxing_settings",
-            return_value={"meditation_mode": "fate", "meditation_switch_id": "new-fate-switch"},
+            "meditation_features.meditation_identity_settings",
+            return_value={"enabled": True, "mode": "daily", "switch_id": "new-fate-switch", "use_heqi_pill": True},
         ), patch("intelligent_cultivator.asyncio.sleep", new=AsyncMock()):
-            self.assertTrue(asyncio.run(actor._prepare_tianxing_fate_mode()))
+            self.assertTrue(asyncio.run(actor._prepare_identity_meditation("主魂", actor.meditation_config())))
 
         self.assertEqual(sent, [".查看闭关", ".强行出关", ".服用 合气丹"])
         self.assertFalse(actor.state["in_deep_meditation"])
         self.assertEqual(actor.state["deep_meditation_end_time"], "")
-        self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "fate")
+        self.assertEqual(actor.state["meditation_runtime"]["prepared_mode"], "daily")
         self.assertEqual(
-            actor.state["tianxing_meditation_prepared_switch_id"], "new-fate-switch"
+            actor.state["meditation_runtime"]["prepared_switch_id"], "new-fate-switch"
         )
 
     def test_switch_to_deep_checks_status_then_starts_deep_meditation(self):
@@ -411,16 +411,16 @@ class MainTianxingTests(unittest.TestCase):
 
         actor.send_and_wait_feedback = send
         with patch(
-            "intelligent_cultivator.tianxing_settings",
-            return_value={"meditation_mode": "deep", "meditation_switch_id": "new-deep-switch"},
+            "meditation_features.meditation_identity_settings",
+            return_value={"enabled": True, "mode": "deep", "switch_id": "new-deep-switch", "use_heqi_pill": False},
         ), patch("intelligent_cultivator.asyncio.sleep", new=AsyncMock()):
-            self.assertTrue(asyncio.run(actor._prepare_tianxing_deep_mode()))
+            self.assertTrue(asyncio.run(actor._prepare_identity_meditation("主魂", actor.meditation_config())))
 
         self.assertEqual(sent, [".查看闭关", ".深度闭关"])
         self.assertTrue(actor.state["in_deep_meditation"])
-        self.assertEqual(actor.state["tianxing_meditation_prepared_mode"], "deep")
+        self.assertEqual(actor.state["meditation_runtime"]["prepared_mode"], "deep")
         self.assertEqual(
-            actor.state["tianxing_meditation_prepared_switch_id"], "new-deep-switch"
+            actor.state["meditation_runtime"]["prepared_switch_id"], "new-deep-switch"
         )
 
     def test_main_daily_destiny_records_only_confirmed_choice(self):

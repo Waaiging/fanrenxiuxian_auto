@@ -125,7 +125,6 @@ from common_command_features import (
 )
 from automation_settings import (
     MAIN_YINLUO_IDENTITY,
-    set_tianxing_heqi_pill_enabled,
     tianxing_settings,
     tianxing_tianji_identities_for_account,
 )
@@ -2010,8 +2009,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             log.info(f"{label}: waiting {wait_sec:.0f}s for deep meditation settlement window.")
             deadline = time.monotonic() + wait_sec
             while self.is_running:
-                if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
-                    log.info(f"{label}: Dashboard switched to 推命闭关; interrupting deep wait.")
+                if self.identity_meditation_mode("主魂") != "deep":
+                    log.info(f"{label}: Dashboard changed meditation selection; interrupting deep wait.")
                     return
                 slice_seconds = min(60, max(0, deadline - time.monotonic()))
                 if slice_seconds <= 0:
@@ -3342,35 +3341,11 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             await asyncio.sleep(3 if made_progress else 60)
 
     def tianxing_meditation_mode(self):
-        if not self.main_soul_is_tianxing():
-            return "deep"
-        mode = str(tianxing_settings().get("meditation_mode") or "deep").strip()
-        return mode if mode in {"deep", "fate"} else "deep"
-
-    def _tianxing_meditation_switch_id(self, mode):
-        config = tianxing_settings()
-        return str(config.get("meditation_switch_id") or mode or "")
-
-    def _mark_tianxing_meditation_mode_prepared(self, mode, switch_id):
-        mode = str(mode or "").strip()
-        if mode not in {"deep", "fate"}:
-            return
-        self.state["tianxing_meditation_prepared_mode"] = mode
-        self.state["tianxing_meditation_prepared_switch_id"] = str(switch_id or mode)
-        self.save_state()
-
-    def _clear_main_deep_meditation_state(self):
-        self.state.update(
-            {
-                "in_deep_meditation": False,
-                "deep_meditation_end_time": "",
-                "deep_meditation_guard_until": "",
-                "next_meditation_time": "",
-            }
-        )
+        """Compatibility name for the main soul's independently selected mode."""
+        mode = self.identity_meditation_mode("主魂")
+        return "fate" if mode == "daily" else mode
 
     async def _sleep_while_tianxing_mode(self, mode, seconds):
-        """Wait without delaying a Dashboard meditation-mode switch."""
         deadline = time.monotonic() + max(0, float(seconds or 0))
         while self.is_running and self.tianxing_meditation_mode() == mode:
             remaining = deadline - time.monotonic()
@@ -3378,330 +3353,14 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
                 return
             await asyncio.sleep(min(60, max(1, remaining)))
 
-    async def _prepare_tianxing_fate_mode(self):
-        async with self.common_atomic_task("Tianxing-meditation-mode-switch"):
-            return await self._prepare_tianxing_fate_mode_unlocked()
-
-    async def _prepare_tianxing_fate_mode_unlocked(self):
-        """Leave an active deep session before entering 推命闭关 mode."""
-        if not self.main_soul_is_tianxing():
-            return True
-        switch_id = self._tianxing_meditation_switch_id("fate")
-        already_prepared = (
-            self.state.get("tianxing_meditation_prepared_mode") == "fate"
-            and self.state.get("tianxing_meditation_prepared_switch_id") == switch_id
-            and not self.state.get("in_deep_meditation")
-        )
-        if already_prepared:
-            return True
-
-        check = await self.send_and_wait_feedback(".查看闭关", timeout=90, max_retries=0)
-        check_text = self.response_text(check).replace("**", "")
-        if is_deep_meditation_ongoing_response(check_text):
-            log.info("Tianxing fate mode: deep meditation is still active; forcing exit.")
-            force_exit = await self.send_and_wait_feedback(
-                ".强行出关", timeout=90, max_retries=0
-            )
-            force_text = self.response_text(force_exit).replace("**", "")
-            force_failed = any(
-                marker in force_text
-                for marker in ("失败", "无法", "不能", "冷却", "不足")
-            )
-            force_confirmed = (
-                not force_failed
-                and bool(force_text)
-                and any(
-                    marker in force_text
-                    for marker in (
-                        "强行出关",
-                        "强行中断",
-                        "出关成功",
-                        "已出关",
-                        "闭关结束",
-                        "未处于深度闭关",
-                        "并未处于深度闭关",
-                    )
-                )
-            )
-            if not force_confirmed:
-                log.warning(
-                    "Tianxing fate mode: .强行出关 was not confirmed: %s",
-                    force_text[:240],
-                )
-                return False
-
-            self._clear_main_deep_meditation_state()
-            self.save_state()
-            await asyncio.sleep(3)
-
-            pill = await self.send_and_wait_feedback(
-                ".服用 合气丹", timeout=90, max_retries=0
-            )
-            pill_text = self.response_text(pill).replace("**", "")
-            shortage = any(
-                marker in pill_text
-                for marker in ("没有足够", "不足", "未拥有", "数量不够", "没有合气丹")
-            )
-            pill_success = (
-                bool(pill_text)
-                and not shortage
-                and any(marker in pill_text for marker in ("成功", "服用", "合气丹"))
-            )
-            if shortage:
-                # Keep the established fallback: disable automatic pill usage and
-                # continue the ordinary fate cycle, which will parse any remaining CD.
-                set_tianxing_heqi_pill_enabled(False, updated_by="runtime-mode-switch-pill-shortage")
-                await send_text_alert(
-                    self,
-                    "天星宗合气丹已停用",
-                    "主号主魂切换推命闭关时检测到合气丹不足，已自动取消“服用合气丹”，后续继续普通推命闭关。",
-                    log,
-                )
-            elif not pill_success:
-                log.warning(
-                    "Tianxing fate mode: .服用 合气丹 was not confirmed: %s",
-                    pill_text[:240],
-                )
-                return False
-            else:
-                log.info("Tianxing fate mode: consumed one 合气丹 after forced exit.")
-                await asyncio.sleep(3)
-
-        elif is_not_deep_meditation_response(check_text) or is_deep_meditation_settlement_response(check_text):
-            self._clear_main_deep_meditation_state()
-            self.save_state()
-        else:
-            log.warning(
-                "Tianxing fate mode: .查看闭关 status was not recognized: %s",
-                check_text[:240],
-            )
-            return False
-
-        self._mark_tianxing_meditation_mode_prepared("fate", switch_id)
-        return True
-
-    async def _prepare_tianxing_deep_mode(self):
-        async with self.common_atomic_task("Tianxing-meditation-mode-switch"):
-            return await self._prepare_tianxing_deep_mode_unlocked()
-
-    async def _prepare_tianxing_deep_mode_unlocked(self):
-        """Verify the current state before returning to 深度闭关 mode."""
-        if not self.main_soul_is_tianxing():
-            return True
-        switch_id = self._tianxing_meditation_switch_id("deep")
-        if (
-            self.state.get("tianxing_meditation_prepared_mode") == "deep"
-            and self.state.get("tianxing_meditation_prepared_switch_id") == switch_id
-        ):
-            return True
-
-        check = await self.send_and_wait_feedback(".查看闭关", timeout=90, max_retries=0)
-        check_text = self.response_text(check).replace("**", "")
-        if is_deep_meditation_ongoing_response(check_text):
-            cd = self.parse_wait_time(check_text)
-            if cd > 0:
-                self.state.update(
-                    self.meditation_active_state_values(
-                        add_seconds_str(now_str(), cd), clear_restart=False
-                    )
-                )
-            else:
-                self.state["in_deep_meditation"] = True
-            self.save_state()
-            log.info("Tianxing deep mode: .查看闭关 confirmed an active deep session.")
-        elif is_not_deep_meditation_response(check_text) or is_deep_meditation_settlement_response(check_text):
-            self._clear_main_deep_meditation_state()
-            self.save_state()
-            log.info("Tianxing deep mode: .查看闭关 confirmed that deep meditation is not active.")
-            await asyncio.sleep(3)
-            deep = await self.send_and_wait_feedback(
-                ".深度闭关", timeout=90, max_retries=0
-            )
-            deep_text = self.response_text(deep).replace("**", "")
-            if not await self.sync_main_deep_meditation_start(
-                deep_text, "Tianxing mode switch to .深度闭关"
-            ):
-                wait_seconds = self.parse_wait_time(deep_text)
-                self.state["next_meditation_retry_time"] = add_seconds_str(
-                    now_str(), max(60, wait_seconds or 300)
-                )
-                self.save_state()
-                log.warning(
-                    "Tianxing deep mode: .深度闭关 was not confirmed: %s",
-                    deep_text[:240],
-                )
-                return False
-        else:
-            log.warning(
-                "Tianxing deep mode: .查看闭关 status was not recognized: %s",
-                check_text[:240],
-            )
-            return False
-
-        self._mark_tianxing_meditation_mode_prepared("deep", switch_id)
-        return True
-
-    async def run_tianxing_fate_meditation_loop(self):
-        """Run normal 推命闭关 cycles until the dashboard selects deep mode."""
-        await self.startup_done.wait()
-        while self.is_running and self.tianxing_meditation_mode() == "fate":
-            try:
-                await self._wait_for_main_identity()
-                if not await self._prepare_tianxing_fate_mode():
-                    await self._sleep_while_tianxing_mode("fate", 300)
-                    continue
-
-                if not await self.ensure_tianxing_destiny_for_action("主魂", "cultivation"):
-                    await self._sleep_while_tianxing_mode(
-                        "fate",
-                        max(300, self.tianxing_destiny_retry_wait_seconds("主魂")),
-                    )
-                    continue
-                prefix = await self.send_and_wait_feedback(
-                    TIANXING_MEDITATION_PREFIX_COMMAND,
-                    timeout=60,
-                    max_retries=0,
-                )
-                prefix_text = self.response_text(prefix)
-                if not self.tianxing_prefix_response_ok(
-                    TIANXING_MEDITATION_PREFIX_COMMAND, prefix_text
-                ):
-                    wait_seconds = self.parse_wait_time(prefix_text)
-                    await self._sleep_while_tianxing_mode(
-                        "fate", max(60, min(wait_seconds or 300, 900))
-                    )
-                    continue
-                await asyncio.sleep(3)
-
-                def cultivation_succeeded(text):
-                    clean = self.response_text(text).replace("**", "")
-                    # 增益描述里会出现"闭关失败损失降低"，不能当作失败。
-                    clean = clean.replace("闭关失败损失", "")
-                    return bool(clean) and any(
-                        marker in clean
-                        for marker in ("闭关成功", "修炼成功", "获得修为", "闭关收益")
-                    ) and not any(
-                        marker in clean
-                        for marker in ("失败", "无法", "不足", "冷却中")
-                    )
-
-                cultivation = await self.send_and_wait_feedback(
-                    ".闭关修炼", timeout=90, max_retries=0
-                )
-                cultivation_text = self.response_text(cultivation).replace("**", "")
-                success = cultivation_succeeded(cultivation_text)
-                cooldown_text = cultivation_text
-                cycle_wait_seconds = 0
-                if success:
-                    count = max(0, int(self.state.get("tianxing_fate_success_count") or 0)) + 1
-                    self.state["tianxing_fate_success_count"] = count
-                    self.state["tianxing_fate_last_time"] = now_str()
-                    self.state["tianxing_fate_last_result"] = cultivation_text[:240]
-                    self.save_state()
-                    config = tianxing_settings()
-                    if config.get("use_heqi_pill") and count % 2 == 0:
-                        pill = await self.send_and_wait_feedback(
-                            ".服用 合气丹", timeout=90, max_retries=0
-                        )
-                        pill_text = self.response_text(pill).replace("**", "")
-                        shortage = any(
-                            marker in pill_text
-                            for marker in ("没有足够", "不足", "未拥有", "数量不够", "没有合气丹")
-                        )
-                        pill_success = bool(pill_text) and not shortage and any(
-                            marker in pill_text
-                            for marker in ("成功", "服用", "合气丹", "修为增加")
-                        )
-                        if shortage:
-                            set_tianxing_heqi_pill_enabled(False, updated_by="runtime-pill-shortage")
-                            await send_text_alert(
-                                self,
-                                "天星宗合气丹已停用",
-                                "主号主魂检测到合气丹不足，已自动取消“服用合气丹”，后续继续普通推命闭关。",
-                                log,
-                            )
-                        elif not pill_success:
-                            self.state["tianxing_fate_last_result"] = (
-                                f"合气丹回复未确认：{pill_text[:160]}"
-                            )
-                            self.save_state()
-                        else:
-                            await asyncio.sleep(3)
-                            post_pill_prefix = await self.send_and_wait_feedback(
-                                TIANXING_MEDITATION_PREFIX_COMMAND,
-                                timeout=60,
-                                max_retries=0,
-                            )
-                            post_pill_prefix_text = self.response_text(post_pill_prefix)
-                            if not self.tianxing_prefix_response_ok(
-                                TIANXING_MEDITATION_PREFIX_COMMAND,
-                                post_pill_prefix_text,
-                            ):
-                                cycle_wait_seconds = self.tianxing_prefix_wait_seconds(
-                                    post_pill_prefix_text
-                                )
-                                cooldown_text = post_pill_prefix_text or cultivation_text
-                                self.state["tianxing_fate_last_result"] = (
-                                    "合气丹后推命闭关未确认："
-                                    f"{post_pill_prefix_text[:160]}"
-                                )
-                                self.save_state()
-                                log.warning(
-                                    "Tianxing post-pill .推命 闭关 was not confirmed; "
-                                    "blocking .闭关修炼: %s",
-                                    post_pill_prefix_text[:240],
-                                )
-                            else:
-                                await asyncio.sleep(3)
-                                followup = await self.send_and_wait_feedback(
-                                    ".闭关修炼", timeout=90, max_retries=0
-                                )
-                                followup_text = self.response_text(followup).replace("**", "")
-                                cooldown_text = followup_text or cultivation_text
-                                if cultivation_succeeded(followup_text):
-                                    self.state["tianxing_fate_success_count"] = count + 1
-                                    self.state["tianxing_fate_last_time"] = now_str()
-                                    self.state["tianxing_fate_last_result"] = followup_text[:240]
-                                    self.save_state()
-                                else:
-                                    log.warning(
-                                        "Tianxing immediate post-pill .闭关修炼 was not confirmed: %s",
-                                        followup_text[:240],
-                                    )
-                wait_seconds = cycle_wait_seconds or self.parse_wait_time(cooldown_text)
-                await self._sleep_while_tianxing_mode(
-                    "fate", max(60, min(wait_seconds or 300, 900))
-                )
-            except asyncio.CancelledError:
-                raise
-            except MiniAppCircuitOpenError as exc:
-                wait = miniapp_circuit_wait_seconds(exc, 60)
-                self.state["next_meditation_retry_time"] = add_seconds_str(
-                    now_str(), wait
-                )
-                self.save_state()
-                log.info(
-                    "Tianxing fate meditation paused by upstream circuit until %s",
-                    exc.retry_at or f"in {wait}s",
-                )
-                await self._sleep_while_tianxing_mode("fate", wait)
-            except Exception as exc:
-                log.error("Tianxing fate meditation loop error: %s", exc, exc_info=True)
-                await self._sleep_while_tianxing_mode("fate", 300)
-
     async def run_meditation_timer(self):
-        """Dispatch the selected Tianxing meditation mode without disrupting deep sessions."""
+        """Dispatch the main soul's configured daily/deep meditation schedule."""
         await self.startup_done.wait()
         while self.is_running:
-            if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
-                await self.run_tianxing_fate_meditation_loop()
-            else:
-                if self.main_soul_is_tianxing():
-                    await self._wait_for_main_identity()
-                    if not await self._prepare_tianxing_deep_mode():
-                        await self._sleep_while_tianxing_mode("deep", 300)
-                        continue
-                await self._run_deep_meditation_timer()
+            if await self.configured_meditation_tick("主魂"):
+                await asyncio.sleep(60)
+                continue
+            await self._run_deep_meditation_timer()
             await asyncio.sleep(1)
 
     async def _run_deep_meditation_timer(self):
@@ -3734,7 +3393,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         if retry_time and is_future(retry_time):
             log.info(f"Meditation: deferred until {retry_time}.")
             await self._sleep_while_tianxing_mode("deep", seconds_until(retry_time))
-            if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
+            if self.identity_meditation_mode("主魂") != "deep":
                 return
             self.state["next_meditation_retry_time"] = ""
             self.save_state()
@@ -3778,7 +3437,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             self.save_state()
 
         while self.is_running:
-            if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
+            if self.identity_meditation_mode("主魂") != "deep":
                 return
             await self._wait_for_main_identity()
             # 检查重试延迟
@@ -3786,7 +3445,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             if retry_time and is_future(retry_time):
                 log.debug(f"Meditation: deferred until {retry_time}.")
                 await self._sleep_while_tianxing_mode("deep", seconds_until(retry_time))
-                if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
+                if self.identity_meditation_mode("主魂") != "deep":
                     return
                 self.state["next_meditation_retry_time"] = ""
                 self.save_state()
@@ -3850,7 +3509,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
 
             # === Step 3 & 4: 监控与结算 ===
             while self.is_running and self.state.get("in_deep_meditation"):
-                if self.main_soul_is_tianxing() and self.tianxing_meditation_mode() == "fate":
+                if self.identity_meditation_mode("主魂") != "deep":
                     return
                 if self.ensure_meditation_guard_from_end_time(self.state):
                     self.save_state()
@@ -4088,6 +3747,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         log.info(f"[{avatar}] meditation restart pending ({source}).")
 
     def avatar_meditation_needs_attention(self, avatar):
+        if self.identity_meditation_mode(avatar) != "deep":
+            return False
         a_state = self.get_avatar_state(avatar)
         next_med = self.meditation_defer_until(a_state)
         if next_med and is_future(next_med):
@@ -4934,6 +4595,8 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         3. .闭关修炼 → 只要机器人有响应就继续
         4. .深度闭关
         """
+        if await self.configured_meditation_tick(avatar):
+            return
         a_state = self.get_avatar_state(avatar)
         features = self.avatar_features.get(avatar, {})
         prefix = features.get("meditation_prefix", "")

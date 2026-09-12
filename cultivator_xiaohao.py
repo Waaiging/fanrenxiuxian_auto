@@ -824,6 +824,8 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         return CommonCommandMixin.ensure_meditation_guard_from_end_time(self, state)
 
     def avatar_meditation_needs_attention(self, avatar):
+        if self.identity_meditation_mode(avatar) != "deep":
+            return False
         # The guard only suppresses early meditation-maintenance checks.
         # Other avatar commands may still run while deep meditation is active.
         if self.avatar_meditation_guard_active(avatar):
@@ -6963,6 +6965,9 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         """深度闭关循环：查看状态→结算→重新开始"""
         await self.startup_done.wait()
         while self.is_running:
+            if await self.configured_meditation_tick("主魂"):
+                await asyncio.sleep(60)
+                continue
             if await self.sleep_if_main_soul_paused("Meditation loop"):
                 continue
             retry_time = self.meditation_defer_until(self.state)
@@ -7055,6 +7060,9 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         while self.is_running:
             avatar = self.resolve_avatar_identity(avatar)
             try:
+                if await self.configured_meditation_tick(avatar):
+                    await asyncio.sleep(60)
+                    continue
                 a_state = self.get_avatar_state(avatar)
 
                 # 检查重试冷却

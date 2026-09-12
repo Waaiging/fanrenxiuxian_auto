@@ -5974,7 +5974,12 @@ async def automation_settings_control(
     fate_cards = fate_cards if isinstance(fate_cards, dict) else {}
     tianxing = payload.get("tianxing")
     tianxing = tianxing if isinstance(tianxing, dict) else {}
+    meditation = payload.get("meditation")
     try:
+        if meditation is not None and (
+            not isinstance(meditation, dict) or not isinstance(meditation.get("identities"), dict)
+        ):
+            raise ValueError("meditation identities must be an object")
         with AUTOMATION_SETTINGS_LOCK:
             settings = save_automation_settings(
                 world_boss_participants=participants,
@@ -6005,10 +6010,16 @@ async def automation_settings_control(
                 tianxing_tianji_grind_enabled=tianxing.get("tianji_grind_enabled"),
                 tianxing_tianji_grind_target=tianxing.get("tianji_grind_target"),
                 tianxing_tianji_grind_participants=tianxing.get("tianji_grind_participants"),
+                meditation_identities=meditation["identities"] if meditation is not None else None,
                 updated_by=username,
             )
     except ValueError as exc:
         messages = {
+            "meditation identities must be an object": "闭关身份设置格式错误",
+            "invalid meditation identity": "闭关参与身份无效",
+            "invalid meditation mode": "请选择深度闭关或日常闭关",
+            "invalid meditation enabled": "闭关参与开关必须是启用或关闭",
+            "invalid meditation use_heqi_pill": "合气丹选项必须是启用或关闭",
             "invalid Xuangu quiz enabled flag": "玄骨答题开关必须是启用或关闭",
             "Xuangu quiz participants must be a list": "玄骨答题参与身份列表格式错误",
             "invalid Xuangu quiz participant": "玄骨答题参与身份无效",

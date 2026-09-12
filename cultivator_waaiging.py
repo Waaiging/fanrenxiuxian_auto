@@ -20,11 +20,8 @@ SESSION_NAME = "waaiging_session"
 SECT_JOIN_COMMAND = ".拜入宗门 天星宗"
 SECT_JOIN_COOLDOWN_FALLBACK_SECONDS = 24 * 3600
 SECT_JOIN_UNKNOWN_RETRY_SECONDS = 60 * 60
-TIANXING_PREFIX_DELAY_SECONDS = 3
 TIANXING_DESTINY_RETRY_SECONDS = 30 * 60
 TIANXING_DESTINY_CHOICES = ("贪狼", "太阴", "紫微", "天府")
-WAAIGING_MEDITATION_MODE = "deep"
-WAAIGING_MEDITATION_SWITCH_ID = "waaiging:deep"
 DUAL_CULTIVATION_INTERVAL_SECONDS = 3600
 DUAL_CULTIVATION_BUFFER_SECONDS = 2
 DUAL_CULTIVATION_RETRY_SECONDS = 60
@@ -100,14 +97,6 @@ class WaaigingCultivator(core.Cultivator):
         self.state.setdefault("last_destiny_time", "")
         self.state.setdefault("last_destiny_choice", "")
         self.state.setdefault("next_tianxing_destiny_retry_time", "")
-        meditation_scope_changed = False
-        if self.state.get("tianxing_meditation_prepared_mode") != WAAIGING_MEDITATION_MODE:
-            self.state["tianxing_meditation_prepared_mode"] = WAAIGING_MEDITATION_MODE
-            meditation_scope_changed = True
-        if self.state.get("tianxing_meditation_prepared_switch_id") != WAAIGING_MEDITATION_SWITCH_ID:
-            self.state["tianxing_meditation_prepared_switch_id"] = WAAIGING_MEDITATION_SWITCH_ID
-            meditation_scope_changed = True
-
         # The account is controlled by the main process when the game group is
         # private. It must not start another copy of that controller itself.
         self.manage_restricted_accounts = False
@@ -142,7 +131,7 @@ class WaaigingCultivator(core.Cultivator):
             if self.state.get(key):
                 self.state[key] = ""
                 disabled_state_changed = True
-        if disabled_state_changed or avatars_removed or meditation_scope_changed or star_state_changed:
+        if disabled_state_changed or avatars_removed or star_state_changed:
             self.save_state()
 
         # Match the existing restricted xiaohao send protection exactly.
@@ -192,13 +181,6 @@ class WaaigingCultivator(core.Cultivator):
             "主魂", command=command, *args, **kwargs
         )
 
-    def tianxing_meditation_mode(self):
-        """Keep the @Waaiging account independent from the main-account setting."""
-        return WAAIGING_MEDITATION_MODE
-
-    def _tianxing_meditation_switch_id(self, mode):
-        return WAAIGING_MEDITATION_SWITCH_ID
-
     def account_sect_name(self):
         return str(
             (self.state.get("identity_sect_names") or {}).get("主魂")
@@ -226,45 +208,6 @@ class WaaigingCultivator(core.Cultivator):
                 "next_miracle_preach_time",
             ))
         return [item for item in stale if item[0] not in disabled_keys]
-
-    async def _send_tianxing_prefixes(self, commands, action):
-        for command in commands:
-            core.log.info("Tianxing %s prefix: sending %s.", action, command)
-            response = await super().send_and_wait_feedback(
-                command,
-                timeout=60,
-                max_retries=0,
-            )
-            if not self.response_text(response).strip():
-                core.log.warning(
-                    "Tianxing %s prefix %s had no confirmed feedback; blocking the target command.",
-                    action,
-                    command,
-                )
-                return False
-            await asyncio.sleep(TIANXING_PREFIX_DELAY_SECONDS)
-        return True
-
-    async def send_and_wait_feedback(self, message, *args, **kwargs):
-        command = str(message or "").strip()
-        prefixes = ()
-        action = ""
-        if self.account_sect_name() == "天星宗":
-            if command.startswith(".闭关修炼"):
-                prefixes = (".推命 闭关",)
-                action = "meditation"
-
-        if not prefixes:
-            return await super().send_and_wait_feedback(message, *args, **kwargs)
-
-        async with self.common_atomic_task(f"Tianxing-{action}"):
-            if action == "meditation" and not await self.ensure_tianxing_destiny_for_action(
-                "主魂", "cultivation"
-            ):
-                return None
-            if not await self._send_tianxing_prefixes(prefixes, action):
-                return None
-            return await super().send_and_wait_feedback(message, *args, **kwargs)
 
     def _tianxing_destiny_window(self, now=None):
         now = now or datetime.now()

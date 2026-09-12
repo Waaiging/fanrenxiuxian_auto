@@ -794,8 +794,10 @@ class MiniAppDwellingTransport:
     def _check_sect_operation(self, identity, command):
         actor = getattr(self, "sect_actor", None)
         if actor is not None:
-            from sect_rules import require_command
+            from sect_rules import SectTaskStopped, require_command, task_paused
             require_command(actor, identity, command)
+            if command in {".闭关修炼", ".深度闭关", ".查看闭关", ".强行出关"} and task_paused(actor, identity, command):
+                raise SectTaskStopped(command)
 
     async def _request_unlocked(
         self,
@@ -814,6 +816,12 @@ class MiniAppDwellingTransport:
             self._check_sect_operation(identity, required_command)
         if path.endswith("/command-center"):
             self._check_sect_operation(identity, (payload or {}).get("command"))
+        elif path.endswith("/cultivation"):
+            self._check_sect_operation(identity, ".闭关修炼")
+        elif path.endswith("/deep-seclusion"):
+            command = {"start": ".深度闭关", "status": ".查看闭关", "force": ".强行出关"}.get((payload or {}).get("action"))
+            if command:
+                self._check_sect_operation(identity, command)
         body = {
             "token": self.entry_token,
             "initData": self.init_data,

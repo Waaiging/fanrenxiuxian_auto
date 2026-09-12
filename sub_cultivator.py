@@ -781,6 +781,8 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
         log.info(f"Avatar [{avatar}] meditation restart pending ({source}).")
 
     def avatar_meditation_needs_attention(self, avatar):
+        if self.identity_meditation_mode(avatar) != "deep":
+            return False
         a_state = self.get_avatar_state(avatar)
         if self.meditation_guard_active_for_state(a_state):
             return False
@@ -4888,6 +4890,10 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                         self.state["next_formation_time"] = retry_at
                         self.save_state()
 
+            if await self.configured_meditation_tick("主魂"):
+                await asyncio.sleep(60)
+                continue
+
             # ---- 深度闭关逻辑 ----
             meditation_retry_time = self.meditation_defer_until(self.state)
             if meditation_retry_time and is_future(meditation_retry_time):
@@ -5597,92 +5603,95 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 except Exception as e:
                     log.error(f"Avatar [{avatar}] formation error: {e}")
 
-                # ---- 深度闭关状态管理（精细版） ----
-                # 重新读取 state（野外历练可能已更新了状态）
-                a_state = self.get_avatar_state(avatar)
-
-                # 优先检查是否有重试延迟（未知响应后的冷却）
-                retry_time = self.meditation_defer_until(a_state)
-                if retry_time and is_future(retry_time):
-                    wait_sec = min(300, seconds_until(retry_time))
-                    log.debug(f"Avatar [{avatar}] meditation deferred until {retry_time}.")
-                    await asyncio.sleep(wait_sec)
-                    continue
-
-                if a_state.get("meditation_restart_mode") == "deep_only":
-                    log.info(f"Avatar [{avatar}] direct deep meditation restart pending; sending .深度闭关.")
-                    async with self.common_atomic_task(f"Meditation-{avatar}"):
-                        deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
-                        deep_text = getattr(deep_resp, "text", "") if hasattr(deep_resp, "text") else deep_resp if isinstance(deep_resp, str) else str(deep_resp) if deep_resp else ""
-                        started = await self.record_avatar_deep_meditation_start(avatar, deep_text)
-                    await asyncio.sleep(60 if started else 600)
-                    continue
-
-                # 检查缓存的深度闭关结束时间
-                if self.ensure_meditation_guard_from_end_time(a_state):
-                    self.save_state()
-                guard_wait = self.meditation_guard_wait_seconds_for_state(a_state)
-                med_end = a_state.get("deep_meditation_end_time", "")
-                if a_state.get("meditation_restart_pending") and guard_wait <= 0:
-                    med_end = ""
-                    log.info(f"Avatar [{avatar}] meditation restart pending; checking immediately.")
-                if guard_wait > 0:
-                    # 缓存的闭关结束时间在未来，跳过 .查看闭关
-                    # ⚠️ 不能直接 sleep 到闭关结束，否则野外历练会被跳过
-                    # 短睡后重新循环，确保野外历练等冷却到期的功能不被阻塞
-                    log.debug(
-                        f"Avatar [{avatar}] deep meditation protected for "
-                        f"{self.compact_duration_text(guard_wait)}, short sleep then recheck."
-                    )
-                    med_wait = min(guard_wait, 1800)  # 最多睡 30 分钟
+                if await self.configured_meditation_tick(avatar):
+                    med_wait = 60
                 else:
-                    # 缓存无效或已过期，通过 .查看闭关 确认实际状态；整条闭关链保持同一身份。
-                    log.info(f"Avatar [{avatar}] checking meditation status via .查看闭关...")
-                    result = await self.run_avatar_meditation_restart_chain(
-                        avatar,
-                        source="meditation loop",
-                        check_timeout=30,
-                        check_retries=1,
-                        cultivation_timeout=45,
-                        cultivation_retries=1,
-                        deep_timeout=60,
-                        deep_retries=1,
-                    )
-                    status = result.get("status")
-                    med_wait = int(result.get("wait") or 300)
-                    if status == "ongoing":
-                        med_wait += random.randint(10, 30)
-                    elif status == "ongoing_unknown":
-                        self.update_avatar_states(avatar, {
-                            "in_deep_meditation": True,
-                            "next_meditation_retry_time": "",
-                            "meditation_restart_pending": False,
-                        })
-                        med_wait = 300
-                    elif status == "deferred":
-                        med_wait += random.randint(10, 30)
-                    elif status in {"started", "failed"}:
-                        pass
+                    # ---- 深度闭关状态管理（精细版） ----
+                    # 重新读取 state（野外历练可能已更新了状态）
+                    a_state = self.get_avatar_state(avatar)
+
+                    # 优先检查是否有重试延迟（未知响应后的冷却）
+                    retry_time = self.meditation_defer_until(a_state)
+                    if retry_time and is_future(retry_time):
+                        wait_sec = min(300, seconds_until(retry_time))
+                        log.debug(f"Avatar [{avatar}] meditation deferred until {retry_time}.")
+                        await asyncio.sleep(wait_sec)
+                        continue
+
+                    if a_state.get("meditation_restart_mode") == "deep_only":
+                        log.info(f"Avatar [{avatar}] direct deep meditation restart pending; sending .深度闭关.")
+                        async with self.common_atomic_task(f"Meditation-{avatar}"):
+                            deep_resp = await self.send_and_wait_feedback_identity(avatar, ".深度闭关")
+                            deep_text = getattr(deep_resp, "text", "") if hasattr(deep_resp, "text") else deep_resp if isinstance(deep_resp, str) else str(deep_resp) if deep_resp else ""
+                            started = await self.record_avatar_deep_meditation_start(avatar, deep_text)
+                        await asyncio.sleep(60 if started else 600)
+                        continue
+
+                    # 检查缓存的深度闭关结束时间
+                    if self.ensure_meditation_guard_from_end_time(a_state):
+                        self.save_state()
+                    guard_wait = self.meditation_guard_wait_seconds_for_state(a_state)
+                    med_end = a_state.get("deep_meditation_end_time", "")
+                    if a_state.get("meditation_restart_pending") and guard_wait <= 0:
+                        med_end = ""
+                        log.info(f"Avatar [{avatar}] meditation restart pending; checking immediately.")
+                    if guard_wait > 0:
+                        # 缓存的闭关结束时间在未来，跳过 .查看闭关
+                        # ⚠️ 不能直接 sleep 到闭关结束，否则野外历练会被跳过
+                        # 短睡后重新循环，确保野外历练等冷却到期的功能不被阻塞
+                        log.debug(
+                            f"Avatar [{avatar}] deep meditation protected for "
+                            f"{self.compact_duration_text(guard_wait)}, short sleep then recheck."
+                        )
+                        med_wait = min(guard_wait, 1800)  # 最多睡 30 分钟
                     else:
-                        check_text = result.get("text", "")
-                        med_cd = self.parse_wait_time(check_text)
-                        if "冷却" in check_text and med_cd > 0:
-                            log.info(f"Avatar [{avatar}] deep meditation on cooldown: {med_cd}s.")
-                            self.set_avatar_state(avatar, "in_deep_meditation", False)
-                            self.set_avatar_state(avatar, "deep_meditation_end_time", "")
-                            self.set_avatar_state(avatar, "deep_meditation_guard_until", "")
-                            self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), med_cd))
-                            self.set_avatar_state(avatar, "meditation_restart_pending", True)
-                            med_wait = med_cd + random.randint(10, 30)
+                        # 缓存无效或已过期，通过 .查看闭关 确认实际状态；整条闭关链保持同一身份。
+                        log.info(f"Avatar [{avatar}] checking meditation status via .查看闭关...")
+                        result = await self.run_avatar_meditation_restart_chain(
+                            avatar,
+                            source="meditation loop",
+                            check_timeout=30,
+                            check_retries=1,
+                            cultivation_timeout=45,
+                            cultivation_retries=1,
+                            deep_timeout=60,
+                            deep_retries=1,
+                        )
+                        status = result.get("status")
+                        med_wait = int(result.get("wait") or 300)
+                        if status == "ongoing":
+                            med_wait += random.randint(10, 30)
+                        elif status == "ongoing_unknown":
+                            self.update_avatar_states(avatar, {
+                                "in_deep_meditation": True,
+                                "next_meditation_retry_time": "",
+                                "meditation_restart_pending": False,
+                            })
+                            med_wait = 300
+                        elif status == "deferred":
+                            med_wait += random.randint(10, 30)
+                        elif status in {"started", "failed"}:
+                            pass
                         else:
-                            if check_text:
-                                notify_unrecognized_response(
-                                    self, ".查看闭关", check_text, log, f"闭关状态[{avatar}]"
-                                )
-                            log.warning(f"Avatar [{avatar}] meditation unknown response: {check_text[:80]}. Retrying in 10min.")
-                            self.set_avatar_state(avatar, "in_deep_meditation", False)
-                            self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
-                            med_wait = 600
+                            check_text = result.get("text", "")
+                            med_cd = self.parse_wait_time(check_text)
+                            if "冷却" in check_text and med_cd > 0:
+                                log.info(f"Avatar [{avatar}] deep meditation on cooldown: {med_cd}s.")
+                                self.set_avatar_state(avatar, "in_deep_meditation", False)
+                                self.set_avatar_state(avatar, "deep_meditation_end_time", "")
+                                self.set_avatar_state(avatar, "deep_meditation_guard_until", "")
+                                self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), med_cd))
+                                self.set_avatar_state(avatar, "meditation_restart_pending", True)
+                                med_wait = med_cd + random.randint(10, 30)
+                            else:
+                                if check_text:
+                                    notify_unrecognized_response(
+                                        self, ".查看闭关", check_text, log, f"闭关状态[{avatar}]"
+                                    )
+                                log.warning(f"Avatar [{avatar}] meditation unknown response: {check_text[:80]}. Retrying in 10min.")
+                                self.set_avatar_state(avatar, "in_deep_meditation", False)
+                                self.set_avatar_state(avatar, "next_meditation_retry_time", add_seconds_str(now_str(), 600))
+                                med_wait = 600
 
                 # ---- 侍妾批次：远航归来 -> 天机代卜 -> 入梦寻图 -> 共历心劫 -> 侍妾远航 ----
                 await self.execute_avatar_concubine_chain(avatar)

@@ -1084,6 +1084,21 @@
             font-size: 0.76rem;
             font-weight: 800;
         }
+        .meditation-card { grid-column: 1 / -1; }
+        #meditation-identity-controls {
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+        }
+        .meditation-identity-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 0.3rem;
+            padding-top: 0.5rem;
+            margin-top: 0.5rem;
+            border-top: 1px solid #29323a;
+        }
+        .meditation-identity-row .record-select { min-width: 0; width: 6.5rem; }
+        .meditation-pill-option { grid-column: 1 / -1; justify-self: start; }
         .automation-card-hint {
             margin-top: 0.25rem;
             color: var(--text-secondary);
@@ -1743,18 +1758,14 @@
                     </label>
                     <div class="automation-card-hint" id="miniapp-beast-abyss-runtime">当前按战力不限选取可探渊灵兽。</div>
                 </div>
-                <div class="automation-card">
-                    <div class="automation-card-title">天星宗 · 主号主魂闭关</div>
-                    <div class="automation-mode-options" id="tianxing-meditation-mode-controls">
+                <div class="automation-card meditation-card">
+                    <div class="automation-card-title">闭关修炼 · 所有身份</div>
+                    <div class="automation-card-hint">勾选参与身份，分别选择闭关模式。日常闭关每两次成功后可服用合气丹；天星宗每次日常闭关前先推命。</div>
+                    <div class="automation-card-hint">合气丹通过群指令使用；账号受限时保留用丹设置，日常闭关照常运行。</div>
+                    <div class="automation-account-grid" id="meditation-identity-controls">
                         <div class="record-empty">加载中...</div>
                     </div>
-                    <div class="automation-mode-options">
-                        <label class="automation-option">
-                            <input id="tianxing-use-heqi-pill" type="checkbox" onchange="syncTianxingControls(); markAutomationSettingsDirty()">
-                            服用合气丹
-                        </label>
-                    </div>
-                    <div class="automation-card-hint" id="tianxing-runtime">等待运行状态...</div>
+                    <div class="automation-card-hint" id="meditation-runtime">等待运行状态...</div>
                 </div>
                 <div class="automation-card">
                     <div class="automation-card-title">天星宗 · 刷天机值</div>
@@ -4709,15 +4720,74 @@
         }
 
         function syncTianxingControls() {
-            const mode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || 'deep';
-            const pill = document.getElementById('tianxing-use-heqi-pill');
             const grind = document.getElementById('tianxing-tianji-grind-enabled');
             const target = document.getElementById('tianxing-tianji-grind-target');
-            if (pill) pill.disabled = mode !== 'fate';
             if (target) target.disabled = !Boolean(grind?.checked);
             document.querySelectorAll('#tianxing-tianji-participant-controls input[type="checkbox"]').forEach(input => {
                 input.disabled = !Boolean(grind?.checked);
             });
+        }
+
+        let meditationRenderedSettings = {};
+
+        function readMeditationIdentitySettings(changesOnly = false) {
+            const values = Object.fromEntries(Array.from(document.querySelectorAll('[data-meditation-identity]')).map(row => [
+                row.dataset.meditationIdentity,
+                {
+                    enabled: Boolean(row.querySelector('[data-meditation-field="enabled"]')?.checked),
+                    mode: row.querySelector('[data-meditation-field="mode"]')?.value || 'deep',
+                    use_heqi_pill: Boolean(row.querySelector('[data-meditation-field="use_heqi_pill"]')?.checked)
+                }
+            ]));
+            if (!changesOnly) return values;
+            return Object.fromEntries(Object.entries(values).map(([key, config]) => [
+                key, Object.fromEntries(Object.entries(config).filter(([field, value]) => value !== meditationRenderedSettings[key]?.[field]))
+            ]).filter(([, config]) => Object.keys(config).length));
+        }
+
+        function syncMeditationControls() {
+            const counts = {deep: 0, daily: 0, disabled: 0};
+            document.querySelectorAll('[data-meditation-identity]').forEach(row => {
+                const enabled = Boolean(row.querySelector('[data-meditation-field="enabled"]')?.checked);
+                const mode = row.querySelector('[data-meditation-field="mode"]');
+                const pill = row.querySelector('[data-meditation-field="use_heqi_pill"]');
+                if (mode) mode.disabled = !enabled;
+                if (pill) pill.disabled = !enabled || mode?.value !== 'daily';
+                counts[enabled ? (mode?.value || 'deep') : 'disabled']++;
+            });
+            const summary = document.getElementById('meditation-runtime');
+            if (summary) summary.innerText = `深度闭关 ${counts.deep} 个身份 · 日常闭关 ${counts.daily} 个身份 · 未参与 ${counts.disabled} 个身份`;
+        }
+
+        function renderMeditationControls(meditation) {
+            const controls = document.getElementById('meditation-identity-controls');
+            if (!controls) return;
+            const configs = meditation.identities || {};
+            const modes = meditation.modes || [{key: 'deep', name: '深度闭关'}, {key: 'daily', name: '日常闭关'}];
+            controls.innerHTML = (meditation.accounts || []).map(account => `
+                <div class="automation-account">
+                    <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
+                    ${(account.identities || []).map(item => {
+                        const config = configs[item.key] || {enabled: true, mode: 'deep', use_heqi_pill: false};
+                        const label = `${account.name || account.key} · ${item.name || item.key}`;
+                        return `<div class="meditation-identity-row" data-meditation-identity="${escapeHtml(item.key)}">
+                            <label class="automation-option">
+                                <input type="checkbox" data-meditation-field="enabled" ${config.enabled ? 'checked' : ''} onchange="syncMeditationControls(); markAutomationSettingsDirty()">
+                                ${escapeHtml(item.name || item.key)}
+                            </label>
+                            <select class="record-select" data-meditation-field="mode" aria-label="${escapeHtml(label)}闭关模式" onchange="syncMeditationControls(); markAutomationSettingsDirty()">
+                                ${modes.map(mode => `<option value="${escapeHtml(mode.key)}" ${mode.key === config.mode ? 'selected' : ''}>${escapeHtml(mode.name)}</option>`).join('')}
+                            </select>
+                            <label class="automation-option meditation-pill-option">
+                                <input type="checkbox" data-meditation-field="use_heqi_pill" aria-label="${escapeHtml(label)}服用合气丹" ${config.use_heqi_pill ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                服用合气丹
+                            </label>
+                        </div>`;
+                    }).join('')}
+                </div>
+            `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
+            meditationRenderedSettings = readMeditationIdentitySettings();
+            syncMeditationControls();
         }
 
         function syncStarGazingControls() {
@@ -5099,6 +5169,8 @@
         function renderAutomationDashboard(data) {
             automationDashboardData = data || {settings: {}, world_boss: {accounts: []}, mulan_support: {modes: []}, miniapp_beast_abyss: {}, wind_thunder: {}, miniapp_fishing: {}, miniapp_journey: {}, miniapp_tianji_trial: {}, miniapp_fate_cards: {}, tianxing: {}};
             const settings = automationDashboardData.settings || {};
+            const meditation = {...(settings.meditation || {}), ...(automationDashboardData.meditation || {})};
+            const meditationSelectedCount = Object.values(meditation.identities || {}).filter(item => item.enabled).length;
             const worldBoss = automationDashboardData.world_boss || {};
             const mulan = automationDashboardData.mulan_support || {};
             const starGazing = automationDashboardData.star_gazing || {};
@@ -5149,19 +5221,16 @@
             const fateCardsEnabled = Boolean(fateCards.enabled ?? fateCardsSettings.enabled ?? true);
             const fateCardsParticipants = new Set(fateCards.participants || fateCardsSettings.participants || []);
             const fateCardsAccounts = Array.isArray(fateCards.accounts) ? fateCards.accounts : [];
-            const tianxingMeditationMode = String(tianxing.meditation_mode || tianxingSettings.meditation_mode || 'deep');
-            const tianxingUsePill = Boolean(tianxing.use_heqi_pill ?? tianxingSettings.use_heqi_pill ?? false);
             const tianxingGrindEnabled = Boolean(tianxing.tianji_grind_enabled ?? tianxingSettings.tianji_grind_enabled ?? false);
             const tianxingGrindTarget = Number(tianxing.tianji_grind_target ?? tianxingSettings.tianji_grind_target ?? 0);
             const tianxingTianjiParticipants = new Set(tianxing.tianji_grind_participants ?? tianxingSettings.tianji_grind_participants ?? []);
             const tianxingTianjiAccounts = Array.isArray(tianxing.tianji_accounts) ? tianxing.tianji_accounts : [];
-            const tianxingModeName = (tianxing.meditation_modes || []).find(item => item.key === tianxingMeditationMode)?.name || tianxingMeditationMode;
             const fishingOptionName = (options, key) => (
                 (Array.isArray(options) ? options : []).find(item => String(item.key || '') === String(key || ''))?.name || key
             );
             const summary = document.getElementById('automation-summary');
             if (summary && !automationSettingsDirty) {
-                summary.innerText = `天星 ${tianxingModeName} · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 风雷翅 ${windThunderEnabled ? `${windThunderParticipants.size} 个身份` : '关闭'} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'} · 命脉 ${fateCardsEnabled ? `${fateCardsParticipants.size} 个身份` : '暂停'}`;
+                summary.innerText = `闭关 ${meditationSelectedCount} 个身份 · Boss ${selected.size} 个账号参战 · 慕兰 ${mode} · 探渊 ${abyssRangeText} · 风雷翅 ${windThunderEnabled ? `${windThunderParticipants.size} 个身份` : '关闭'} · 垂钓 ${fishingEnabled ? `${fishingParticipants.size} 个身份` : '暂停'} · 游历 ${journeyEnabled ? `${journeyParticipants.size} 个身份` : '暂停'} · 试炼 ${trialEnabled ? `${trialParticipants.size} 个身份` : '暂停'} · 命脉 ${fateCardsEnabled ? `${fateCardsParticipants.size} 个身份` : '暂停'}`;
             }
 
             if (!automationSettingsDirty) {
@@ -5300,17 +5369,7 @@
                     `).join('') || '<div class="record-empty">暂无可配置身份。</div>';
                 }
                 syncMiniappFateCardsControls();
-                const tianxingModeControls = document.getElementById('tianxing-meditation-mode-controls');
-                if (tianxingModeControls) {
-                    tianxingModeControls.innerHTML = (tianxing.meditation_modes || []).map(item => `
-                        <label class="automation-option">
-                            <input type="radio" name="tianxing-meditation-mode" value="${escapeHtml(item.key || '')}" ${item.key === tianxingMeditationMode ? 'checked' : ''} onchange="syncTianxingControls(); markAutomationSettingsDirty()">
-                            ${escapeHtml(item.name || item.key || '')}
-                        </label>
-                    `).join('');
-                }
-                const tianxingPillControl = document.getElementById('tianxing-use-heqi-pill');
-                if (tianxingPillControl) tianxingPillControl.checked = tianxingUsePill;
+                renderMeditationControls(meditation);
                 const tianxingGrindControl = document.getElementById('tianxing-tianji-grind-enabled');
                 if (tianxingGrindControl) tianxingGrindControl.checked = tianxingGrindEnabled;
                 const tianxingGrindTargetControl = document.getElementById('tianxing-tianji-grind-target');
@@ -5410,11 +5469,7 @@
                     ? `${windThunderParticipants.size} 个身份的冷却指令自动装备风雷翅`
                     : '风雷翅加速已关闭';
             }
-            const tianxingRuntimeControl = document.getElementById('tianxing-runtime');
-            if (tianxingRuntimeControl) {
-                const pillText = tianxingMeditationMode === 'fate' && tianxingUsePill ? '每两轮用丹' : '不用丹';
-                tianxingRuntimeControl.innerText = `${tianxingModeName} · ${pillText}`;
-            }
+            syncMeditationControls();
             const tianxingTianjiRuntimeControl = document.getElementById('tianxing-tianji-runtime');
             if (tianxingTianjiRuntimeControl) {
                 tianxingTianjiRuntimeControl.innerText = tianxingGrindEnabled
@@ -5684,8 +5739,6 @@
             const windThunderParticipants = Array.from(document.querySelectorAll('#wind-thunder-participant-controls input[type="checkbox"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
-            const tianxingMeditationMode = document.querySelector('#tianxing-meditation-mode-controls input[type="radio"]:checked')?.value || '';
-            const tianxingUsePill = Boolean(document.getElementById('tianxing-use-heqi-pill')?.checked);
             const tianxingGrindEnabled = Boolean(document.getElementById('tianxing-tianji-grind-enabled')?.checked);
             const tianxingGrindTarget = document.getElementById('tianxing-tianji-grind-target')?.value || '';
             const tianxingTianjiParticipants = Array.from(document.querySelectorAll('#tianxing-tianji-participant-controls input[type="checkbox"]:checked'))
@@ -5728,8 +5781,9 @@
                 alert('启用风雷翅加速时至少选择一个参与身份。');
                 return;
             }
-            if (!tianxingMeditationMode) {
-                alert('请选择天星宗闭关模式。');
+            const meditationIdentities = readMeditationIdentitySettings();
+            if (Object.values(meditationIdentities).some(item => !['deep', 'daily'].includes(item.mode))) {
+                alert('请选择深度闭关或日常闭关。');
                 return;
             }
             if (tianxingGrindEnabled && Number(tianxingGrindTarget) <= 0) {
@@ -5783,9 +5837,8 @@
                             enabled: quizEnabled,
                             participants: quizParticipants
                         },
+                        meditation: {identities: readMeditationIdentitySettings(true)},
                         tianxing: {
-                            meditation_mode: tianxingMeditationMode,
-                            use_heqi_pill: tianxingUsePill,
                             tianji_grind_enabled: tianxingGrindEnabled,
                             tianji_grind_target: tianxingGrindTarget,
                             tianji_grind_participants: tianxingTianjiParticipants

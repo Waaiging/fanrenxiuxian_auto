@@ -36,7 +36,7 @@ class StarGazingSettingsTests(SettingsFixture, unittest.TestCase):
         self.path.write_text(json.dumps({"version": 12}), encoding="utf-8")
 
         self.assertEqual(settings.star_gazing_settings(), {"lead_seconds": 10})
-        self.assertEqual(settings.load_automation_settings()["version"], 14)
+        self.assertEqual(settings.load_automation_settings()["version"], 15)
         self.assertEqual(json.loads(self.path.read_text())["version"], 12)
 
     def test_custom_timing_survives_unrelated_settings_save(self):

@@ -3118,6 +3118,9 @@ def dashboard_command_disabled(actor, command, identity=None):
             for key in keys:
                 if (ident, key) in bypass or ("*", key) in bypass or (ident, "*") in bypass:
                     return False, "", None
+    meditation_guard = getattr(actor, "meditation_command_paused", None)
+    if callable(meditation_guard) and meditation_guard(command, identity):
+        return True, "meditation", {"disabled": True}
     for key, entry in command_control_matches(load_command_controls(), account, identity, command, root_state):
         if command_control_entry_disabled(entry):
             return True, key, entry
