@@ -57,6 +57,19 @@ NO_RESPONSE_RETRY_COUNT = 1
 # Event handlers with their own result correlation can use the identity/command
 # locks without inheriting the generic response timeout and retry policy.
 _ONE_SHOT_SEND = ContextVar("guarded_one_shot_send", default=None)
+_COMMAND_SEND_GUARDS = ContextVar("command_send_guards", default=())
+
+
+@contextmanager
+def guarded_command_send(before_send, on_sent=None):
+    """Apply synchronous dispatch callbacks to this task, including switches
+    and retries, while retaining the normal command feedback handling.
+    """
+    token = _COMMAND_SEND_GUARDS.set((*_COMMAND_SEND_GUARDS.get(), (before_send, on_sent)))
+    try:
+        yield
+    finally:
+        _COMMAND_SEND_GUARDS.reset(token)
 
 
 @contextmanager
@@ -547,12 +560,19 @@ async def send_and_wait_feedback_common(
                     if not allowed:
                         logger.info("Event dispatch guard blocked [%s]", message)
                         break
+                send_guards = _COMMAND_SEND_GUARDS.get()
+                if not all(guard(actor, message) for guard, _ in send_guards):
+                    logger.info("Task dispatch guard blocked [%s]", message)
+                    break
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组
                 logger.info(f"[DEBUG-FEEDBACK] [{message}] sending message to chat...")
                 sent_msg = await actor.client.send_message(target_chat, message, reply_to=target_reply)
                 if not sent_msg:
                     break
+                for _, on_sent in send_guards:
+                    if on_sent is not None:
+                        on_sent(actor, message, sent_msg)
                 sent_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 remember_script_sent_message(actor, sent_msg)
                 if delete_after:

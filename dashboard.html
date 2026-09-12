@@ -325,6 +325,10 @@
         .duel-multi-summary { margin-top: 0.18rem; color: var(--text-secondary); font-size: 0.7rem; }
         .duel-multi-form { padding: 0.85rem 0.9rem; }
         .duel-multi-settings { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 1fr) auto; gap: 0.75rem; align-items: end; }
+        .duel-multi-schedule { margin-top: 0.75rem; padding: 0.7rem; display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; border: 1px solid var(--border-color); border-radius: 8px; }
+        .duel-multi-schedule .duel-queue-toggle { align-self: center; }
+        .duel-multi-schedule .record-field { width: 8.5rem; }
+        .duel-multi-schedule .duel-multi-hint { flex-basis: 100%; }
         .duel-multi-targets { margin-top: 0.75rem; display: grid; gap: 0.5rem; }
         .duel-multi-target-row { display: grid; grid-template-columns: minmax(10rem, 1fr) 7rem auto; gap: 0.55rem; align-items: end; padding: 0.62rem; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(0,0,0,0.16); }
         .duel-multi-target-meta { margin-top: 0.22rem; color: var(--text-secondary); font-size: 0.66rem; }
@@ -1627,6 +1631,22 @@
                         </label>
                         <button class="reward-refresh" type="button" onclick="addDuelMultiTarget()"><i data-lucide="plus" aria-hidden="true"></i>添加对象</button>
                     </div>
+                    <div class="duel-multi-schedule">
+                        <label class="duel-queue-toggle">
+                            <input id="duel-multi-schedule-enabled" type="checkbox" onchange="markDuelMultiScheduleDirty()">
+                            每日定时（北京时间）
+                        </label>
+                        <label class="record-field">
+                            开始时间
+                            <input id="duel-multi-schedule-start" class="record-input" type="time" step="60" disabled oninput="markDuelMultiScheduleDirty()">
+                        </label>
+                        <label class="record-field">
+                            结束时间
+                            <input id="duel-multi-schedule-end" class="record-input" type="time" step="60" disabled oninput="markDuelMultiScheduleDirty()">
+                        </label>
+                        <button class="reward-refresh" type="button" id="duel-multi-schedule-save" onclick="saveDuelMultiSchedule()">保存定时</button>
+                        <span class="duel-multi-hint" id="duel-multi-schedule-hint">每天按同一时段运行，结束时间早于开始时间表示跨午夜。修改定时保留计划进度。</span>
+                    </div>
                     <div class="duel-multi-targets" id="duel-multi-targets"></div>
                     <div class="duel-multi-actions">
                         <button class="reward-refresh" type="button" id="duel-multi-save" onclick="saveDuelMultiPlan()"><i data-lucide="save" aria-hidden="true"></i>保存计划</button>
@@ -2034,6 +2054,7 @@
         let duelControlPending = false;
         const duelParticipantDirty = new Set();
         let duelMultiDirty = false;
+        let duelMultiScheduleDirty = false;
         let duelSettingsDirty = false;
         let redPacketDashboardData = {settings: {}, accounts: []};
         let redPacketSettingsDirty = false;
@@ -3913,14 +3934,89 @@
             `;
         }
 
+        function renderDuelMultiSchedule() {
+            const schedule = (duelDashboardData.multi || {}).schedule || {};
+            const enabled = document.getElementById('duel-multi-schedule-enabled');
+            const start = document.getElementById('duel-multi-schedule-start');
+            const end = document.getElementById('duel-multi-schedule-end');
+            if (!duelMultiScheduleDirty && !duelControlPending) {
+                if (enabled) enabled.checked = Boolean(schedule.enabled);
+                if (start) start.value = schedule.start || '';
+                if (end) end.value = schedule.end || '';
+            }
+            if (enabled) enabled.disabled = duelControlPending;
+            if (start) start.disabled = duelControlPending || !enabled?.checked;
+            if (end) end.disabled = duelControlPending || !enabled?.checked;
+            const save = document.getElementById('duel-multi-schedule-save');
+            if (save) {
+                save.disabled = duelControlPending;
+                save.textContent = duelMultiScheduleDirty ? '保存定时修改' : '保存定时';
+            }
+            const hint = document.getElementById('duel-multi-schedule-hint');
+            if (hint) hint.textContent = enabled?.checked
+                ? '每天按北京时间重复，结束时间早于开始时间表示跨午夜。到结束时间停止发起，未完成次数留到下个时段；修改定时保留进度。'
+                : '未开启定时，计划可全天调度。开启后每天按同一时段运行；计划总次数完成后结束。';
+        }
+
+        function markDuelMultiScheduleDirty() {
+            duelMultiScheduleDirty = true;
+            renderDuelMultiSchedule();
+        }
+
+        async function saveDuelMultiSchedule() {
+            if (duelControlPending) return false;
+            const schedule = {
+                enabled: Boolean(document.getElementById('duel-multi-schedule-enabled')?.checked),
+                start: String(document.getElementById('duel-multi-schedule-start')?.value || ''),
+                end: String(document.getElementById('duel-multi-schedule-end')?.value || ''),
+            };
+            if (schedule.enabled && (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(schedule.start)
+                || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(schedule.end))) {
+                alert('请选择每天的开始和结束时间。');
+                return false;
+            }
+            if (schedule.enabled && schedule.start === schedule.end) {
+                alert('开始和结束时间不能相同；全天运行请关闭每日定时。');
+                return false;
+            }
+            duelControlPending = true;
+            renderDuelMultiSchedule();
+            try {
+                const response = await fetch(apiUrl('/api/duels/multi'), {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({schedule}),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.msg || `HTTP ${response.status}`);
+                duelDashboardData.multi = {...(duelDashboardData.multi || {}), schedule: data.schedule};
+                duelMultiScheduleDirty = false;
+                return true;
+            } catch (error) {
+                console.error('One-to-many duel schedule save failed:', error);
+                alert(`每日斗法定时保存失败：${error.message || error}`);
+                return false;
+            } finally {
+                duelControlPending = false;
+                renderDuelMultiSchedule();
+                await updateDuelDashboard(true);
+            }
+        }
+
         function renderDuelMultiPlan(force = false) {
             const multi = duelDashboardData.multi || {};
+            const schedule = multi.schedule || {};
+            const scheduleText = schedule.enabled
+                ? (schedule.error || `每日 ${schedule.start}–${schedule.end}${schedule.end < schedule.start ? '（次日）' : ''}（北京时间）`)
+                : '全天';
+            const runStatus = !multi.enabled ? '已暂停'
+                : schedule.enabled && !schedule.active ? '等待时段' : '运行中';
             const summary = document.getElementById('duel-multi-summary');
             if (summary) {
                 summary.textContent = multi.configured
-                    ? `${multi.enabled ? '运行中' : '已暂停'} · 完成 ${Number(multi.total_completed || 0)}/${Number(multi.total_planned || 0)} · 今日神念 ${Number(multi.daily_remaining ?? 10)}/10 · 下次 ${duelTimeText(multi.next_at)} · ${multi.last_result || '等待调度'}`
+                    ? `${runStatus} · ${scheduleText} · 完成 ${Number(multi.total_completed || 0)}/${Number(multi.total_planned || 0)} · 今日神念 ${Number(multi.daily_remaining ?? 10)}/10 · 下次 ${duelTimeText(multi.next_at)} · ${multi.last_result || '等待调度'}`
                     : '尚未配置发起身份和目标列表';
             }
+            renderDuelMultiSchedule();
             if ((duelMultiDirty || duelControlPending) && !force) return;
 
             const initiatorSelect = document.getElementById('duel-multi-initiator');
@@ -3965,6 +4061,10 @@
             const multi = duelDashboardData.multi || {};
             if (duelMultiDirty || !multi.configured) {
                 markDuelMultiDirty();
+                return;
+            }
+            if (enabled && duelMultiScheduleDirty && !await saveDuelMultiSchedule()) {
+                document.getElementById('duel-multi-enabled').checked = Boolean(multi.enabled);
                 return;
             }
             if (duelControlPending) return;
@@ -4023,6 +4123,10 @@
 
         async function saveDuelMultiPlan() {
             if (duelControlPending) return;
+            if (duelMultiScheduleDirty) {
+                const scheduleOnly = !duelMultiDirty && Boolean((duelDashboardData.multi || {}).configured);
+                if (!await saveDuelMultiSchedule() || scheduleOnly) return;
+            }
             const initiator = String(document.getElementById('duel-multi-initiator')?.value || '');
             const enabled = Boolean(document.getElementById('duel-multi-enabled')?.checked);
             const targetSwitchEnabled = String(document.getElementById('duel-multi-target-switch')?.value || 'switch') !== 'direct';

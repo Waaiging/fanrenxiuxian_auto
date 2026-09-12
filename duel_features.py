@@ -11,8 +11,8 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timedelta, timezone
 
 from automation_settings import (
     ACCOUNT_IDENTITIES,
@@ -20,6 +20,7 @@ from automation_settings import (
     canonical_automation_identity,
     current_sub_yinluo_identity,
 )
+from command_feedback import guarded_command_send
 
 try:
     import fcntl
@@ -48,6 +49,8 @@ DUEL_IDENTITY_PAUSE_RETRY_SECONDS = 5 * 60
 DUEL_ROLLING_TARGET_COOLDOWN_SECONDS = 24 * 3600
 DUEL_MULTI_MAX_TARGETS = 20
 DUEL_MULTI_MAX_COUNT = 999
+DUEL_TIMEZONE = timezone(timedelta(hours=8))
+DUEL_SCHEDULE_TIME_PATTERN = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 DUEL_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,64}$")
 DUEL_STATE_VERSION = 4
 DUEL_ROTATION_QUEUE_KEY = "rotation"
@@ -138,6 +141,82 @@ def parse_duel_time(value):
         return datetime.strptime(str(value or ""), TIME_FORMAT)
     except Exception:
         return None
+
+
+def normalize_duel_multi_schedule(value, validate=False):
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        if validate:
+            raise ValueError("invalid duel schedule")
+        value = {"enabled": True}  # Malformed saved settings must not allow sends.
+    schedule = {
+        "enabled": bool(value.get("enabled", False)),
+        "start": str(value.get("start") or "").strip(),
+        "end": str(value.get("end") or "").strip(),
+    }
+    if validate:
+        if "enabled" in value and not isinstance(value["enabled"], bool):
+            raise ValueError("invalid duel schedule")
+        for field in ("start", "end"):
+            if (schedule["enabled"] or schedule[field]) and not DUEL_SCHEDULE_TIME_PATTERN.fullmatch(schedule[field]):
+                raise ValueError("invalid duel schedule time")
+        if schedule["enabled"] and schedule["start"] == schedule["end"]:
+            raise ValueError("equal duel schedule times")
+    return schedule
+
+
+def duel_multi_schedule_status(multi, now=None):
+    """Daily Beijing-time window, inclusive at start and exclusive at end."""
+    now = now or duel_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(DUEL_TIMEZONE).replace(tzinfo=None)
+    schedule = normalize_duel_multi_schedule(multi.get("schedule"))
+    status = {**schedule, "timezone": "Asia/Shanghai", "active": True,
+              "next_start_at": "", "ends_at": "", "error": ""}
+    if not schedule["enabled"]:
+        return status
+    try:
+        normalize_duel_multi_schedule(schedule, validate=True)
+    except ValueError:
+        status.update(active=False, error="请设置有效且不同的每日开始、结束时间")
+        return status
+    start_hour, start_minute = map(int, schedule["start"].split(":"))
+    end_hour, end_minute = map(int, schedule["end"].split(":"))
+    start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    if end < start:
+        if now < end:
+            start -= timedelta(days=1)
+        else:
+            end += timedelta(days=1)
+    if start <= now < end:
+        status["ends_at"] = duel_time(end)
+    else:
+        status["active"] = False
+        status["next_start_at"] = duel_time(start if now < start else start + timedelta(days=1))
+    return status
+
+
+def _duel_multi_next_at(multi, now=None):
+    now = now or duel_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(DUEL_TIMEZONE).replace(tzinfo=None)
+    if not multi.get("enabled") or not (multi.get("schedule") or {}).get("enabled"):
+        return multi.get("next_at") or ""
+    earliest = max(now, parse_duel_time(multi.get("next_at")) or now)
+    status = duel_multi_schedule_status(multi, earliest)
+    if status["error"]:
+        return ""
+    return duel_time(earliest) if status["active"] else status["next_start_at"]
+
+
+def _duel_multi_send_allowed():
+    # Read at dispatch so edits made while waiting for identity/command locks
+    # take effect before either a switch or the duel itself is sent.
+    with duel_state_lock():
+        multi = _read_duel_state_unlocked().get("multi") or {}
+    return duel_multi_schedule_status(multi)["active"]
 
 
 def duel_participant_key(account, identity):
@@ -453,6 +532,7 @@ def _new_multi_target_state(username, count, target_id=None):
 def _new_multi_state():
     return {
         "enabled": False,
+        "schedule": normalize_duel_multi_schedule(None),
         "initiator_account": "",
         "initiator_identity": "",
         "target_switch_enabled": True,
@@ -721,6 +801,7 @@ def _ensure_duel_state_shape(data, reset_daily=True, refresh_roster=True):
             True if raw_multi_explicit is None else raw_multi_explicit
         )
     multi["enabled"] = bool(multi.get("enabled", False))
+    multi["schedule"] = normalize_duel_multi_schedule(multi.get("schedule"))
     initiator_account = str(multi.get("initiator_account") or "").strip().lower()
     initiator_identity = str(multi.get("initiator_identity") or "").strip()
     if duel_identity_config(initiator_account, initiator_identity):
@@ -818,11 +899,14 @@ def _ensure_duel_state_shape(data, reset_daily=True, refresh_roster=True):
                 queue["participants"][key] = reset_state
         multi["daily_remaining"] = DUEL_DAILY_LIMIT
         multi["daily_exhausted_date"] = ""
-        multi["next_at"] = ""
-        multi["in_flight"] = {}
-        multi["preparation"] = {}
+        # Overnight windows can have a switch or duel awaiting feedback at
+        # midnight. Keep live leases so that result still advances the plan.
+        for field in ("in_flight", "preparation"):
+            if not _lease_active(multi.get(field)):
+                multi[field] = {}
         for target in multi["targets"]:
-            target["status"] = "completed" if int(target.get("remaining") or 0) <= 0 else "ready"
+            if not any(target["id"] == multi[field].get("target_id") for field in ("in_flight", "preparation")):
+                target["status"] = "completed" if int(target.get("remaining") or 0) <= 0 else "ready"
     return data
 
 
@@ -989,6 +1073,7 @@ def configure_duel_multi_plan(
     targets,
     enabled=True,
     target_switch_enabled=None,
+    schedule=None,
 ):
     initiator = duel_identity_config(initiator_account, initiator_identity)
     roster_changes = {}
@@ -1032,12 +1117,17 @@ def configure_duel_multi_plan(
             _read_duel_state_unlocked(), roster_changes
         )
         data = _ensure_duel_state_shape(raw)
+        schedule = normalize_duel_multi_schedule(
+            data["multi"]["schedule"] if schedule is None else schedule,
+            validate=True,
+        )
         mode_explicit = target_switch_enabled is not None
         if target_switch_enabled is None:
             target_switch_enabled = duel_target_switch_enabled(data)
         multi = _new_multi_state()
         multi.update({
             "enabled": bool(enabled),
+            "schedule": schedule,
             "initiator_account": initiator["account"],
             "initiator_identity": initiator["identity"],
             "target_switch_enabled": bool(target_switch_enabled),
@@ -1048,6 +1138,18 @@ def configure_duel_multi_plan(
         data["multi"] = multi
         if enabled:
             data["enabled"] = True
+        data["updated_at"] = duel_time()
+        _atomic_write_json(DUEL_STATE_FILE, data)
+        return data
+
+
+def set_duel_multi_schedule(schedule):
+    if not isinstance(schedule, dict):
+        raise ValueError("invalid duel schedule")
+    schedule = normalize_duel_multi_schedule(schedule, validate=True)
+    with duel_state_lock():
+        data = _ensure_duel_state_shape(_read_duel_state_unlocked())
+        data["multi"]["schedule"] = schedule
         data["updated_at"] = duel_time()
         _atomic_write_json(DUEL_STATE_FILE, data)
         return data
@@ -1317,6 +1419,7 @@ def claim_duel_target_preparation(account):
                 )
                 or
                 not container.get("enabled")
+                or (queue_key == "multi" and not duel_multi_schedule_status(container, now)["active"])
                 or str(preparation.get("owner") or "") != account
                 or str(preparation.get("status") or "") != "pending"
                 or not _lease_active(preparation, now)
@@ -1351,6 +1454,9 @@ def finish_duel_target_preparation(claim, success, detail="", reply_to_msg_id=No
         queue_key, container, field, preparation = _duel_target_preparation_context(data, claim)
         if preparation is None:
             return False
+        if queue_key == "multi" and not duel_multi_schedule_status(container, now)["active"]:
+            success = False
+            detail = "等待每日斗法时段"
         if success:
             preparation["status"] = "ready"
             preparation["ready_at"] = duel_time(now)
@@ -1384,9 +1490,16 @@ def duel_target_preparation_held(claim):
         return False
     with duel_state_lock():
         data = _ensure_duel_state_shape(_read_duel_state_unlocked())
-        _queue_key, _container, _field, preparation = _duel_target_preparation_context(data, claim)
+        queue_key, container, _field, preparation = _duel_target_preparation_context(data, claim)
         if preparation is None:
             return False
+        if queue_key == "multi" and not duel_multi_schedule_status(container)["active"]:
+            in_flight = container.get("in_flight") or {}
+            if not (
+                _lease_active(in_flight)
+                and in_flight.get("preparation_run_id") == claim.get("run_id")
+            ):
+                return False
         if not _lease_active(preparation):
             return False
         return str(preparation.get("status") or "") in {"claimed", "ready", "holding"}
@@ -1423,9 +1536,17 @@ def _reserve_multi_duel_locked(data, account, now):
     if (
         not multi.get("enabled")
         or multi.get("initiator_account") != account
-        or not _queue_due(multi, now)
         or _lease_active(multi.get("in_flight"), now)
     ):
+        return None, dirty
+    if not duel_multi_schedule_status(multi, now)["active"]:
+        preparation = multi.get("preparation") or {}
+        if preparation:
+            _set_preparation_subject_status("multi", multi, preparation, "ready", "等待每日斗法时段")
+            multi["preparation"] = {}
+            dirty = True
+        return None, dirty
+    if not _queue_due(multi, now):
         return None, dirty
     if int(multi.get("daily_remaining", DUEL_DAILY_LIMIT) or 0) <= 0:
         multi["next_at"] = _next_day_time(now)
@@ -1536,6 +1657,9 @@ def _reserve_multi_duel_locked(data, account, now):
         return None, True
 
     run_id = uuid.uuid4().hex
+    previous_target_next_at = data.get("target_next_at", {}).get(target_username.lower(), "")
+    previous_last_attempt_at = multi.get("last_attempt_at") or ""
+    previous_target_attempt_at = selected.get("last_attempt_at") or ""
     multi["cursor"] = (selected_index + 1) % len(targets)
     multi["next_at"] = duel_time(now + timedelta(seconds=interval_seconds))
     multi["last_attempt_at"] = duel_time(now)
@@ -1588,6 +1712,10 @@ def _reserve_multi_duel_locked(data, account, now):
             else f".斗法 @{target_username}"
         ),
         "reserved_at": duel_time(now),
+        "reserved_target_next_at": data["target_next_at"][target_username.lower()],
+        "previous_target_next_at": previous_target_next_at,
+        "previous_last_attempt_at": previous_last_attempt_at,
+        "previous_target_attempt_at": previous_target_attempt_at,
     }, True
 
 
@@ -2053,6 +2181,30 @@ def finish_duel_reservation(reservation, result):
             target = _multi_target_by_id(multi, reservation.get("target_id"))
             status = str(result.get("status") or "unknown")
             outcome = str(result.get("outcome") or status)
+            if status == "schedule_wait":
+                # No duel was sent. Release only this reservation's cooldown;
+                # another queue may already have extended the shared target CD.
+                target_key = normalize_duel_target(reservation.get("target_username")).lower()
+                target_next_at = data.setdefault("target_next_at", {})
+                if target_next_at.get(target_key) == reservation.get("reserved_target_next_at"):
+                    previous = reservation.get("previous_target_next_at")
+                    if previous:
+                        target_next_at[target_key] = previous
+                    else:
+                        target_next_at.pop(target_key, None)
+                if target is not None:
+                    target["status"] = "ready"
+                    target["last_result"] = outcome
+                    target["last_attempt_at"] = reservation.get("previous_target_attempt_at") or ""
+                    multi["cursor"] = multi["targets"].index(target)
+                multi["last_attempt_at"] = reservation.get("previous_last_attempt_at") or ""
+                multi["last_result"] = outcome
+                multi["next_at"] = ""
+                multi["in_flight"] = {}
+                multi["preparation"] = {}
+                data["updated_at"] = duel_time(now)
+                _atomic_write_json(DUEL_STATE_FILE, data)
+                return
             if target is not None:
                 target["last_result"] = outcome
                 if status == "settled":
@@ -2732,8 +2884,9 @@ def duel_dashboard_payload(date="", limit=200):
         "initiator_identity": multi_state.get("initiator_identity") or "",
         "target_switch_enabled": multi_target_switch_enabled,
         "duel_method": "reply_switch" if multi_target_switch_enabled else "username",
+        "schedule": duel_multi_schedule_status(multi_state),
         "initiator": initiator or {},
-        "next_at": multi_state.get("next_at") or "",
+        "next_at": _duel_multi_next_at(multi_state),
         "last_attempt_at": multi_state.get("last_attempt_at") or "",
         "last_success_at": multi_state.get("last_success_at") or "",
         "last_result": multi_state.get("last_result") or "",
@@ -2801,13 +2954,20 @@ class DuelMixin:
         prepare = getattr(self, "prepare_identity_for_time_critical_command", None)
         if not callable(prepare):
             return False, "账号缺少身份预切换能力", None
-        prepared = await prepare(
-            identity,
-            command=".斗法",
-            timeout=30,
-            force_fresh=True,
-            return_switch_message_id=True,
-        )
+        is_multi = claim.get("queue_key") == "multi"
+        if is_multi and not _duel_multi_send_allowed():
+            return False, "等待每日斗法时段", None
+        guard = guarded_command_send(lambda actor, command: _duel_multi_send_allowed()) if is_multi else nullcontext()
+        with guard:
+            prepared = await prepare(
+                identity,
+                command=".斗法",
+                timeout=30,
+                force_fresh=True,
+                return_switch_message_id=True,
+            )
+        if is_multi and not _duel_multi_send_allowed():
+            return False, "等待每日斗法时段", None
         if isinstance(prepared, tuple):
             success, reply_to_msg_id = prepared
         else:
@@ -2971,6 +3131,23 @@ class DuelMixin:
         command_msg_id = None
         response_msg_id = None
         result = {"status": "error", "outcome": "执行异常", "text": ""}
+        schedule_blocked = False
+
+        def allowed(actor, command):
+            nonlocal schedule_blocked
+            if not _duel_multi_send_allowed():
+                schedule_blocked = True
+                return False
+            return True
+
+        def sent(actor, command, message):
+            nonlocal command_msg_id
+            if str(command).strip() == reservation["command"]:
+                command_msg_id = message.id
+
+        def schedule_wait_result():
+            return {"status": "schedule_wait", "outcome": "等待每日斗法时段", "text": "当前不在每日斗法时段，保留进度等待下次开放"}
+
         try:
             identity = str(reservation.get("identity") or "主魂").strip() or "主魂"
             resolver = getattr(self, "resolve_avatar_identity", None)
@@ -2990,22 +3167,31 @@ class DuelMixin:
                     }
                     logger.info("Duel skipped for paused identity [%s] (%ss remaining)", identity, remaining)
                     return result
+            is_multi = reservation.get("queue_key") == "multi"
+            if is_multi and not allowed(self, reservation["command"]):
+                result = schedule_wait_result()
+                return result
             logger.info(
                 "Duel turn [%s]: %s/%s -> @%s reply_to=%s",
                 reservation["queue_key"], reservation["account"], reservation["identity"],
                 reservation["target_username"], reservation.get("reply_to_msg_id"),
             )
-            response_msg = await self.send_and_wait_feedback_identity(
-                reservation["identity"],
-                reservation["command"],
-                reply_to=reservation.get("reply_to_msg_id"),
-                timeout=60,
-                max_retries=0,
-                return_response_msg=True,
-                delete_after=False,
-                force_identity_check=True,
-            )
-            command_msg_id = duel_reply_to_message_id(response_msg) or getattr(self, "last_sent_id", None)
+            guard = guarded_command_send(allowed, sent) if is_multi else nullcontext()
+            with guard:
+                response_msg = await self.send_and_wait_feedback_identity(
+                    reservation["identity"],
+                    reservation["command"],
+                    reply_to=reservation.get("reply_to_msg_id"),
+                    timeout=60,
+                    max_retries=0,
+                    return_response_msg=True,
+                    delete_after=False,
+                    force_identity_check=True,
+                )
+            if schedule_blocked and command_msg_id is None:
+                result = schedule_wait_result()
+                return result
+            command_msg_id = duel_reply_to_message_id(response_msg) or command_msg_id or getattr(self, "last_sent_id", None)
             final_msg, final_text = await wait_for_duel_result(
                 self,
                 response_msg,
@@ -3027,7 +3213,7 @@ class DuelMixin:
             logger.exception("Duel turn crashed: %s", reservation)
         finally:
             try:
-                if result.get("status") != "identity_paused":
+                if result.get("status") not in {"identity_paused", "schedule_wait"}:
                     record_duel_event(
                         reservation,
                         result,

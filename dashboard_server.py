@@ -93,10 +93,12 @@ from duel_features import (
     DUEL_ROTATION_QUEUE_KEY,
     configure_duel_multi_plan,
     duel_dashboard_payload,
+    duel_multi_schedule_status,
     duel_multi_target_switch_enabled,
     set_duel_control,
     set_duel_intervals,
     set_duel_multi_control,
+    set_duel_multi_schedule,
     set_duel_participant_control,
     set_duel_target_switch,
     set_titan_beast_mode,
@@ -6228,7 +6230,10 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
                 payload.get("targets"),
                 enabled=bool(payload.get("enabled", True)),
                 target_switch_enabled=multi_target_switch,
+                schedule=payload.get("schedule"),
             )
+        elif "schedule" in payload:
+            data = set_duel_multi_schedule(payload["schedule"])
         else:
             data = set_duel_multi_control(bool(payload.get("enabled")))
     except ValueError as exc:
@@ -6243,6 +6248,9 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
             "duel target matches initiator": "不能把发起身份自己设为斗法对象",
             "same account duel target": "同一账号内无法同时保持发起身份和目标分身激活",
             "duel multi plan is not configured": "请先保存一对多斗法计划",
+            "invalid duel schedule": "每日斗法定时格式错误",
+            "invalid duel schedule time": "请选择有效的开始和结束时间（HH:MM）",
+            "equal duel schedule times": "开始和结束时间不能相同；全天运行请关闭每日定时",
         }
         return {"success": False, "msg": messages.get(str(exc), str(exc))}
     with STATUS_LOCK:
@@ -6258,6 +6266,7 @@ async def duel_multi_control(payload: dict = Body(...), username: str = Depends(
         "initiator_identity": multi.get("initiator_identity") or "",
         "target_switch_enabled": multi_target_switch_enabled_value,
         "duel_method": "reply_switch" if multi_target_switch_enabled_value else "username",
+        "schedule": duel_multi_schedule_status(multi),
         "target_count": len(multi.get("targets") or []),
         "updated_by": username,
     }

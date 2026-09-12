@@ -136,6 +136,63 @@ class FeedbackRegistrationTests(unittest.IsolatedAsyncioTestCase):
         on_sent.assert_not_called()
         self.actor.client.send_message.assert_awaited_once()
 
+    async def test_dispatch_guard_preserves_feedback_and_observes_actual_send(self):
+        allowed, on_sent = MagicMock(return_value=True), MagicMock()
+
+        async def notify(*args, **kwargs):
+            self._reply()
+
+        self._patch("record_telegram_send_success", notify)
+        with feedback.guarded_command_send(allowed, on_sent):
+            self.assertEqual(await self._send(), "reply fixture")
+        allowed.assert_called_once_with(self.actor, ".问道")
+        on_sent.assert_called_once_with(self.actor, ".问道", self.sent)
+        self._assert_cleaned()
+
+    async def test_dispatch_guard_is_rechecked_after_event_guard_awaits(self):
+        allowed, on_sent = MagicMock(return_value=True), MagicMock()
+
+        async def event_allowed(*args):
+            allowed.return_value = False
+            return True
+
+        with (
+            feedback.guarded_command_send(allowed, on_sent),
+            feedback.guarded_one_shot_send(".问道", event_allowed, MagicMock()),
+        ):
+            self.assertFalse(await self._send())
+        self.actor.client.send_message.assert_not_awaited()
+        on_sent.assert_not_called()
+
+    async def test_dispatch_guard_is_local_to_its_task_and_restored_on_exit(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        blocked = MagicMock(return_value=False)
+
+        async def guarded_task():
+            with feedback.guarded_command_send(blocked):
+                entered.set()
+                await release.wait()
+                return await self._send()
+
+        async def notify(*args, **kwargs):
+            self._reply()
+
+        self._patch("record_telegram_send_success", notify)
+        task = asyncio.create_task(guarded_task())
+        try:
+            await entered.wait()
+            self.assertEqual(await self._send(), "reply fixture")
+            blocked.assert_not_called()
+            release.set()
+            self.assertFalse(await task)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        with feedback.guarded_command_send(blocked):
+            self.assertFalse(await self._send())
+        self.assertEqual(await self._send(), "reply fixture")
+        self.assertEqual(self.actor.client.send_message.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
