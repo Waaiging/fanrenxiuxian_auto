@@ -50,12 +50,12 @@ class MeditationModeMixin:
         config = self.meditation_config(identity)
         return config["mode"] if config["enabled"] else "disabled"
 
-    def required_meditation_destiny(self, identity="主魂"):
-        """Return the destiny required before this soul's daily cultivation."""
+    def meditation_destiny_preferences(self, identity="主魂"):
+        """Return daily cultivation choices in priority order."""
         identity = self.resolve_avatar_identity(identity)
         if self.identity_sect_name(identity) == "天星宗" and self.identity_meditation_mode(identity) == "daily":
-            return "紫微"
-        return ""
+            return ("紫微", "贪狼")
+        return ()
 
     def meditation_command_paused(self, command, identity="主魂"):
         scope = _COMMAND_SELECTION.get()
@@ -276,7 +276,7 @@ class MeditationModeMixin:
             if not await self.ensure_tianxing_destiny_for_action(identity, "cultivation"):
                 if not self._defer_meditation_for_missing_destiny(identity, config):
                     self._meditation_retry(
-                        identity, config, "紫微命星未确认",
+                        identity, config, "闭关命星未确认",
                         max(300, self.tianxing_destiny_retry_wait_seconds(identity)),
                     )
                 return None

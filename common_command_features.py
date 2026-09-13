@@ -1422,8 +1422,8 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
 
     def unavailable_meditation_destiny(self, identity="主魂"):
         """Distinguish a missing daily candidate from an unconfirmed observation."""
-        required = self.required_meditation_destiny(identity)
-        if not required:
+        preferences = self.meditation_destiny_preferences(identity)
+        if not preferences:
             return ""
         today = datetime.now().strftime("%Y-%m-%d")
         state = self.tianxing_identity_state(identity)
@@ -1434,7 +1434,7 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             return ""
         options = [name for name in state.get("tianxing_destiny_options", [])
                    if name in TIANXING_DESTINY_CHOICES]
-        return required if options and required not in options else ""
+        return "、".join(preferences) if options and not any(name in options for name in preferences) else ""
 
     async def ensure_tianxing_destiny_for_action(self, identity, action):
         identity = str(identity or "主魂").strip() or "主魂"
@@ -1461,13 +1461,13 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             for name in state.get("tianxing_destiny_options", [])
             if name in TIANXING_DESTINY_CHOICES
         ]
-        # Apply the daily-meditation requirement only to cultivation.
-        required = self.required_meditation_destiny(identity) if action == "cultivation" else ""
-        if required:
-            preferences = (required,)
+        # Apply daily-meditation preferences only to cultivation.
+        daily_preferences = self.meditation_destiny_preferences(identity) if action == "cultivation" else ()
+        if daily_preferences:
+            preferences = daily_preferences
         choice = next((name for name in preferences if name in options), "")
         if not choice:
-            if required and self._defer_meditation_for_missing_destiny(
+            if daily_preferences and self._defer_meditation_for_missing_destiny(
                 identity, self.meditation_config(identity)
             ):
                 return False
