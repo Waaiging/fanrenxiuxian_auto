@@ -44,6 +44,7 @@ from world_boss_turnstile import (
 )
 from world_boss_recovery import WorldBossRecoveryStore
 from world_boss_runtime import run_isolated_battle
+from world_boss_timing import BattleClockProbe
 
 
 WORLD_BOSS_BUTTON_TEXT = "进入真仙战场"
@@ -80,7 +81,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 4
+WORLD_BOSS_DIAGNOSTIC_VERSION = 5
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -629,6 +630,8 @@ class WorldBossMonitor:
         self._drift_samples = 0
         self._drift_history: list[float] = []
         self._drift_weight_history: list[tuple[float, float]] = []
+        self._arrival_clock_offset_ms = 0.0
+        self._clock_probe = BattleClockProbe()
         self._drift_direction_counts: dict[str, int] = {
             "early": 0,
             "late": 0,
@@ -657,6 +660,9 @@ class WorldBossMonitor:
         self._boss_defeat_reason = ""
         self._boss_defeat_marker: Path | None = None
         self._boss_skipped_window_count = 0
+        self._boss_marker_task: asyncio.Task[Any] | None = None
+        self._boss_marker_reads = 0
+        self._boss_marker_max_read_ms = 0
         self._http_executor: ThreadPoolExecutor | None = None
         self._checkpoint_executor: ThreadPoolExecutor | None = None
         try:
@@ -700,8 +706,22 @@ class WorldBossMonitor:
 
         async def fight():
             self._checkpoint_lock = asyncio.Lock()
+            # Event.wait() binds to this runner's loop. A monitor survives
+            # across rounds, whereas each isolated battle gets a fresh loop.
+            already_stopped = self._boss_defeated.is_set()
+            self._boss_defeated = asyncio.Event()
+            if already_stopped:
+                self._boss_defeated.set()
             self._battle_execution = "dedicated_thread"
-            return await self._fight(*args, **kwargs)
+            self._boss_marker_reads = 0
+            self._boss_marker_max_read_ms = 0
+            self._boss_marker_task = asyncio.create_task(self._poll_boss_marker())
+            try:
+                return await self._fight(*args, **kwargs)
+            finally:
+                self._boss_marker_task.cancel()
+                await asyncio.gather(self._boss_marker_task, return_exceptions=True)
+                self._boss_marker_task = None
 
         return await run_isolated_battle(fight, account=self.account)
 
@@ -791,31 +811,65 @@ class WorldBossMonitor:
         self._boss_stop_requested()
 
     def _boss_stop_requested(self) -> bool:
-        """Check local and shared death state without doing network I/O."""
+        """Check the cached stop signal on the production battle clock."""
         defeated = getattr(self, "_boss_defeated", None)
         if isinstance(defeated, asyncio.Event) and defeated.is_set():
             return True
         marker = getattr(self, "_boss_defeat_marker", None)
         if marker is None:
             return False
+        watcher = getattr(self, "_boss_marker_task", None)
+        if watcher is not None and not watcher.done():
+            return False
+        return self._adopt_boss_marker(self._read_boss_marker(marker))
+
+    @staticmethod
+    def _read_boss_marker(marker: Path) -> str:
+        """Read only files here; asyncio state is updated by the owning loop."""
         try:
             stat = marker.stat()
             age = max(0.0, time.time() - float(stat.st_mtime))
             if age > WORLD_BOSS_DEFEAT_MARKER_TTL_SECONDS:
                 marker.unlink(missing_ok=True)
-                return False
+                return ""
             with marker.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
             if not isinstance(data, dict):
-                return False
-            reason = str(data.get("reason") or "boss_defeated_remote").strip()
-            self._boss_defeat_reason = reason[:80]
-            if not isinstance(getattr(self, "_boss_defeated", None), asyncio.Event):
-                self._boss_defeated = asyncio.Event()
-            self._boss_defeated.set()
-            return True
+                return ""
+            return str(data.get("reason") or "boss_defeated_remote").strip()[:80]
         except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            return ""
+
+    def _adopt_boss_marker(self, reason: str) -> bool:
+        if not reason:
             return False
+        self._boss_defeat_reason = reason
+        if not isinstance(getattr(self, "_boss_defeated", None), asyncio.Event):
+            self._boss_defeated = asyncio.Event()
+        self._boss_defeated.set()
+        return True
+
+    async def _refresh_boss_marker(self) -> None:
+        marker = self._boss_defeat_marker
+        if marker is None or self._boss_defeated.is_set():
+            return
+        started = self.monotonic()
+        reason = await _run_blocking(
+            self._read_boss_marker, marker, executor=self._world_boss_checkpoint_executor(),
+        )
+        self._boss_marker_reads += 1
+        self._boss_marker_max_read_ms = max(
+            self._boss_marker_max_read_ms, int(round((self.monotonic() - started) * 1000)),
+        )
+        if marker == self._boss_defeat_marker:
+            self._adopt_boss_marker(reason)
+
+    async def _poll_boss_marker(self) -> None:
+        # One watcher per battle; each sleeping strike waits only on its Event.
+        # Filesystem stalls cannot occupy the clock thread or the HTTP pool.
+        while True:
+            await self._refresh_boss_marker()
+            await asyncio.sleep(0.1)
 
     def _mark_boss_defeated(self, reason: Any = "boss_defeated", boss_hp: Any = None) -> None:
         """Publish a best-effort local/cross-process stop signal."""
@@ -867,9 +921,14 @@ class WorldBossMonitor:
 
     async def _wait_for_boss_stop(self) -> None:
         """Poll the shared marker while a future window is sleeping."""
+        watcher = getattr(self, "_boss_marker_task", None)
+        if watcher is not None and not watcher.done():
+            await self._boss_defeated.wait()
+            return
         while not self._boss_defeated.is_set():
-            if self._boss_stop_requested():
-                return
+            await self._refresh_boss_marker()
+            if self._boss_defeated.is_set():
+                break
             await asyncio.sleep(0.05)
 
     async def _sleep_until(self, target: float) -> bool:
@@ -2005,6 +2064,8 @@ class WorldBossMonitor:
         self._drift_samples = 0
         self._drift_history = []
         self._drift_weight_history = []
+        self._arrival_clock_offset_ms = 0.0
+        self._clock_probe = BattleClockProbe()
         self._drift_direction_counts = {
             "early": 0,
             "late": 0,
@@ -2165,6 +2226,7 @@ class WorldBossMonitor:
         account_offset_ms: Any = 0,
         request_interval_ms: Any = None,
         tolerance_ms: Any = None,
+        clock_offset_ms: Any = 0,
     ) -> dict[str, Any] | None:
         """Infer the sign hidden by the server's unsigned ``deltaMs``.
 
@@ -2208,8 +2270,13 @@ class WorldBossMonitor:
                 return None
             interval_values = (start, end)
 
-        interval_start = min(interval_values)
-        interval_end = max(interval_values)
+        # A confirmed probe aligns the two clocks before testing candidate
+        # directions. Merely changing the strike lead leaves this comparison
+        # in the old coordinate system and can reverse the next correction.
+        clock_offset = cls._finite_ms(clock_offset_ms) or 0.0
+        clock_offset = max(-400.0, min(400.0, clock_offset))
+        interval_start = min(interval_values) + clock_offset
+        interval_end = max(interval_values) + clock_offset
         tolerance = cls._finite_ms(
             WORLD_BOSS_DRIFT_TOLERANCE_MS if tolerance_ms is None else tolerance_ms
         )
@@ -2335,6 +2402,7 @@ class WorldBossMonitor:
                 cls._rounded_ms(interval_end),
             ],
             "request_rtt_ms": cls._rounded_ms(rtt_ms),
+            "clock_offset_ms": cls._rounded_ms(clock_offset),
             "tolerance_ms": cls._rounded_ms(tolerance),
             "sample_drift_ms": cls._rounded_ms(sample_drift),
             "clamped_sample_drift_ms": cls._rounded_ms(clamped_sample_drift),
@@ -2417,6 +2485,7 @@ class WorldBossMonitor:
             account_offset_ms=account_offset_ms,
             request_interval_ms=request_interval_ms,
             tolerance_ms=tolerance_ms,
+            clock_offset_ms=getattr(self, "_arrival_clock_offset_ms", 0.0),
         )
         if inference is None:
             return None
@@ -2596,6 +2665,7 @@ class WorldBossMonitor:
         offset_ms = self._hit_offset_ms(window)
         drift_ms = self._drift_lead_ms()
         initial_drift_ms = drift_ms
+        probe_shift_ms = 0
         target_ms = max(
             0, int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms
         )
@@ -2633,11 +2703,12 @@ class WorldBossMonitor:
             # minting the ticket so feedback can still move a not-yet-started
             # charge later (or mark an already-late one accurately).
             refreshed_drift_ms = self._drift_lead_ms()
-            if refreshed_drift_ms != drift_ms:
+            probe_shift_ms = self._clock_probe.plan(str(window["id"]), int(window["hitMs"]))
+            if refreshed_drift_ms != drift_ms or probe_shift_ms:
                 drift_ms = refreshed_drift_ms
                 target_ms = max(
                     0,
-                    int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms,
+                    int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms + probe_shift_ms,
                 )
                 target = battle_start + target_ms / 1000.0
                 refreshed_charge_at = target - planned_hold_ms / 1000.0
@@ -2710,7 +2781,7 @@ class WorldBossMonitor:
             drift_ms = refreshed_drift_ms
             target_ms = max(
                 0,
-                int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms,
+                int(window["centerMs"]) + offset_ms - request_lead_ms - drift_ms + probe_shift_ms,
             )
             target = battle_start + target_ms / 1000.0
 
@@ -2784,6 +2855,8 @@ class WorldBossMonitor:
             "request_lead_ms": request_lead_ms,
             "drift_lead_ms": drift_ms,
             "initial_drift_lead_ms": initial_drift_ms,
+            "clock_probe_shift_ms": probe_shift_ms,
+            "clock_alignment_ms": self._rounded_ms(self._arrival_clock_offset_ms),
             "planned_hold_ms": planned_hold_ms,
             "hold_skew_estimate_ms": hold_skew_estimate_ms,
             "target_ms": strike_ms,
@@ -2888,6 +2961,28 @@ class WorldBossMonitor:
                 request_lead_ms=request_lead_ms,
                 account_offset_ms=offset_ms,
             )
+            probe_diagnostic = self._clock_probe.observe(
+                str(window["id"]), delta_ms=hit.get("deltaMs"),
+                sent_offset_ms=sent_elapsed_ms - int(window["centerMs"]) + request_lead_ms,
+                rtt_ms=(request_completed_elapsed_ms - sent_elapsed_ms
+                        if len(request_trace.get("attempts", [])) == 1 else None),
+                wake_lateness_ms=diagnostic["wake_lateness_ms"],
+                perfect_ms=int(window["perfectMs"]), hit_ms=int(window["hitMs"]),
+                strict_direction=(arrival_inference or {}).get("reason") in {
+                    "only_early_candidate_in_interval", "only_late_candidate_in_interval",
+                },
+            )
+            if probe_diagnostic is not None:
+                diagnostic["clock_probe"] = probe_diagnostic
+                if probe_diagnostic.get("status") == "confirmed":
+                    self._arrival_clock_offset_ms = float(probe_diagnostic["offset_ms"])
+                    self._drift_ms = max(WORLD_BOSS_DRIFT_MIN_MS, min(
+                        WORLD_BOSS_DRIFT_MAX_MS, self._arrival_clock_offset_ms,
+                    ))
+                    self._drift_history = [self._drift_ms]
+                    self._drift_weight_history = [(self._drift_ms, 1.0)]
+                    self._drift_samples += 1
+                    probe_diagnostic["next_drift_lead_ms"] = self._drift_lead_ms()
             diagnostic.update(
                 {
                     "request_completed_elapsed_ms": request_completed_elapsed_ms,
@@ -3334,6 +3429,10 @@ class WorldBossMonitor:
             return await self._submit_finish(entry, resume)
         challenge = payload.get("challenge") or {}
         self._prepare_boss_lifecycle(entry)
+        if getattr(self, "_boss_marker_task", None) is not None:
+            # Check for an already finished round before /begin. This wait is
+            # off-thread and precedes creation of any battle deadlines.
+            await self._refresh_boss_marker()
         if self._boss_stop_requested() and not resume:
             # Another account may have finished this exact event while this
             # worker was waiting for its challenge. Do not call /begin or turn
@@ -3623,6 +3722,12 @@ class WorldBossMonitor:
                     self._rounded_ms(value) for value in self._drift_history[-WORLD_BOSS_DRIFT_HISTORY_SIZE:]
                 ],
                 "drift_direction_counts": dict(self._drift_direction_counts),
+                "clock_probe": self._clock_probe.summary(),
+                "stop_marker_io": {
+                    "mode": "background" if self._boss_marker_task is not None else "inline",
+                    "reads": self._boss_marker_reads,
+                    "max_read_ms": self._boss_marker_max_read_ms,
+                },
                 "account_offset_slot": int(
                     WORLD_BOSS_ACCOUNT_OFFSET_SLOTS.get(self.account, 0)
                 ),
@@ -3910,6 +4015,17 @@ class WorldBossMonitor:
             )
         hits = diagnostics.get("hits")
         if isinstance(hits, list):
+            reduced_multipliers = []
+            for item in hits:
+                if not isinstance(item, dict) or item.get("server_status") != "accepted":
+                    continue
+                server_hit = item.get("server_hit")
+                value = server_hit.get("automationDamageMultiplier") if isinstance(server_hit, dict) else None
+                multiplier = WorldBossMonitor._finite_ms(value) if not isinstance(value, bool) else None
+                if multiplier is not None and 0 <= multiplier < 1:
+                    reduced_multipliers.append(multiplier)
+            if reduced_multipliers:
+                parts.append(f"服务端减伤 {len(reduced_multipliers)} 击，最低倍率 {min(reduced_multipliers):g}")
             durations = sorted(
                 int((item.get("request") or {}).get("total_duration_ms") or 0)
                 for item in hits
