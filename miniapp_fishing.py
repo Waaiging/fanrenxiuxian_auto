@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, FISHING, command_paused
+
 import asyncio
 import json
 import math
@@ -2087,6 +2089,8 @@ class MiniAppFishingAutomation:
                     raise
                 self._pending_result_tokens.pop(identity, None)
 
+        if command_paused(self.actor, FISHING, identity):
+            return 60
         token, payload = await self.transport.fishing_entry(identity)
         if pending_result:
             try:
@@ -2350,7 +2354,8 @@ class MiniAppFishingAutomation:
     ) -> dict[str, Any]:
         runtime = miniapp_fishing_global_snapshot(settings)
         scans = _mapping(runtime.get("scans"))
-        identities = self._local_identity_keys(settings, runtime)
+        identities = [identity for identity in self._local_identity_keys(settings, runtime)
+                      if not command_paused(self.actor, FISHING, identity)]
         current_key = str(
             _mapping(runtime.get("account_current_keys")).get(self.account) or ""
         )
@@ -3139,7 +3144,11 @@ class MiniAppFishingAutomation:
         local_participants = [
             item for item in participants
             if fishing_participant_parts(item)[0] == self.account
+            and not command_paused(self.actor, FISHING, fishing_participant_parts(item)[1])
         ]
+        if not local_participants and any(fishing_participant_parts(item)[0] == self.account for item in participants):
+            self._set_global_status(settings, "paused", "本账号所选身份的垂钓指令已暂停")
+            return 60
         target_key = str(_mapping(runtime.get("account_current_keys")).get(self.account) or "")
         force_retry = _mapping(runtime.get("force_retry"))
         force_pending = [str(item) for item in force_retry.get("pending") or []]
@@ -3293,6 +3302,8 @@ class MiniAppFishingAutomation:
                 self._global_state_busy_failures = 0
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                wait = 60
             except MiniAppCircuitOpenError as exc:
                 identity = self._status_identity(settings)
                 wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)

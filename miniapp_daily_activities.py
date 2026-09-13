@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, FATE_CARDS, HUNT, PAGODA, TRIAL, command_paused
+
 import asyncio
 import math
 import random
@@ -1005,6 +1007,9 @@ class MiniAppDailyActivities:
             await pause.wait()
 
     def _record_error(self, identity: str, feature: str, exc: Exception) -> None:
+        if isinstance(exc, CommandControlPaused):
+            self.log.info("Mini App %s paused by dashboard for %s", feature, identity)
+            return
         code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
         now = datetime.now().strftime(TIME_FORMAT)
         self._record(
@@ -1076,7 +1081,7 @@ class MiniAppDailyActivities:
         state = self._state(identity)
         if state.get("miniapp_pagoda_last_date") == today:
             return "done"
-        if self._identity_pause_seconds(identity) > 0:
+        if self._identity_pause_seconds(identity) > 0 or command_paused(self.actor, PAGODA, identity):
             return "paused"
 
         snapshot = await self.transport.pagoda_snapshot(identity)
@@ -1164,7 +1169,7 @@ class MiniAppDailyActivities:
         state = self._state(identity)
         if state.get("miniapp_tianji_trial_last_date") == today:
             return "done"
-        if self._identity_pause_seconds(identity) > 0:
+        if self._identity_pause_seconds(identity) > 0 or command_paused(self.actor, TRIAL, identity):
             return "paused"
 
         try:
@@ -1380,7 +1385,7 @@ class MiniAppDailyActivities:
         state = self._state(identity)
         if state.get("miniapp_fate_cards_last_date") == today:
             return "done"
-        if self._identity_pause_seconds(identity) > 0:
+        if self._identity_pause_seconds(identity) > 0 or command_paused(self.actor, FATE_CARDS, identity):
             return "paused"
 
         payload = await self.transport.fate_cards_start(identity)
@@ -1571,7 +1576,7 @@ class MiniAppDailyActivities:
         state = self._state(identity)
         if state.get("miniapp_hunt_last_date") == today:
             return "done"
-        if self._identity_pause_seconds(identity) > 0:
+        if self._identity_pause_seconds(identity) > 0 or command_paused(self.actor, HUNT, identity):
             return "paused"
 
         snapshot = await self.transport.hunt_snapshot(identity)

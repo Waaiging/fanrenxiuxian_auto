@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, STAR_FARM, command_paused
+
 import asyncio
 import logging
 import random
@@ -455,6 +457,8 @@ class RestrictedMiniAppWorker:
                 payload = await self.transport.overview(identity)
                 apply_dwelling_snapshot(self.actor, identity, payload)
                 synced += 1
+            except CommandControlPaused:
+                continue
             except MiniAppCircuitOpenError as exc:
                 container["miniapp_last_error"] = exc.code
                 self.log.info(
@@ -700,7 +704,7 @@ class RestrictedMiniAppWorker:
                 payload = await self.transport.sect_farm_snapshot(STAR_IDENTITY)
                 ready, troubled, empty, next_wait = self._record_star_snapshot(payload)
                 collection_due = sect_farm_collection_due(ready, troubled, next_wait)
-                if collection_due:
+                if collection_due and not command_paused(self.actor, STAR_FARM + "-collect", STAR_IDENTITY):
                     _, (ready, troubled, empty, next_wait) = await self._star_action("soothe")
                     if ready > 0 and sect_farm_collection_due(ready, troubled, next_wait):
                         requested_count = ready
@@ -734,7 +738,7 @@ class RestrictedMiniAppWorker:
                 # rest of the Tianlei batch is still maturing.  Waiting lets
                 # the next collection empty and refill all eight together.
                 pull_keys = list(empty) if next_wait <= 0 else []
-                if pull_keys:
+                if pull_keys and not command_paused(self.actor, STAR_FARM + "-pull", STAR_IDENTITY):
                     operation = sect_farm_pull_batch_operation(pull_keys)
                     self.log.info("OUT [Mini App | %s]:\n%s", STAR_IDENTITY, operation)
                     pull_results = []
@@ -761,6 +765,8 @@ class RestrictedMiniAppWorker:
                 )
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                wait = 60
             except MiniAppCircuitOpenError as exc:
                 wait = miniapp_circuit_wait_seconds(exc, self.star_retry_seconds)
                 state = identity_state(self.actor, STAR_IDENTITY)
@@ -815,6 +821,8 @@ class RestrictedMiniAppWorker:
                 self._record_beast_snapshot(snapshot)
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                await asyncio.sleep(60)
             except MiniAppCircuitOpenError as exc:
                 wait = miniapp_circuit_wait_seconds(exc, 300)
                 self.actor.state["beast_miniapp_last_error"] = exc.code

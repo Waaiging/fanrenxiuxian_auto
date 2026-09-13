@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, JOURNEY, command_paused
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any
@@ -310,6 +312,8 @@ class MiniAppTianxingJourney:
         now: datetime | None = None,
     ) -> tuple[bool, int]:
         """Use all currently available attempts; return (daily_complete, retry_seconds)."""
+        if command_paused(self.actor, JOURNEY, identity):
+            return False, 60
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
         counter = await self._refresh_counter(identity, now)
@@ -332,6 +336,8 @@ class MiniAppTianxingJourney:
         safety_limit = max(1, int(counter["daily_limit"]))
         attempts = 0
         while counter["daily_remaining"] > 0 and attempts < safety_limit:
+            if command_paused(self.actor, JOURNEY, identity):
+                return False, 60
             pause_seconds = self._identity_pause_seconds(identity)
             if pause_seconds > 0:
                 return False, max(60, pause_seconds)
@@ -462,6 +468,9 @@ class MiniAppTianxingJourney:
                     retry_after = identity_retry if retry_after <= 0 else min(retry_after, identity_retry)
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                complete = False
+                retry_after = min(retry_after, 60) if retry_after else 60
             except MiniAppCircuitOpenError:
                 # One shared upstream circuit covers every identity. Stop the
                 # current batch so the scheduler emits one pause record rather

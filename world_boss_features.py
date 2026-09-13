@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, WORLD_BOSS, require_enabled
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -1218,11 +1220,12 @@ class WorldBossMonitor:
     ) -> None:
         remaining = (entry.notice_epoch or time.time()) + WORLD_BOSS_RESUME_WINDOW_SECONDS - time.time()
         deadline = self.monotonic() + max(0.0, remaining)
+        record = {}
         while self.monotonic() < deadline:
             await self._run_entry_once(entry, identities)
             record = next((item for item in self._history()
                            if item.get("fingerprint") == entry.fingerprint), {})
-            retryable = record.get("status") in {"paused_upstream", "finish_pending", "delegated"}
+            retryable = record.get("status") in {"paused", "paused_upstream", "finish_pending", "delegated"}
             retryable = retryable or record.get("error") in TRANSIENT_WORLD_BOSS_ERRORS
             if not retryable:
                 return
@@ -1230,6 +1233,8 @@ class WorldBossMonitor:
             if remaining <= 0:
                 break
             await self.sleep(min(30.0, remaining))
+        if record.get("status") == "paused":
+            return
         self._record(entry, "recovery_expired", error="world_boss_recovery_expired")
         self.log.error("World Boss recovery deadline reached for event %s", entry.message_id)
         await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_checkpoint_executor())
@@ -1340,6 +1345,9 @@ class WorldBossMonitor:
             return {"identity": identity, "status": "completed", **outcome, "error": ""}
         except asyncio.CancelledError:
             raise
+        except CommandControlPaused:
+            self.log.info("World Boss entry paused by dashboard for %s", identity)
+            return {"identity": identity, "status": "paused", "error": ""}
         except MiniAppCircuitOpenError as exc:
             pending_outcome = getattr(exc, "world_boss_outcome", None)
             if isinstance(pending_outcome, dict):
@@ -3200,6 +3208,11 @@ class WorldBossMonitor:
         # tells us whether this deployment actually requires Turnstile, while
         # keeping older/staging servers compatible without any configuration.
         for handoff_index in range(max_handoffs + 1):
+            try:
+                require_enabled(self.actor, identity, WORLD_BOSS)
+            except CommandControlPaused:
+                self._record_turnstile_result(active_request_id, accepted=False, error="dashboard_paused")
+                raise
             request_trace: dict[str, Any] = {}
             using_turnstile = bool(base_payload.get("turnstileToken"))
             request_started_at = self.monotonic()
@@ -3915,6 +3928,7 @@ class WorldBossMonitor:
         # Prepare the lifecycle before the potentially long webview/challenge
         # handshake. This lets a worker that starts late notice a sibling's
         # shared defeat marker without issuing more /start requests.
+        require_enabled(self.actor, identity, WORLD_BOSS)
         self._prepare_boss_lifecycle(entry)
         if self._boss_stop_requested():
             raise self._boss_stopped_error()
@@ -3925,6 +3939,7 @@ class WorldBossMonitor:
                 entry.token,
             )
         player_id = await self._identity_player_id(identity)
+        require_enabled(self.actor, identity, WORLD_BOSS)
         session_token, payload = await self._wait_for_challenge(
             entry,
             init_data,

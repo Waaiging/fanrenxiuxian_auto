@@ -99,7 +99,9 @@ class AvatarSoulCursePanelTests(unittest.TestCase):
                 switches = [row for row in disabled if row.get("dashboard_action") == "soul-curse-toggle"]
                 self.assertEqual(len(switches), 1)
                 self.assertEqual(switches[0]["soul_curse_identity"], identity)
-                self.assertFalse(any(row.get("command", "").startswith(".推演封魂咒") for row in disabled))
+                infer = next(row for row in disabled if row.get("command") == ".推演封魂咒")
+                self.assertEqual(infer["status"], "链路未启用")
+                self.assertFalse(infer["actionable"])
 
     def test_final_command_panels_keep_both_yinluo_chains_and_one_switch(self):
         for account, identity, legacy in (
@@ -124,7 +126,13 @@ class AvatarSoulCursePanelTests(unittest.TestCase):
                     ".探望南宫婉", ".推演封魂咒", ".护持神魂", ".发布解咒委托",
                     ".接取解咒委托", ".辨认咒纹", ".借幡镇魂", ".剥离咒源",
                 ):
-                    self.assertEqual(command in commands, enabled, (account, enabled, command))
+                    self.assertIn(command, commands, (account, enabled, command))
+                    row = next(row for row in rows if row.get("command", "").split()[0] == command)
+                    self.assertTrue(row["controllable"])
+                    if not enabled:
+                        self.assertEqual(row["status"], "链路未启用")
+                        self.assertFalse(row["actionable"])
+                        self.assertIsNone(row["next_seconds"])
                 switches = [row for row in rows if row.get("dashboard_action") == "soul-curse-toggle"]
                 self.assertEqual(len(switches), 1)
                 self.assertEqual(switches[0]["soul_curse_enabled"], enabled)

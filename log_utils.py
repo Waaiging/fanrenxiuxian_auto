@@ -303,6 +303,7 @@ COMMAND_GUARD_POLICY_OVERRIDES = {
 }
 
 PARAM_COMMAND_ROOTS = {
+    ".切换",
     ".放生",
     ".探渊",
     ".灵兽出战",
@@ -2953,6 +2954,8 @@ def command_control_key(command):
     text = re.sub(r"\s+", " ", str(command or "").strip())
     if not text:
         return ""
+    from automation_command_controls import CONTROL_ALIASES
+    text = CONTROL_ALIASES.get(text, text)
     if text in {f".神迹 {mode}" for mode in SMALL_WORLD_MIRACLE_ACTIONS}:
         return SMALL_WORLD_MIRACLE_CONTROL_KEY
     if "<" in text:
@@ -2982,6 +2985,17 @@ def command_control_candidate_keys(command):
         parts = text.split()
         if len(parts) >= 2:
             keys.append(f"{root} {parts[1]}")
+    # Panel templates may have arguments without belonging to the historic
+    # PARAM_COMMAND_ROOTS set (.定命, .斗法, .上架, etc.). Match only whole
+    # argument boundaries, preserving exact keys and existing family keys.
+    parts = text.split()
+    if root.startswith("."):
+        keys.extend(" ".join(parts[:length]) + " *" for length in range(len(parts), 0, -1))
+    from automation_command_controls import CONTROL_ALIASES, CONTROL_PARENTS
+    canonical = command_control_key(text)
+    keys.extend(alias for alias, target in CONTROL_ALIASES.items() if target == canonical)
+    if canonical in CONTROL_PARENTS:
+        keys.append(CONTROL_PARENTS[canonical])
     # Preserve order while removing duplicates.
     return list(dict.fromkeys(k for k in keys if k))
 
@@ -3074,7 +3088,9 @@ def command_control_matches(controls, account, identity, command, root_state=Non
             entries = account_controls.get(name, {})
             if not isinstance(entries, dict):
                 continue
-            found = [(key, entries[key]) for key in keys if key in entries]
+            from automation_command_controls import CONTROL_ALIASES
+            found = [(key, entries[key]) for key in keys if key in entries
+                     and not (key in CONTROL_ALIASES and CONTROL_ALIASES[key] in entries)]
             if found:
                 matches.extend(found)
                 break
@@ -3109,6 +3125,8 @@ def dashboard_command_disabled(actor, command, identity=None):
     if not account:
         return False, "", None
     identity = identity or getattr(actor, "current_identity", "主魂")
+    if str(command or "").strip().startswith(".切换 "):
+        identity = str(command).strip().split(maxsplit=1)[1]
     root_state = getattr(actor, "state", None)
     identities = [*command_control_identity_candidates(identity, root_state), "*"]
     keys = command_control_candidate_keys(command)

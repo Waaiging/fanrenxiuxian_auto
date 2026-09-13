@@ -2,6 +2,42 @@
 
 from dataclasses import dataclass
 
+from automation_command_controls import (
+    BEAST_SYNC, FATE_CARDS, FISHING, HUNT, INVENTORY, JOURNEY, PAGODA,
+    PROFILE, STAR_FARM, TRIAL, WORLD_BOSS,
+)
+
+
+# Page-native operations have no Telegram text. These are display aliases,
+# shared by classification and identity panel completion, not a scheduler.
+IDENTITY_PAGE_COMMANDS = {
+    "tianji-grind": ("miniapp:forge",),
+    "star-farm-soothe": (STAR_FARM + "-soothe",),
+    "star-farm-collect": (STAR_FARM + "-collect",),
+    "star-farm-pull": (STAR_FARM + "-pull",),
+    "beast-seek": (".寻觅灵兽",),
+    "beast-release": ("miniapp:spirit-beast-release",),
+    "beast-roster": (BEAST_SYNC,),
+    "beast-contract": ("miniapp:spirit-beast-contract",),
+    "beast-rest": ("miniapp:spirit-beast-rest",),
+    "beast-abyss": ("miniapp:spirit-beast-abyss",),
+    "world-collect": ("miniapp:small-world-collect",),
+    "fishing": (FISHING,),
+    "fishing-bait": ("miniapp:fishing-bait",),
+    "fishing-chum": ("miniapp:fishing-chum",),
+    "journey": (JOURNEY,),
+    "pagoda": (PAGODA,),
+    "treasure-hunt": (HUNT,),
+    "trial": (TRIAL,),
+    "fate-cards": (FATE_CARDS,),
+    "world-boss": (WORLD_BOSS,),
+    "inventory": (INVENTORY,),
+    "profile-sync": (PROFILE,),
+    "meditation-settle": ("miniapp:meditation-settle",),
+    "star-farm": (STAR_FARM,),
+    "star-palace-status": ("miniapp:star-palace",),
+}
+
 
 CATEGORIES = (("sect", "宗门"), ("realm", "境界"), ("general", "通用"))
 CATEGORY_LABELS = dict(CATEGORIES)
@@ -158,6 +194,10 @@ COMMAND_CATALOG = (
     CatalogEntry("formation-start", "启阵", "general", "归属待确认", (".启阵",), condition="宗门限制待确认", pending=True),
     CatalogEntry("formation-assist", "助阵", "general", "归属待确认", (".助阵",), trigger="事件", condition="宗门限制待确认", pending=True),
     CatalogEntry("spirit-nurture", "温养器灵", "general", "法宝", (".温养器灵 <器灵>",), condition="主号主魂已停用；其他身份依原策略"),
+    CatalogEntry("profile-sync", "洞府资料同步", "general", "资料与辅助", channel="miniapp", trigger="查询", condition="同步当前道号、宗门、境界和灵根"),
+    CatalogEntry("meditation-settle", "出关结算", "general", "修炼", channel="miniapp", trigger="流程", condition="深度闭关完成后结算"),
+    CatalogEntry("star-farm", "宗门灵圃", "sect", "星宫", channel="miniapp", condition="控制灵圃读取及安抚、收集、牵引全流程"),
+    CatalogEntry("star-palace-status", "司星台状态", "sect", "星宫", channel="miniapp", trigger="查询"),
     CatalogEntry("legacy-pagoda", "旧群指令闯塔", "general", "游历", (".闯塔",), lifecycle="retired", condition="由 Mini App 琉璃问心塔替代"),
     CatalogEntry("legacy-training", "旧群指令野外历练", "general", "游历", (".野外历练 <方式>",), lifecycle="retired", condition="由 Mini App 游历替代"),
     CatalogEntry("legacy-beast", "旧群指令灵兽操作", "sect", "万灵宗", (".寻觅灵兽", ".灵兽休息 <灵兽>"), lifecycle="retired", condition="寻觅与休息已迁入 Mini App"),
@@ -177,7 +217,8 @@ def classify_command(command, *, group="", custom=False):
     """Return metadata without changing the command, its control key or schedule."""
     normalized = " ".join(str(command or "").split())
     for entry in COMMAND_CATALOG:
-        if normalized in entry.aliases or any(_matches(normalized, pattern) for pattern in entry.commands):
+        if (normalized in entry.aliases or normalized in IDENTITY_PAGE_COMMANDS.get(entry.key, ())
+                or any(_matches(normalized, pattern) for pattern in entry.commands)):
             return entry.classification()
     if normalized.startswith("封魂咒链路 ["):
         entry = next(item for item in COMMAND_CATALOG if item.key == ("curse-accept" if group == "阴罗宗" else "curse-publish"))

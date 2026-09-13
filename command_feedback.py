@@ -29,6 +29,7 @@ from log_utils import (
     actor_allows_retired_auto_command,
     command_response_family,      # 指令回复类型
     command_send_allowed,         # 指令守卫：检测发送频率
+    dashboard_command_disabled,
     is_passive_settlement_response, # 被动结算会截断任意指令回复
     log_incoming_message,         # 记录收到的消息到日志
     record_bot_no_response,       # 记录机器人无响应事件
@@ -563,6 +564,9 @@ async def send_and_wait_feedback_common(
                 send_guards = _COMMAND_SEND_GUARDS.get()
                 if not all(guard(actor, message) for guard, _ in send_guards):
                     logger.info("Task dispatch guard blocked [%s]", message)
+                    break
+                if dashboard_command_disabled(actor, message)[0]:
+                    logger.info("Dashboard paused [%s] while dispatch was waiting", message)
                     break
                 remember_script_send_intent(actor, message)
                 # 发送指令到游戏群组

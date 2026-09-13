@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused
+
 import asyncio
 import json
 import logging
@@ -416,6 +418,8 @@ class MiniAppInventoryWorker:
                     completed += 1
                 except asyncio.CancelledError:
                     raise
+                except CommandControlPaused:
+                    errors[identity] = "dashboard_paused"
                 except MiniAppCircuitOpenError as exc:
                     errors[identity] = exc.code
                     for pending in targets[index + 1:]:

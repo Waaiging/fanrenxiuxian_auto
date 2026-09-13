@@ -2543,7 +2543,7 @@
         }
 
         function isDashboardCommand(item) {
-            return ['cooldown', 'daily'].includes(String(item?.schedule_type || ''));
+            return Boolean(item?.command);
         }
 
         function dashboardCommands(commands) {
@@ -2553,38 +2553,45 @@
         function applyCommandPauseLocal(panelKey, controlKey, disabled) {
             const panel = window.commandPanelDataMap?.[panelKey]?.panel;
             const commands = panel?.commands || [];
-            const item = commands.find(row => (row.control_key || commandItemKey(row)) === controlKey);
-            if (!item) return null;
-            const previous = {
+            const items = commands.filter(row => (row.control_key || commandItemKey(row)) === controlKey);
+            if (!items.length) return null;
+            const previous = items.map(item => ({
+                itemKey: commandItemKey(item),
                 control_disabled: Boolean(item.control_disabled),
                 status: item.status || '',
                 tone: item.tone || '',
                 detail: item.detail || ''
-            };
-            item.control_disabled = Boolean(disabled);
-            if (disabled) {
-                item.status = '已暂停';
-                item.tone = 'paused';
-                if (!String(item.detail || '').includes('dashboard 临时暂停')) {
-                    item.detail = item.detail ? `dashboard 临时暂停 · ${item.detail}` : 'dashboard 临时暂停';
+            }));
+            for (const item of items) {
+                const wasPaused = Boolean(item.control_disabled);
+                item.control_disabled = Boolean(disabled);
+                if (disabled) {
+                    item.status = '已暂停';
+                    item.tone = 'paused';
+                    if (!String(item.detail || '').includes('dashboard 临时暂停')) {
+                        item.detail = item.detail ? `dashboard 临时暂停 · ${item.detail}` : 'dashboard 临时暂停';
+                    }
+                } else if (wasPaused) {
+                    item.status = item.status === '已暂停' ? '更新中' : item.status;
+                    item.tone = item.tone === 'paused' ? 'unknown' : item.tone;
+                    item.detail = String(item.detail || '').replace(/^dashboard 临时暂停\s*·?\s*/, '');
                 }
-            } else if (previous.control_disabled) {
-                item.status = previous.status === '已暂停' ? '更新中' : previous.status;
-                item.tone = previous.tone === 'paused' ? 'unknown' : previous.tone;
-                item.detail = String(item.detail || '').replace(/^dashboard 临时暂停\s*·?\s*/, '');
             }
-            return {item, previous};
+            return {items, previous};
         }
 
         function restoreCommandPauseLocal(panelKey, controlKey, previous) {
             const panel = window.commandPanelDataMap?.[panelKey]?.panel;
             const commands = panel?.commands || [];
-            const item = commands.find(row => (row.control_key || commandItemKey(row)) === controlKey);
-            if (!item || !previous) return;
-            item.control_disabled = Boolean(previous.control_disabled);
-            item.status = previous.status;
-            item.tone = previous.tone;
-            item.detail = previous.detail;
+            if (!Array.isArray(previous)) return;
+            for (const item of commands.filter(row => (row.control_key || commandItemKey(row)) === controlKey)) {
+                const saved = previous.find(row => row.itemKey === commandItemKey(item));
+                if (!saved) continue;
+                item.control_disabled = Boolean(saved.control_disabled);
+                item.status = saved.status;
+                item.tone = saved.tone;
+                item.detail = saved.detail;
+            }
         }
 
         function registerCommandPanels(account, panels) {
@@ -2599,6 +2606,11 @@
                         commands: dashboardCommands(panel.commands)
                     }
                 };
+                for (const row of window.commandPanelDataMap[key].panel.commands) {
+                    const controlKey = row.control_key || commandItemKey(row);
+                    const pending = commandPausePending[commandPauseKey(account, identity, controlKey)];
+                    if (typeof pending?.disabled === 'boolean') applyCommandPauseLocal(key, controlKey, pending.disabled);
+                }
             }
         }
 
@@ -3158,7 +3170,7 @@
                 const pendingControl = commandPausePending[commandPauseKey(account, identity, controlKey)];
                 const pending = Boolean(pendingControl);
                 const controlLabel = paused ? '暂停' : '启用';
-                const controlTitle = paused ? '恢复自动执行' : '临时暂停自动执行';
+                const controlTitle = `${identity} · ${item.label || item.command}：${paused ? '允许按原策略执行' : '暂停此指令'}`;
                 const isNextDue = dueKey && commandItemKey(item) === dueKey;
                 const baitOptions = Array.isArray(item.bait_options) ? item.bait_options : [];
                 const patrolModeOptions = Array.isArray(item.patrol_mode_options) ? item.patrol_mode_options : [];
@@ -3199,16 +3211,12 @@
                         <i data-lucide="${item.soul_curse_enabled ? 'power-off' : 'power'}" aria-hidden="true"></i>
                     </button>
                     <span>${item.soul_curse_enabled ? '已启用' : '已关闭'}</span>
-                ` : dashboardAction === 'miniapp-beast-refresh' ? `
-                    <button class="command-action-button" ${actionPending ? 'disabled' : ''} onclick="refreshMiniappBeasts('${escapeJs(account)}', this)" title="立即同步万兽谷" aria-label="立即同步万兽谷">
-                        <i data-lucide="refresh-cw" aria-hidden="true"></i>
-                    </button>
-                    <span>${actionPending ? '已提交' : '刷新'}</span>
                 ` : `
+                    ${dashboardAction === 'miniapp-beast-refresh' ? `<button class="command-action-button" ${actionPending || paused ? 'disabled' : ''} onclick="refreshMiniappBeasts('${escapeJs(account)}', this)" title="立即同步万兽谷" aria-label="立即同步万兽谷"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>` : ''}
                     ${baitSelect}
                     ${patrolModeSelect}
                     ${miracleModeSelect}
-                    <button class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
+                    <button type="button" role="switch" aria-checked="${!paused}" class="command-toggle ${paused ? 'paused' : ''} ${pending ? 'updating' : ''}" ${pending ? 'disabled' : ''} onclick="toggleCommandPause('${escapeJs(panelKey)}', '${escapeJs(account)}', '${escapeJs(identity)}', '${escapeJs(controlKey)}', '${escapeJs(item.command || '')}', '${escapeJs(item.label || item.command || '')}', ${paused ? 'false' : 'true'}, ${item.default_paused ? 'true' : 'false'})" aria-label="${escapeHtml(controlTitle)}"></button>
                     <span>${pending ? '处理中' : controlLabel}</span>
                 `;
                 return `
@@ -3219,10 +3227,11 @@
                                 <span class="command-channel execution-${executionChannel}" title="${escapeHtml(executionTitle)}">${escapeHtml(executionLabel)}</span>
                             </div>
                             ${commandClassification(item).pending ? '<div class="command-classification-note">归属待确认</div>' : ''}
+                            ${item.actionable === false && item.detail && !dashboardAction ? `<div class="command-classification-note">${escapeHtml(item.detail)}</div>` : ''}
                             ${targetEditor}
                         </div>
                         <div class="command-schedule" title="${escapeHtml(item.at || scheduleText)}">${escapeHtml(scheduleText)}</div>
-                        <div class="command-status">${escapeHtml(item.status || '未记录')}</div>
+                        <div class="command-status" title="${escapeHtml(item.detail || '')}">${escapeHtml(item.status || '未记录')}</div>
                         <div class="command-control" title="${escapeHtml(controlTitle)}">
                             ${controlHtml}
                         </div>
@@ -3317,6 +3326,7 @@
                 <span>${escapeHtml(subtitle)}</span>
             `;
             document.getElementById('commandModalBody').innerHTML = `
+                <p class="command-classification-note">每个开关只控制当前身份的对应指令；开启后仍遵守参与设置、冷却和触发条件。已开始的青元子战斗和垂钓会完成结算。</p>
                 <div class="command-toolbar">
                     <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', true)">显示全部</button>
                     <button class="command-toolbar-btn" onclick="setAllCommandVisibility('${escapeJs(panelKey)}', false)">隐藏全部</button>
@@ -3329,8 +3339,8 @@
                     <summary>显示设置</summary>
                     <div class="command-visibility-grid">${switches || '<span class="command-visibility-item">暂无可配置指令</span>'}</div>
                 </details>
-                <div class="command-category-tabs" role="tablist" aria-label="排程分类">${renderCommandCategoryTabs(shown, category, 'setCommandModalCategory')}</div>
-                ${filteredShown.length ? renderClassifiedCommandRows(panelKey, filteredShown, nextDueCommandKey(shown)) : '<div class="command-list-empty">当前分类没有可显示的冷却或每日任务。</div>'}
+                <div class="command-category-tabs" role="tablist" aria-label="指令分类">${renderCommandCategoryTabs(shown, category, 'setCommandModalCategory')}</div>
+                ${filteredShown.length ? renderClassifiedCommandRows(panelKey, filteredShown, nextDueCommandKey(shown)) : '<div class="command-list-empty">当前分类没有可显示的指令。</div>'}
                 ${renderIdentityCommandRecords(data.account, panel.identity || '主魂')}
             `;
             refreshIcons();
@@ -4785,7 +4795,7 @@
             const pendingKey = commandPauseKey(account, identity, controlKey);
             if (commandPausePending[pendingKey]) return;
             const localChange = applyCommandPauseLocal(panelKey, controlKey, disabled);
-            commandPausePending[pendingKey] = true;
+            commandPausePending[pendingKey] = {disabled: Boolean(disabled)};
             if (commandModalKey === panelKey) renderCommandModal(panelKey);
             try {
                 const r = await fetch(apiUrl('/api/command-control'), {
@@ -4807,7 +4817,11 @@
                     alert(data.msg || `操作失败：HTTP ${r.status}`);
                     return;
                 }
-                setTimeout(() => updateStatus(), 30);
+                commandPausePending[pendingKey].disabled = Boolean(data.disabled);
+                applyCommandPauseLocal(panelKey, controlKey, Boolean(data.disabled));
+                if (Boolean(data.disabled) !== Boolean(disabled) && data.msg) alert(data.msg);
+                while (pollBusy.status) await new Promise(resolve => window.setTimeout(resolve, 50));
+                await updateStatus();
             } catch (e) {
                 console.error('Command pause toggle failed:', e);
                 restoreCommandPauseLocal(panelKey, controlKey, localChange?.previous);

@@ -380,10 +380,11 @@ class MiniAppJourneyTests(unittest.TestCase):
         self.assertIn("miniapp:journey-deep", main_commands)
         self.assertIn(".推命 闭关", main_commands)
         self.assertIn(".观命", main_commands)
-        self.assertNotIn(
-            "miniapp:journey-deep",
-            {row["command"] for row in main_panels["缘生子"]["commands"]},
-        )
+        unselected = next(row for row in main_panels["缘生子"]["commands"]
+                          if row["command"] == "miniapp:journey-deep")
+        self.assertTrue(unselected["controllable"])
+        self.assertFalse(unselected["actionable"])
+        self.assertNotIn("next_seconds", unselected)
         waaiging_row = next(
             row
             for row in waaiging_panels[0]["commands"]

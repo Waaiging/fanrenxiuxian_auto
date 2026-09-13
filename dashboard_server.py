@@ -1068,7 +1068,8 @@ def apply_command_controls(account, panel, root_state=None):
             default_disabled=bool(row.get("default_paused")),
             root_state=root_state,
         )
-        if row["control_disabled"] and row.get("actionable", True):
+        row["controllable"] = row.get("dashboard_action") != "soul-curse-toggle"
+        if row["control_disabled"] and row["controllable"]:
             row["status"] = "已暂停"
             row["tone"] = "paused"
             detail = row.get("detail", "")
@@ -1105,7 +1106,8 @@ def apply_command_execution_channels(panel, root_state=None):
         command = normalize_miniapp_command(row.get("command", ""))
         miniapp_only = command.startswith("miniapp:")
         miniapp_scheduler = command == ".寻觅灵兽"
-        miniapp_capable = miniapp_command_allowed(command) or miniapp_scheduler
+        miniapp_capable = (miniapp_command_allowed(command) or miniapp_scheduler
+                           or row.get("execution_channel") == "miniapp")
         if miniapp_only or miniapp_capable:
             row["execution_channel"] = "miniapp"
             if miniapp_only:
@@ -2369,14 +2371,27 @@ def soul_curse_yinluo_publisher_for_dashboard(account, identity, root_state=None
     )
 
 
+def soul_curse_panel_rows(rows, identity, enabled, *, group="南宫婉", include_switch=True):
+    """Keep individual controls visible while the identity's chain is disabled."""
+    if not enabled:
+        for row in rows:
+            detail = row.get("detail", "")
+            row.update(
+                status="链路未启用", tone="manual", actionable=False, next_seconds=None,
+                detail="封魂咒总开关已关闭，启用链路后才会执行" + (f" · {detail}" if detail else ""),
+            )
+    if include_switch:
+        rows.insert(0, soul_curse_switch_row(identity, enabled, group=group))
+    return rows
+
+
 def soul_curse_publisher_commands(state, account=None, identity="主魂", *, root_state=None):
     curse = state.get("soul_curse", {}) if isinstance(state, dict) else {}
     if not isinstance(curse, dict):
         curse = {}
-    if account and not soul_curse_identity_enabled_for_dashboard(
+    enabled = not account or soul_curse_identity_enabled_for_dashboard(
         account, identity, state=root_state if root_state is not None else state
-    ):
-        return [soul_curse_switch_row(identity, False)]
+    )
     detail = clean_custom_text(curse.get("last_detail") or "", 120)
     commission_id = str(curse.get("commission_id") or "").strip()
     target = str(curse.get("commission_target") or "").strip()
@@ -2491,24 +2506,23 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂", *, roo
             )
         rows.append(wanying_row)
     rows.extend([infer_row, protect_row, publish_row])
-    return rows
+    return soul_curse_panel_rows(rows, identity, enabled, include_switch=bool(account))
 
 
 def soul_curse_assist_commands(state, account=None, identity=None, *, root_state=None, include_switch=True):
     assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
     if not isinstance(assist, dict):
         assist = {}
-    if identity and not soul_curse_identity_enabled_for_dashboard(
+    enabled = not identity or soul_curse_identity_enabled_for_dashboard(
         account, identity, state=root_state if root_state is not None else state, assistant=True
-    ):
-        return [soul_curse_switch_row(identity, False, group="阴罗宗")] if include_switch else []
+    )
     commission_id = str(assist.get("commission_id") or "").strip()
     target = str(assist.get("target_username") or "").strip()
     detail = clean_custom_text(assist.get("last_detail") or "", 120)
     base_detail = " · ".join(part for part in [f"委托 {commission_id}" if commission_id else "", target, detail] if part)
     accept_command = f"{SOUL_CURSE_ACCEPT_COMMAND} <ID>"
     target_suffix = target or "<@委托用户>"
-    return [
+    rows = [
         time_command(
             assist,
             "next_action_at",
@@ -2554,6 +2568,9 @@ def soul_curse_assist_commands(state, account=None, identity=None, *, root_state
             group="阴罗宗",
         ),
     ]
+    return soul_curse_panel_rows(
+        rows, identity, enabled, group="阴罗宗", include_switch=bool(identity) and include_switch
+    )
 
 
 def deep_meditation_command(state, command=".深度闭关", label="深度闭关", group="闭关"):
@@ -3198,6 +3215,7 @@ def current_sect_commands(account, identity, state, root_state):
             flow_command(".定命 <命星>", "定命", "闭关、游历或炼器前按命星候选自动选择", sect),
             flow_command(".推命 闭关", "推命闭关", "服从当前闭关模式与指令开关", sect),
             flow_command(".推命 炼制", "刷天机值", "服从自动化设置中的身份选择、目标次数和开关", sect),
+            flow_command(".推命 探索", "推命探索", "仅在探索前按原有参与设置执行", sect),
             flow_command(".改命 探索", "改命探索", "服从野外历练参与设置", sect),
         ]
     if sect == "万灵宗":
@@ -3246,6 +3264,8 @@ def build_command_panels(account, state):
                              and row.get("group") != "阴罗宗"
                              and not (sect == "阴罗宗" and row.get("group") == "南宫婉")]
         panel["commands"].extend(current_sect_commands(account, identity, identity_state, state))
+        from dashboard_identity_controls import append_identity_control_commands
+        append_identity_control_commands(account, panel, state)
         append_custom_commands(account, panel, custom_commands, root_state=state)
         panel = apply_command_execution_channels(panel, root_state=state)
         panel = apply_command_controls(account, panel, root_state=state)
@@ -6383,14 +6403,15 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
     identity = str(payload.get("identity") or "主魂").strip() or "主魂"
     command = str(payload.get("command") or "").strip()
     label = str(payload.get("label") or command).strip()
-    control_key = str(payload.get("control_key") or command_control_key(command)).strip()
+    control_key = command_control_key(payload.get("control_key") or command)
     disabled = bool(payload.get("disabled"))
-    default_paused = bool(payload.get("default_paused"))
+    default_paused = command == ".共历心劫" or bool(payload.get("default_paused"))
     if account not in WINDOW_MAP:
         return {"success": False, "msg": "未知账号"}
     if not command or not control_key:
         return {"success": False, "msg": "指令为空"}
     root_state = get_state(account)
+    identity = command_control_identity_candidates(identity, root_state)[0]
     if not FISHING_AUTOMATION_ENABLED and (
         command in FISHING_AUTO_CONTROL_COMMANDS
         or command in FISHING_CONTROL_COMMANDS
@@ -6442,7 +6463,9 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         identity_controls = account_controls.setdefault(identity, {})
         old_entry = command_control_entry(data, account, identity, control_key, root_state)
         stored_entry = dict(old_entry) if isinstance(old_entry, dict) else {}
-        persist_entry = (control_key in {BEAST_BORDER_PATROL_CONTROL_KEY, DUAL_CULTIVATION_COMMAND,
+        from automation_command_controls import CONTROL_ALIASES
+        persist_entry = (control_key in set(CONTROL_ALIASES.values())
+                         or control_key in {BEAST_BORDER_PATROL_CONTROL_KEY, DUAL_CULTIVATION_COMMAND,
                                         SMALL_WORLD_MIRACLE_CONTROL_KEY}
                          or len(command_control_identity_candidates(identity, root_state)) > 1)
         if disabled or default_paused or persist_entry:
@@ -6465,6 +6488,9 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
             if not account_controls:
                 data.pop(account, None)
         save_command_controls(data)
+        effective_disabled = command_control_disabled(
+            data, account, identity, control_key, default_disabled=default_paused, root_state=root_state,
+        )
     with STATUS_LOCK:
         STATUS_CACHE.clear()
     return {
@@ -6472,7 +6498,8 @@ async def set_command_control(payload: dict = Body(...), username: str = Depends
         "account": account,
         "identity": identity,
         "control_key": control_key,
-        "disabled": disabled,
+        "disabled": effective_disabled,
+        "msg": "该指令仍受账号级、指令族或上级功能开关暂停控制" if effective_disabled and not disabled else "",
     }
 
 

@@ -11,6 +11,8 @@ Mini App initialization or execution fails.
 
 from __future__ import annotations
 
+from automation_command_controls import CommandControlPaused, PROFILE, STAR_FARM, command_paused
+
 import asyncio
 import json
 import logging
@@ -634,12 +636,16 @@ class MiniAppCommandRouter:
         self._sync_avatar_dao_names_from_transport()
         synced = 0
         for identity in identities if identities is not None else self.routable_identities():
+            if command_paused(self.actor, PROFILE, identity):
+                continue
             try:
                 payload = await self.transport.overview(identity)
                 apply_dwelling_snapshot(self.actor, identity, payload)
                 synced += 1
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                continue
             except MiniAppCircuitOpenError as exc:
                 identity_state(self.actor, identity)["miniapp_last_error"] = exc.code
                 self.log.info(
@@ -782,10 +788,12 @@ class MiniAppCommandRouter:
 
     async def run_star_farm_cycle(self, identity: str) -> int:
         """Run one due batch and return seconds until the next collection."""
+        if command_paused(self.actor, STAR_FARM, identity):
+            return 60
         payload = await self.transport.sect_farm_snapshot(identity)
         ready, troubled, empty, next_wait = self._record_star_snapshot(identity, payload)
         collection_due = sect_farm_collection_due(ready, troubled, next_wait)
-        if collection_due:
+        if collection_due and not command_paused(self.actor, STAR_FARM + "-collect", identity):
             # One maintenance action immediately before the batch collection;
             # no fixed-interval soothing or polling while stars are maturing.
             _, (ready, troubled, empty, next_wait) = await self._star_farm_action(
@@ -827,7 +835,7 @@ class MiniAppCommandRouter:
         # Tianlei batch is still maturing.  Once the remainder is collected,
         # all empty plots are pulled together and their timers realign.
         pull_keys = list(empty) if next_wait <= 0 else []
-        if pull_keys:
+        if pull_keys and not command_paused(self.actor, STAR_FARM + "-pull", identity):
             operation = sect_farm_pull_batch_operation(pull_keys)
             self.log.info("OUT [Mini App | %s]:\n%s", identity, operation)
             pull_results = []
@@ -875,6 +883,8 @@ class MiniAppCommandRouter:
                     wait = await self.run_star_farm_cycle(identity)
             except asyncio.CancelledError:
                 raise
+            except CommandControlPaused:
+                wait = 60
             except MiniAppCircuitOpenError as exc:
                 state = identity_state(self.actor, identity)
                 state["star_miniapp_last_error"] = exc.code

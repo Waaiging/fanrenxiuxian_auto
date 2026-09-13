@@ -794,6 +794,8 @@ class MiniAppDwellingTransport:
     def _check_sect_operation(self, identity, command):
         actor = getattr(self, "sect_actor", None)
         if actor is not None:
+            from automation_command_controls import require_enabled
+            require_enabled(actor, identity, command)
             from sect_rules import SectTaskStopped, require_command, task_paused
             require_command(actor, identity, command)
             if command in {".闭关修炼", ".深度闭关", ".查看闭关", ".强行出关"} and task_paused(actor, identity, command):
@@ -808,18 +810,19 @@ class MiniAppDwellingTransport:
         include_player_id: bool = True,
         *,
         time_critical: bool = False,
-        required_command: str = "",
+        required_command: str | tuple[str, ...] = "",
     ) -> dict[str, Any]:
+        from automation_command_controls import miniapp_request_commands
+        required = (required_command,) if isinstance(required_command, str) else required_command
+        commands = (*required, *miniapp_request_commands(path, payload))
+        for command in commands:
+            if command:
+                self._check_sect_operation(identity, command)
         if not self.init_data or not self.start_payload:
             await self._initialize_unlocked()
-        if required_command:
-            self._check_sect_operation(identity, required_command)
-        if path.endswith("/command-center"):
-            self._check_sect_operation(identity, (payload or {}).get("command"))
-        elif path.endswith("/cultivation"):
-            self._check_sect_operation(identity, ".闭关修炼")
-        elif path.endswith("/deep-seclusion"):
-            command = {"start": ".深度闭关", "status": ".查看闭关", "force": ".强行出关"}.get((payload or {}).get("action"))
+        # Initialization can wait on Telegram/authentication; switches may
+        # change while queued. Recheck immediately before the actual request.
+        for command in commands:
             if command:
                 self._check_sect_operation(identity, command)
         body = {
@@ -1122,7 +1125,7 @@ class MiniAppDwellingTransport:
                 f"指令 {command}",
                 lambda: self._request_unlocked(
                     path, payload, identity=identity,
-                    required_command=".推命 闭关" if prefix_required else "",
+                    required_command=(command, ".推命 闭关") if prefix_required else command,
                 ),
                 log_operation=log_operation,
             )
@@ -1184,12 +1187,8 @@ class MiniAppDwellingTransport:
         retry_auth: bool = True,
     ) -> dict[str, Any]:
         def check_sect():
-            if action == "spirit_beast":
-                operation = (payload or {}).get("action")
-                command = {"seek": ".寻觅灵兽", "release": "miniapp:spirit-beast-release",
-                           "rest": "miniapp:spirit-beast-rest", "interact": "miniapp:spirit-beast-contract"}.get(
-                               operation, "miniapp:spirit-beast-abyss" if path.endswith("/abyss/enter")
-                               else "miniapp:spirit-beast")
+            from automation_command_controls import miniapp_request_commands
+            for command in miniapp_request_commands(path, payload):
                 self._check_sect_operation(identity, command)
         check_sect()
         token = await self._external_token_unlocked(identity, action, expected_prefix)
@@ -1515,8 +1514,13 @@ class MiniAppDwellingTransport:
         payload: dict[str, Any] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
+        from automation_command_controls import miniapp_request_commands, require_enabled
+        commands = miniapp_request_commands(path, payload)
+        actor = getattr(self, "sect_actor", None)
+        require_enabled(actor, identity, *commands)
         if not self.init_data or not self.start_payload:
             await self._initialize_unlocked()
+        require_enabled(actor, identity, *commands)
         body = {"token": str(token or "").strip(), "initData": self.init_data}
         if not body["token"]:
             raise MiniAppBeastError("fishing_token_missing")
