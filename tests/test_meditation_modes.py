@@ -184,6 +184,116 @@ class MeditationModesTests(unittest.TestCase):
         self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("主魂", "cultivation")))
         self.assertEqual(actor.commands(), [".定命 贪狼", ".定命 天府", ".定命 贪狼"])
 
+    def test_missing_daily_ziwei_waits_for_refresh_once_even_after_restart(self):
+        self.select("main|无咎子", mode="daily")
+        actor = MeditationActor()
+        actor.sects["无咎子"] = "天星宗"
+        runtime = self.ready(actor, "无咎子", count=51)
+        self.destiny_ready(actor, "无咎子", options=["天府", "贪狼", "太阴"], choice="贪狼")
+        tomorrow = (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        asyncio.run(actor.configured_meditation_tick("无咎子"))
+        self.assertEqual(runtime["next_retry_at"], tomorrow.strftime(TIME_FORMAT))
+        self.assertIn("今日候选没有紫微", runtime["last_result"])
+        self.assertEqual(runtime["success_count"], 51)
+        self.assertEqual(actor.commands("无咎子"), [])
+        actor.logger.error.assert_not_called()
+        notices = [call for call in actor.logger.info.call_args_list if "日常闭关等待候选刷新" in call.args[0]]
+        self.assertEqual(len(notices), 1)
+        actor.save_state.reset_mock()
+        for _ in range(2):
+            asyncio.run(actor.configured_meditation_tick("无咎子"))
+            self.assertFalse(asyncio.run(actor.ensure_tianxing_destiny_for_action("无咎子", "cultivation")))
+        actor.save_state.assert_not_called()
+        self.assertEqual(actor.logger.info.call_args_list.count(notices[0]), 1)
+
+        restarted = MeditationActor()
+        restarted.sects = dict(actor.sects)
+        restarted.state = copy.deepcopy(actor.state)
+        self.destiny_ready(restarted, "无咎子", options=["天府", "贪狼", "太阴"], choice="贪狼")
+        asyncio.run(restarted.configured_meditation_tick("无咎子"))
+        self.assertEqual(restarted.sent, [])
+        restarted.logger.error.assert_not_called()
+        restarted.logger.info.assert_not_called()
+        self.assertNotIn("next_tianxing_destiny_retry_time", restarted.get_avatar_state("无咎子"))
+
+    def test_missing_daily_ziwei_does_not_block_other_actions_or_souls(self):
+        for identity in ("主魂", "无咎子"):
+            self.select(f"main|{identity}", mode="daily")
+        actor = MeditationActor()
+        actor.sects.update({"主魂": "天星宗", "无咎子": "天星宗"})
+        for identity in ("主魂", "无咎子"):
+            self.ready(actor, identity)
+            self.destiny_ready(actor, identity, options=["天府", "贪狼", "太阴"] if identity == "无咎子" else None)
+
+        asyncio.run(actor.configured_meditation_tick("无咎子"))
+        for action in ("exploration", "crafting"):
+            self.assertTrue(asyncio.run(actor.ensure_tianxing_destiny_for_action("无咎子", action)))
+        asyncio.run(actor.configured_meditation_tick())
+        self.assertEqual(actor.commands("无咎子"), [".定命 贪狼", ".定命 天府"])
+        self.assertEqual(actor.commands(), [".定命 紫微", ".推命 闭关", ".闭关修炼"])
+        self.assertEqual(actor._meditation_runtime("主魂")["success_count"], 1)
+        actor.logger.error.assert_not_called()
+
+    def test_missing_daily_ziwei_rechecks_after_candidates_sect_or_mode_change(self):
+        for change in ("candidates", "sect", "mode"):
+            with self.subTest(change=change):
+                self.select(mode="daily")
+                actor = MeditationActor()
+                actor.sects["主魂"] = "天星宗"
+                self.ready(actor)
+                self.destiny_ready(actor, options=["天府", "贪狼", "太阴"])
+                asyncio.run(actor.configured_meditation_tick())
+                if change == "candidates":
+                    actor.record_tianxing_destiny_observation("主魂", ["天府", "紫微", "太阴"])
+                    expected = [".定命 紫微", ".推命 闭关", ".闭关修炼"]
+                elif change == "sect":
+                    actor.sects["主魂"] = "星宫"
+                    expected = [".闭关修炼"]
+                else:
+                    self.select(mode="deep")
+                    expected = [".查看闭关", ".深度闭关"]
+                asyncio.run(actor.configured_meditation_tick())
+                self.assertEqual(actor.commands(), expected)
+                self.assertEqual(actor._meditation_runtime("主魂").get("next_retry_at"), "")
+                actor.logger.error.assert_not_called()
+
+    def test_missing_daily_ziwei_observes_again_at_midnight(self):
+        self.select(mode="daily")
+        actor = MeditationActor()
+        actor.sects["主魂"] = "天星宗"
+        self.ready(actor)
+        self.destiny_ready(actor, options=["天府", "贪狼", "太阴"])
+        asyncio.run(actor.configured_meditation_tick())
+        actor.responses[".观命"] = "今日可定命的命星：天府、紫微、太阴"
+        tomorrow = (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        with ExitStack() as stack:
+            for module in ("common_command_features", "meditation_features"):
+                clock = stack.enter_context(patch(f"{module}.datetime", wraps=datetime))
+                clock.now.return_value = tomorrow
+            asyncio.run(actor.configured_meditation_tick())
+        self.assertEqual(actor.commands(), [".观命", ".定命 紫微", ".推命 闭关", ".闭关修炼"])
+        self.assertEqual(actor.state["last_destiny_observation_date"], tomorrow.strftime("%Y-%m-%d"))
+        self.assertEqual(actor._meditation_runtime("主魂")["success_count"], 1)
+        actor.logger.error.assert_not_called()
+
+    def test_unknown_candidates_and_unconfirmed_ziwei_keep_short_retries(self):
+        self.select(mode="daily")
+        for options in ([], ["紫微", "贪狼"]):
+            with self.subTest(options=options):
+                actor = MeditationActor()
+                actor.sects["主魂"] = "天星宗"
+                runtime = self.ready(actor)
+                self.destiny_ready(actor, options=options)
+                actor.responses.update({".观命": "", ".定命 紫微": ""})
+                asyncio.run(actor.configured_meditation_tick())
+                retry = datetime.strptime(runtime["next_retry_at"], TIME_FORMAT)
+                self.assertLessEqual(retry, datetime.now() + timedelta(minutes=5))
+                self.assertGreater(retry, datetime.now() + timedelta(minutes=4))
+                self.assertEqual(runtime["last_result"], "紫微命星未确认")
+                self.assertNotIn(".闭关修炼", actor.commands())
+                self.assertNotIn(".推命 闭关", actor.commands())
+
     def test_daily_mode_selected_during_auth_preserves_other_actions_destiny_commands(self):
         actor = MeditationActor()
         actor.sects["主魂"] = "天星宗"

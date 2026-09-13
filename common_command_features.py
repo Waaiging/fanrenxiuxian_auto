@@ -1420,6 +1420,22 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
         )
         return True
 
+    def unavailable_meditation_destiny(self, identity="主魂"):
+        """Distinguish a missing daily candidate from an unconfirmed observation."""
+        required = self.required_meditation_destiny(identity)
+        if not required:
+            return ""
+        today = datetime.now().strftime("%Y-%m-%d")
+        state = self.tianxing_identity_state(identity)
+        if (
+            state.get("last_destiny_observation_date") != today
+            or state.get("tianxing_destiny_options_date") != today
+        ):
+            return ""
+        options = [name for name in state.get("tianxing_destiny_options", [])
+                   if name in TIANXING_DESTINY_CHOICES]
+        return required if options and required not in options else ""
+
     async def ensure_tianxing_destiny_for_action(self, identity, action):
         identity = str(identity or "主魂").strip() or "主魂"
         action = str(action or "").strip().casefold()
@@ -1451,6 +1467,10 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             preferences = (required,)
         choice = next((name for name in preferences if name in options), "")
         if not choice:
+            if required and self._defer_meditation_for_missing_destiny(
+                identity, self.meditation_config(identity)
+            ):
+                return False
             self.common_command_logger().error(
                 "Tianxing destiny has no usable candidate [%s/%s]: %s",
                 identity,

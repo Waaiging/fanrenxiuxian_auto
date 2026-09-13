@@ -140,9 +140,35 @@ class MeditationModeMixin:
         runtime.update(
             next_retry_at=_after(max(60, seconds)),
             retry_switch_id=config["switch_id"],
+            retry_reason="",
             last_result=str(text or "未收到确认回复")[:240],
         )
         self.save_state()
+
+    def _defer_meditation_for_missing_destiny(self, identity, config):
+        required = self.unavailable_meditation_destiny(identity)
+        if not required:
+            return False
+        # Candidates are fixed for the day. Keep this wait local to meditation;
+        # exploration and crafting still use their own available destiny choices.
+        retry_at = (datetime.now() + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).strftime(TIME_FORMAT)
+        waiting = {
+            "next_retry_at": retry_at,
+            "retry_switch_id": config["switch_id"],
+            "retry_reason": "destiny_unavailable",
+            "last_result": f"今日候选没有{required}，日常闭关等待 {retry_at} 重新观命",
+        }
+        runtime = self._meditation_runtime(identity)
+        if any(runtime.get(key) != value for key, value in waiting.items()):
+            runtime.update(waiting)
+            self.save_state()
+            self.common_command_logger().info(
+                "[%s] 日常闭关等待候选刷新：今日候选没有%s，下次检查 %s",
+                identity, required, retry_at,
+            )
+        return True
 
     def _meditation_wait(self, text, default=300):
         seconds = self.parse_wait_time(text)
@@ -248,10 +274,11 @@ class MeditationModeMixin:
     async def _daily_meditation_once(self, identity, config):
         if self.identity_sect_name(identity) == "天星宗":
             if not await self.ensure_tianxing_destiny_for_action(identity, "cultivation"):
-                self._meditation_retry(
-                    identity, config, "紫微命星未确认",
-                    max(300, self.tianxing_destiny_retry_wait_seconds(identity)),
-                )
+                if not self._defer_meditation_for_missing_destiny(identity, config):
+                    self._meditation_retry(
+                        identity, config, "紫微命星未确认",
+                        max(300, self.tianxing_destiny_retry_wait_seconds(identity)),
+                    )
                 return None
             prefix = await self._send_meditation_command(identity, ".推命 闭关", config)
             if not self.tianxing_prefix_response_ok(".推命 闭关", prefix):
@@ -277,6 +304,14 @@ class MeditationModeMixin:
         if not config["enabled"]:
             return True
         runtime = self._meditation_runtime(identity)
+        if runtime.get("retry_reason") == "destiny_unavailable" and (
+            runtime.get("retry_switch_id", "") != config["switch_id"]
+            or not self.unavailable_meditation_destiny(identity)
+        ):
+            # A refreshed observation, new day, sect change or mode switch may
+            # make cultivation possible before the saved wait expires.
+            runtime.update(next_retry_at="", retry_reason="")
+            self.save_state()
         if (
             runtime.get("retry_switch_id", "") == config["switch_id"]
             and _remaining(runtime.get("next_retry_at")) > 0
