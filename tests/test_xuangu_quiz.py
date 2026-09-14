@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -6,6 +7,11 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+from telethon.tl.types import (
+    InputPeerChannel, KeyboardButtonCallback, KeyboardButtonRow, Message,
+    MessageReplyHeader, PeerChannel, PeerUser, ReplyInlineMarkup,
+)
 
 import automation_settings as settings
 import command_feedback as feedback
@@ -102,8 +108,9 @@ class QuizTests(unittest.IsolatedAsyncioTestCase):
         body = f"【玄骨考校·{outcome}】\n@{target} 的答案 {letter} 完全正确！\n你获得了 5000 点修为作为奖赏！"
         if outcome == "答错":
             body = f"【玄骨考校·答错】\n@{target} 的答案 A 错得离谱！（正确答案: {letter}）"
-        msg = SimpleNamespace(**{**vars(question), "id": message_id or question.id + 3, "text": body,
-                                  "sender_id": 8964348409, "date": datetime.now(timezone.utc)})
+        msg = SimpleNamespace(id=message_id or question.id + 3, text=body, chat_id=question.chat_id,
+            sender_id=8964348409, date=datetime.now(timezone.utc), entities=[], out=False,
+            reply_to_msg_id=question.reply_to_msg_id, reply_to=question.reply_to)
         return event(msg, "hantianzun22_bot")
 
     async def handle(self, msg=None, actor=None):
@@ -116,6 +123,235 @@ class QuizTests(unittest.IsolatedAsyncioTestCase):
 
     def state_entry(self, msg=None):
         return quiz._state()["events"][quiz._event_key(msg or self.msg)]
+
+    def add_buttons(self, msg=None, token="MY68XJ"):
+        msg = msg or self.msg
+        msg.reply_markup = ReplyInlineMarkup(rows=[KeyboardButtonRow(buttons=[
+            KeyboardButtonCallback(text=letter, data=f"xgq:{token}:{letter}".encode("ascii"))
+            for letter in letters]) for letters in ("AB", "CD")])
+        async def click(*, data):
+            self.dispatched.set()
+            if self.emit_result:
+                await quiz.maybe_handle_xuangu_quiz(self.actor, self.result_event(msg, data[-1:].decode("ascii")))
+            return SimpleNamespace(message="答案已提交", alert=False)
+        msg.click = AsyncMock(side_effect=click)
+        return msg
+
+    async def test_main_soul_button_answers_when_ja_group_sends_are_banned(self):
+        self.actor.account_key = "xiaohao"
+        self.actor.avatars = ["问心子"]
+        self.actor.current_identity = "问心子"
+        self.actor.client.send_message.side_effect = RuntimeError("You're banned from sending messages in supergroups/channels")
+        self.add_buttons()
+        await self.handle()
+        await self.handle()
+        await self.finish()
+        await self.handle()
+        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.actor.client.send_message.assert_not_awaited()
+        self.assertEqual(self.actor.current_identity, "问心子")
+        self.assertEqual(self.state_entry()["transport"], "callback")
+        self.assertEqual(self.state_entry()["status"], "correct")
+        self.assertNotIn("sent_message_id", self.state_entry())
+        self.ledger.assert_not_called()  # A button is not an outgoing chat message.
+        self.delta.assert_called_once()
+
+    async def test_restricted_monitor_answers_main_soul_with_buttons_only(self):
+        from red_packet_account import install_restricted_quiz_monitor
+        self.actor.client.add_event_handler = MagicMock()
+        handlers = install_restricted_quiz_monitor(self.actor)
+        self.add_buttons()
+        await handlers[0][0](event(self.msg))
+        await self.finish()
+        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_real_telethon_message_uses_callback_request_for_original_question(self):
+        self.add_buttons()
+        peer = InputPeerChannel(-quiz.JA_CHAT - 1000000000000, 123)
+        message = Message(id=self.msg.id, peer_id=PeerChannel(peer.channel_id),
+            from_id=PeerUser(quiz.QUESTION_BOT_ID), date=self.msg.date, message=self.msg.text,
+            reply_to=MessageReplyHeader(reply_to_msg_id=quiz.JA_TOPIC, reply_to_top_id=quiz.JA_TOPIC, forum_topic=True),
+            reply_markup=self.msg.reply_markup)
+        async def request(call):
+            self.assertIsInstance(call, GetBotCallbackAnswerRequest)
+            self.assertEqual((call.peer, call.msg_id, call.data), (peer, 400, b"xgq:MY68XJ:C"))
+            await quiz.maybe_handle_xuangu_quiz(self.actor, self.result_event(message))
+            return SimpleNamespace(message="答案已提交", alert=False)
+        client = AsyncMock(side_effect=request)
+        client.parse_mode = None
+        client.get_messages = AsyncMock(return_value=message)
+        client.send_message = AsyncMock()
+        message._client, message._input_chat = client, peer
+        self.msg, self.actor.client = message, client
+        await self.handle()
+        await self.finish()
+        client.assert_awaited_once()
+        client.send_message.assert_not_awaited()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_restricted_monitor_does_not_answer_avatars_or_plain_questions(self):
+        self.actor.xuangu_quiz_callback_only = True
+        await self.handle()  # Main soul with no keyboard.
+        self.actor.avatars = ["问心子"]
+        self.actor.avatar_usernames = {"avatar_player": "问心子"}
+        self.msg = self.add_buttons(question_message(target="avatar_player", message_id=500))
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_not_awaited()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertFalse(self.sent)
+
+    async def test_avatar_buttons_still_use_confirmed_identity_command_path(self):
+        self.actor.avatars = ["问心子"]
+        self.actor.avatar_usernames = {"avatar_player": "问心子"}
+        self.msg = self.add_buttons(question_message(target="avatar_player"))
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_not_awaited()
+        self.assertEqual(self.sent, [(quiz.JA_CHAT, ".作答 C", 400)])
+
+    async def test_button_answer_uses_current_option_order(self):
+        self.msg = self.add_buttons(question_message(options={
+            "A": "修罗圣火", "B": "紫罗极火", "C": "六极真魔火", "D": "碧焰天火"}))
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:A")
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_malformed_keyboard_never_falls_back_to_group_send(self):
+        for index, (label, data) in enumerate((
+                ("C", b"other:MY68XJ:C"), ("C", b"xgq:OTHER:C"),
+                ("B", b"xgq:MY68XJ:C"), ("C", b"xgq:MY68XJ:D"), ("C", None))):
+            with self.subTest(label=label, data=data):
+                self.msg = self.add_buttons(question_message(message_id=400 + index))
+                button = self.msg.reply_markup.rows[1].buttons[0]
+                button.text, button.data = label, data
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_not_awaited()
+                self.assertEqual(self.state_entry()["status"], "skipped")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_removed_or_replaced_keyboard_prevents_any_submission(self):
+        for index, replacement in enumerate((None, "DIFFERENT")):
+            with self.subTest(replacement=replacement):
+                self.msg = self.add_buttons(question_message(message_id=400 + index))
+                live = question_message(message_id=self.msg.id)
+                if replacement:
+                    self.add_buttons(live, token=replacement)
+                self.actor.client.get_messages.side_effect = None
+                self.actor.client.get_messages.return_value = live
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_not_awaited()
+                self.assertEqual(self.state_entry()["status"], "invalid")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_button_question_must_belong_to_this_user_and_source(self):
+        for msg in (question_message(target="somebody_else"), question_message(sender_id=999),
+                    question_message(topic=999), question_message(chat_id=-1009999999999),
+                    question_message(age=301), question_message(stem="未知的新题？")):
+            with self.subTest(target=msg.text, chat=msg.chat_id):
+                self.msg = self.add_buttons(msg)
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_not_awaited()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_refetched_question_must_have_the_same_message_id(self):
+        self.add_buttons()
+        live = self.add_buttons(question_message(message_id=500))
+        self.actor.client.get_messages.side_effect = None
+        self.actor.client.get_messages.return_value = live
+        await self.handle()
+        await self.finish()
+        live.click.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "invalid")
+
+    async def test_controls_are_rechecked_after_callback_question_fetch(self):
+        for index, stop in enumerate(("disabled", "paused", "identity_pause", "command_guard", "expired")):
+            with self.subTest(stop=stop):
+                self.enabled = True
+                self.actor.pause_event.set()
+                self.actor.identity_pause_seconds = MagicMock(return_value=0)
+                self.msg = self.add_buttons(question_message(message_id=400 + index))
+                fetching, release = asyncio.Event(), asyncio.Event()
+                async def fetch(*args, **kwargs):
+                    fetching.set()
+                    await release.wait()
+                    return self.msg
+                self.actor.client.get_messages.side_effect = fetch
+                await self.handle()
+                await asyncio.wait_for(fetching.wait(), 1)
+                if stop == "disabled":
+                    self.enabled = False
+                elif stop == "paused":
+                    self.actor.pause_event.clear()
+                elif stop == "identity_pause":
+                    self.actor.identity_pause_seconds.return_value = 60
+                with patch.object(quiz, "command_send_precheck", return_value=False) if stop == "command_guard" else \
+                        patch.object(quiz.time, "time", return_value=self.msg.date.timestamp() + 301) if stop == "expired" else \
+                        nullcontext():
+                    release.set()
+                    await self.finish()
+                self.msg.click.assert_not_awaited()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_callback_failure_or_empty_response_never_retries_or_falls_back(self):
+        for index, error in enumerate((TimeoutError("response lost"), RuntimeError("request failed"), None)):
+            with self.subTest(error=error):
+                self.msg = self.add_buttons(question_message(message_id=400 + index))
+                self.msg.click.side_effect = error
+                self.msg.click.return_value = None
+                await self.handle()
+                await self.finish()
+                await self.handle()
+                await quiz.resume_pending_xuangu_quiz_events(self.actor)
+                self.msg.click.assert_awaited_once()
+                self.assertEqual(self.state_entry()["status"], "send_uncertain")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_callback_acceptance_waits_for_actual_judgment(self):
+        self.emit_result = False
+        self.add_buttons()
+        await self.handle()
+        await asyncio.wait_for(self.dispatched.wait(), 1)
+        self.assertNotEqual(self.state_entry()["status"], "correct")
+        self.delta.assert_not_called()
+        await quiz.maybe_handle_xuangu_quiz(self.actor, self.result_event(self.msg))
+        await self.finish()
+        self.assertEqual(self.state_entry()["status"], "correct")
+        self.delta.assert_called_once()
+
+    async def test_edited_original_question_can_confirm_callback_result(self):
+        self.emit_result = False
+        self.add_buttons()
+        await self.handle()
+        await asyncio.wait_for(self.dispatched.wait(), 1)
+        result = self.result_event(self.msg, message_id=self.msg.id)
+        result.message.sender_id = quiz.QUESTION_BOT_ID
+        await quiz.maybe_handle_xuangu_quiz(self.actor, result)
+        await self.finish()
+        await quiz.maybe_handle_xuangu_quiz(self.actor, result)
+        self.assertEqual(self.state_entry()["status"], "correct")
+        self.delta.assert_called_once()
+
+    async def test_pending_callback_can_resume_in_restricted_worker(self):
+        self.actor.xuangu_quiz_callback_only = True
+        self.add_buttons()
+        self.msg.get_sender = event(self.msg).get_sender
+        entry = quiz._question_entry(self.msg, quiz.parse_question(self.msg.text))
+        entry.update(status="queued", account=self.actor.account_key, identity="主魂", owner="old-process")
+        quiz._update(lambda state: state["events"].update({quiz._event_key(self.msg): entry}))
+        await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        await self.finish()
+        await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        self.msg.click.assert_awaited_once()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
 
     def test_answer_content_tracks_shuffled_options(self):
         self.assertEqual(len(quiz._bank()), 14)

@@ -17,8 +17,8 @@ import uuid
 from automation_settings import canonical_automation_identity, xuangu_quiz_enabled
 from command_feedback import guarded_one_shot_send
 from log_utils import (
-    actor_message_target, actor_target_chat_ids, is_game_bot_sender,
-    normalize_telegram_chat_id, record_command_response_for_command_id,
+    actor_message_target, actor_target_chat_ids, command_send_precheck,
+    is_game_bot_sender, normalize_telegram_chat_id, record_command_response_for_command_id,
     record_cultivation_delta_from_text, telegram_event_message_context,
     telegram_message_topic_id,
 )
@@ -155,6 +155,27 @@ def answer_for(question, state=None):
     return letters[0] if len(letters) == 1 else None
 
 
+def quiz_callback_data(msg, letter):
+    """Use only the original bot's complete, consistent A/B/C/D keyboard.
+
+    A callback is sent as the logged-in Telegram user, not a channel avatar.
+    The caller must therefore also verify that the question names its main soul.
+    """
+    choices, tokens = {}, set()
+    for row in getattr(getattr(msg, "reply_markup", None), "rows", []) or []:
+        for button in getattr(row, "buttons", []) or []:
+            data = getattr(button, "data", None)
+            match = re.fullmatch(rb"xgq:([A-Za-z0-9_-]{1,48}):([A-D])", data) if isinstance(data, bytes) else None
+            if not match:
+                return None
+            option = match[2].decode("ascii")
+            if clean_text(getattr(button, "text", "")) != option or option in choices:
+                return None
+            choices[option] = data
+            tokens.add(match[1])
+    return choices.get(letter) if set(choices) == set("ABCD") and len(tokens) == 1 else None
+
+
 def _epoch(msg):
     date = getattr(msg, "date", None)
     if not isinstance(date, datetime):
@@ -248,7 +269,13 @@ def _remember_pending(data, entry, reason="unknown"):
 
 
 def _writable(actor):
-    return not getattr(actor, "xuangu_quiz_read_only", False) and getattr(actor, "is_running", True)
+    return (not getattr(actor, "xuangu_quiz_callback_only", False)
+            and not getattr(actor, "xuangu_quiz_read_only", False) and getattr(actor, "is_running", True))
+
+
+def _can_callback(actor, identity):
+    return (identity == "主魂" and not getattr(actor, "xuangu_quiz_read_only", False)
+            and getattr(actor, "is_running", True))
 
 
 def _set_event(key, *, expected_owner=None, expected_status=None, **values):
@@ -272,7 +299,7 @@ def _record_result(actor, entry):
 
 
 async def _answer(actor, msg, question, key, owner, identity):
-    """Use the existing identity pipeline, with a durable final-send claim."""
+    """Prefer a main-soul callback; claim either transport before dispatch."""
     letter = answer_for(question)
     if not letter:
         _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="答案待确认")
@@ -285,14 +312,17 @@ async def _answer(actor, msg, question, key, owner, identity):
         signals = actor._xuangu_quiz_signals = {}
     signals[key] = signal
 
-    def dispatch_enabled(current_actor):
-        if not _writable(current_actor) or time.time() >= deadline:
+    def dispatch_enabled(current_actor, *, callback=False):
+        active = _can_callback(current_actor, identity) if callback else _writable(current_actor)
+        if not active or time.time() >= deadline:
             return False
         if not xuangu_quiz_enabled(current_actor.account_key, identity):
             return False
         pause = getattr(current_actor, "pause_event", None)
         if pause is not None and not pause.is_set():
             return False
+        if callback:
+            return command_send_precheck(current_actor, command, LOG, identity=identity)
         target_chat, target_reply = actor_message_target(current_actor, reply_to=msg.id)
         if normalize_telegram_chat_id(target_chat) != normalize_telegram_chat_id(msg.chat_id) or target_reply != msg.id:
             return False
@@ -309,6 +339,7 @@ async def _answer(actor, msg, question, key, owner, identity):
                 LOG.warning("[玄骨答题] 发送前无法重新确认题面 %s，跳过本次作答", key)
                 return False
             if (not live or getattr(live, "sender_id", None) != QUESTION_BOT_ID
+                    or _event_key(live) != key
                     or parse_question(getattr(live, "text", "")) != question or not _scope(current_actor, live)
                     or target_identity(current_actor, question.target, live) != identity):
                 _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="发送前题面已删除、失效或发生变化")
@@ -328,7 +359,7 @@ async def _answer(actor, msg, question, key, owner, identity):
                 active = canonical_automation_identity(current_actor.account_key, getattr(current_actor, "current_identity", ""))
                 if active != identity:
                     return
-                entry.update(status="sending", attempt_at=time.time(), answer=command[-1])
+                entry.update(status="sending", attempt_at=time.time(), answer=command[-1], transport="command")
             accepted = True
         _update(claim)
         return accepted
@@ -345,6 +376,40 @@ async def _answer(actor, msg, question, key, owner, identity):
         _record_result(current_actor, entry)
         LOG.info("[玄骨答题] [%s/%s] %s，回复题面 %s", current_actor.account_key, identity, command, key)
 
+    async def click_answer(live, data):
+        if not dispatch_enabled(actor, callback=True):
+            return
+        accepted = False
+        def claim(state):
+            nonlocal accepted
+            entry = state["events"].get(key, {})
+            if (entry.get("owner") == owner and entry.get("status") == "queued"
+                    and answer_for(question, state) == letter):
+                entry.update(status="sending", attempt_at=time.time(), answer=letter,
+                             transport="callback", callback_data=data.decode("ascii"))
+                accepted = True
+        _update(claim)
+        if not accepted:
+            return
+        # Once dispatched, an exception or empty callback response is ambiguous.
+        # Never fall back to a group command or retry the button in that case.
+        LOG.info("OUT [玄骨答题按钮 | %s/%s]:\n点击 %s（%s），题面 %s",
+                 actor.account_key, identity, letter, question.options[letter], key)
+        try:
+            response = await asyncio.wait_for(live.click(data=data), timeout=min(15, max(0.01, deadline - time.time())))
+        except Exception as exc:
+            _set_event(key, expected_owner=owner, expected_status="sending", status="send_uncertain",
+                       reason=f"按钮作答请求未确认（{type(exc).__name__}），不自动重发")
+            LOG.warning("[玄骨答题] [%s/%s] 题面 %s 按钮请求未确认：%s", actor.account_key, identity, key, type(exc).__name__)
+            return
+        if response is None:
+            _set_event(key, expected_owner=owner, expected_status="sending", status="send_uncertain",
+                       reason="按钮作答请求未确认，不自动重发")
+            return
+        _set_event(key, expected_owner=owner,
+                   callback_at=time.time(), callback_response=str(getattr(response, "message", "") or "")[:500])
+        _set_event(key, expected_owner=owner, expected_status="sending", status="awaiting_result")
+
     try:
         with telegram_event_message_context(msg):
             remaining = deadline - time.time()
@@ -353,16 +418,30 @@ async def _answer(actor, msg, question, key, owner, identity):
             live = await asyncio.wait_for(actor.client.get_messages(msg.chat_id, ids=msg.id), timeout=min(15, remaining))
             live_question = parse_question(getattr(live, "text", "")) if live else None
             if (not live or getattr(live, "sender_id", None) != QUESTION_BOT_ID
-                    or live_question != question or not _scope(actor, live)):
+                    or _event_key(live) != key
+                    or live_question != question or not _scope(actor, live)
+                    or target_identity(actor, question.target, live) != identity):
                 _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="题面已删除、失效或发生变化")
                 return
-            with guarded_one_shot_send(command, allowed, sent):
-                await asyncio.wait_for(actor.send_and_wait_feedback_identity(
-                    identity, command, reply_to=msg.id, max_retries=0, retry_on_timeout=False,
-                    force_identity_check=True,
-                    force_fresh_identity_confirm=bool(getattr(actor, "avatars", [])),
-                    suppress_no_response_alert=True,
-                ), timeout=max(0.01, deadline - time.time()))
+            original_data = quiz_callback_data(msg, letter) if identity == "主魂" else None
+            callback_data = quiz_callback_data(live, letter) if identity == "主魂" else None
+            if original_data and callback_data != original_data:
+                _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="发送前答题按钮已移除或变化")
+                return
+            if callback_data:
+                await click_answer(live, callback_data)
+            elif identity == "主魂" and getattr(live, "reply_markup", None):
+                _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="原题按钮无法核实，跳过作答")
+            elif _writable(actor):
+                with guarded_one_shot_send(command, allowed, sent):
+                    await asyncio.wait_for(actor.send_and_wait_feedback_identity(
+                        identity, command, reply_to=msg.id, max_retries=0, retry_on_timeout=False,
+                        force_identity_check=True,
+                        force_fresh_identity_confirm=bool(getattr(actor, "avatars", [])),
+                        suppress_no_response_alert=True,
+                    ), timeout=max(0.01, deadline - time.time()))
+            else:
+                _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="群发受限且没有可用的主魂答题按钮")
         entry = _state().get("events", {}).get(key, {})
         if entry.get("status") == "awaiting_result":
             try:
@@ -421,7 +500,10 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
                        if e["chat_id"] == _quiz_chat_id(msg.chat_id)
                        and e["kind"] == result["kind"] and e["target"].casefold() == result["target"].casefold()
                        and 0 <= now - e["created_at"] <= DEADLINE_SECONDS + 120
-                       and (e["message_id"] < msg.id or (result["outcome"] == "题面失效" and e["message_id"] == msg.id))]
+                       and e["message_id"] <= msg.id]
+            exact = [(key, entry) for key, entry in matches if entry["message_id"] == msg.id]
+            if exact:
+                matches = exact
             if len(matches) != 1:
                 return
             key, entry = matches[0]
@@ -459,7 +541,7 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
                 recorded = entry["result"]
                 result_msg = SimpleNamespace(id=recorded["message_id"], chat_id=entry["chat_id"], text=recorded["text"])
                 record_cultivation_delta_from_text(actor, recorded["text"], identity=entry["identity"], logger=LOG, source="玄骨答题", msg=result_msg)
-                LOG.info("[玄骨答题] [%s/%s] %s：%s", actor.account_key, entry["identity"], entry["kind"], result["outcome"])
+                LOG.info("IN [玄骨答题 | %s/%s]:\n%s：%s", actor.account_key, entry["identity"], entry["kind"], result["outcome"])
             signal = (getattr(actor, "_xuangu_quiz_signals", None) or {}).get(key)
             if signal:
                 signal.set()
@@ -473,7 +555,8 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
     identity = target_identity(actor, question.target, msg)
     key, owner = _event_key(msg), uuid.uuid4().hex
     letter = answer_for(question)
-    eligible = bool(identity and letter and _writable(actor) and xuangu_quiz_enabled(actor.account_key, identity))
+    eligible = bool(identity and letter and xuangu_quiz_enabled(actor.account_key, identity)
+                    and (_writable(actor) or (_can_callback(actor, identity) and quiz_callback_data(msg, letter))))
     claimed = False
     def observe(data):
         nonlocal claimed
