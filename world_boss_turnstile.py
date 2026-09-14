@@ -16,6 +16,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -41,10 +42,23 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 MAX_TOKEN_LENGTH = 4096
 DEFAULT_REQUEST_TTL_SECONDS = 180
 STALE_RETENTION_SECONDS = 300
+BROWSER_WARMUP_SECONDS = 90
+BROWSER_ORIGIN = "https://asc.aiopenai.app"
 BROWSER_EVENTS = frozenset({
+    "browser_starting", "browser_ready", "page_ready",
     "helper_ready", "widget_ready", "interaction_required", "token_generated",
     "widget_error", "widget_timeout", "unsupported", "expired", "script_error",
     "config_error",
+})
+BROWSER_FAILURE_CODES = frozenset({
+    "browser_executable_missing", "websocket_client_missing", "virtual_display_missing",
+    "browser_launch_failed", "browser_connection_timeout", "browser_protocol_error",
+    "browser_disconnected", "browser_protocol_timeout", "browser_script_error",
+    "browser_origin_not_allowed", "turnstile_script_unavailable", "verification_request_finished",
+    "verification_generation_changed", "browser_token_invalid", "turnstile_browser_error",
+    "turnstile_browser_unsupported", "turnstile_browser_expired", "turnstile_browser_timeout",
+    "turnstile_browser_config_error", "turnstile_request_invalid", "turnstile_request_not_found",
+    "turnstile_request_expired", "turnstile_request_already_submitted", "turnstile_token_invalid",
 })
 FINISHED_STATUSES = frozenset({"consumed", "accepted", "rejected", "expired", "cancelled"})
 
@@ -199,6 +213,81 @@ class WorldBossTurnstileBroker:
         payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n"
         _atomic_write(self._request_path(self.queue_dir, request_id), payload)
 
+    def _read_warmup_unlocked(self) -> dict[str, Any]:
+        try:
+            value = json.loads((self.queue_dir / "browser_warmup.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def request_warmup(self, *, event_fingerprint: str, origin: str, notice_epoch: float) -> bool:
+        """Load the official page during registration, without creating a token.
+
+        The deadline belongs to the announcement, not to each caller. Four
+        accounts, repeated notices and restarts cannot extend it or reopen a
+        warmup already used by a real verification request.
+        """
+        now = float(self.clock())
+        try:
+            notice = float(notice_epoch)
+        except (TypeError, ValueError):
+            return False
+        if (not re.fullmatch(r"[a-f0-9]{64}", str(event_fingerprint))
+                or str(origin).rstrip("/") != BROWSER_ORIGIN
+                or not math.isfinite(notice) or not now - BROWSER_WARMUP_SECONDS < notice <= now + 5):
+            return False
+        with self._thread_lock, _queue_lock(self.lock_path):
+            previous = self._read_warmup_unlocked()
+            if previous.get("event_fingerprint") == event_fingerprint:
+                return previous.get("status") == "pending"
+            try:
+                if float(previous.get("notice_epoch") or 0) > notice:
+                    return False
+            except (TypeError, ValueError):
+                pass
+            _atomic_write(self.queue_dir / "browser_warmup.json", json.dumps({
+                "event_fingerprint": event_fingerprint, "origin": BROWSER_ORIGIN,
+                "notice_epoch": notice, "expires_epoch": notice + BROWSER_WARMUP_SECONDS,
+                "status": "pending",
+            }, separators=(",", ":")))
+        return True
+
+    def get_warmup(self) -> dict[str, Any] | None:
+        with self._thread_lock, _queue_lock(self.lock_path):
+            value = self._read_warmup_unlocked()
+        try:
+            remaining = float(value.get("expires_epoch") or 0) - float(self.clock())
+        except (TypeError, ValueError):
+            return None
+        if (value.get("status") != "pending" or not 0 < remaining <= BROWSER_WARMUP_SECONDS + 5
+                or value.get("origin") != BROWSER_ORIGIN
+                or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("event_fingerprint")))):
+            return None
+        return value
+
+    def finish_warmup(self, event_fingerprint: str) -> None:
+        with self._thread_lock, _queue_lock(self.lock_path):
+            value = self._read_warmup_unlocked()
+            if value.get("event_fingerprint") == event_fingerprint and value.get("status") == "pending":
+                value["status"] = "used"
+                _atomic_write(self.queue_dir / "browser_warmup.json", json.dumps(value, separators=(",", ":")))
+
+    def claim_warmup(self, event_fingerprint: str) -> dict[str, Any] | None:
+        """Keep the two-prewarm limit across verifier restarts as well."""
+        with self._thread_lock, _queue_lock(self.lock_path):
+            value = self._read_warmup_unlocked()
+            try:
+                attempts = int(value.get("attempts") or 0)
+                remaining = float(value.get("expires_epoch") or 0) - float(self.clock())
+            except (TypeError, ValueError):
+                return None
+            if (value.get("event_fingerprint") != event_fingerprint or value.get("status") != "pending"
+                    or not 0 < remaining <= BROWSER_WARMUP_SECONDS + 5 or not 0 <= attempts < 2):
+                return None
+            value["attempts"] = attempts + 1
+            _atomic_write(self.queue_dir / "browser_warmup.json", json.dumps(value, separators=(",", ":")))
+            return value
+
     def _delete_files_unlocked(self, request_id: str) -> None:
         for path in (
             self._request_path(self.queue_dir, request_id),
@@ -283,7 +372,9 @@ class WorldBossTurnstileBroker:
             "challenge_id",
             "origin",
             "created_at",
+            "created_epoch",
             "expires_at",
+            "expires_epoch",
             "status",
             "token_available",
             "submitted_at",
@@ -292,12 +383,34 @@ class WorldBossTurnstileBroker:
             "browser_error_code",
             "browser_updated_at",
             "browser_source",
+            "browser_attempts",
             "result_error",
             "result_http_status",
             "result_at",
             "cancel_reason",
         )
         return {key: request[key] for key in allowed if key in request}
+
+    def record_browser_attempt(self, request_id: str, *, attempt: int, duration_ms: int,
+                               budget_ms: int, error: str = "", cf_code: str = "", stage: str = "") -> None:
+        """Retain bounded, credential-free attempt timing even after cancellation."""
+        request_id = _safe_id(request_id)
+        safe_error = str(error or "")
+        if safe_error and safe_error not in BROWSER_FAILURE_CODES:
+            safe_error = "browser_verification_failed"
+        code = str(cf_code or "")
+        if code and not re.fullmatch(r"[0-9]{3,6}", code):
+            code = ""
+        row = {"attempt": max(1, min(3, int(attempt))),
+               "duration_ms": max(0, min(600000, int(duration_ms))),
+               "budget_ms": max(0, min(90000, int(budget_ms))),
+               "error": safe_error, "cf_code": code,
+               "stage": stage if stage in BROWSER_EVENTS else ""}
+        with self._thread_lock, _queue_lock(self.lock_path):
+            request = self._read_request_unlocked(request_id)
+            if request:
+                request["browser_attempts"] = [*(request.get("browser_attempts") or [])[-2:], row]
+                self._write_request_unlocked(request)
 
     def get_request(self, request_id: Any) -> dict[str, Any] | None:
         request_id = _safe_id(request_id)

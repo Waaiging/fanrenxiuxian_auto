@@ -5140,7 +5140,7 @@
                 const label = `${item.account || '--'} · ${item.identity || '--'}`;
                 const states = {pending:item.browser_source === 'automatic' ? '自动验证中' : '等待浏览器验证',submitted:'令牌已提交，等待取用',consumed:'令牌已取用，等待入阵结果',accepted:'入阵成功',rejected:'入阵未成功',expired:'请求已过期',cancelled:item.cancel_reason === 'turnstile_timeout' ? '等待验证超时' : '请求已结束'};
                 const state = states[item.status] || item.status || '等待验证';
-                const stages = {helper_ready:'浏览器已就绪',widget_ready:'控件已加载',interaction_required:'正在验证',token_generated:'已生成令牌',widget_error:'CF 验证失败',widget_timeout:'控件超时',unsupported:'浏览器不支持',expired:'令牌过期',script_error:'脚本加载失败',config_error:'浏览器启动或配置失败'};
+                const stages = {browser_starting:'正在启动浏览器',browser_ready:'浏览器已启动',page_ready:'验证页面已就绪',helper_ready:'浏览器已就绪',widget_ready:'控件已加载',interaction_required:'正在验证',token_generated:'已生成令牌',widget_error:'CF 验证失败',widget_timeout:'控件超时',unsupported:'浏览器不支持',expired:'令牌过期',script_error:'脚本加载失败',config_error:'浏览器启动或配置失败'};
                 const detail = [stages[item.browser_event], item.browser_error_code, item.result_error].filter(Boolean).join(' · ');
                 const editable = item.status === 'pending';
                 const draft = worldBossTurnstileDrafts[requestId] || '';

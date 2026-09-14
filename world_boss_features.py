@@ -3107,10 +3107,27 @@ class WorldBossMonitor:
 
         started = self.monotonic()
         deadline = started + wait_seconds
+
+        def browser_diagnostics():
+            try:
+                metadata = broker.get_request(request_id) or {}
+                return {key: metadata[key] for key in (
+                    "browser_event", "browser_error_code", "browser_updated_at",
+                    "browser_source", "browser_attempts",
+                ) if key in metadata}
+            except Exception:
+                return {}
+
         while self.monotonic() < deadline:
             if self._boss_stop_requested():
+                error = self._boss_stopped_error()
+                error.details = {**(getattr(error, "details", None) or {}),
+                                 "turnstile_request_id": request_id,
+                                 "turnstile_wait_seconds": wait_seconds,
+                                 "wait_duration_ms": max(0, round((self.monotonic() - started) * 1000)),
+                                 "browser": browser_diagnostics()}
                 broker.cancel(request_id, reason="boss_event_closed")
-                raise self._boss_stopped_error()
+                raise error
             try:
                 token = broker.take_token(request_id)
             except Exception as exc:
@@ -3140,14 +3157,8 @@ class WorldBossMonitor:
                     pass
                 raise
 
-        browser_diagnostics = {}
+        browser_metadata = browser_diagnostics()
         try:
-            metadata = broker.get_request(request_id) or {}
-            browser_diagnostics = {
-                key: metadata[key]
-                for key in ("browser_event", "browser_error_code", "browser_updated_at", "browser_source")
-                if key in metadata
-            }
             broker.cancel(request_id, reason="turnstile_timeout")
         except Exception:
             pass
@@ -3158,7 +3169,7 @@ class WorldBossMonitor:
             "account": self.account,
             "identity": identity,
             "challenge_id": challenge_id,
-            "browser": browser_diagnostics,
+            "browser": browser_metadata,
         }
         raise error
 
@@ -3932,6 +3943,18 @@ class WorldBossMonitor:
         self._prepare_boss_lifecycle(entry)
         if self._boss_stop_requested():
             raise self._boss_stopped_error()
+        # The trusted announcement opens a 60 s registration phase. Use that
+        # time for the shared browser's cold start, without requesting a token
+        # or entering any extra battle. A stale/recovered event cannot extend it.
+        try:
+            await _run_blocking(
+                lambda: self.turnstile_broker.request_warmup(
+                    event_fingerprint=entry.fingerprint, origin=entry.origin,
+                    notice_epoch=entry.notice_epoch,
+                ), executor=self._world_boss_checkpoint_executor(),
+            )
+        except Exception as exc:
+            self.log.warning("World Boss browser prewarm request failed: %s", type(exc).__name__)
         if not init_data:
             init_data = await request_webview_init_data(
                 self.client,

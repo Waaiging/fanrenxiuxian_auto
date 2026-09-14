@@ -23,11 +23,16 @@ import time
 import urllib.request
 import uuid
 
-from world_boss_turnstile import WorldBossTurnstileBroker, TurnstileRequestError, MAX_TOKEN_LENGTH
+from world_boss_turnstile import (
+    WorldBossTurnstileBroker, TurnstileRequestError, MAX_TOKEN_LENGTH, BROWSER_ORIGIN,
+)
 
 
-ORIGIN = "https://asc.aiopenai.app"
+ORIGIN = BROWSER_ORIGIN
 LOG = logging.getLogger("world_boss_browser")
+REUSABLE_BROWSER_ERRORS = frozenset({
+    "browser_protocol_timeout", "turnstile_script_unavailable", "verification_request_finished",
+})
 
 
 class BrowserVerificationError(RuntimeError):
@@ -37,21 +42,43 @@ class BrowserVerificationError(RuntimeError):
         super().__init__(code)
 
 
+def _snap_launcher(candidate: str) -> bool:
+    if str(candidate).replace("\\", "/").startswith("/snap/"):
+        return True
+    path = Path(candidate)
+    try:
+        if path.resolve().name == "snap":
+            return True
+        if path.stat().st_size <= 16384:
+            return b"/snap/bin/chromium" in path.read_bytes()
+    except OSError:
+        pass
+    return False
+
+
 def find_chrome(explicit: str | None = None) -> str:
     if explicit:
         candidate = Path(explicit).expanduser()
         if candidate.is_file():
             return str(candidate.resolve())
         raise BrowserVerificationError("browser_executable_missing")
+    snap_candidates = []
     for name in ("google-chrome", "chromium", "chromium-browser"):
         candidate = shutil.which(name)
         if candidate:
-            return candidate
+            if _snap_launcher(candidate):
+                snap_candidates.append(candidate)
+            else:
+                return candidate
     candidates = [Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")]
     candidates += sorted((Path.home() / ".cache/ms-playwright").glob("chromium-*/*/chrome"), reverse=True)
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate.resolve())
+    # Snap startup repeatedly exceeded 25 s on the small VPS. Prefer an
+    # already-installed native binary; keep Snap usable when it is the only one.
+    if snap_candidates:
+        return snap_candidates[0]
     raise BrowserVerificationError("browser_executable_missing")
 
 
@@ -65,7 +92,18 @@ class NativeTurnstileBrowser:
         self.sequence = 0
         self.origin = ""
 
-    def start(self):
+    @staticmethod
+    def _remaining(deadline, still_pending=None, code="turnstile_browser_timeout"):
+        if still_pending and not still_pending():
+            raise BrowserVerificationError("verification_request_finished")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrowserVerificationError(code)
+        return remaining
+
+    def start(self, *, timeout=25, still_pending=None):
+        deadline = time.monotonic() + max(0, min(45, float(timeout)))
+        self._remaining(deadline, still_pending, "browser_connection_timeout")
         if self.connection is not None:
             return
         try:
@@ -84,6 +122,8 @@ class NativeTurnstileBrowser:
         args = [executable, f"--remote-debugging-port={port}",
                 f"--user-data-dir={self.profile_dir}", "--no-first-run",
                 "--no-default-browser-check", "--disable-dev-shm-usage",
+                "--disable-background-networking", "--disable-component-update",
+                "--disable-default-apps", "--disable-sync",
                 "--window-size=1100,950", "about:blank"]
         startup = None
         if os.name == "nt":
@@ -106,37 +146,50 @@ class NativeTurnstileBrowser:
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             startupinfo=startup, start_new_session=os.name != "nt",
         )
-        deadline = time.monotonic() + 25
         try:
-            while time.monotonic() < deadline:
+            while True:
+                remaining = self._remaining(deadline, still_pending, "browser_connection_timeout")
                 if self.process.poll() is not None:
                     raise BrowserVerificationError("browser_launch_failed")
                 try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1) as response:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=min(1, remaining)) as response:
                         pages = json.load(response)
                     page = next(item for item in pages if item.get("type") == "page")
+                    remaining = self._remaining(deadline, still_pending, "browser_connection_timeout")
                     self.connection = websocket.create_connection(
-                        page["webSocketDebuggerUrl"], timeout=10, suppress_origin=True,
+                        page["webSocketDebuggerUrl"], timeout=min(1, remaining), suppress_origin=True,
                     )
-                    self.command("Page.enable")
+                    self.command("Page.enable", deadline=deadline, still_pending=still_pending)
                     return
                 except BrowserVerificationError:
                     raise
                 except Exception:
-                    time.sleep(0.25)
-            raise BrowserVerificationError("browser_connection_timeout")
+                    time.sleep(min(0.25, self._remaining(deadline, still_pending, "browser_connection_timeout")))
+        except BrowserVerificationError as exc:
+            if exc.code not in REUSABLE_BROWSER_ERRORS or self.connection is None:
+                self.close()
+            raise
         except BaseException:
             self.close()
             raise
 
-    def command(self, method, params=None):
+    def command(self, method, params=None, *, deadline=None, still_pending=None):
+        from websocket import WebSocketTimeoutException
+
+        deadline = min(deadline, time.monotonic() + 10) if deadline is not None else time.monotonic() + 10
         self.sequence += 1
         sequence = self.sequence
         try:
+            remaining = self._remaining(deadline, still_pending, "browser_protocol_timeout")
+            self.connection.settimeout(min(1, remaining))
             self.connection.send(json.dumps({"id": sequence, "method": method, "params": params or {}}))
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                message = json.loads(self.connection.recv())
+            while True:
+                remaining = self._remaining(deadline, still_pending, "browser_protocol_timeout")
+                self.connection.settimeout(min(1, remaining))
+                try:
+                    message = json.loads(self.connection.recv())
+                except (WebSocketTimeoutException, TimeoutError):
+                    continue
                 if message.get("id") == sequence:
                     if "error" in message:
                         raise BrowserVerificationError("browser_protocol_error")
@@ -145,34 +198,47 @@ class NativeTurnstileBrowser:
             raise
         except Exception as exc:
             raise BrowserVerificationError("browser_disconnected") from exc
-        raise BrowserVerificationError("browser_protocol_timeout")
 
-    def evaluate(self, expression):
-        result = self.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    def evaluate(self, expression, *, deadline=None, still_pending=None):
+        result = self.command("Runtime.evaluate", {"expression": expression, "returnByValue": True},
+                              deadline=deadline, still_pending=still_pending)
         if result.get("exceptionDetails"):
             raise BrowserVerificationError("browser_script_error")
         return result.get("result", {}).get("value")
 
-    def verify(self, origin=ORIGIN, *, timeout=55, on_event=None, still_pending=None):
+    def prepare(self, origin=ORIGIN, *, timeout=45, on_event=None, still_pending=None):
+        """Warm the normal browser and page; no widget or token is created here."""
         if str(origin).rstrip("/") != ORIGIN:
             raise BrowserVerificationError("browser_origin_not_allowed")
-        deadline = time.monotonic() + max(10, min(90, float(timeout)))
+        deadline = time.monotonic() + max(0, min(90, float(timeout)))
+        if on_event:
+            on_event("browser_starting", "")
+        self.start(timeout=self._remaining(deadline, still_pending), still_pending=still_pending)
+        if on_event:
+            on_event("browser_ready", "")
+        self.command("Page.bringToFront", deadline=deadline, still_pending=still_pending)
+        if self.origin != origin:
+            self.command("Page.navigate", {"url": ORIGIN + "/miniapp/xianxia-world-boss"},
+                         deadline=deadline, still_pending=still_pending)
+            while True:
+                self._remaining(deadline, still_pending, "turnstile_script_unavailable")
+                if self.evaluate("Boolean(window.turnstile && window.__QYZ_TURNSTILE_CONFIG__)",
+                                 deadline=deadline, still_pending=still_pending):
+                    self.origin = origin
+                    break
+                time.sleep(min(0.25, self._remaining(deadline, still_pending, "turnstile_script_unavailable")))
+        if on_event:
+            on_event("page_ready", "")
+
+    def verify(self, origin=ORIGIN, *, timeout=55, on_event=None, still_pending=None):
+        deadline = time.monotonic() + max(0, min(90, float(timeout)))
 
         def emit(event, code=""):
             if on_event:
                 on_event(event, code)
 
-        self.start()
-        self.command("Page.bringToFront")
-        if self.origin != origin:
-            self.command("Page.navigate", {"url": ORIGIN + "/miniapp/xianxia-world-boss"})
-            while time.monotonic() < deadline:
-                if self.evaluate("Boolean(window.turnstile && window.__QYZ_TURNSTILE_CONFIG__)"):
-                    self.origin = origin
-                    break
-                time.sleep(0.25)
-            else:
-                raise BrowserVerificationError("turnstile_script_unavailable")
+        self.prepare(origin, timeout=max(0, deadline - time.monotonic()),
+                     on_event=on_event, still_pending=still_pending)
         emit("helper_ready")
         generation = uuid.uuid4().hex
         self.evaluate("""(generation => {
@@ -202,13 +268,12 @@ class NativeTurnstileBrowser:
                 });
                 if(state.phase==='loading') state.phase='ready';
             });
-        })(""" + json.dumps(generation) + ")")
+        })(""" + json.dumps(generation) + ")", deadline=deadline, still_pending=still_pending)
         emit("widget_ready")
         clicked = False
         interactive_since = None
         while time.monotonic() < deadline:
-            if still_pending and not still_pending():
-                raise BrowserVerificationError("verification_request_finished")
+            self._remaining(deadline, still_pending)
             state = self.evaluate("""(() => {
                 const s=window.__qyzAutomaticVerification;
                 const box=document.getElementById('__qyz_automatic_widget');
@@ -216,7 +281,7 @@ class NativeTurnstileBrowser:
                 const rect=box.getBoundingClientRect();
                 return {phase:s.phase,error:s.error,generation:s.generation,age:performance.now()-s.created,
                         x:rect.left+51,y:rect.top+63};
-            })()""") or {}
+            })()""", deadline=deadline, still_pending=still_pending) or {}
             if state.get("generation") != generation:
                 raise BrowserVerificationError("verification_generation_changed")
             phase = state.get("phase")
@@ -224,7 +289,8 @@ class NativeTurnstileBrowser:
                 interactive_since = time.monotonic()
             if phase == "solved":
                 token = self.evaluate("""(() => {const s=window.__qyzAutomaticVerification;
-                    const token=s.token;s.token='';return token;})()""")
+                    const token=s.token;s.token='';return token;})()""",
+                    deadline=deadline, still_pending=still_pending)
                 if not isinstance(token, str) or not token or len(token) > MAX_TOKEN_LENGTH or any(ord(c) < 32 for c in token):
                     raise BrowserVerificationError("browser_token_invalid")
                 emit("token_generated")
@@ -238,22 +304,21 @@ class NativeTurnstileBrowser:
             if (not clicked and phase == "interactive" and state.get("age", 0) >= 8000
                     and interactive_since is not None and time.monotonic() - interactive_since >= 1):
                 emit("interaction_required")
-                self.command("Page.captureScreenshot", {"format": "png"})
                 point = {"x": state["x"], "y": state["y"]}
-                self.command("Input.dispatchMouseEvent", {"type":"mouseMoved", **point})
+                self.command("Input.dispatchMouseEvent", {"type":"mouseMoved", **point}, deadline=deadline, still_pending=still_pending)
                 time.sleep(0.12)
-                self.command("Input.dispatchMouseEvent", {"type":"mousePressed", "button":"left", "buttons":1, "clickCount":1, **point})
+                self.command("Input.dispatchMouseEvent", {"type":"mousePressed", "button":"left", "buttons":1, "clickCount":1, **point}, deadline=deadline, still_pending=still_pending)
                 time.sleep(0.12)
-                self.command("Input.dispatchMouseEvent", {"type":"mouseReleased", "button":"left", "buttons":0, "clickCount":1, **point})
+                self.command("Input.dispatchMouseEvent", {"type":"mouseReleased", "button":"left", "buttons":0, "clickCount":1, **point}, deadline=deadline, still_pending=still_pending)
                 clicked = True
-            time.sleep(0.25)
+            time.sleep(min(0.25, self._remaining(deadline, still_pending)))
         emit("widget_timeout")
         raise BrowserVerificationError("turnstile_browser_timeout")
 
     def close(self):
         if self.connection is not None:
             try:
-                self.command("Browser.close")
+                self.command("Browser.close", deadline=time.monotonic() + 1)
             except Exception:
                 pass
             try:
@@ -263,21 +328,27 @@ class NativeTurnstileBrowser:
         self.connection = None
         self.origin = ""
         if self.process is not None:
+            # xvfb-run may exit before its children. Always terminate this
+            # launch's process group, even when the wrapper has already exited.
             try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
                 if os.name == "nt":
-                    self.process.terminate()
+                    if self.process.poll() is None:
+                        self.process.terminate()
                 else:
                     os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
                 try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
                     if os.name == "nt":
                         self.process.kill()
                     else:
                         os.killpg(self.process.pid, signal.SIGKILL)
-                    self.process.wait(timeout=5)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=2)
         self.process = None
 
 
@@ -288,6 +359,45 @@ class AutomaticTurnstileWorker:
         self.attempts = {}
         self.last_attempt = {}
         self.last_work = clock()
+        self.warmup_fingerprint = ""
+        self.warmup_attempts = 0
+        self.warmup_ready = False
+        self.last_warmup = -1000.0
+
+    def _warmup(self):
+        row = self.broker.get_warmup()
+        if not row:
+            return False
+        fingerprint = row["event_fingerprint"]
+        if fingerprint != self.warmup_fingerprint:
+            self.warmup_fingerprint = fingerprint
+            self.warmup_attempts = 0
+            self.warmup_ready = False
+        if self.warmup_ready or self.warmup_attempts >= 2 or self.clock() - self.last_warmup < 5:
+            return True
+        row = self.broker.claim_warmup(fingerprint)
+        if not row:
+            return True
+        self.warmup_attempts = row["attempts"]
+        started = self.clock()
+
+        def pending():
+            current = self.broker.get_warmup()
+            return bool(current and current.get("event_fingerprint") == fingerprint)
+
+        try:
+            self.browser.prepare(row["origin"], timeout=min(45, row["expires_epoch"] - self.broker.clock()),
+                                 still_pending=pending)
+            self.warmup_ready = True
+            LOG.info("Qing Yuanzi browser prewarm ready in %sms", round((self.clock() - started) * 1000))
+        except BrowserVerificationError as exc:
+            LOG.warning("Qing Yuanzi browser prewarm attempt %s: %s (%sms)",
+                        self.warmup_attempts, exc.code, round((self.clock() - started) * 1000))
+            if exc.code not in REUSABLE_BROWSER_ERRORS:
+                self.browser.close()
+        finally:
+            self.last_work = self.last_warmup = self.clock()
+        return True
 
     def run_once(self):
         rows = [row for row in self.broker.list_requests() if row.get("status") == "pending"]
@@ -296,24 +406,36 @@ class AutomaticTurnstileWorker:
         self.last_attempt = {key: value for key, value in self.last_attempt.items() if key in live}
         rows = [row for row in rows if self.attempts.get(row["request_id"], 0) < self.max_attempts
                 and self.clock() - self.last_attempt.get(row["request_id"], -1000) >= 5]
-        rows.sort(key=lambda row: (self.attempts.get(row["request_id"], 0), str(row.get("created_at", ""))))
+        rows.sort(key=lambda row: (self.attempts.get(row["request_id"], 0), float(row.get("created_epoch") or 0)))
         if not rows:
-            if self.clock() - self.last_work >= 20:
+            if not live and self._warmup():
+                return False
+            exhausted = bool(live) and all(self.attempts.get(key, 0) >= self.max_attempts for key in live)
+            if exhausted or self.clock() - self.last_work >= 20:
                 self.browser.close()
             return False
         row = rows[0]
         request_id = row["request_id"]
+        self.broker.finish_warmup(row.get("event_fingerprint", ""))
         self.attempts[request_id] = self.attempts.get(request_id, 0) + 1
+        # A slow first widget previously occupied the one shared browser for
+        # 55 s. Give every account a bounded first turn before longer retries.
+        budget = 20 if self.attempts[request_id] == 1 else 35
+        budget = max(0, min(budget, float(row.get("expires_epoch") or self.broker.clock() + budget) - self.broker.clock()))
+        started = self.clock()
+        failure, cf_code = "", ""
+        last_stage, failed_stage = "", ""
 
         def pending():
             return (self.broker.get_request(request_id) or {}).get("status") == "pending"
 
         def event(stage, code=""):
+            nonlocal last_stage
+            last_stage = stage
             self.broker.record_browser_event(request_id, stage, code, source="automatic")
 
         try:
-            event("helper_ready")
-            token = self.browser.verify(row.get("origin"), on_event=event, still_pending=pending)
+            token = self.browser.verify(row.get("origin"), timeout=budget, on_event=event, still_pending=pending)
             if pending():
                 self.broker.submit_token(request_id, token)
                 LOG.info("[%s/%s] automatic browser token submitted", row.get("account"), row.get("identity"))
@@ -324,14 +446,27 @@ class AutomaticTurnstileWorker:
                 # set alive throughout another 20 seconds of combat.
                 self.browser.close()
         except (BrowserVerificationError, TurnstileRequestError) as exc:
-            LOG.warning("[%s/%s] automatic verification attempt %s: %s CF=%s",
+            failure, cf_code = exc.code, getattr(exc, "cf_code", "")
+            failed_stage = last_stage
+            LOG.warning("[%s/%s] automatic verification attempt %s: %s CF=%s (%sms, budget %sms)",
                         row.get("account"), row.get("identity"), self.attempts[request_id],
-                        exc.code, getattr(exc, "cf_code", ""))
-            if isinstance(exc, BrowserVerificationError) and not exc.code.startswith("turnstile_browser_"):
+                        failure, cf_code, round((self.clock() - started) * 1000), round(budget * 1000))
+            if (isinstance(exc, BrowserVerificationError)
+                    and exc.code not in REUSABLE_BROWSER_ERRORS
+                    and not exc.code.startswith("turnstile_browser_")):
                 if pending():
                     event("config_error")
                 self.browser.close()
         finally:
+            try:
+                self.broker.record_browser_attempt(
+                    request_id, attempt=self.attempts[request_id],
+                    duration_ms=round((self.clock() - started) * 1000),
+                    budget_ms=round(budget * 1000), error=failure, cf_code=cf_code,
+                    stage=failed_stage or last_stage,
+                )
+            except Exception as exc:
+                LOG.warning("Browser attempt timing could not be saved: %s", type(exc).__name__)
             self.last_work = self.clock()
             self.last_attempt[request_id] = self.last_work
         return True

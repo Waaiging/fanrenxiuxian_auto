@@ -15,7 +15,7 @@ class FakeBrowser:
         self.fail = fail
         self.before_return = before_return
 
-    def verify(self, origin, *, on_event, still_pending):
+    def verify(self, origin, *, timeout=55, on_event, still_pending):
         self.calls += 1
         on_event('widget_ready')
         if self.fail:
