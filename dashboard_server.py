@@ -5,7 +5,7 @@
 功能：
   1. 账号状态查看 —— 实时查看四个账号的运行状态、修为进度
   2. 日志浏览 —— 按指令标签分类/搜索浏览日志
-  3. 修为统计 —— 自动从日志中提取修为变化，按日统计
+  3. 身份资料 —— 展示账号已同步的境界、修为与宗门
   4. 进程管理 —— 启动/停止/重启账号脚本
   5. 清屏功能 —— 后台清理账号发出的消息
 
@@ -30,6 +30,7 @@ if hasattr(time, "tzset"):
     time.tzset()
 
 import subprocess
+import asyncio
 import secrets
 import base64
 import hashlib
@@ -41,11 +42,12 @@ import uuid
 import re
 import signal
 import sqlite3
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status as http_status, Body, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 from common_command_features import MULAN_SUPPORT_START_HOUR, MULAN_SUPPORT_START_MINUTE
@@ -205,7 +207,26 @@ def _load_dashboard_dotenv():
 
 
 _load_dashboard_dotenv()
-app = FastAPI()
+
+
+async def expire_dashboard_caches_periodically():
+    while True:
+        await asyncio.sleep(DASHBOARD_CACHE_SWEEP_SECONDS)
+        clear_expired_dashboard_caches()
+
+
+@asynccontextmanager
+async def dashboard_lifespan(app):
+    sweeper = asyncio.create_task(expire_dashboard_caches_periodically())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
+
+
+app = FastAPI(lifespan=dashboard_lifespan)
 security = HTTPBasic(auto_error=False)
 
 # =====================================================================
@@ -370,8 +391,6 @@ STATUS_CACHE = {}                        # Dashboard 总状态缓存，避免前
 STATUS_LOCK = threading.Lock()           # Dashboard 总状态锁
 LOG_PAGE_CACHE = {}                      # 日志分页接口短缓存
 LOG_PAGE_LOCK = threading.Lock()         # 日志分页接口锁
-CULTIVATION_CACHE = {}                   # 修为统计缓存
-CULTIVATION_LOCK = threading.Lock()      # 修为统计锁
 COMMAND_RECORD_CACHE = {}                # 指令发送记录缓存
 COMMAND_RECORD_LOCK = threading.Lock()   # 指令发送记录锁
 COMMAND_RECORD_ENDPOINT_CACHE = {}       # 指令发送记录接口短缓存
@@ -383,7 +402,6 @@ MESSAGE_HEALTH_LOCK = threading.Lock()   # 消息采集健康锁
 RESOURCE_STATS_CACHE = {}                # 资源/库存统计缓存，构建成本较高所以单独限时缓存
 RESOURCE_STATS_LOCK = threading.Lock()   # 资源/库存统计锁
 RESOURCE_STATS_BUILD_LOCK = threading.Lock()
-CULTIVATION_CACHE_FILE = "cultivation_stats_cache.json"
 COMMAND_CONTROL_FILE = "command_controls.json"
 CUSTOM_COMMAND_FILE = "dashboard_commands.json"
 BEAST_BORDER_PATROL_CONTROL_KEY = ".灵兽巡边 *"
@@ -394,13 +412,13 @@ DEPLOY_VERSION_FILE = "deploy_version.json"
 MINIAPP_INVENTORY_NON_TRADABLE_FILE = "miniapp_inventory_non_tradable.json"
 MESSAGE_HEALTH_MAX_SCAN_IDS = 12000
 STATUS_CACHE_SECONDS = 10
+DASHBOARD_CACHE_SWEEP_SECONDS = 30
 LOG_PAGE_CACHE_SECONDS = 5
 COMMAND_RECORD_ENDPOINT_CACHE_SECONDS = 180
 DAILY_REWARD_ENDPOINT_CACHE_SECONDS = 30
 MESSAGE_HEALTH_CACHE_SECONDS = 30
 RESOURCE_STATS_CACHE_SECONDS = 900
 RESOURCE_STATS_MAX_ROWS = 400
-CULTIVATION_STATS_VERSION = 14  # rebuilt: merge username-owned profile snapshots
 LOG_TAIL_INITIAL_BYTES = 192 * 1024
 LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -408,6 +426,36 @@ SERVER_START_TS = time.time()
 SERVER_STARTED_AT = datetime.fromtimestamp(SERVER_START_TS).strftime(TIME_FORMAT)
 GIT_META_CACHE = {}
 GIT_META_CACHE_SECONDS = 60
+
+
+def clear_expired_dashboard_caches(now_ts=None):
+    """Release expired response objects even when nobody visits the panel."""
+    now_ts = time.time() if now_ts is None else now_ts
+    caches = (
+        (STATUS_CACHE, STATUS_LOCK, STATUS_CACHE_SECONDS, False),
+        (LOG_PAGE_CACHE, LOG_PAGE_LOCK, LOG_PAGE_CACHE_SECONDS, True),
+        (COMMAND_RECORD_CACHE, COMMAND_RECORD_LOCK, COMMAND_RECORD_ENDPOINT_CACHE_SECONDS, True),
+        (COMMAND_RECORD_ENDPOINT_CACHE, COMMAND_RECORD_ENDPOINT_LOCK, COMMAND_RECORD_ENDPOINT_CACHE_SECONDS, False),
+        (DAILY_REWARD_ENDPOINT_CACHE, DAILY_REWARD_ENDPOINT_LOCK, DAILY_REWARD_ENDPOINT_CACHE_SECONDS, True),
+        (MESSAGE_HEALTH_CACHE, MESSAGE_HEALTH_LOCK, MESSAGE_HEALTH_CACHE_SECONDS, False),
+        (RESOURCE_STATS_CACHE, RESOURCE_STATS_LOCK, RESOURCE_STATS_CACHE_SECONDS, False),
+    )
+    for cache, lock, lifetime, keyed in caches:
+        # A request may be constructing this cache in a worker thread.
+        if not lock.acquire(blocking=False):
+            continue
+        try:
+            if keyed:
+                expired = [key for key, value in cache.items()
+                           if now_ts - float(value.get("at") or 0) >= lifetime]
+                for key in expired:
+                    cache.pop(key, None)
+            elif cache and now_ts - float(cache.get("at") or 0) >= lifetime:
+                cache.clear()
+        finally:
+            lock.release()
+
+
 ACCOUNT_DISPLAY_NAMES = {
     "main": "天星宗 (主号)",
     "sub": "元婴宗 (副号)",
@@ -673,9 +721,6 @@ PROFILE_USERNAME_PATTERNS = (
 LOG_ENTRY_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[[A-Z]+\]")
 LOG_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_])(\.[\u4e00-\u9fffA-Za-z0-9_]+)(?:\s+([^\s`，,。:：)）]+))?")
 LOG_OUT_IDENTITY_RE = re.compile(r"OUT(?:\s*\[([^\]]+)\])?\s*:")
-LOG_LEVEL_RE = re.compile(r"(?:\*\*)?(?:当前)?境界(?:\*\*)?\s*[:：]\s*\**\s*([^\n\r*]+)")
-LOG_CULTIVATION_RE = re.compile(r"(?:\*\*)?(?:当前)?修为(?:\*\*)?\s*[:：]\s*\**\s*([\d,]+)\s*/\s*\**\s*([\d,]+)")
-LOG_SPIRIT_ROOT_RE = re.compile(r"(?:\*\*)?灵根(?:\*\*)?\s*[:：]\s*\**\s*([^\n\r*]+)")
 MAIN_TREASURE_TOUCH_COMMAND = treasure_touch_plan(".抚摸法宝 玄天斩灵剑").command
 SUB_TREASURE_TOUCH_COMMAND = treasure_touch_plan(".抚摸法宝 青竹蜂云剑").command
 MAIN_FIELD_TRAINING_COMMAND = field_training_plan_from_features("主魂", main_command=".野外历练 谨慎").command
@@ -699,7 +744,6 @@ TWO_PART_COMMANDS = {
 OTHER_LOG_TAG = "其他"                    # 未分类日志标签
 FISHING_LOG_TAG = "钓鱼"
 RELATED_LOG_WINDOW_SECONDS = 180          # 关联日志窗口（秒）
-CULTIVATION_DEDUPE_SECONDS = 15           # 修为变更去重窗口
 
 # 游戏机器人标识（用于区分机器人回复和普通消息）
 BOT_REPLY_MARKERS = {
@@ -3528,14 +3572,13 @@ def can_inherit_related_command(entry):
         "IN [edited" in header or "IN [mention" in header
     )
 
-def split_log_entries(lines):
-    """将日志行列表按时间戳分割为条目"""
-    entries = []
+def iter_split_log_entries(lines):
+    """Split an iterable of lines while retaining only the current entry."""
     current = []
     start_line = 0
     for idx, line in enumerate(lines):
         if LOG_ENTRY_RE.match(line) and current:
-            entries.append({"start_line": start_line, "end_line": idx, "lines": current})
+            yield {"start_line": start_line, "end_line": idx, "lines": current}
             current = [line]
             start_line = idx
         else:
@@ -3543,12 +3586,14 @@ def split_log_entries(lines):
                 start_line = idx
             current.append(line)
     if current:
-        entries.append({"start_line": start_line, "end_line": len(lines), "lines": current})
-    return entries
+        yield {"start_line": start_line, "end_line": idx + 1, "lines": current}
 
-def decorate_log_entries(entries):
-    """为日志条目补充标签和关联信息"""
-    decorated = []
+def split_log_entries(lines):
+    """Compatibility list API for callers that already hold a small log slice."""
+    return list(iter_split_log_entries(lines))
+
+def iter_decorated_log_entries(entries):
+    """Decorate entries in order, preserving bounded command/reply context."""
     last_command_tag = ""
     last_command_time = None
     recent_outgoing = []
@@ -3594,8 +3639,28 @@ def decorate_log_entries(entries):
                 if 0 <= delta <= RELATED_LOG_WINDOW_SECONDS:
                     identity = item.get("identity") or ""
                     break
-        decorated.append({**entry, "text": text, "tags": tags, "related_tags": related_tags, "identity": identity})
-    return decorated
+        yield {**entry, "text": text, "tags": tags, "related_tags": related_tags, "identity": identity}
+
+def decorate_log_entries(entries):
+    return list(iter_decorated_log_entries(entries))
+
+def iter_account_log_entries(name, start_offset=0, end_offset=None):
+    """Read a fixed byte snapshot without materializing all lines or entries."""
+    path = os.path.join(CONFIG_DIR, get_log_filename(name))
+    with open(path, "rb") as handle:
+        handle.seek(start_offset)
+        remaining = max(0, (os.fstat(handle.fileno()).st_size if end_offset is None else end_offset) - start_offset)
+
+        def lines():
+            nonlocal remaining
+            while remaining > 0:
+                raw = handle.readline(remaining)
+                if not raw:
+                    break
+                remaining -= len(raw)
+                yield from raw.decode("utf-8", errors="ignore").splitlines()
+
+        yield from iter_decorated_log_entries(iter_split_log_entries(lines()))
 
 def read_log_entries(name):
     """读取账号的日志文件并返回解析后的条目"""
@@ -3604,11 +3669,9 @@ def read_log_entries(name):
     if not os.path.exists(path):
         return [], f"日志文件 {filename} 不存在。"
     try:
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.read().splitlines()
+        return list(iter_account_log_entries(name)), ""
     except Exception:
         return [], "无法读取日志内容。"
-    return decorate_log_entries(split_log_entries(lines)), ""
 
 def log_entries_from_bytes(raw, base_offset, end_offset, trim_start=True):
     """Parse complete log entries from a byte slice and keep byte cursors."""
@@ -3799,67 +3862,68 @@ def build_account_command_records(name, recent_limit=8):
             ORDER BY cl.sent_at ASC, cl.command_msg_id ASC
             """,
             (name,),
-        ).fetchall()
+        )
+
+        for item in rows:
+            command = str(item["command"] or "").strip()
+            if not command or not command.startswith("."):
+                continue
+            entry_time = parse_state_time(item["sent_at"])
+            if not entry_time:
+                continue
+            send_key = f"{item['chat_id']}:{item['command_msg_id']}"
+            if not send_key:
+                continue
+            identity = str(item["identity"] or "主魂").strip() or "主魂"
+            key = (identity, command)
+            row = records.setdefault(key, {
+                "account": name,
+                "account_name": ACCOUNT_DISPLAY_NAMES.get(name, name),
+                "identity": identity,
+                "username": command_record_username(name, identity),
+                "command": command,
+                "count": 0,
+                "today_count": 0,
+                "first_time": "",
+                "previous_time": "",
+                "last_time": "",
+                "last_interval_seconds": None,
+                "recent_times": [],
+                "_seen_send_keys": set(),
+                "manual_count": 0,
+                "auto_count": 0,
+                "is_switch": command.startswith(".切换"),
+            })
+            if send_key in row["_seen_send_keys"]:
+                continue
+            row["_seen_send_keys"].add(send_key)
+            time_text = entry_time.strftime(TIME_FORMAT)
+            if not row["first_time"]:
+                row["first_time"] = time_text
+            if row["last_time"]:
+                row["previous_time"] = row["last_time"]
+                prev_dt = parse_state_time(row["last_time"])
+                if prev_dt:
+                    row["last_interval_seconds"] = int(max(0, (entry_time - prev_dt).total_seconds()))
+            row["last_time"] = time_text
+            row["count"] += 1
+            if time_text.startswith(today):
+                row["today_count"] += 1
+            source = str(item["source"] or "")
+            if source == "manual":
+                row["manual_count"] += 1
+            else:
+                row["auto_count"] += 1
+            row["recent_times"].append(time_text)
+            if len(row["recent_times"]) > recent_limit:
+                row["recent_times"] = row["recent_times"][-recent_limit:]
+
     except Exception as exc:
-        rows = []
+        records.clear()
         error = f"读取 {MESSAGE_EVENTS_DB_FILE} 失败: {exc}"
     finally:
         if conn is not None:
             conn.close()
-
-    for item in rows:
-        command = str(item["command"] or "").strip()
-        if not command or not command.startswith("."):
-            continue
-        entry_time = parse_state_time(item["sent_at"])
-        if not entry_time:
-            continue
-        send_key = f"{item['chat_id']}:{item['command_msg_id']}"
-        if not send_key:
-            continue
-        identity = str(item["identity"] or "主魂").strip() or "主魂"
-        key = (identity, command)
-        row = records.setdefault(key, {
-            "account": name,
-            "account_name": ACCOUNT_DISPLAY_NAMES.get(name, name),
-            "identity": identity,
-            "username": command_record_username(name, identity),
-            "command": command,
-            "count": 0,
-            "today_count": 0,
-            "first_time": "",
-            "previous_time": "",
-            "last_time": "",
-            "last_interval_seconds": None,
-            "recent_times": [],
-            "_seen_send_keys": set(),
-            "manual_count": 0,
-            "auto_count": 0,
-            "is_switch": command.startswith(".切换"),
-        })
-        if send_key in row["_seen_send_keys"]:
-            continue
-        row["_seen_send_keys"].add(send_key)
-        time_text = entry_time.strftime(TIME_FORMAT)
-        if not row["first_time"]:
-            row["first_time"] = time_text
-        if row["last_time"]:
-            row["previous_time"] = row["last_time"]
-            prev_dt = parse_state_time(row["last_time"])
-            if prev_dt:
-                row["last_interval_seconds"] = int(max(0, (entry_time - prev_dt).total_seconds()))
-        row["last_time"] = time_text
-        row["count"] += 1
-        if time_text.startswith(today):
-            row["today_count"] += 1
-        source = str(item["source"] or "")
-        if source == "manual":
-            row["manual_count"] += 1
-        else:
-            row["auto_count"] += 1
-        row["recent_times"].append(time_text)
-        if len(row["recent_times"]) > recent_limit:
-            row["recent_times"] = row["recent_times"][-recent_limit:]
 
     rows = sorted(records.values(), key=lambda item: item.get("last_time") or "", reverse=True)
     for row in rows:
@@ -3872,7 +3936,7 @@ def build_account_command_records(name, recent_limit=8):
         **signature,
     }
     with COMMAND_RECORD_LOCK:
-        COMMAND_RECORD_CACHE[name] = {"signature": cache_key, "data": data}
+        COMMAND_RECORD_CACHE[name] = {"signature": cache_key, "at": time.time(), "data": data}
     return data
 
 def build_all_command_records():
@@ -4697,338 +4761,6 @@ def build_resource_stats(since_hours=12, max_rows=RESOURCE_STATS_MAX_ROWS, event
 
 
 # =====================================================================
-# 修为统计
-# =====================================================================
-
-def default_cultivation_profile():
-    """默认修为档案"""
-    return {"level": "", "current": None, "required": None, "current_text": "", "updated_at": "",
-            "estimated_current": None, "estimated_current_text": "", "estimated_updated_at": "", "delta_after_snapshot": 0}
-
-def empty_cultivation_day(date_key):
-    return {"date": date_key, "gain": 0, "loss": 0, "net": 0}
-
-def empty_cultivation_stats(stat=None):
-    return {"version": CULTIVATION_STATS_VERSION, "log_size": int(getattr(stat, "st_size", 0) or 0), "log_mtime_ns": int(getattr(stat, "st_mtime_ns", 0) or 0),
-            "processed_offset": 0, "processed_until": "", "last_change_at": "", "days": {}, "profile": default_cultivation_profile(), "recent_events": []}
-
-def cultivation_cache_path():
-    return os.path.join(CONFIG_DIR, CULTIVATION_CACHE_FILE)
-
-def load_cultivation_cache_store():
-    """加载修为统计缓存"""
-    if CULTIVATION_CACHE.get("_loaded"):
-        return CULTIVATION_CACHE.setdefault("accounts", {})
-    path = cultivation_cache_path()
-    accounts = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            accounts = raw.get("accounts", raw) if isinstance(raw, dict) else {}
-            if not isinstance(accounts, dict):
-                accounts = {}
-        except Exception:
-            accounts = {}
-    CULTIVATION_CACHE.clear()
-    CULTIVATION_CACHE["_loaded"] = True
-    CULTIVATION_CACHE["accounts"] = accounts
-    return accounts
-
-def save_cultivation_cache_store():
-    """保存修为统计缓存"""
-    path = cultivation_cache_path()
-    tmp_path = f"{path}.tmp"
-    data = {"version": CULTIVATION_STATS_VERSION, "updated_at": time.strftime(TIME_FORMAT), "accounts": CULTIVATION_CACHE.get("accounts", {})}
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
-
-def cultivation_profile_from_entry(entry, account=None):
-    """从日志条目中提取修为档案（境界、当前修为/需求）"""
-    if not is_probable_bot_reply_log_entry(entry):
-        return None
-    text = entry.get("text") or "\n".join(entry.get("lines") or [])
-    if not entry_belongs_to_main_profile(account, entry):
-        return None
-    # 过滤掉分身日志，避免主魂境界被分身污染
-    if is_avatar_log_entry(entry):
-        return None
-    level_match = LOG_LEVEL_RE.search(text)
-    cultivation_match = LOG_CULTIVATION_RE.search(text)
-    spirit_root_match = LOG_SPIRIT_ROOT_RE.search(text)
-    if not level_match and not cultivation_match and not spirit_root_match:
-        return None
-    updated_at = entry["lines"][0][:19] if entry.get("lines") else ""
-    profile = {"updated_at": updated_at, "_has_exp_snapshot": False}
-    if level_match:
-        profile["level"] = level_match.group(1).strip()
-    if cultivation_match:
-        current = parse_log_int(cultivation_match.group(1))
-        required = parse_log_int(cultivation_match.group(2))
-        profile.update({
-            "current": current,
-            "required": required,
-            "current_text": f"{current} / {required}" if required else str(current),
-            "estimated_current": current,
-            "estimated_current_text": f"{current} / {required}" if required else str(current),
-            "estimated_updated_at": updated_at,
-            "delta_after_snapshot": 0,
-            "_has_exp_snapshot": True,
-        })
-    if spirit_root_match:
-        spirit_root = spirit_root_match.group(1).replace("*", "").strip()
-        if spirit_root:
-            profile["spirit_root"] = spirit_root
-    return profile
-
-def apply_cultivation_profile_update(stats, update):
-    has_exp_snapshot = bool(update.pop("_has_exp_snapshot", False))
-    profile = default_cultivation_profile()
-    profile.update(stats.get("profile") or {})
-    for key in ("level", "spirit_root"):
-        if update.get(key):
-            profile[key] = update[key]
-    if has_exp_snapshot:
-        for key in ("current", "required", "current_text", "estimated_current", "estimated_current_text",
-                    "estimated_updated_at", "delta_after_snapshot"):
-            profile[key] = update.get(key)
-    if update.get("updated_at"):
-        profile["updated_at"] = update["updated_at"]
-    stats["profile"] = profile
-    return has_exp_snapshot
-
-def parse_time_value(value):
-    if not value: return None
-    try:
-        from datetime import datetime
-        return datetime.strptime(str(value), TIME_FORMAT)
-    except: return None
-
-def recent_event_map(stats):
-    events = {}
-    for item in stats.get("recent_events", []) or []:
-        try:
-            source = str(item.get("source", ""))
-            delta = int(item.get("delta", 0))
-            dt = parse_time_value(item.get("time", ""))
-            if source and delta and dt:
-                events[(source, delta)] = dt
-        except: continue
-    return events
-
-def save_recent_event_map(stats, events, latest_time=None):
-    if latest_time is None and events:
-        latest_time = max(events.values())
-    rows = []
-    for (source, delta), dt in events.items():
-        if latest_time is not None and (latest_time - dt).total_seconds() > 300:
-            continue
-        rows.append({"source": source, "delta": delta, "time": dt.strftime(TIME_FORMAT)})
-    rows.sort(key=lambda item: item["time"], reverse=True)
-    stats["recent_events"] = rows[:100]
-
-def apply_cultivation_change(stats, date_key, delta):
-    days = stats.setdefault("days", {})
-    bucket = days.setdefault(date_key, empty_cultivation_day(date_key))
-    if delta > 0: bucket["gain"] = int(bucket.get("gain", 0)) + delta
-    else: bucket["loss"] = int(bucket.get("loss", 0)) + abs(delta)
-    bucket["net"] = int(bucket.get("gain", 0)) - int(bucket.get("loss", 0))
-
-def apply_cultivation_estimate_change(stats, delta, entry_time):
-    profile = stats.get("profile") or {}
-    current = profile.get("estimated_current") or profile.get("current")
-    if current is None: return
-    required = profile.get("required")
-    current = int(current) + int(delta)
-    profile["estimated_current"] = current
-    profile["estimated_current_text"] = f"{current} / {required}" if required else str(current)
-    profile["estimated_updated_at"] = entry_time.strftime(TIME_FORMAT)
-    profile["delta_after_snapshot"] = int(profile.get("delta_after_snapshot") or 0) + int(delta)
-    stats["profile"] = profile
-
-def latest_log_time_from_text(text):
-    latest = None
-    for line in (text or "").splitlines():
-        match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}", line)
-        if not match: continue
-        dt = parse_time_value(match.group(1))
-        if dt and (latest is None or dt > latest): latest = dt
-    return latest
-
-def process_cultivation_entries(stats, entries, account=None):
-    """处理日志条目，提取修为变化"""
-    recent_events = recent_event_map(stats)
-    latest_time = parse_time_value(stats.get("processed_until", ""))
-    changed = False
-    for entry in entries:
-        entry_time = parse_log_entry_time(entry)
-        if entry_time is None: continue
-        if latest_time is None or entry_time > latest_time:
-            latest_time = entry_time
-        profile = cultivation_profile_from_entry(entry, account=account)
-        profile_updated = False
-        if profile:
-            profile_updated = apply_cultivation_profile_update(stats, profile); changed = True
-        for change in extract_cultivation_changes(entry, account=account):
-            source = change["source"]; delta = int(change["delta"])
-            dedupe_key = (source, delta)
-            previous_time = recent_events.get(dedupe_key)
-            if previous_time is not None and 0 <= (entry_time - previous_time).total_seconds() <= CULTIVATION_DEDUPE_SECONDS:
-                continue
-            recent_events[dedupe_key] = entry_time
-            apply_cultivation_change(stats, entry_time.strftime("%Y-%m-%d"), delta)
-            if not profile_updated: apply_cultivation_estimate_change(stats, delta, entry_time)
-            stats["last_change_at"] = entry_time.strftime(TIME_FORMAT); changed = True
-    if latest_time is not None: stats["processed_until"] = latest_time.strftime(TIME_FORMAT)
-    save_recent_event_map(stats, recent_events, latest_time=latest_time)
-    return changed
-
-def process_cultivation_text(stats, text, account=None):
-    if not text: return False
-    entries = decorate_log_entries(split_log_entries(text.splitlines()))
-    return process_cultivation_entries(stats, entries, account=account)
-
-def cultivation_response_from_stats(stats, error=""):
-    today_key = time.strftime("%Y-%m-%d")
-    days = dict(stats.get("days") or {})
-    today = dict(days.get(today_key) or empty_cultivation_day(today_key))
-    days[today_key] = today
-    ordered_days = sorted(days.values(), key=lambda item: item.get("date", ""), reverse=True)
-    return {"today": today, "days": ordered_days, "profile": stats.get("profile") or default_cultivation_profile(),
-            "processed_until": stats.get("processed_until", ""), "last_change_at": stats.get("last_change_at", ""),
-            "processed_offset": stats.get("processed_offset", 0), "error": error}
-
-def add_cultivation_change(changes, source, delta, line=""):
-    delta = parse_log_int(delta)
-    if not delta: return
-    changes.append({"source": source or "日志", "delta": delta, "line": line.strip()})
-
-def extract_cultivation_changes(entry, account=None):
-    """从游戏机器人回复的日志条目中提取修为变化值"""
-    if not is_probable_bot_reply_log_entry(entry): return []
-    text = entry.get("text") or "\n".join(entry.get("lines") or [])
-    if entry_profile_mentions_other_account(account, entry):
-        return []
-    # 过滤掉分身日志，避免主魂修为收益被分身污染
-    if is_avatar_log_entry(entry):
-        return []
-    if "修为不足" in text: return []
-    changes = []
-    command = first_command_tag(entry)
-
-    # 优先匹配各种修为变化格式
-    match = re.search(r"本次深度闭关，你的修为最终变化了\s*\*?\*?([+-]?\d[\d,]*)\*?\*?\s*点", text)
-    if match: add_cultivation_change(changes, "深度闭关", match.group(1), match.group(0)); return changes
-    match = re.search(r"本次闭关，你的修为最终增加了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", text)
-    if match: add_cultivation_change(changes, "闭关修炼", match.group(1), match.group(0)); return changes
-    match = re.search(r"修为结算[:：]\s*\*?\*?([+-]?\d[\d,]*)\*?\*?", text)
-    if match: add_cultivation_change(changes, "共历心劫", match.group(1), match.group(0)); return changes
-    # 逐行匹配各种消耗/获得
-    skip_phrases = ("当前修为", "**修为**", "基础修为:", "基础修为增加", "每日被动修为", "红袖添香", "灵犀双运",
-                    "同门道友", "可以使用 `.重置古塔`", "今日已挑战失败", "预计消耗",
-                    "被动将灵气转化为修为", "前路已被", "消耗修为来", "修为惩罚", "修为加成",
-                    "施展需消耗修为")
-    for line in text.splitlines()[1:]:
-        clean = line.strip()
-        if not clean or "修为" not in clean: continue
-        if any(phrase in clean for phrase in skip_phrases): continue
-        line_changes = []
-        for amount in re.findall(r"(?:消耗了|开始消耗)\D{0,40}?\*?\*?(\d[\d,]*)\*?\*?\s*点\s*修为", clean):
-            line_changes.append((command or "消耗", -parse_log_int(amount)))
-        for amount in re.findall(r"你消耗了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点修为", clean):
-            line_changes.append((command or "消耗", -parse_log_int(amount)))
-        for amount in re.findall(r"本次消耗[:：]\s*\*?\*?(\d[\d,]*)\s*修为\*?\*?", clean):
-            line_changes.append((command or "消耗", -parse_log_int(amount)))
-        for amount in re.findall(r"额外损失了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点修为", clean):
-            line_changes.append((command or "损失", -parse_log_int(amount)))
-        for amount in re.findall(r"修为折损\s*\*?\*?(-?\d[\d,]*)\*?\*?", clean):
-            line_changes.append((command or "野外历练", -abs(parse_log_int(amount))))
-        for amount in re.findall(r"修为\*?\*?额外倒退了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "倒退", -parse_log_int(amount)))
-        for amount in re.findall(r"修为\*?\*?倒退了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "倒退", -parse_log_int(amount)))
-        for amount in re.findall(r"修为\s*\*?\*?损失了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "损失", -parse_log_int(amount)))
-        for amount in re.findall(r"修为\*?\*?减少了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "减少", -parse_log_int(amount)))
-        for amount in re.findall(r"减少了\s*\*?\*?(\d[\d,]*)\s*点\*?\*?\s*修为", clean):
-            line_changes.append((command or "减少", -parse_log_int(amount)))
-        for amount in re.findall(r"本次获得\s*\*?\*?(\d[\d,]*)\*?\*?\s*点修为", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"获得了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点修为", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"额外获得\s*\*?\*?(\d[\d,]*)\*?\*?\s*点修为", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"(?:获得|额外获得)\s*\*?\*?(\d[\d,]*)\s*修为\*?\*?", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"折算为修为\s*(\d[\d,]*)", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"获得修为\s*\*?\*?([+-]?\d[\d,]*)\*?\*?", clean):
-            line_changes.append((command or "野外历练", parse_log_int(amount)))
-        for amount in re.findall(r"修为\s*([+-]\d[\d,]*)", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"修为\s*\*?\*?额外增加了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        for amount in re.findall(r"修为\s*\*?\*?增加了\s*\*?\*?(\d[\d,]*)\*?\*?\s*点", clean):
-            line_changes.append((command or "获得", parse_log_int(amount)))
-        seen = set()
-        for source, delta in line_changes:
-            key = (source, delta)
-            if delta and key not in seen:
-                seen.add(key)
-                add_cultivation_change(changes, source, delta, clean)
-    return changes
-
-def latest_cultivation_profile(entries, account=None):
-    stats = {"profile": default_cultivation_profile()}
-    for entry in entries:
-        entry_profile = cultivation_profile_from_entry(entry, account=account)
-        if entry_profile:
-            apply_cultivation_profile_update(stats, entry_profile)
-    return stats["profile"]
-
-def get_cultivation_summary(name):
-    """获取账号的修为统计摘要（增量读取日志）"""
-    # ... (完整实现见原文件)
-    filename = get_log_filename(name)
-    path = os.path.join(CONFIG_DIR, filename)
-    if not os.path.exists(path):
-        return {"today": {"date": time.strftime("%Y-%m-%d"), "gain": 0, "loss": 0, "net": 0}, "days": [], "profile": {}, "error": f"日志文件 {filename} 不存在。"}
-    with CULTIVATION_LOCK:
-        try:
-            stat = os.stat(path)
-            accounts = load_cultivation_cache_store()
-            stats = accounts.get(name)
-            if not isinstance(stats, dict) or int(stats.get("version", 0)) < CULTIVATION_STATS_VERSION:
-                stats = empty_cultivation_stats(stat)
-                with open(path, "rb") as f: text = f.read().decode("utf-8", errors="ignore")
-                process_cultivation_text(stats, text, account=name)
-                stats["processed_offset"] = int(stat.st_size); stats["log_size"] = int(stat.st_size); stats["log_mtime_ns"] = int(stat.st_mtime_ns)
-                accounts[name] = stats; save_cultivation_cache_store()
-                return cultivation_response_from_stats(stats)
-            processed_offset = int(stats.get("processed_offset", 0) or 0)
-            cached_size = int(stats.get("log_size", 0) or 0); cached_mtime_ns = int(stats.get("log_mtime_ns", 0) or 0)
-            if int(stat.st_size) == cached_size and int(stat.st_mtime_ns) == cached_mtime_ns:
-                return cultivation_response_from_stats(stats)
-            if int(stat.st_size) < processed_offset:
-                stats = empty_cultivation_stats(stat)
-                with open(path, "rb") as f: text = f.read().decode("utf-8", errors="ignore")
-                process_cultivation_text(stats, text, account=name)
-            else:
-                with open(path, "rb") as f: f.seek(processed_offset); text = f.read().decode("utf-8", errors="ignore")
-                if "修为" in text: process_cultivation_text(stats, text, account=name)
-                else:
-                    latest_time = latest_log_time_from_text(text)
-                    if latest_time: stats["processed_until"] = latest_time.strftime(TIME_FORMAT)
-            stats["processed_offset"] = int(stat.st_size); stats["log_size"] = int(stat.st_size); stats["log_mtime_ns"] = int(stat.st_mtime_ns)
-            accounts[name] = stats; save_cultivation_cache_store()
-            return cultivation_response_from_stats(stats)
-        except Exception as e:
-            return {"today": {"date": time.strftime("%Y-%m-%d"), "gain": 0, "loss": 0, "net": 0}, "days": [], "profile": {}, "error": str(e)}
-
-
-# =====================================================================
 # 日志过滤与查询
 # =====================================================================
 
@@ -5112,10 +4844,9 @@ def entry_matches_log_kind(entry, kind=""):
         return any(marker in header for marker in ("[ERROR]", "[CRITICAL]"))
     return True
 
-def filter_log_entries(entries, tag="", q="", kind="", sender=""):
+def iter_filtered_log_entries(entries, tag="", q="", kind="", sender=""):
     """按 Dashboard 可见范围、标签和关键词过滤日志条目"""
     tag = (tag or "").strip(); q = (q or "").strip().lower()
-    filtered = []
     for entry in entries:
         if not is_dashboard_visible_log_entry(entry):
             continue
@@ -5128,8 +4859,11 @@ def filter_log_entries(entries, tag="", q="", kind="", sender=""):
                 if tag not in entry["tags"]: continue
             elif tag not in entry["tags"] and tag not in entry.get("related_tags", set()): continue
         if q and q not in entry["text"].lower(): continue
-        filtered.append(entry)
-    return filtered
+        yield entry
+
+
+def filter_log_entries(entries, tag="", q="", kind="", sender=""):
+    return list(iter_filtered_log_entries(entries, tag=tag, q=q, kind=kind, sender=sender))
 
 def get_log_tags(name, include_counts=True):
     """获取日志可用的分类标签列表"""
@@ -5145,11 +4879,16 @@ def get_log_tags(name, include_counts=True):
             ordered.append({"tag": OTHER_LOG_TAG, "count": None})
         return {"tags": ordered, "error": "", "partial": True}
 
-    entries, error = read_log_entries(name)
-    entries = [entry for entry in entries if is_dashboard_visible_log_entry(entry)]
     counts = {}
-    for entry in entries:
-        for tag in entry["tags"]: counts[tag] = counts.get(tag, 0) + 1
+    error = ""
+    try:
+        for entry in iter_filtered_log_entries(iter_account_log_entries(name)):
+            for tag in entry["tags"]:
+                counts[tag] = counts.get(tag, 0) + 1
+    except FileNotFoundError:
+        error = f"日志文件 {get_log_filename(name)} 不存在。"
+    except OSError:
+        error = "无法读取日志内容。"
     seen = set(); ordered = []
     for tag in ACCOUNT_LOG_TAGS.get(name, []):
         ordered.append({"tag": tag, "count": counts.get(tag, 0)}); seen.add(tag)
@@ -5195,16 +4934,30 @@ def get_log_page(name, before=None, limit=80, tag="", q="", kind="", sender=""):
             "log_size": meta.get("log_size", 0),
         }
 
-    entries, error = read_log_entries(name)
-    if error:
-        return {"content": error, "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None}
-    filtered = filter_log_entries(entries, tag=tag, q=q, kind=kind, sender=sender)
-    total = len(entries); matched = len(filtered)
-    end = matched if before is None else max(0, min(int(before), matched))
+    # Keep exact counts and the existing match-index cursor, but only retain
+    # the requested page. Decoration still sees earlier command/reply context.
+    total = matched = 0
+    requested_end = None if before is None else max(0, int(before))
+    page_entries = deque(maxlen=limit)
+
+    def counted_entries():
+        nonlocal total
+        for entry in iter_account_log_entries(name):
+            total += 1
+            yield entry
+
+    try:
+        for entry in iter_filtered_log_entries(counted_entries(), tag=tag, q=q, kind=kind, sender=sender):
+            if requested_end is None or matched < requested_end:
+                page_entries.append(entry["text"])
+            matched += 1
+    except OSError as exc:
+        error = f"日志文件 {get_log_filename(name)} 不存在。" if isinstance(exc, FileNotFoundError) else "无法读取日志内容。"
+        return {"content": error, "entries": [], "start": 0, "end": 0, "total": 0, "matched": 0, "has_more": False, "next_before": None}
+    end = matched if requested_end is None else min(requested_end, matched)
     start = max(0, end - limit)
-    page_entries = filtered[start:end]
-    return {"content": "\n\n".join(entry["text"] for entry in page_entries),
-            "entries": [entry["text"] for entry in page_entries],
+    return {"content": "\n\n".join(page_entries),
+            "entries": list(page_entries),
             "start": start, "end": end, "total": total, "matched": matched,
             "has_more": start > 0, "next_before": start if start > 0 else None, "tag": tag, "q": q, "kind": kind, "sender": sender}
 
@@ -5651,7 +5404,7 @@ def status(username: str = Depends(authenticate)):
         with STATUS_LOCK:
             cached = STATUS_CACHE.get("data")
             if cached and now_ts - float(STATUS_CACHE.get("at") or 0) < STATUS_CACHE_SECONDS:
-                return cached
+                return Response(cached, media_type="application/json")
             result = {}
             runtime_accounts = {}
             states = {}
@@ -5666,7 +5419,6 @@ def status(username: str = Depends(authenticate)):
                     "state": state,
                     "is_alive": bool(pids) if os.name != 'nt' else get_process_status(key),
                     "process": process_info,
-                    "cultivation": get_cultivation_summary(key),
                     "command_panels": build_command_panels(key, state),
                     "profile_usernames": account_profile_usernames(key, state),
                 }
@@ -5677,9 +5429,12 @@ def status(username: str = Depends(authenticate)):
                 "runtime": dashboard_runtime_info(runtime_accounts),
                 "fishing_auto": None if not FISHING_AUTOMATION_ENABLED else fishing_auto_dashboard_summary(states),
             }
-            STATUS_CACHE["at"] = now_ts
-            STATUS_CACHE["data"] = payload
-            return payload
+            # Keep compact JSON bytes, not four full mutable state trees. This
+            # also avoids FastAPI copying/re-encoding them for every cache hit.
+            content = JSONResponse(payload).body
+            STATUS_CACHE["at"] = time.time()
+            STATUS_CACHE["data"] = content
+            return Response(content, media_type="application/json")
     except Exception as e: return {"error": str(e)}
 
 @app.get("/api/message-health")

@@ -61,24 +61,6 @@
         .stat-label { font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
         .stat-value { font-size: 0.95rem; font-weight: 600; }
         .stat-value.active { color: var(--accent-color); }
-        .cultivation-panel { background: rgba(0,0,0,0.18); border: 1px solid var(--border-color); border-radius: 12px; padding: 0.8rem; margin-bottom: 1rem; }
-        .cultivation-title { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.45rem; font-weight: 600; border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; }
-        .cultivation-current { display: grid; grid-template-columns: 1fr auto; gap: 0.55rem; align-items: baseline; margin-bottom: 0.55rem; font-size: 0.82rem; }
-        .cultivation-level { color: var(--accent-color); font-weight: 700; }
-        .cultivation-value { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); font-weight: 600; }
-        .cultivation-affiliation { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 0.7rem; flex-wrap: wrap; }
-        .cultivation-root { color: #6ee7b7; font-size: 0.74rem; font-weight: 700; text-shadow: 0 0 10px rgba(16,185,129,0.28); }
-        .cultivation-sect { color: #c4b5fd; font-size: 0.74rem; font-weight: 700; }
-        .cultivation-meta { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; margin-bottom: 0.55rem; display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
-        .cultivation-days { display: grid; gap: 0.25rem; }
-        .cultivation-row { display: grid; grid-template-columns: 5.8rem 1fr 1fr 1fr; gap: 0.45rem; align-items: center; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--text-secondary); }
-        .cultivation-row.today { color: var(--text-primary); font-weight: 700; }
-        .cultivation-gain { color: #34d399; text-align: right; }
-        .cultivation-loss { color: #f87171; text-align: right; }
-        .cultivation-net { color: #e5e7eb; text-align: right; }
-        .cultivation-net.positive { color: #22c55e; }
-        .cultivation-net.negative { color: #ef4444; }
-        .cultivation-empty { color: var(--text-secondary); font-size: 0.78rem; }
 
         .cd-list { margin-top: 1rem; background: rgba(0,0,0,0.2); border-radius: 12px; padding: 0.8rem; font-size: 0.8rem; }
         .cd-title { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.5rem; font-weight: 600; border-bottom: 1px solid var(--border-color); padding-bottom: 0.3rem; }
@@ -976,28 +958,6 @@
             color: var(--account-accent);
             font-size: 0.56rem;
             font-weight: 700;
-        }
-        .account-detail-drawer {
-            border-bottom: 1px solid var(--border-color);
-            margin-bottom: 0.65rem;
-        }
-        .account-detail-drawer summary {
-            cursor: pointer;
-            color: var(--text-secondary);
-            font-size: 0.66rem;
-            padding: 0 0 0.58rem;
-            list-style: none;
-        }
-        .account-detail-drawer summary::-webkit-details-marker { display: none; }
-        .account-detail-drawer summary::after { content: "+"; float: right; color: var(--account-accent); }
-        .account-detail-drawer[open] summary::after { content: "-"; }
-        .account-detail-drawer .cultivation-panel {
-            border: 0;
-            border-top: 1px solid var(--border-color);
-            border-radius: 0;
-            background: transparent;
-            margin: 0;
-            padding: 0.65rem 0;
         }
         .controls {
             display: grid;
@@ -2236,107 +2196,15 @@
             };
         }
 
-        function renderCultivation(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot, stateSect) {
-            const data = cultivation || {};
-            const profile = data.profile || {};
-            const days = Array.isArray(data.days) ? data.days.slice(0, 7) : [];
-            // 优先使用 state 中的境界和修为（更准确）
-            const level = stateLevel || profile.level || '未获取';
-            const spiritRoot = stateSpiritRoot || profile.spirit_root || '未获取';
-            const sect = stateSect || '未同步';
-            // 修为：state 是实时查询结果；日志 profile 只作为缺失时兜底。
-            const profileCurrent = profile.estimated_current !== null && profile.estimated_current !== undefined
-                ? profile.estimated_current : (profile.current || 0);
-            const profileRequired = profile.required || 0;
-            const stateCurrentNum = Number(stateCurrent);
-            const stateTotalNum = Number(stateTotal);
-            const hasStateCurrent = stateCurrent !== undefined && stateCurrent !== null && stateCurrent !== '';
-            const hasStateTotal = stateTotal !== undefined && stateTotal !== null && stateTotal !== '';
-            const hasStateFields = hasStateCurrent || hasStateTotal;
-            const hasValidStateExp = hasStateCurrent && hasStateTotal
-                && Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
-                && Number.isFinite(stateTotalNum) && stateTotalNum > 0;
-            const hasProfileExp = profileCurrent !== null && profileCurrent !== undefined
-                && Number.isFinite(Number(profileCurrent)) && Number(profileRequired) > 0;
-            const displayedCurrent = hasValidStateExp ? stateCurrentNum : (!hasStateFields && hasProfileExp ? profileCurrent : null);
-            const displayedRequired = hasValidStateExp ? stateTotalNum : (!hasStateFields && hasProfileExp ? profileRequired : null);
-            const hasCultivationValue = displayedCurrent !== null && displayedCurrent !== undefined && Number.isFinite(Number(displayedCurrent));
-            const currentText = hasCultivationValue
-                ? `${formatNumber(displayedCurrent)} / ${formatNumber(displayedRequired)}`
-                : '未获取';
-            const processedUntil = data.processed_until || '--';
-            const lastChangeAt = data.last_change_at || '--';
-
-            const rows = days.length ? days.map(day => {
-                const net = Number(day.net || 0);
-                const netClass = net > 0 ? 'positive' : (net < 0 ? 'negative' : '');
-                const label = day.date === (data.today || {}).date ? '今日' : day.date.slice(5);
-                return `
-                    <div class="cultivation-row ${label === '今日' ? 'today' : ''}">
-                        <span>${label}</span>
-                        <span class="cultivation-gain">+${formatNumber(day.gain)}</span>
-                        <span class="cultivation-loss">-${formatNumber(day.loss)}</span>
-                        <span class="cultivation-net ${netClass}">${formatSigned(net)}</span>
-                    </div>
-                `;
-            }).join('') : '<div class="cultivation-empty">暂无可统计的修为记录</div>';
-
-            return `
-                <div class="cultivation-panel">
-                    <div class="cultivation-title">修为统计</div>
-                    <div class="cultivation-current">
-                        <span class="cultivation-level">${escapeHtml(level)}</span>
-                        <span class="cultivation-value">${currentText}</span>
-                        <div class="cultivation-affiliation">
-                            <span class="cultivation-root">灵根 ${escapeHtml(spiritRoot)}</span>
-                            <span class="cultivation-sect">${escapeHtml(sect)}</span>
-                        </div>
-                    </div>
-                    <div class="cultivation-meta">
-                        <span>统计到 ${processedUntil}</span>
-                        <span>最新变动 ${lastChangeAt}</span>
-                    </div>
-                    <div class="cultivation-days">
-                        <div class="cultivation-row">
-                            <span>日期</span>
-                            <span class="cultivation-gain">增加</span>
-                            <span class="cultivation-loss">减少</span>
-                            <span class="cultivation-net">净值</span>
-                        </div>
-                        ${rows}
-                    </div>
-                </div>
-            `;
-        }
-
-        function renderCultivationOverview(cultivation, stateLevel, stateCurrent, stateTotal, stateSpiritRoot, stateSect) {
-            const data = cultivation || {};
-            const profile = data.profile || {};
-            const level = stateLevel || profile.level || '境界未同步';
-            const spiritRoot = stateSpiritRoot || profile.spirit_root || '灵根未同步';
-            const sect = stateSect || '未同步';
-            const stateCurrentNum = Number(stateCurrent);
-            const stateTotalNum = Number(stateTotal);
-            const estimatedCurrent = Number(profile.estimated_current ?? profile.current);
-            const estimatedTotal = Number(profile.required);
-            const hasStateCurrent = stateCurrent !== undefined && stateCurrent !== null && stateCurrent !== '';
-            const hasStateTotal = stateTotal !== undefined && stateTotal !== null && stateTotal !== '';
-            const hasState = hasStateCurrent && hasStateTotal
-                && Number.isFinite(stateCurrentNum) && stateCurrentNum >= 0
-                && Number.isFinite(stateTotalNum) && stateTotalNum > 0;
-            const hasEstimate = Number.isFinite(estimatedCurrent) && estimatedCurrent >= 0
-                && Number.isFinite(estimatedTotal) && estimatedTotal > 0;
-            const current = hasState ? stateCurrentNum : (hasEstimate ? estimatedCurrent : null);
-            const total = hasState ? stateTotalNum : (hasEstimate ? estimatedTotal : null);
-            const percent = current !== null && total
-                ? Math.max(0, Math.min(100, current * 100 / total))
-                : 0;
-            const expText = current !== null && total
-                ? `${formatNumber(current)} / ${formatNumber(total)}`
-                : '修为未同步';
-            const today = data.today || {};
-            const todayNet = Number(today.net || 0);
-            const netClass = todayNet > 0 ? 'positive' : (todayNet < 0 ? 'negative' : '');
+        function renderAccountProfile(profile) {
+            const level = profile.level || '境界未同步';
+            const spiritRoot = profile.spiritRoot || '灵根未同步';
+            const sect = profile.sect || '未同步';
+            const current = finiteProfileNumber(profile.current);
+            const total = finiteProfileNumber(profile.total);
+            const hasExp = current !== null && current >= 0 && total !== null && total > 0;
+            const percent = hasExp ? Math.max(0, Math.min(100, current * 100 / total)) : 0;
+            const expText = hasExp ? `${formatNumber(current)} / ${formatNumber(total)}` : '修为未同步';
             return `
                 <div class="account-main-profile">
                     <div class="account-profile-line">
@@ -2346,13 +2214,9 @@
                     <div class="account-profile-sect" title="${escapeHtml(sect)}">${escapeHtml(sect)}</div>
                     <div class="account-profile-exp">
                         <span>${escapeHtml(expText)}</span>
-                        <span>${current !== null && total ? `${percent.toFixed(1)}%` : '--'}</span>
+                        <span>${hasExp ? `${percent.toFixed(1)}%` : '--'}</span>
                     </div>
                     <div class="account-progress" aria-label="修为进度 ${percent.toFixed(1)}%"><span style="width:${percent.toFixed(1)}%"></span></div>
-                    <div class="account-profile-foot">
-                        <span>今日修为</span>
-                        <span class="${netClass}">${escapeHtml(formatSigned(todayNet))}</span>
-                    </div>
                 </div>
             `;
         }
@@ -6737,16 +6601,16 @@
                                     </div>
                                 </div>
                                 ${mainUsernameText ? `<div class="identity-username account-username" title="${escapeHtml(mainUsernameText)}">主魂 ${escapeHtml(mainUsernameText)}</div>` : ''}
-                                ${renderCultivationOverview(acc.cultivation, mainProfile.level, mainProfile.current, mainProfile.total, mainProfile.spiritRoot, mainProfile.sect)}
+                                ${renderAccountProfile(mainProfile)}
                                 ${renderIdentityCommandStrip(id, '主魂')}
                             </div>
                             ${accountHealthHtml}
                             ${avatarHtml}
                             ${commandPanelHtml}
-                            <details class="account-detail-drawer">
-                                <summary>${escapeHtml(s.in_deep_meditation ? '深度闭关中' : '普通闭关')} · ${escapeHtml(mainProgressText(id, s))} · 查看修为明细</summary>
-                                ${renderCultivation(acc.cultivation, mainProfile.level, mainProfile.current, mainProfile.total, mainProfile.spiritRoot, mainProfile.sect)}
-                            </details>
+                            <div class="account-profile-foot">
+                                <span>${escapeHtml(s.in_deep_meditation ? '深度闭关中' : '普通闭关')}</span>
+                                <span>${escapeHtml(mainProgressText(id, s))}</span>
+                            </div>
                             <div class="controls">
                                 <button class="btn btn-start" onclick="doAction('${id}', 'start')"><i data-lucide="play" aria-hidden="true"></i>启动</button>
                                 <button class="btn btn-stop" onclick="doAction('${id}', 'stop')"><i data-lucide="square" aria-hidden="true"></i>停止</button>

@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from telethon import types
 from sect_rules import SectTaskStopped
 from command_modules import SMALL_WORLD_MIRACLE_ACTIONS
 
@@ -625,6 +624,8 @@ class MiniAppDwellingTransport:
         """Load the newest pinned entry link from the configured game chat."""
         chat = self.entry_chat
         try:
+            from telethon import types
+
             pinned = await self.client.get_messages(
                 chat,
                 limit=ENTRY_URL_PIN_SCAN_LIMIT,

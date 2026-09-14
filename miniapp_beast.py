@@ -19,10 +19,6 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable
 
-from telethon import types, utils
-from telethon.tl.functions.messages import RequestMainWebViewRequest
-
-
 DEFAULT_BOT_USERNAME = "fanrenxiuxian_bot"
 DEFAULT_REFRESH_SECONDS = 30 * 60
 DEFAULT_RETRY_SECONDS = 5 * 60
@@ -766,6 +762,10 @@ async def _post_json(
 
 
 async def request_webview_init_data(client, bot_username, start_param):
+    # Dashboard imports the file/state helpers without opening a Telegram client.
+    from telethon import types, utils
+    from telethon.tl.functions.messages import RequestMainWebViewRequest
+
     bot_entity = await client.get_entity(bot_username)
     result = await client(RequestMainWebViewRequest(
         peer=await client.get_input_entity(bot_entity),

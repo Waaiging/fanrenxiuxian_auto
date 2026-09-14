@@ -27,7 +27,9 @@ import re
 import sqlite3
 import time
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+import shutil
+import tempfile
 from contextvars import ContextVar
 from functools import wraps
 from urllib.parse import parse_qs, urlparse
@@ -6590,21 +6592,42 @@ def prune_log_file(path, hours=LOG_RETENTION_HOURS):
     if not os.path.exists(path):
         return
     cutoff = datetime.now() - timedelta(hours=hours)
-    kept = []
     current_keep = True
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                m = _TS_RE.match(line)
-                if m:
-                    try:
-                        current_keep = (datetime.strptime(m.group(1), TIME_FORMAT) >= cutoff and _line_allowed(line))
-                    except ValueError:
-                        current_keep = _line_allowed(line)
-                if current_keep:
-                    kept.append(line)
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(kept)
+        target = os.path.normcase(os.path.realpath(path))
+        loggers = [logging.getLogger(), *list(logging.Logger.manager.loggerDict.values())]
+        handlers = {
+            handler for logger in loggers if isinstance(logger, logging.Logger)
+            for handler in logger.handlers
+            if isinstance(handler, logging.FileHandler)
+            and os.path.normcase(os.path.realpath(handler.baseFilename)) == target
+        }
+        with ExitStack() as locks:
+            # Preserve the inode used by open FileHandlers and serialize their
+            # appends with compaction. Renaming a new file would orphan them.
+            for handler in sorted(handlers, key=id):
+                handler.acquire()
+                locks.callback(handler.release)
+                handler.flush()
+            with tempfile.TemporaryFile(mode="w+b") as kept:
+                dropped = False
+                with open(path, "rb") as source:
+                    for raw_line in source:
+                        line = raw_line.decode("utf-8", errors="ignore")
+                        match = _TS_RE.match(line)
+                        if match:
+                            try:
+                                current_keep = (datetime.strptime(match.group(1), TIME_FORMAT) >= cutoff and _line_allowed(line))
+                            except ValueError:
+                                current_keep = _line_allowed(line)
+                        if current_keep:
+                            kept.write(raw_line)
+                        else:
+                            dropped = True
+                if dropped:
+                    kept.seek(0)
+                    with open(path, "wb") as destination:
+                        shutil.copyfileobj(kept, destination, length=64 * 1024)
     except Exception:
         logging.getLogger(__name__).exception("Failed to prune log file %s", path)
 

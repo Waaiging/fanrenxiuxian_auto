@@ -17,8 +17,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from telethon import events
-
 
 CONFIG_DIR = Path(__file__).resolve().parent
 RED_PACKET_SETTINGS_FILE = CONFIG_DIR / "red_packet_settings.json"
@@ -1041,6 +1039,9 @@ class RedPacketMonitor:
             self._write_status(listening=False, last_action="install_error", last_error=str(exc))
             self.log.error("[%s] Red-packet monitor setup failed: %s", self.account, exc)
             return False
+
+        # Settings/status readers do not need Telethon's protocol objects.
+        from telethon import events
 
         @self.client.on(events.NewMessage(chats=self.entity))
         async def new_message_handler(event: Any) -> None:
