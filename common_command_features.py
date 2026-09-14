@@ -116,7 +116,7 @@ COMMAND_CONTROL_FILE = os.path.join(CONFIG_DIR, "command_controls.json")
 CUSTOM_COMMAND_FILE = os.path.join(CONFIG_DIR, "dashboard_commands.json")
 SECOND_SOUL_TRAIN_COMMAND = ".元神修炼"        # 第二元神修炼指令
 SECOND_SOUL_STATUS_COMMAND = ".第二元神"       # 第二元神状态查询（解析剩余冷却）
-SECOND_SOUL_INTERVAL_SECONDS = 24 * 3600       # 第二元神修炼间隔 24 小时
+SECOND_SOUL_INTERVAL_SECONDS = 24 * 3600 + 10 * 60  # 第二元神修炼间隔 24 小时 + 10 分钟缓冲
 SECOND_SOUL_COOLDOWN_BUFFER_SECONDS = 300      # 解析出剩余冷却后额外留 5 分钟缓冲
 SECOND_SOUL_RECHECK_SECONDS = 300              # 状态回复无时间格式时，5 分钟后重查
 FIELD_TRAINING_COMMAND = ".野外历练 谨慎"      # 野外历练指令（各账号可覆盖）
@@ -3559,10 +3559,10 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
         log.info(f"Custom command done [{identity}] {command}: {status}")
 
     async def run_second_soul_loop(self):
-        """第二元神修炼循环：每 24 小时发送 `.元神修炼`。
+        """第二元神修炼循环：每 24 小时 10 分钟发送 `.元神修炼`。
 
         若返回“无法分心修炼”，再查询 `.第二元神` 解析剩余冷却时间，
-        按真实剩余时间安排下次执行，而不是固定顺延 24 小时。
+        按真实剩余时间安排下次执行，而不是固定顺延整个修炼间隔。
         """
         interval_seconds = SECOND_SOUL_INTERVAL_SECONDS
         await self.startup_done.wait()

@@ -106,7 +106,7 @@ class SecondSoulLoopTests(unittest.TestCase):
         self._run(actor)
 
         self.assertEqual(actor.sent, [SECOND_SOUL_TRAIN_COMMAND])
-        self._assert_next_within(actor, SECOND_SOUL_INTERVAL_SECONDS)
+        self._assert_next_within(actor, 24 * 3600 + 10 * 60)
 
     def test_empty_response_schedules_full_interval(self):
         actor = _StubActor([""])
@@ -127,7 +127,7 @@ class SecondSoulLoopTests(unittest.TestCase):
     def test_corrupt_schedule_is_repaired_without_sending(self):
         """时间戳损坏时先修复排程再等待。
 
-        注意与"字段缺失"的差异：缺失会立即发送，损坏则重置为 +24h 后等待。
+        注意与"字段缺失"的差异：缺失会立即发送，损坏则重置为 +24h10m 后等待。
         这是原实现的既有行为，本次重构刻意保留，未作变更。
         """
         actor = _StubActor([SUCCESS_REPLY], state={"next_second_soul_time": "not-a-time"})

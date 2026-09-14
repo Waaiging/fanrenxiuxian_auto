@@ -219,11 +219,11 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 
 ### 第二元神修炼
 
-- 主号和 Waaiging 各注册 `second_soul` 调度任务，间隔 24 小时向群内发送 `.元神修炼`。
+- 主号和 Waaiging 各注册 `second_soul` 调度任务，间隔 24 小时 10 分钟向群内发送 `.元神修炼`，为服务端冷却留出 10 分钟缓冲。
 - 实现下沉在 `common_command_features.CommonCommandMixin.run_second_soul_loop()`，两个入口通过继承共用同一份代码，不再各自复制。
-- 回复命中"无法分心修炼"时，追加查询 `.第二元神`，用 `command_feedback.second_soul_cooldown_seconds()` 解析 `剩余: 14小时11分钟36秒` 这类文本，按真实剩余时间加 5 分钟缓冲排下一次；解析不出时才回落固定 24 小时。
+- 回复命中"无法分心修炼"时，追加查询 `.第二元神`，用 `command_feedback.second_soul_cooldown_seconds()` 解析 `剩余: 14小时11分钟36秒` 这类文本，按真实剩余时间加 5 分钟缓冲排下一次；解析不出时 5 分钟后重试。
 - 判定与解析统一走 `command_feedback` 的 `second_soul_busy()` / `second_soul_cooldown_seconds()`，两者都经 `command_response_text()` 兼容纯字符串和消息对象两种回复形态。`send_and_wait_feedback()` 默认返回纯字符串，直接对返回值取 `.text` 会永远得到空串。
-- 排程写在 state 的 `next_second_soul_time`。字段缺失时立即发送；时间戳损坏时先重置为 +24 小时再等待，不立即发送。
+- 排程写在 state 的 `next_second_soul_time`。字段缺失时立即发送；时间戳损坏时先重置为 +24 小时 10 分钟再等待，不立即发送。
 - 回归用例见 `tests/test_second_soul_loop.py`，直接驱动循环本身；`tests/test_parser_fixtures.py` 只覆盖解析函数。
 
 ### 星宫宗门灵圃
