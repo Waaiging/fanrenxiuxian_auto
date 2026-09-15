@@ -82,7 +82,7 @@ def parse_question(text):
     choices = {m[1]: m[2].strip() for m in options}
     if not stem or len(stem) > 1000 or any(not v or len(v) > 1000 for v in choices.values()):
         return None
-    if not re.search(r"300\s*秒", body) or ".作答" not in body:
+    if not re.search(r"300\s*秒", body):
         return None
     return Question(kind, intro[1].strip(), stem, choices)
 
@@ -156,24 +156,39 @@ def answer_for(question, state=None):
 
 
 def quiz_callback_data(msg, letter):
-    """Use only the original bot's complete, consistent A/B/C/D keyboard.
-
-    A callback is sent as the logged-in Telegram user, not a channel avatar.
-    The caller must therefore also verify that the question names its main soul.
-    """
-    choices, tokens = {}, set()
+    """Match original answer buttons by their labels, preserving opaque data."""
+    question = parse_question(getattr(msg, "text", ""))
+    if question is None:
+        return None
+    choices, tokens, known_protocol_count = {}, set(), 0
     for row in getattr(getattr(msg, "reply_markup", None), "rows", []) or []:
         for button in getattr(row, "buttons", []) or []:
+            label = unicodedata.normalize("NFKC", clean_text(getattr(button, "text", "")))
+            labeled = re.fullmatch(r"([A-D])(?:[.、:)]\s*(.*)|\s+(.*))?", label, re.S)
+            if labeled:
+                option, content = labeled[1], labeled[2] or labeled[3] or ""
+                if content and normalized(content) != normalized(question.options[option]):
+                    return None
+            else:
+                matches = [key for key, value in question.options.items() if normalized(label) == normalized(value)]
+                if len(matches) != 1:
+                    continue
+                option = matches[0]
             data = getattr(button, "data", None)
-            match = re.fullmatch(rb"xgq:([A-Za-z0-9_-]{1,48}):([A-D])", data) if isinstance(data, bytes) else None
-            if not match:
+            if not isinstance(data, bytes) or not 1 <= len(data) <= 64 or option in choices:
                 return None
-            option = match[2].decode("ascii")
-            if clean_text(getattr(button, "text", "")) != option or option in choices:
-                return None
-            choices[option] = data
-            tokens.add(match[1])
-    return choices.get(letter) if set(choices) == set("ABCD") and len(tokens) == 1 else None
+            if data.startswith(b"xgq:"):
+                match = re.fullmatch(rb"xgq:([A-Za-z0-9_-]{1,48}):([A-D])", data)
+                if not match or match[2].decode("ascii") != option:
+                    return None
+                tokens.add(match[1])
+                known_protocol_count += 1
+            choices[option] = data  # Never reconstruct another button's payload.
+    if set(choices) != set("ABCD") or len(set(choices.values())) != 4:
+        return None
+    if known_protocol_count and (known_protocol_count != 4 or len(tokens) != 1):
+        return None
+    return choices.get(letter)
 
 
 def _epoch(msg):
@@ -274,7 +289,9 @@ def _writable(actor):
 
 
 def _can_callback(actor, identity):
-    return (identity == "主魂" and not getattr(actor, "xuangu_quiz_read_only", False)
+    managed = {"主魂", *(canonical_automation_identity(getattr(actor, "account_key", ""), avatar)
+                           for avatar in getattr(actor, "avatars", []) or [])}
+    return (identity in managed and not getattr(actor, "xuangu_quiz_read_only", False)
             and getattr(actor, "is_running", True))
 
 
@@ -299,7 +316,7 @@ def _record_result(actor, entry):
 
 
 async def _answer(actor, msg, question, key, owner, identity):
-    """Prefer a main-soul callback; claim either transport before dispatch."""
+    """Prefer the original answer button for every managed, enabled identity."""
     letter = answer_for(question)
     if not letter:
         _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="答案待确认")
@@ -386,7 +403,8 @@ async def _answer(actor, msg, question, key, owner, identity):
             if (entry.get("owner") == owner and entry.get("status") == "queued"
                     and answer_for(question, state) == letter):
                 entry.update(status="sending", attempt_at=time.time(), answer=letter,
-                             transport="callback", callback_data=data.decode("ascii"))
+                             transport="callback", callback_data_hex=data.hex(),
+                             callback_data=data.decode("utf-8", errors="backslashreplace"))
                 accepted = True
         _update(claim)
         if not accepted:
@@ -423,14 +441,14 @@ async def _answer(actor, msg, question, key, owner, identity):
                     or target_identity(actor, question.target, live) != identity):
                 _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="题面已删除、失效或发生变化")
                 return
-            original_data = quiz_callback_data(msg, letter) if identity == "主魂" else None
-            callback_data = quiz_callback_data(live, letter) if identity == "主魂" else None
+            original_data = quiz_callback_data(msg, letter)
+            callback_data = quiz_callback_data(live, letter)
             if original_data and callback_data != original_data:
                 _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="发送前答题按钮已移除或变化")
                 return
             if callback_data:
                 await click_answer(live, callback_data)
-            elif identity == "主魂" and getattr(live, "reply_markup", None):
+            elif getattr(live, "reply_markup", None):
                 _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="原题按钮无法核实，跳过作答")
             elif _writable(actor):
                 with guarded_one_shot_send(command, allowed, sent):
@@ -441,7 +459,7 @@ async def _answer(actor, msg, question, key, owner, identity):
                         suppress_no_response_alert=True,
                     ), timeout=max(0.01, deadline - time.time()))
             else:
-                _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="群发受限且没有可用的主魂答题按钮")
+                _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="群发受限且没有可用的答题按钮")
         entry = _state().get("events", {}).get(key, {})
         if entry.get("status") == "awaiting_result":
             try:

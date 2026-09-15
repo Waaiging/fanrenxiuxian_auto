@@ -78,7 +78,7 @@ def install_restricted_exchange_monitor(actor, logger=None):
 
 
 def install_restricted_quiz_monitor(actor):
-    """Answer main-soul questions through bot buttons while group writes stay off."""
+    """Prefer bot answer buttons for enabled identities while group writes stay off."""
     actor.xuangu_quiz_callback_only = True
     @routed_telegram_event_handler
     async def handle_event(event):

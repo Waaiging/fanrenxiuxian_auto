@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.types import (
-    InputPeerChannel, KeyboardButtonCallback, KeyboardButtonRow, Message,
+    InputPeerChannel, KeyboardButtonCallback, KeyboardButtonRow, KeyboardButtonUrl, Message,
     MessageReplyHeader, PeerChannel, PeerUser, ReplyInlineMarkup,
 )
 
@@ -23,9 +23,14 @@ OPTIONS = {"A": "紫罗极火", "B": "碧焰天火", "C": "修罗圣火", "D": "
 
 
 def question_message(target="my_player", message_id=400, chat_id=quiz.JA_CHAT, topic=quiz.JA_TOPIC,
-                     stem=STEM, options=None, age=0, sender_id=quiz.QUESTION_BOT_ID):
+                     stem=STEM, options=None, age=0, sender_id=quiz.QUESTION_BOT_ID, kind="玄骨考校"):
     options = OPTIONS if options is None else options
-    text = (f"神念直入脑海，一个苍老的声音向 @{target} 提问：\n\n**“{stem}”**\n\n" +
+    introduction = {
+        "玄骨考校": f"神念直入脑海，一个苍老的声音向 @{target} 提问：",
+        "玄骨窥鼎": f"那道魔念绕着你识海中的虚天鼎缓缓打转，向 @{target} 阴恻恻地发问：",
+        "玄骨夺焰": f"一缕魔念直逼你识海中的乾蓝寒焰，玄骨上人的声音在 @{target} 脑海中炸响：",
+    }[kind]
+    text = (f"{introduction}\n\n**“{stem}”**\n\n" +
             "\n".join(f"**{letter}.** {answer}" for letter, answer in options.items()) +
             "\n\n小辈，你有 **300秒** 的时间，可点击按钮，也可回复本消息 `.作答 <选项>`。")
     return SimpleNamespace(id=message_id, chat_id=chat_id, sender_id=sender_id, text=text,
@@ -104,10 +109,11 @@ class QuizTests(unittest.IsolatedAsyncioTestCase):
         return actor
 
     def result_event(self, question, letter="C", outcome="答对", message_id=None):
-        target = quiz.parse_question(question.text).target
-        body = f"【玄骨考校·{outcome}】\n@{target} 的答案 {letter} 完全正确！\n你获得了 5000 点修为作为奖赏！"
+        parsed = quiz.parse_question(question.text)
+        target = parsed.target
+        body = f"【{parsed.kind}·{outcome}】\n@{target} 的答案 {letter} 完全正确！\n你获得了 5000 点修为作为奖赏！"
         if outcome == "答错":
-            body = f"【玄骨考校·答错】\n@{target} 的答案 A 错得离谱！（正确答案: {letter}）"
+            body = f"【{parsed.kind}·答错】\n@{target} 的答案 A 错得离谱！（正确答案: {letter}）"
         msg = SimpleNamespace(id=message_id or question.id + 3, text=body, chat_id=question.chat_id,
             sender_id=8964348409, date=datetime.now(timezone.utc), entities=[], out=False,
             reply_to_msg_id=question.reply_to_msg_id, reply_to=question.reply_to)
@@ -193,26 +199,131 @@ class QuizTests(unittest.IsolatedAsyncioTestCase):
         self.actor.send_and_wait_feedback_identity.assert_not_awaited()
         self.assertEqual(self.state_entry()["status"], "correct")
 
-    async def test_restricted_monitor_does_not_answer_avatars_or_plain_questions(self):
+    async def test_restricted_monitor_does_not_send_plain_answers_for_any_identity(self):
         self.actor.xuangu_quiz_callback_only = True
         await self.handle()  # Main soul with no keyboard.
         self.actor.avatars = ["问心子"]
         self.actor.avatar_usernames = {"avatar_player": "问心子"}
-        self.msg = self.add_buttons(question_message(target="avatar_player", message_id=500))
+        self.msg = question_message(target="avatar_player", message_id=500)
         await self.handle()
         await self.finish()
-        self.msg.click.assert_not_awaited()
         self.actor.send_and_wait_feedback_identity.assert_not_awaited()
         self.assertFalse(self.sent)
 
-    async def test_avatar_buttons_still_use_confirmed_identity_command_path(self):
+    async def test_avatar_prefers_original_button_without_sending_group_commands(self):
         self.actor.avatars = ["问心子"]
         self.actor.avatar_usernames = {"avatar_player": "问心子"}
         self.msg = self.add_buttons(question_message(target="avatar_player"))
         await self.handle()
         await self.finish()
-        self.msg.click.assert_not_awaited()
+        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertFalse(self.sent)
+        self.assertEqual(self.state_entry()["identity"], "问心子")
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_avatar_without_buttons_keeps_identity_command_fallback(self):
+        self.actor.avatars = ["问心子"]
+        self.actor.avatar_usernames = {"avatar_player": "问心子"}
+        self.msg = question_message(target="avatar_player")
+        await self.handle()
+        await self.finish()
         self.assertEqual(self.sent, [(quiz.JA_CHAT, ".作答 C", 400)])
+        self.assertEqual(self.actor.send_and_wait_feedback_identity.await_args.args[0], "问心子")
+
+    async def test_all_thirteen_identities_and_three_quiz_kinds_prefer_buttons(self):
+        participants = {
+            "main": ("主魂", "无咎子", "缘生子", "素缘子"),
+            "sub": ("主魂", "厚土", "缘生子", "寻真子"),
+            "xiaohao": ("主魂", "问心子", "素心子", "缘生子"),
+            "waaiging": ("主魂",),
+        }
+        bank = json.loads(quiz.BANK_FILE.read_text(encoding="utf-8"))["questions"]
+        message_id = 1000
+        for account, slots in participants.items():
+            self.actor = self.make_actor(account, account + "_main")
+            identities = [settings.canonical_automation_identity(account, name) for name in slots]
+            self.actor.avatars = identities[1:]
+            aliases = {identity: f"{account}_avatar_{index}" for index, identity in enumerate(identities[1:])}
+            self.actor.avatar_usernames = {name: identity for identity, name in aliases.items()}
+            # The standby worker exposes the same native buttons without group sends.
+            self.actor.xuangu_quiz_callback_only = account in {"xiaohao", "waaiging"}
+            for identity in identities:
+                for kind in ("玄骨考校", "玄骨窥鼎", "玄骨夺焰"):
+                    with self.subTest(account=account, identity=identity, kind=kind):
+                        row = next(row for row in bank if row["event_type"] == kind)
+                        target = self.actor.my_info.username if identity == "主魂" else aliases[identity]
+                        self.msg = self.add_buttons(question_message(target=target, message_id=message_id,
+                            kind=kind, stem=row["question"], options={"A": "干扰甲", "B": "干扰乙", "C": row["answer"], "D": "干扰丁"}))
+                        message_id += 10
+                        await self.handle()
+                        await self.finish()
+                        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+                        self.assertEqual(self.state_entry()["identity"], identity)
+                        self.assertEqual(self.state_entry()["status"], "correct")
+                        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+                        self.actor.client.send_message.assert_not_awaited()
+
+    async def test_answer_button_labels_can_include_or_equal_option_text(self):
+        formats = ("{letter}", "{letter}. {text}", "{letter}、{text}", "{letter}: {text}", "{letter} {text}", "{text}")
+        for index, template in enumerate(formats):
+            with self.subTest(template=template):
+                username = f"label_player_{index}"
+                self.actor.my_info.username = username
+                self.actor.identity_usernames["主魂"] = [username]
+                self.msg = self.add_buttons(question_message(target=username, message_id=500 + index))
+                for row in self.msg.reply_markup.rows:
+                    for button in row.buttons:
+                        button.text = template.format(letter=button.text, text=OPTIONS[button.text])
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_button_only_question_does_not_need_a_text_command_hint(self):
+        self.add_buttons()
+        self.msg.text = self.msg.text.replace("，也可回复本消息 `.作答 <选项>`", "")
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_awaited_once_with(data=b"xgq:MY68XJ:C")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_opaque_original_callback_data_and_unrelated_controls_are_supported(self):
+        self.add_buttons()
+        for row in self.msg.reply_markup.rows:
+            for button in row.buttons:
+                button.data = b"\x00quiz\xff" + button.text.encode("ascii")
+        self.msg.reply_markup.rows.append(KeyboardButtonRow(buttons=[KeyboardButtonUrl("帮助", "https://example.invalid/help")]))
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_awaited_once_with(data=b"\x00quiz\xffC")
+        self.assertEqual(self.state_entry()["callback_data_hex"], b"\x00quiz\xffC".hex())
+        self.assertEqual(self.state_entry()["status"], "correct")
+
+    async def test_duplicate_callback_data_cannot_select_a_unique_answer(self):
+        self.add_buttons()
+        for row in self.msg.reply_markup.rows:
+            for button in row.buttons:
+                button.data = b"same-payload"
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_not_awaited()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "skipped")
+
+    async def test_avatar_callback_failure_never_resubmits_as_a_group_command(self):
+        self.actor.avatars = ["问心子"]
+        self.actor.avatar_usernames = {"avatar_player": "问心子"}
+        self.msg = self.add_buttons(question_message(target="avatar_player"))
+        self.msg.click.side_effect = TimeoutError("callback response lost")
+        await self.handle()
+        await self.finish()
+        await self.handle()
+        await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        self.msg.click.assert_awaited_once()
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.assertEqual(self.state_entry()["status"], "send_uncertain")
 
     async def test_button_answer_uses_current_option_order(self):
         self.msg = self.add_buttons(question_message(options={
