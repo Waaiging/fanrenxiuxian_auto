@@ -426,6 +426,251 @@ class QuizTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.state_entry()["status"], "send_uncertain")
         self.actor.send_and_wait_feedback_identity.assert_not_awaited()
 
+    async def test_waaiging_fresh_question_recovers_from_explicit_expired_callback(self):
+        self.actor.account_key = "waaiging"
+        self.actor.my_info.username = "Waaiging"
+        self.actor.identity_usernames = {"主魂": ["Waaiging"]}
+        self.actor.xuangu_quiz_callback_only = True
+        self.msg = self.add_buttons(question_message(target="Waaiging", message_id=12337564,
+            stem="韩立能把虚天鼎从乾蓝冰焰池中拉出的关键倚仗是什么？",
+            options={"A": "血玉蜘蛛", "B": "啼魂兽", "C": "风雷翅", "D": "玄骨魔幡"}), token="G98BHA")
+        async def click(*, data):
+            if self.msg.click.await_count == 1:
+                return SimpleNamespace(message="这道题已经失效了。", alert=True, cache_time=0)
+            await quiz.maybe_handle_xuangu_quiz(self.actor, self.result_event(self.msg, "A"))
+            return SimpleNamespace(message="答案已提交", alert=False, cache_time=0)
+        self.msg.click.side_effect = click
+        with patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)):
+            await self.handle()
+            await self.finish()
+        self.assertEqual(self.msg.click.await_count, 2)
+        for call in self.msg.click.await_args_list:
+            self.assertEqual(call.kwargs, {"data": b"xgq:G98BHA:A"})
+        self.assertEqual(self.actor.client.get_messages.await_count, 2)
+        self.assertEqual(self.state_entry()["status"], "correct")
+        self.assertEqual([attempt["outcome"] for attempt in self.state_entry()["callback_attempts"]],
+                         ["rejected_expired", "response_received"])
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.actor.client.send_message.assert_not_awaited()
+        self.delta.assert_called_once()
+
+    async def test_explicit_callback_rejections_are_bounded_and_never_use_text(self):
+        self.add_buttons()
+        self.msg.click.side_effect = None
+        self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。", alert=True, cache_time=0)
+        with patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)), self.assertLogs(quiz.LOG, level="WARNING") as logs:
+            await self.handle()
+            await self.finish()
+            await self.handle()
+            await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        self.assertEqual(self.msg.click.await_count, 3)
+        self.assertEqual(self.state_entry()["status"], "callback_rejected")
+        self.assertEqual(len(self.state_entry()["callback_attempts"]), 3)
+        self.assertEqual(sum("这道题已经失效了" in row for row in logs.output), 3)
+        self.assertNotIn("callback_retry_at", self.state_entry())
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+        self.delta.assert_not_called()
+
+    async def test_rejection_followed_by_uncertain_callback_stops_all_retries(self):
+        for index, response in enumerate((None, TimeoutError("response lost"), RuntimeError("network failed"))):
+            with self.subTest(response=response), patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)):
+                self.msg = self.add_buttons(question_message(message_id=500 + index))
+                self.msg.click.side_effect = [SimpleNamespace(message="这道题已经失效了。"), response]
+                await self.handle()
+                await self.finish()
+                await self.handle()
+                await quiz.resume_pending_xuangu_quiz_events(self.actor)
+                self.assertEqual(self.msg.click.await_count, 2)
+                self.assertEqual(self.state_entry()["status"], "send_uncertain")
+                self.assertEqual(self.state_entry()["callback_attempts"][-1]["outcome"], "uncertain")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_callback_retry_rechecks_source_target_question_and_original_buttons(self):
+        for index, change in enumerate(("deleted", "sender", "chat", "topic", "target", "question", "removed", "replaced", "fetch_failed")):
+            with self.subTest(change=change), patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)):
+                self.msg = self.add_buttons(question_message(message_id=500 + index))
+                live = question_message(message_id=self.msg.id)
+                if change != "removed":
+                    self.add_buttons(live, token="OTHER" if change == "replaced" else "MY68XJ")
+                if change == "deleted":
+                    live = None
+                elif change == "sender":
+                    live.sender_id = 999
+                elif change == "chat":
+                    live.chat_id = quiz.LINUXDO_CHAT
+                elif change == "topic":
+                    live.reply_to_msg_id = live.reply_to.reply_to_msg_id = live.reply_to.reply_to_top_id = 999
+                elif change == "target":
+                    live.text = live.text.replace("@my_player", "@someone_else")
+                elif change == "question":
+                    live.text = live.text.replace(STEM, "题干被更换了？")
+                elif change == "fetch_failed":
+                    live = TimeoutError("cannot verify original question")
+                self.actor.client.get_messages.side_effect = [self.msg, live]
+                self.msg.click.side_effect = None
+                self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。")
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_awaited_once()
+                if live is not None and not isinstance(live, Exception):
+                    if hasattr(live, "click"):
+                        live.click.assert_not_awaited()
+                self.assertEqual(self.state_entry()["status"], "skipped" if change == "fetch_failed" else "invalid")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_retry_obeys_controls_changed_during_fresh_question_fetch(self):
+        original_precheck = quiz.command_send_precheck
+        for index, stop in enumerate(("disabled", "paused", "identity_pause", "command_guard", "stopped", "answer_changed")):
+            with self.subTest(stop=stop), patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)), \
+                    patch.object(quiz, "command_send_precheck", wraps=original_precheck) as precheck:
+                self.enabled = True
+                self.actor.pause_event.set()
+                self.actor.is_running = True
+                self.actor.identity_pause_seconds = MagicMock(return_value=0)
+                self.msg = self.add_buttons(question_message(message_id=500 + index))
+                self.msg.click.side_effect = None
+                self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。")
+                async def fetch(*args, **kwargs):
+                    if self.actor.client.get_messages.await_count == 2:
+                        if stop == "disabled":
+                            self.enabled = False
+                        elif stop == "paused":
+                            self.actor.pause_event.clear()
+                        elif stop == "identity_pause":
+                            self.actor.identity_pause_seconds.return_value = 60
+                        elif stop == "command_guard":
+                            precheck.return_value = False
+                        elif stop == "stopped":
+                            self.actor.is_running = False
+                        else:
+                            q = quiz.parse_question(self.msg.text)
+                            quiz._update(lambda state: state["pending"].update({q.key: {"status": "conflict"}}))
+                    return self.msg
+                self.actor.client.get_messages = AsyncMock(side_effect=fetch)
+                await self.handle()
+                await self.finish()
+                self.msg.click.assert_awaited_once()
+                self.assertEqual(self.state_entry()["status"], "skipped")
+                quiz._update(lambda state: state["pending"].clear())
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_judgment_manual_answer_or_invalidation_cancels_callback_retry_wait(self):
+        for index, completion in enumerate(("judgment", "manual", "invalid")):
+            with self.subTest(completion=completion), patch.object(quiz, "CALLBACK_RETRY_DELAYS", (30, 30)):
+                self.msg = self.add_buttons(question_message(message_id=500 + index * 10))
+                self.msg.click.side_effect = None
+                self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。")
+                ready = asyncio.Event()
+                with patch.object(quiz.LOG, "warning", side_effect=lambda *args, **kwargs: ready.set()):
+                    await self.handle()
+                    await asyncio.wait_for(ready.wait(), 1)
+                self.assertEqual(self.state_entry()["status"], "queued")
+                if completion == "judgment":
+                    await quiz.maybe_handle_xuangu_quiz(self.actor, self.result_event(self.msg))
+                elif completion == "manual":
+                    manual = SimpleNamespace(**{**vars(self.msg), "id": self.msg.id + 1, "text": ".作答 C",
+                        "sender_id": 12345, "reply_to_msg_id": self.msg.id})
+                    await self.handle(manual)
+                else:
+                    invalid = SimpleNamespace(**{**vars(self.msg),
+                        "text": "【玄骨考校·题面失效】\n@my_player 未能及时作答..."})
+                    await self.handle(invalid)
+                await self.finish()
+                self.msg.click.assert_awaited_once()
+                self.assertEqual(self.state_entry()["status"], {"judgment": "correct", "manual": "manual", "invalid": "invalid"}[completion])
+                self.assertEqual(self.state_entry()["callback_outcome"], "rejected_expired")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_callback_retry_count_and_original_data_survive_worker_restart(self):
+        self.add_buttons()
+        self.msg.click.side_effect = None
+        self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。")
+        self.msg.get_sender = event(self.msg).get_sender
+        ready = asyncio.Event()
+        with patch.object(quiz, "CALLBACK_RETRY_DELAYS", (30, 30)), \
+                patch.object(quiz.LOG, "warning", side_effect=lambda *args, **kwargs: ready.set()):
+            await self.handle()
+            await asyncio.wait_for(ready.wait(), 1)
+            task = next(iter(self.actor._xuangu_quiz_tasks.values()))
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        saved = self.state_entry()
+        self.assertEqual(saved["status"], "queued")
+        self.assertEqual(len(saved["callback_attempts"]), 1)
+        self.actor = self.make_actor()  # Fresh worker, persisted attempt history.
+        with patch.object(quiz.time, "time", return_value=saved["callback_retry_at"] + 0.1), \
+                patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)):
+            await quiz.resume_pending_xuangu_quiz_events(self.actor)
+            await self.finish()
+            await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        self.assertEqual(self.msg.click.await_count, 3)
+        self.assertEqual(self.state_entry()["status"], "callback_rejected")
+        self.assertEqual(self.state_entry()["attempt_at"], saved["attempt_at"])
+        self.assertEqual(len(self.state_entry()["callback_attempts"]), 3)
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_callback_retry_respects_cached_rejection_and_send_deadline(self):
+        self.add_buttons()
+        self.msg.click.side_effect = None
+        self.msg.click.return_value = SimpleNamespace(message="这道题已经失效了。", cache_time=300)
+        await self.handle()
+        await self.finish()
+        self.msg.click.assert_awaited_once()
+        self.assertEqual(self.state_entry()["status"], "callback_rejected")
+        self.assertNotIn("callback_retry_at", self.state_entry())
+        self.assertEqual(self.state_entry()["callback_attempts"][0]["cache_time"], 300)
+
+    async def test_restart_cannot_retry_changed_target_or_button_or_fall_back_to_text(self):
+        for index, change in enumerate(("target", "button", "removed")):
+            with self.subTest(change=change), patch.object(quiz, "CALLBACK_RETRY_DELAYS", (30, 30)):
+                self.msg = self.add_buttons(question_message(message_id=600 + index))
+                self.msg.get_sender = event(self.msg).get_sender
+                first_click = self.msg.click
+                first_click.side_effect = None
+                first_click.return_value = SimpleNamespace(message="这道题已经失效了。")
+                ready = asyncio.Event()
+                with patch.object(quiz.LOG, "warning", side_effect=lambda *args, **kwargs: ready.set()):
+                    await self.handle()
+                    await asyncio.wait_for(ready.wait(), 1)
+                    task = next(iter(self.actor._xuangu_quiz_tasks.values()))
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                if change == "target":
+                    self.actor.avatars = ["问心子"]
+                    self.actor.avatar_usernames = {"avatar_player": "问心子"}
+                    self.msg.text = self.msg.text.replace("@my_player", "@avatar_player")
+                elif change == "button":
+                    self.add_buttons(self.msg, token="REPLACED")
+                else:
+                    self.msg.reply_markup = None
+                await quiz.resume_pending_xuangu_quiz_events(self.actor)
+                await self.finish()
+                first_click.assert_awaited_once()
+                if change == "button":
+                    self.msg.click.assert_not_awaited()
+                self.assertEqual(self.state_entry()["status"], "skipped" if change == "removed" else "invalid")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
+    async def test_cancelled_inflight_retry_cannot_resume_or_submit_again(self):
+        self.add_buttons()
+        retry_started, release = asyncio.Event(), asyncio.Event()
+        async def click(*, data):
+            if self.msg.click.await_count == 1:
+                return SimpleNamespace(message="这道题已经失效了。")
+            retry_started.set()
+            await release.wait()
+        self.msg.click.side_effect = click
+        with patch.object(quiz, "CALLBACK_RETRY_DELAYS", (0, 0)):
+            await self.handle()
+            await asyncio.wait_for(retry_started.wait(), 1)
+            task = next(iter(self.actor._xuangu_quiz_tasks.values()))
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await quiz.resume_pending_xuangu_quiz_events(self.actor)
+        self.assertEqual(self.msg.click.await_count, 2)
+        self.assertEqual(self.state_entry()["status"], "send_uncertain")
+        self.actor.send_and_wait_feedback_identity.assert_not_awaited()
+
     async def test_callback_acceptance_waits_for_actual_judgment(self):
         self.emit_result = False
         self.add_buttons()

@@ -34,6 +34,7 @@ JA_TOPIC = 7310786
 DEADLINE_SECONDS = 300
 SEND_MARGIN_SECONDS = 10
 RESULT_GRACE_SECONDS = 30
+CALLBACK_RETRY_DELAYS = (3, 10)
 LOG = logging.getLogger("xuangu_quiz")
 INTRO_PATTERNS = (
     ("玄骨考校", re.compile(r"^神念直入脑海，一个苍老的声音向 @(.+?) 提问[：:]")),
@@ -393,53 +394,139 @@ async def _answer(actor, msg, question, key, owner, identity):
         _record_result(current_actor, entry)
         LOG.info("[玄骨答题] [%s/%s] %s，回复题面 %s", current_actor.account_key, identity, command, key)
 
+    async def fetch_question():
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None
+        live = await asyncio.wait_for(actor.client.get_messages(msg.chat_id, ids=msg.id), timeout=min(15, remaining))
+        if (not live or getattr(live, "sender_id", None) != QUESTION_BOT_ID
+                or _event_key(live) != key
+                or parse_question(getattr(live, "text", "")) != question or not _scope(actor, live)
+                or target_identity(actor, question.target, live) != identity):
+            _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="题面已删除、失效或发生变化")
+            return None
+        return live
+
     async def click_answer(live, data):
-        if not dispatch_enabled(actor, callback=True):
+        while dispatch_enabled(actor, callback=True):
+            entry = _state().get("events", {}).get(key, {})
+            if entry.get("owner") != owner or entry.get("status") != "queued":
+                return
+            attempts = entry.get("callback_attempts", [])
+            if attempts:
+                # Only an explicit rejection permits another attempt. Persisted
+                # attempts and the retry time keep this limit across restarts.
+                if (attempts[-1].get("outcome") != "rejected_expired"
+                        or len(attempts) > len(CALLBACK_RETRY_DELAYS)
+                        or "callback_retry_at" not in entry):
+                    _set_event(key, expected_owner=owner, expected_status="queued", status="callback_rejected",
+                               reason="按钮请求没有可恢复的明确拒绝记录，停止自动作答")
+                    return
+                if entry.get("callback_data_hex") != data.hex():
+                    _set_event(key, expected_owner=owner, expected_status="queued", status="invalid",
+                               reason="重试前原题按钮发生变化")
+                    return
+                remaining = entry["callback_retry_at"] - time.time()
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(signal.wait(), timeout=min(remaining, max(0.01, deadline - time.time())))
+                        return  # A judgment or invalidation arrived while waiting.
+                    except asyncio.TimeoutError:
+                        pass
+                if not dispatch_enabled(actor, callback=True):
+                    return
+                live = await fetch_question()
+                if not live:
+                    return
+                if quiz_callback_data(live, letter) != data:
+                    _set_event(key, expected_owner=owner, expected_status="queued", status="invalid",
+                               reason="重试前答题按钮已移除或变化")
+                    return
+            if not dispatch_enabled(actor, callback=True):
+                return
+            attempt_number = 0
+            def claim(state):
+                nonlocal attempt_number
+                current = state["events"].get(key, {})
+                if (current.get("owner") != owner or current.get("status") != "queued"
+                        or answer_for(question, state) != letter):
+                    return
+                history = current.setdefault("callback_attempts", [])
+                if history and (history[-1].get("outcome") != "rejected_expired"
+                                or len(history) > len(CALLBACK_RETRY_DELAYS)
+                                or current.get("callback_retry_at", deadline) > time.time()):
+                    return
+                attempted_at = time.time()
+                history.append({"attempt_at": attempted_at, "data_hex": data.hex(), "outcome": "sending"})
+                current.setdefault("attempt_at", attempted_at)
+                current.update(status="sending", answer=letter, transport="callback", callback_outcome="sending",
+                               callback_data_hex=data.hex(), callback_data=data.decode("utf-8", errors="backslashreplace"))
+                current.pop("callback_retry_at", None)
+                attempt_number = len(history)
+            _update(claim)
+            if not attempt_number:
+                return
+
+            def record_response(outcome, response=None, reason=""):
+                received_at = time.time()
+                text = str(getattr(response, "message", "") or "")[:500]
+                cache_time = max(0, int(getattr(response, "cache_time", 0) or 0))
+                def record(state):
+                    current = state["events"].get(key, {})
+                    if current.get("owner") != owner:
+                        return
+                    history = current.get("callback_attempts", [])
+                    if len(history) != attempt_number:
+                        return
+                    history[-1].update(outcome=outcome, responded_at=received_at, response=text,
+                                       alert=bool(getattr(response, "alert", False)), cache_time=cache_time)
+                    current.update(callback_at=received_at, callback_response=text, callback_outcome=outcome)
+                    if current.get("status") != "sending":
+                        return  # Preserve a judgment received during the request.
+                    if outcome == "rejected_expired":
+                        current.update(status="callback_rejected", reason="机器人明确拒绝按钮作答：" + text)
+                        if attempt_number <= len(CALLBACK_RETRY_DELAYS):
+                            retry_at = received_at + max(CALLBACK_RETRY_DELAYS[attempt_number - 1], cache_time)
+                            if retry_at < deadline:
+                                current.update(status="queued", callback_retry_at=retry_at)
+                    elif outcome == "uncertain":
+                        current.update(status="send_uncertain", reason=reason)
+                    else:
+                        current.update(status="awaiting_result")
+                        current.pop("reason", None)
+                return _update(record).get("events", {}).get(key, {})
+
+            LOG.info("OUT [玄骨答题按钮 | %s/%s]:\n尝试点击 %s（%s），第 %s 次，题面 %s",
+                     actor.account_key, identity, letter, question.options[letter], attempt_number, key)
+            try:
+                response = await asyncio.wait_for(live.click(data=data), timeout=min(15, max(0.01, deadline - time.time())))
+            except Exception as exc:
+                record_response("uncertain", reason=f"按钮作答请求未确认（{type(exc).__name__}），不自动重发")
+                LOG.warning("[玄骨答题] [%s/%s] 题面 %s 按钮请求未确认：%s", actor.account_key, identity, key, type(exc).__name__)
+                return
+            if response is None:
+                record_response("uncertain", reason="按钮作答请求未确认，不自动重发")
+                LOG.warning("[玄骨答题] [%s/%s] 题面 %s 按钮请求没有响应，不自动重发", actor.account_key, identity, key)
+                return
+            response_text = clean_text(getattr(response, "message", ""))
+            rejected = response_text.rstrip("。.!！") == "这道题已经失效了"
+            entry = record_response("rejected_expired" if rejected else "response_received", response)
+            if rejected:
+                retry_at = entry.get("callback_retry_at") if entry.get("status") == "queued" else None
+                LOG.warning("IN [玄骨按钮回执 | %s/%s]:\n题面 %s 第 %s 次被拒绝：%s；%s",
+                            actor.account_key, identity, key, attempt_number, response_text,
+                            f"{max(0, retry_at - time.time()):.1f} 秒后重新核对原题按钮" if retry_at is not None else "停止自动点击")
+                if retry_at is not None:
+                    continue
+            else:
+                LOG.info("IN [玄骨按钮回执 | %s/%s]:\n题面 %s 第 %s 次响应：%s；答题结果以正式判题为准",
+                         actor.account_key, identity, key, attempt_number, response_text or "（无提示文字）")
             return
-        accepted = False
-        def claim(state):
-            nonlocal accepted
-            entry = state["events"].get(key, {})
-            if (entry.get("owner") == owner and entry.get("status") == "queued"
-                    and answer_for(question, state) == letter):
-                entry.update(status="sending", attempt_at=time.time(), answer=letter,
-                             transport="callback", callback_data_hex=data.hex(),
-                             callback_data=data.decode("utf-8", errors="backslashreplace"))
-                accepted = True
-        _update(claim)
-        if not accepted:
-            return
-        # Once dispatched, an exception or empty callback response is ambiguous.
-        # Never fall back to a group command or retry the button in that case.
-        LOG.info("OUT [玄骨答题按钮 | %s/%s]:\n点击 %s（%s），题面 %s",
-                 actor.account_key, identity, letter, question.options[letter], key)
-        try:
-            response = await asyncio.wait_for(live.click(data=data), timeout=min(15, max(0.01, deadline - time.time())))
-        except Exception as exc:
-            _set_event(key, expected_owner=owner, expected_status="sending", status="send_uncertain",
-                       reason=f"按钮作答请求未确认（{type(exc).__name__}），不自动重发")
-            LOG.warning("[玄骨答题] [%s/%s] 题面 %s 按钮请求未确认：%s", actor.account_key, identity, key, type(exc).__name__)
-            return
-        if response is None:
-            _set_event(key, expected_owner=owner, expected_status="sending", status="send_uncertain",
-                       reason="按钮作答请求未确认，不自动重发")
-            return
-        _set_event(key, expected_owner=owner,
-                   callback_at=time.time(), callback_response=str(getattr(response, "message", "") or "")[:500])
-        _set_event(key, expected_owner=owner, expected_status="sending", status="awaiting_result")
 
     try:
         with telegram_event_message_context(msg):
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                return
-            live = await asyncio.wait_for(actor.client.get_messages(msg.chat_id, ids=msg.id), timeout=min(15, remaining))
-            live_question = parse_question(getattr(live, "text", "")) if live else None
-            if (not live or getattr(live, "sender_id", None) != QUESTION_BOT_ID
-                    or _event_key(live) != key
-                    or live_question != question or not _scope(actor, live)
-                    or target_identity(actor, question.target, live) != identity):
-                _set_event(key, expected_owner=owner, expected_status="queued", status="invalid", reason="题面已删除、失效或发生变化")
+            live = await fetch_question()
+            if not live:
                 return
             original_data = quiz_callback_data(msg, letter)
             callback_data = quiz_callback_data(live, letter)
@@ -448,7 +535,7 @@ async def _answer(actor, msg, question, key, owner, identity):
                 return
             if callback_data:
                 await click_answer(live, callback_data)
-            elif getattr(live, "reply_markup", None):
+            elif getattr(live, "reply_markup", None) or _state().get("events", {}).get(key, {}).get("transport") == "callback":
                 _set_event(key, expected_owner=owner, expected_status="queued", status="skipped", reason="原题按钮无法核实，跳过作答")
             elif _writable(actor):
                 with guarded_one_shot_send(command, allowed, sent):
@@ -502,7 +589,11 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
                 entry = data["events"].get(parent_key, {})
                 if entry and entry.get("status") in {"queued", "observed", "unknown"}:
                     entry.update(status="manual", manual_message_id=msg.id)
-            _update(manual)
+            updated = _update(manual).get("events", {}).get(parent_key, {})
+            if updated.get("status") == "manual":
+                signal = (getattr(actor, "_xuangu_quiz_signals", None) or {}).get(parent_key)
+                if signal:
+                    signal.set()
         return False
     if not is_quiz_message(body):
         return False
@@ -559,7 +650,8 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
                 recorded = entry["result"]
                 result_msg = SimpleNamespace(id=recorded["message_id"], chat_id=entry["chat_id"], text=recorded["text"])
                 record_cultivation_delta_from_text(actor, recorded["text"], identity=entry["identity"], logger=LOG, source="玄骨答题", msg=result_msg)
-                LOG.info("IN [玄骨答题 | %s/%s]:\n%s：%s", actor.account_key, entry["identity"], entry["kind"], result["outcome"])
+                note = "（自动按钮最近一次被明确拒绝，不能据此归因于自动提交）" if entry.get("callback_outcome") == "rejected_expired" else ""
+                LOG.info("IN [玄骨答题 | %s/%s]:\n%s：%s%s", actor.account_key, entry["identity"], entry["kind"], result["outcome"], note)
             signal = (getattr(actor, "_xuangu_quiz_signals", None) or {}).get(key)
             if signal:
                 signal.set()
@@ -579,8 +671,9 @@ async def maybe_handle_xuangu_quiz(actor, event, text=None, sender=None, *, resu
     def observe(data):
         nonlocal claimed
         entry = data["events"].setdefault(key, _question_entry(msg, question))
-        if entry["question_key"] != question.key or entry["options"] != question.options:
-            entry.update(status="invalid", reason="同一消息的题面发生变化")
+        if (entry["question_key"] != question.key or entry["options"] != question.options
+                or entry["target"].casefold() != question.target.casefold()):
+            entry.update(status="invalid", reason="同一消息的题面或点名对象发生变化")
             return
         if not letter:
             _remember_pending(data, entry, reason="conflict" if (data["pending"].get(question.key) or {}).get("status") == "conflict" else "unknown")
