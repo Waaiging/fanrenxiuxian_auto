@@ -83,7 +83,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 5
+WORLD_BOSS_DIAGNOSTIC_VERSION = 6
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -127,6 +127,9 @@ WORLD_BOSS_HOLD_MAX_MS = 1250
 WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS = 700
 WORLD_BOSS_HOLD_SKEW_HISTORY_SIZE = 5
 WORLD_BOSS_HOLD_SKEW_WEIGHT = 0.35
+# A request much slower than this battle's normal route describes a transient
+# ticket/arrival delay, not a hold bias to carry into the next window.
+WORLD_BOSS_HOLD_FEEDBACK_MIN_RTT_LIMIT_MS = 400
 WORLD_BOSS_HOLD_PLAN_MIN_MS = WORLD_BOSS_HOLD_MIN_MS + 40
 WORLD_BOSS_HOLD_PLAN_MAX_MS = WORLD_BOSS_HOLD_MAX_MS - 40
 # The charge request's latency already counts towards the hold, because the press
@@ -955,19 +958,31 @@ class WorldBossMonitor:
             await self.sleep(remaining)
             return not self._boss_stop_requested()
 
-        sleep_task = asyncio.create_task(self.sleep(remaining))
+        # Register the deadline before yielding. A child sleep task can start
+        # late after an event-loop stall and then sleep the *old* remaining
+        # duration again. An absolute timer cannot add that extra delay.
+        loop = asyncio.get_running_loop()
+        sleep_waiter = loop.create_future()
+
+        def wake() -> None:
+            if not sleep_waiter.done():
+                sleep_waiter.set_result(None)
+
+        deadline = loop.time() + float(target) - self.monotonic()
+        timer = loop.call_at(deadline, wake)
         stop_task = asyncio.create_task(self._wait_for_boss_stop())
         try:
             done, _ = await asyncio.wait(
-                (sleep_task, stop_task),
+                (sleep_waiter, stop_task),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            return stop_task not in done
+            return stop_task not in done and not self._boss_stop_requested()
         finally:
-            for task in (sleep_task, stop_task):
+            timer.cancel()
+            for task in (sleep_waiter, stop_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(sleep_task, stop_task, return_exceptions=True)
+            await asyncio.gather(sleep_waiter, stop_task, return_exceptions=True)
 
     def _history(self) -> list[dict[str, Any]]:
         state = getattr(self.actor, "state", None)
@@ -2108,6 +2123,25 @@ class WorldBossMonitor:
                     return value
         return None
 
+    @classmethod
+    def _hold_feedback_quality(
+        cls, charge_request: dict[str, Any], hit_request: dict[str, Any], request_lead_ms: int,
+    ) -> dict[str, Any]:
+        """Only learn a persistent hold bias from comparable one-shot requests."""
+        limit = max(float(WORLD_BOSS_HOLD_FEEDBACK_MIN_RTT_LIMIT_MS), 4 * request_lead_ms)
+        quality: dict[str, Any] = {"eligible": False, "request_limit_ms": int(round(limit))}
+        for name, trace in (("charge", charge_request), ("hit", hit_request)):
+            duration = cls._finite_ms(trace.get("total_duration_ms"))
+            quality[name + "_request_ms"] = cls._rounded_ms(duration)
+            attempts = trace.get("attempts") or []
+            if duration is None or duration < 0 or not attempts:
+                return {**quality, "reason": "request_timing_missing"}
+            if len(attempts) != 1:
+                return {**quality, "reason": name + "_request_retried"}
+            if duration > limit:
+                return {**quality, "reason": "slow_" + name + "_request"}
+        return {**quality, "eligible": True, "reason": "comparable_requests"}
+
     def _record_hold_skew(self, server_hold_ms: Any, local_hold_ms: Any) -> float | None:
         """Update a robust EWMA of ``server hold - local hold``.
 
@@ -2951,9 +2985,36 @@ class WorldBossMonitor:
             boss_hp = self._boss_hp_from_response(payload, hit)
             if boss_hp is not None and boss_hp <= 0:
                 self._mark_boss_defeated("boss_defeated", boss_hp)
+                if (
+                    hit.get("damageYi") == 0 and not isinstance(hit.get("damageYi"), bool)
+                    and hit.get("perfect") is False
+                    and not any(key in hit for key in ("deltaMs", "holdMs", "serverHoldMs", "server_hold_ms"))
+                ):
+                    # The API also returns HTTP 200 after another player wins.
+                    # Its compact zero-damage receipt has no hit measurement.
+                    # Keep our real release in the proof, but do not count it as
+                    # a hit, a transport failure, or an unsent/skipped action.
+                    diagnostic.update({
+                        "request_completed_elapsed_ms": max(0, int((self.monotonic() - battle_start) * 1000)),
+                        "request": request_trace, "server_status": "ended", "http_status": 200,
+                        "accepted_perfect": False, "server_hit": _diagnostic_value(hit),
+                        "stop_reason": "boss_defeated_before_hit",
+                    })
+                    return {
+                        "action": action, "ok": False, "matched": matched, "perfect": perfect,
+                        "accepted_perfect": False, "damage": 0.0, "ended": True,
+                        "diagnostic": diagnostic,
+                    }
             accepted_perfect = bool(hit.get("perfect")) if "perfect" in hit else perfect
             server_hold_ms = self._server_hold_ms(hit)
-            hold_skew_sample_ms = self._record_hold_skew(server_hold_ms, hold_ms)
+            hold_feedback = self._hold_feedback_quality(charge_trace, request_trace, request_lead_ms)
+            hold_skew_sample_ms = (
+                self._record_hold_skew(server_hold_ms, hold_ms) if hold_feedback["eligible"] else None
+            )
+            hold_feedback["update_applied"] = hold_skew_sample_ms is not None
+            if hold_feedback["eligible"] and hold_skew_sample_ms is None:
+                hold_feedback["reason"] = "unusable_hold_sample"
+            diagnostic["hold_feedback"] = hold_feedback
             request_completed_elapsed_ms = max(
                 0,
                 int((self.monotonic() - battle_start) * 1000),
@@ -3667,7 +3728,8 @@ class WorldBossMonitor:
         actions.sort(key=lambda item: item["t"])
         successful_hits = sum(1 for item in hit_results if item["ok"])
         skipped_hits = sum(1 for item in hit_results if item.get("skipped"))
-        failed_hits = len(hit_results) - successful_hits - skipped_hits
+        ended_hits = sum(1 for item in hit_results if item.get("ended"))
+        failed_hits = len(hit_results) - successful_hits - skipped_hits - ended_hits
         local_matched_hits = sum(1 for item in hit_results if item.get("matched"))
         local_perfect_hits = sum(1 for item in hit_results if item.get("perfect"))
         accepted_perfect_hits = sum(
@@ -3686,7 +3748,7 @@ class WorldBossMonitor:
         )
         hit_error_counts: dict[str, int] = {}
         for item in hit_results:
-            if item.get("ok") or item.get("skipped"):
+            if item.get("ok") or item.get("skipped") or item.get("ended"):
                 continue
             code = str(item.get("error") or "unknown")
             hit_error_counts[code] = hit_error_counts.get(code, 0) + 1
@@ -3812,6 +3874,7 @@ class WorldBossMonitor:
             "local_perfect_count": local_perfect_hits,
             "failed_hit_count": failed_hits,
             "skipped_hit_count": skipped_hits,
+            "ended_hit_count": ended_hits,
             "hit_error_counts": hit_error_counts,
             "window_count": len(windows),
             "damage_yi_total": damage_yi_total,
@@ -3865,6 +3928,40 @@ class WorldBossMonitor:
         }
         await self._save_checkpoint()
 
+    @classmethod
+    def _reconcile_finish_counts(cls, outcome: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Use valid settlement counts without changing the submitted proof."""
+        reported_hits = max(0, int(outcome.get("hit_count") or 0))
+        reported_perfects = max(0, int(outcome.get("perfect_count") or 0))
+        windows = max(0, int(outcome.get("window_count") or WORLD_BOSS_WINDOW_LIMIT))
+
+        def count(key: str, maximum: int) -> int | None:
+            raw = result.get(key)
+            value = cls._finite_ms(raw) if not isinstance(raw, bool) else None
+            if value is None or not value.is_integer() or not 0 <= value <= maximum:
+                return None
+            return int(value)
+
+        hits, hits_source = reported_hits, "realtime_responses"
+        for key in ("hits", "realtime_hit_count"):
+            value = count(key, windows)
+            if value is not None:
+                hits, hits_source = value, "finish." + key
+                break
+        perfects = count("perfects", hits)
+        perfects_source = "finish.perfects"
+        if perfects is None:
+            perfects = min(reported_perfects, hits)
+            perfects_source = ("realtime_responses" if perfects == reported_perfects
+                               else "bounded_realtime_responses")
+        outcome.update(hit_count=hits, perfect_count=perfects)
+        return {
+            "reported_hits": reported_hits, "reported_perfects": reported_perfects,
+            "hits": hits, "perfects": perfects,
+            "hits_source": hits_source, "perfects_source": perfects_source,
+            "mismatch": (hits, perfects) != (reported_hits, reported_perfects),
+        }
+
     async def _submit_finish(self, entry: WorldBossEntry, checkpoint: dict[str, Any]) -> dict[str, Any]:
         outcome = checkpoint["outcome"]
         trace: dict[str, Any] = {}
@@ -3905,7 +4002,10 @@ class WorldBossMonitor:
             grade=str(result.get("grade") or ""), score=int(result.get("score") or 0),
             player_hp=int(result.get("player_hp") if result.get("player_hp") is not None else outcome["player_hp"]),
         )
-        outcome["diagnostics"]["finish"] = {"request": trace, "server_result": _diagnostic_value(result)}
+        outcome["diagnostics"]["finish"] = {
+            "request": trace, "server_result": _diagnostic_value(result),
+            "counts": self._reconcile_finish_counts(outcome, result),
+        }
         await _run_blocking(self.recovery_store.delete, entry.fingerprint, executor=self._world_boss_checkpoint_executor())
         self._checkpoint = None
         return outcome
@@ -4109,6 +4209,7 @@ class WorldBossMonitor:
         hp = int(outcome.get("player_hp") or 0)
         failed = int(outcome.get("failed_hit_count") or 0)
         skipped = int(outcome.get("skipped_hit_count") or 0)
+        ended = int(outcome.get("ended_hit_count") or 0)
         summary = f"{grade} {score}分；命中 {hits}/{total}，完美 {perfects}，余血 {hp}"
         local_perfects = int(outcome.get("local_perfect_count") or perfects)
         if local_perfects != perfects:
@@ -4126,6 +4227,8 @@ class WorldBossMonitor:
                     summary += f"（{details}）"
         if skipped:
             summary += f"；Boss结束后跳过 {skipped} 次无效请求"
+        if ended:
+            summary += f"；Boss结束回执 {ended} 次（未计命中）"
         damage_summary = WorldBossMonitor._damage_summary(outcome)
         if damage_summary:
             summary += f"；{damage_summary}"
