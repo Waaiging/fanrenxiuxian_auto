@@ -83,7 +83,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 6
+WORLD_BOSS_DIAGNOSTIC_VERSION = 7
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -1905,23 +1905,41 @@ class WorldBossMonitor:
         exit_reason = "window_count_reached"
         last_poll_at: float | None = None
         polling = {"request_count": 0, "wait_count": 0, "max_request_ms": 0,
-                   "max_poll_gap_ms": 0, "max_queue_delay_ms": 0, "max_bookkeeping_ms": 0}
+                   "max_poll_gap_ms": 0, "max_queue_delay_ms": 0, "max_bookkeeping_ms": 0,
+                   "max_request_network_ms": 0, "max_sleep_lateness_ms": 0,
+                   "slow_poll_count": 0, "max_gap_from_ms": 0, "max_gap_to_ms": 0,
+                   "max_gap_request_ms": 0, "max_gap_sleep_ms": 0,
+                   "max_gap_sleep_lateness_ms": 0, "max_gap_processing_ms": 0}
+        previous_request_ms = previous_sleep_ms = previous_sleep_lateness_ms = 0
 
         def record_poll() -> None:
-            polling["max_request_ms"] = max(
-                polling["max_request_ms"],
-                max(0, int(round((self.monotonic() - requested_at) * 1000))),
-            )
+            nonlocal previous_request_ms
+            previous_request_ms = max(0, int(round((self.monotonic() - requested_at) * 1000)))
+            polling["max_request_ms"] = max(polling["max_request_ms"], previous_request_ms)
             for attempt in trace.get("attempts", []):
                 if not isinstance(attempt, dict):
                     continue
+                polling["max_request_network_ms"] = max(
+                    polling["max_request_network_ms"], int(attempt.get("network_duration_ms") or 0),
+                )
                 for field in ("queue_delay_ms", "bookkeeping_ms"):
                     polling["max_" + field] = max(polling["max_" + field], int(attempt.get(field) or 0))
+
+        async def poll_sleep(seconds: float) -> None:
+            nonlocal previous_sleep_ms, previous_sleep_lateness_ms
+            started = self.monotonic()
+            await self.sleep(seconds)
+            finished = self.monotonic()
+            previous_sleep_ms = max(0, int(round((finished - started) * 1000)))
+            previous_sleep_lateness_ms = max(0, int(round((finished - started - seconds) * 1000)))
+            polling["max_sleep_lateness_ms"] = max(
+                polling["max_sleep_lateness_ms"], previous_sleep_lateness_ms,
+            )
 
         async def wait_for_next_poll() -> None:
             # The official client measures the interval from request start.
             # Adding another 360 ms after HTTP completion loses useful lead.
-            await self.sleep(max(
+            await poll_sleep(max(
                 WORLD_BOSS_WINDOW_DRAIN_SECONDS,
                 WORLD_BOSS_WINDOW_POLL_SECONDS - (self.monotonic() - requested_at),
             ))
@@ -1963,9 +1981,21 @@ class WorldBossMonitor:
                 requested_at = self.monotonic()
                 polling["request_count"] += 1
                 if last_poll_at is not None:
-                    polling["max_poll_gap_ms"] = max(
-                        polling["max_poll_gap_ms"], int(round((requested_at - last_poll_at) * 1000)),
-                    )
+                    gap_ms = max(0, int(round((requested_at - last_poll_at) * 1000)))
+                    if gap_ms > 1000:
+                        polling["slow_poll_count"] += 1
+                    if gap_ms > polling["max_poll_gap_ms"]:
+                        # Keep the components of this same gap together. The
+                        # independent maxima can belong to different requests.
+                        polling.update(
+                            max_poll_gap_ms=gap_ms,
+                            max_gap_from_ms=int(round((last_poll_at - battle_start) * 1000)),
+                            max_gap_to_ms=int(round((requested_at - battle_start) * 1000)),
+                            max_gap_request_ms=previous_request_ms,
+                            max_gap_sleep_ms=previous_sleep_ms,
+                            max_gap_sleep_lateness_ms=previous_sleep_lateness_ms,
+                            max_gap_processing_ms=max(0, gap_ms - previous_request_ms - previous_sleep_ms),
+                        )
                 last_poll_at = requested_at
                 try:
                     data = await self._request(
@@ -2071,7 +2101,7 @@ class WorldBossMonitor:
                     exit_reason = "server_done"
                     break
                 if window is not None:
-                    await self.sleep(WORLD_BOSS_WINDOW_DRAIN_SECONDS)
+                    await poll_sleep(WORLD_BOSS_WINDOW_DRAIN_SECONDS)
                 else:
                     polling["wait_count"] += 1
                     await wait_for_next_poll()
@@ -2842,18 +2872,26 @@ class WorldBossMonitor:
 
         strike_ms = target_ms
         min_hold_strike_ms = None
+        required_hold_strike_ms = None
+        perfect_deadline_ms = None
+        hold_margin_reduced = False
         if charge_required and charge_ticket and charge_started_elapsed_ms >= 0:
             # A late reveal cannot reach the minimum hold by the ideal strike time.
             # Delaying the strike buys hold, but only helps while the later moment
             # still sits inside the perfect tolerance; past that, accuracy wins.
             min_hold_strike_ms = charge_started_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS
+            required_hold_strike_ms = min_hold_strike_ms
             if request_lead_ms > 0 and charge_received_elapsed_ms >= 0:
                 # A slow charge response may mean the ticket was only just minted.
                 # Estimate its age using the normal return + outbound delay, not
                 # half of this abnormally slow request. Buy actual holding time
                 # when it still fits; keep reporting the real press/release gap.
+                required_hold_strike_ms = max(
+                    required_hold_strike_ms,
+                    charge_received_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS - 2 * request_lead_ms,
+                )
                 min_hold_strike_ms = max(
-                    min_hold_strike_ms,
+                    required_hold_strike_ms,
                     charge_received_elapsed_ms + WORLD_BOSS_HOLD_MIN_MS + 40 - 2 * request_lead_ms,
                 )
             if min_hold_strike_ms > strike_ms:
@@ -2861,11 +2899,17 @@ class WorldBossMonitor:
                     int(window["centerMs"]) + int(window["perfectMs"]) - 40
                     - request_lead_ms - drift_ms
                 )
+                candidate_ms = min(min_hold_strike_ms, perfect_deadline_ms)
                 if (
-                    min_hold_strike_ms <= perfect_deadline_ms
-                    and min_hold_strike_ms - charge_started_elapsed_ms <= WORLD_BOSS_HOLD_MAX_MS
+                    candidate_ms >= required_hold_strike_ms
+                    and candidate_ms > strike_ms
+                    and candidate_ms - charge_started_elapsed_ms <= WORLD_BOSS_HOLD_MAX_MS
                 ):
-                    strike_ms = min_hold_strike_ms
+                    # A few missing milliseconds of optional hold margin must
+                    # not discard a feasible real hold. Keep the 40 ms arrival
+                    # margin and both actual/predicted minimum hold constraints.
+                    strike_ms = candidate_ms
+                    hold_margin_reduced = candidate_ms < min_hold_strike_ms
         target = battle_start + strike_ms / 1000.0
 
         if not await self._sleep_until(target):
@@ -2932,6 +2976,9 @@ class WorldBossMonitor:
                 "wake_lateness_ms": charge_wake_lateness_ms,
                 "checkpoint_duration_ms": checkpoint_duration_ms,
                 "minimum_hold_target_ms": min_hold_strike_ms,
+                "required_hold_target_ms": required_hold_strike_ms,
+                "perfect_deadline_ms": perfect_deadline_ms,
+                "hold_margin_reduced": hold_margin_reduced,
                 "granted": bool(charge_ticket),
                 "error": charge_error,
                 "request": charge_trace,
