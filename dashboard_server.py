@@ -5760,6 +5760,7 @@ async def automation_settings_control(
         with AUTOMATION_SETTINGS_LOCK:
             settings = save_automation_settings(
                 world_boss_participants=participants,
+                nangongque_boss_participants=payload.get("nangongque_boss_participants"),
                 mulan_support_mode=mode,
                 star_gazing_lead_seconds=star_gazing.get("lead_seconds"),
                 miniapp_beast_abyss_power_min=abyss.get("power_min"),
@@ -5804,6 +5805,9 @@ async def automation_settings_control(
             "world boss participants must be a list": "Boss 参战身份列表格式错误",
             "invalid world boss participant": "Boss 参战身份无效",
             "multiple world boss identities per account": "每个账号最多选择一个 Boss 参战身份",
+            "Nangongque participants must be a list": "南宫阙参战身份列表格式错误",
+            "invalid Nangongque participant": "南宫阙参战身份无效",
+            "multiple Nangongque identities per account": "每个账号最多选择一个南宫阙参战身份",
             "invalid Mulan support mode": "慕兰支援参数必须是斥候、破灯、奇袭或护阵",
             "invalid star gazing lead seconds": "观星提前量必须是 -120 至 120 秒的整数（负数表示显化后发送）",
             "invalid Mini App beast abyss power range": "万兽谷探渊战力区间必须是非负整数，且最大值不能小于最小值",

@@ -25,6 +25,7 @@ import uuid
 
 from world_boss_turnstile import (
     WorldBossTurnstileBroker, TurnstileRequestError, MAX_TOKEN_LENGTH, BROWSER_ORIGIN,
+    BROWSER_ACTIVITIES,
 )
 
 
@@ -91,6 +92,7 @@ class NativeTurnstileBrowser:
         self.connection = None
         self.sequence = 0
         self.origin = ""
+        self.activity = ""
 
     @staticmethod
     def _remaining(deadline, still_pending=None, code="turnstile_browser_timeout"):
@@ -206,10 +208,12 @@ class NativeTurnstileBrowser:
             raise BrowserVerificationError("browser_script_error")
         return result.get("result", {}).get("value")
 
-    def prepare(self, origin=ORIGIN, *, timeout=45, on_event=None, still_pending=None):
+    def prepare(self, origin=ORIGIN, *, timeout=45, on_event=None, still_pending=None,
+                activity="qingyuanzi"):
         """Warm the normal browser and page; no widget or token is created here."""
-        if str(origin).rstrip("/") != ORIGIN:
+        if str(origin).rstrip("/") != ORIGIN or activity not in BROWSER_ACTIVITIES:
             raise BrowserVerificationError("browser_origin_not_allowed")
+        page_path, action = BROWSER_ACTIVITIES[activity]
         deadline = time.monotonic() + max(0, min(90, float(timeout)))
         if on_event:
             on_event("browser_starting", "")
@@ -217,20 +221,28 @@ class NativeTurnstileBrowser:
         if on_event:
             on_event("browser_ready", "")
         self.command("Page.bringToFront", deadline=deadline, still_pending=still_pending)
-        if self.origin != origin:
-            self.command("Page.navigate", {"url": ORIGIN + "/miniapp/xianxia-world-boss"},
+        if self.origin != origin or self.activity != activity:
+            self.command("Page.navigate", {"url": ORIGIN + page_path},
                          deadline=deadline, still_pending=still_pending)
             while True:
                 self._remaining(deadline, still_pending, "turnstile_script_unavailable")
-                if self.evaluate("Boolean(window.turnstile && window.__QYZ_TURNSTILE_CONFIG__)",
+                # Navigation is asynchronous. An old page's still-live config
+                # must never mint a token for the other activity's action.
+                ready = ("Boolean(window.turnstile && window.__QYZ_TURNSTILE_CONFIG__"
+                         " && location.origin === " + json.dumps(ORIGIN)
+                         + " && location.pathname === " + json.dumps(page_path)
+                         + " && window.__QYZ_TURNSTILE_CONFIG__.action === " + json.dumps(action) + ")")
+                if self.evaluate(ready,
                                  deadline=deadline, still_pending=still_pending):
                     self.origin = origin
+                    self.activity = activity
                     break
                 time.sleep(min(0.25, self._remaining(deadline, still_pending, "turnstile_script_unavailable")))
         if on_event:
             on_event("page_ready", "")
 
-    def verify(self, origin=ORIGIN, *, timeout=55, on_event=None, still_pending=None):
+    def verify(self, origin=ORIGIN, *, timeout=55, on_event=None, still_pending=None,
+               activity="qingyuanzi"):
         deadline = time.monotonic() + max(0, min(90, float(timeout)))
 
         def emit(event, code=""):
@@ -238,7 +250,8 @@ class NativeTurnstileBrowser:
                 on_event(event, code)
 
         self.prepare(origin, timeout=max(0, deadline - time.monotonic()),
-                     on_event=on_event, still_pending=still_pending)
+                     on_event=on_event, still_pending=still_pending,
+                     **({"activity": activity} if activity != "qingyuanzi" else {}))
         emit("helper_ready")
         generation = uuid.uuid4().hex
         self.evaluate("""(generation => {
@@ -327,6 +340,7 @@ class NativeTurnstileBrowser:
                 pass
         self.connection = None
         self.origin = ""
+        self.activity = ""
         if self.process is not None:
             # xvfb-run may exit before its children. Always terminate this
             # launch's process group, even when the wrapper has already exited.
@@ -387,7 +401,8 @@ class AutomaticTurnstileWorker:
 
         try:
             self.browser.prepare(row["origin"], timeout=min(45, row["expires_epoch"] - self.broker.clock()),
-                                 still_pending=pending)
+                                 still_pending=pending,
+                                 **({"activity": row["activity"]} if row.get("activity", "qingyuanzi") != "qingyuanzi" else {}))
             self.warmup_ready = True
             LOG.info("Qing Yuanzi browser prewarm ready in %sms", round((self.clock() - started) * 1000))
         except BrowserVerificationError as exc:
@@ -406,7 +421,9 @@ class AutomaticTurnstileWorker:
         self.last_attempt = {key: value for key, value in self.last_attempt.items() if key in live}
         rows = [row for row in rows if self.attempts.get(row["request_id"], 0) < self.max_attempts
                 and self.clock() - self.last_attempt.get(row["request_id"], -1000) >= 5]
-        rows.sort(key=lambda row: (self.attempts.get(row["request_id"], 0), float(row.get("created_epoch") or 0)))
+        rows.sort(key=lambda row: (self.attempts.get(row["request_id"], 0),
+                                  float(row.get("expires_epoch") or 0),
+                                  float(row.get("created_epoch") or 0)))
         if not rows:
             if not live and self._warmup():
                 return False
@@ -435,7 +452,8 @@ class AutomaticTurnstileWorker:
             self.broker.record_browser_event(request_id, stage, code, source="automatic")
 
         try:
-            token = self.browser.verify(row.get("origin"), timeout=budget, on_event=event, still_pending=pending)
+            token = self.browser.verify(row.get("origin"), timeout=budget, on_event=event, still_pending=pending,
+                                        **({"activity": row["activity"]} if row.get("activity", "qingyuanzi") != "qingyuanzi" else {}))
             if pending():
                 self.broker.submit_token(request_id, token)
                 LOG.info("[%s/%s] automatic browser token submitted", row.get("account"), row.get("identity"))

@@ -237,7 +237,7 @@ def _error_diagnostics(exc: BaseException) -> dict[str, Any]:
 class _PersistentWorldBossJsonClient:
     """Reuse idle connections without serializing polling and timed strikes."""
 
-    def __init__(self, origin: str) -> None:
+    def __init__(self, origin: str, *, referer_path: str = "/miniapp/xianxia-world-boss") -> None:
         parsed = urllib.parse.urlsplit(str(origin or "").strip())
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise MiniAppBeastError("invalid_entry_url")
@@ -246,6 +246,7 @@ class _PersistentWorldBossJsonClient:
         )
         self.scheme = parsed.scheme
         self.hostname = parsed.hostname
+        self.referer_path = referer_path
         self.port = parsed.port
         self._idle: list[tuple[float, http.client.HTTPConnection]] = []
         self._lock = threading.Lock()
@@ -287,7 +288,7 @@ class _PersistentWorldBossJsonClient:
             "Content-Type": "application/json",
             "Content-Length": str(len(body)),
             "Origin": self.origin,
-            "Referer": self.origin.rstrip("/") + "/miniapp/xianxia-world-boss",
+            "Referer": self.origin.rstrip("/") + self.referer_path,
             "User-Agent": "Mozilla/5.0 Telegram-Android/11.0",
             "Connection": "keep-alive",
         }
@@ -401,15 +402,27 @@ def extract_world_boss_entry(
     sender_username: str = "",
 ) -> WorldBossEntry | None:
     """Extract and validate the dynamic world-boss entry without exposing its token."""
+    return extract_world_event_entry(
+        message, sender_username=sender_username,
+        title_markers=WORLD_BOSS_TITLE_MARKERS, button_text=WORLD_BOSS_BUTTON_TEXT,
+        token_prefix=WORLD_BOSS_TOKEN_PREFIX,
+    )
+
+
+def extract_world_event_entry(
+    message: Any, *, sender_username: str = "", title_markers: tuple[str, ...],
+    button_text: str, token_prefix: str,
+) -> WorldBossEntry | None:
+    """Validate a public announcement and its activity-specific Telegram button."""
 
     text = _message_text(message)
-    if not all(marker in text for marker in WORLD_BOSS_TITLE_MARKERS):
+    if not all(marker in text for marker in title_markers):
         return None
 
     selected_url = ""
     for row in getattr(message, "buttons", None) or []:
         for button in row:
-            if _normalized_button_text(getattr(button, "text", "")) != WORLD_BOSS_BUTTON_TEXT:
+            if _normalized_button_text(getattr(button, "text", "")) != button_text:
                 continue
             selected_url = _button_url(button)
             if selected_url:
@@ -440,7 +453,7 @@ def extract_world_boss_entry(
     query = urllib.parse.parse_qs(parsed.query)
     token = str((query.get("startapp") or query.get("start_param") or [""])[0]).strip()
     if (
-        not token.startswith(WORLD_BOSS_TOKEN_PREFIX)
+        not token.startswith(token_prefix)
         or len(token) > 160
         or not re.fullmatch(r"[A-Za-z0-9_-]+", token)
     ):
@@ -452,7 +465,7 @@ def extract_world_boss_entry(
     return WorldBossEntry(
         message_id=message_id,
         chat_id=getattr(message, "chat_id", None),
-        origin=miniapp_origin(selected_url),
+        origin=miniapp_origin("https://t.me/" + bot_username),
         bot_username=bot_username,
         fingerprint=fingerprint,
         token=token,

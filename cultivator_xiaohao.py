@@ -99,6 +99,7 @@ from miniapp_fishing import MiniAppFishingAutomation
 from miniapp_inventory import MiniAppInventoryWorker
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
+from nangongque_boss import install_nangongque_boss_monitor
 from telegram_message_logging import log_addressed_message_if_needed
 from log_utils import (
     CommandLogFilter, cap_command_retries, command_send_allowed, command_send_precheck, handle_clear_history_command, handle_anti_bot_challenge,
@@ -7441,6 +7442,7 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             logger=log,
             transport=miniapp_router.transport,
         )
+        await install_nangongque_boss_monitor(self, self.account_key, logger=log, transport=miniapp_router.transport)
         log.info("Mention/reply log capture active for chats %s", self.target_chat_ids)
         @self.client.on(events.NewMessage(chats=self.target_chat_ids))
         @routed_telegram_event_handler

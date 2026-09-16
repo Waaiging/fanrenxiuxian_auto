@@ -15,6 +15,7 @@ from miniapp_beast import MiniAppCircuitOpenError, miniapp_circuit_wait_seconds
 from red_packet_features import install_red_packet_monitor
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 from world_boss_features import install_world_boss_monitor
+from nangongque_boss import install_nangongque_boss_monitor
 from xuangu_quiz_features import maybe_handle_xuangu_quiz, resume_pending_xuangu_quiz_events
 from telegram_message_logging import install_addressed_message_monitor
 
@@ -154,6 +155,7 @@ async def run(account: str) -> None:
     miniapp_worker = None
     miniapp_recovery_task = None
     world_boss_monitor = None
+    nangongque_boss_monitor = None
     exchange_handlers = []
     quiz_handlers = []
     quiz_resume_task = None
@@ -240,6 +242,9 @@ async def run(account: str) -> None:
             logger=logger,
             transport=miniapp_worker.transport,
         )
+        nangongque_boss_monitor = await install_nangongque_boss_monitor(
+            actor, account, logger=logger, transport=miniapp_worker.transport,
+        )
         logger.warning("[%s] Restricted account entered Mini App standby mode", account)
         await client.run_until_disconnected()
     finally:
@@ -259,6 +264,8 @@ async def run(account: str) -> None:
             client.remove_event_handler(callback, builder)
         if world_boss_monitor is not None:
             await world_boss_monitor.stop()
+        if nangongque_boss_monitor is not None:
+            await nangongque_boss_monitor.stop()
         if miniapp_worker is not None:
             await miniapp_worker.stop()
         if surprise_raid_task is not None:

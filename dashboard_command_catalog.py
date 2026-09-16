@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from automation_command_controls import (
     BEAST_SYNC, FATE_CARDS, FISHING, HUNT, INVENTORY, JOURNEY, PAGODA,
-    PROFILE, STAR_FARM, TRIAL, WORLD_BOSS,
+    PROFILE, STAR_FARM, TRIAL, WORLD_BOSS, NANGONGQUE_BOSS,
 )
 
 
@@ -31,6 +31,7 @@ IDENTITY_PAGE_COMMANDS = {
     "trial": (TRIAL,),
     "fate-cards": (FATE_CARDS,),
     "world-boss": (WORLD_BOSS,),
+    "nangongque-boss": (NANGONGQUE_BOSS,),
     "inventory": (INVENTORY,),
     "profile-sync": (PROFILE,),
     "meditation-settle": ("miniapp:meditation-settle",),
@@ -170,6 +171,7 @@ COMMAND_CATALOG = (
     CatalogEntry("trial", "天机试炼", "general", "天机日常", aliases=(".天机试炼",), channel="miniapp", trigger="每日"),
     CatalogEntry("fate-cards", "天机命脉", "general", "天机日常", aliases=(".天机命脉",), channel="miniapp", trigger="每日", condition="问天、翻牌、命择、任务与验命组成的流程"),
     CatalogEntry("world-boss", "青元子世界 Boss", "general", "世界活动", aliases=("青元子",), channel="miniapp", trigger="事件"),
+    CatalogEntry("nangongque-boss", "南宫阙·月殿血誓", "general", "世界活动", aliases=("南宫阙",), channel="miniapp", trigger="事件", condition="按南宫阙参战身份设置，房间至少十人开战"),
     CatalogEntry("mulan", "支援慕兰", "general", "世界活动", (".支援慕兰 <方式>",), trigger="每日"),
     CatalogEntry("huanglong", "黄龙山报名", "general", "世界活动", (".报名黄龙山",), trigger="事件"),
     CatalogEntry("exchange", "南陇侯交换", "general", "世界活动", (".交换 <物品类型>",), trigger="事件"),

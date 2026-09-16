@@ -1664,7 +1664,14 @@
                     </div>
                 </div>
                 <div class="automation-card">
-                    <div class="automation-card-title">青元子安全验证</div>
+                    <div class="automation-card-title">南宫阙 · 月殿血誓参战身份</div>
+                    <div class="automation-card-hint">每个账号最多选择一个身份，默认主魂。监听开场公告后自动入场、处理机制并领取战利品；60 秒集结，房间至少 10 人才能开战。关闭后停止新入场，已入场房间继续结算。</div>
+                    <div class="automation-account-grid" id="nangongque-boss-identity-controls">
+                        <div class="record-empty">加载中...</div>
+                    </div>
+                </div>
+                <div class="automation-card">
+                    <div class="automation-card-title">世界 Boss 安全验证</div>
                     <div class="automation-card-hint">
                         自动验证助手会依次为各账号完成浏览器验证，并把一次性令牌交给机器人入阵。这里分别显示浏览器验证进度和实际入阵结果；验证失败时保留错误码。
                     </div>
@@ -1673,14 +1680,14 @@
                     </div>
                     <details>
                     <summary class="automation-card-hint">手动验证与浏览器检查</summary>
-                    <div class="automation-card-hint">可将“青元子验证”拖到收藏栏，在对应验证页点击收藏并完成验证。</div>
+                    <div class="automation-card-hint">青元子和南宫阙共用验证助手。可将“世界 Boss 验证”拖到收藏栏，在对应验证页点击收藏并完成验证。</div>
                     <div class="world-boss-turnstile-request-actions">
-                        <a class="red-packet-save" id="world-boss-turnstile-bookmarklet" href="#" draggable="true" onclick="event.preventDefault(); document.getElementById('world-boss-turnstile-status').textContent='请把此链接拖到收藏栏，然后在青元子验证页点击收藏。';">青元子验证</a>
+                        <a class="red-packet-save" id="world-boss-turnstile-bookmarklet" href="#" draggable="true" onclick="event.preventDefault(); document.getElementById('world-boss-turnstile-status').textContent='请把此链接拖到收藏栏，然后在对应 Boss 验证页点击收藏。';">世界 Boss 验证</a>
                         <button class="red-packet-save" type="button" onclick="openWorldBossTurnstile('')">提前检查浏览器验证</button>
                     </div>
                     <details>
                         <summary class="automation-card-hint">手动执行脚本</summary>
-                        <div class="automation-card-hint">只在 <code>asc.aiopenai.app</code> 的青元子页面执行。复制后在该页开发者工具 Console 中运行，再完成验证。</div>
+                        <div class="automation-card-hint">只在 <code>asc.aiopenai.app</code> 的青元子或南宫阙页面执行。复制后在该页开发者工具 Console 中运行，再完成验证。</div>
                         <textarea class="world-boss-turnstile-script" id="world-boss-turnstile-script" readonly></textarea>
                         <button class="red-packet-save" type="button" onclick="copyWorldBossTurnstileScript()">复制脚本</button>
                     </details>
@@ -4814,8 +4821,13 @@
         // renders Turnstile and hands the callback token to the opener; it does
         // not attempt to forge, alter, or replay the token.
         function worldBossTurnstileBrowserHelper() {
-            if (window.location.origin !== 'https://asc.aiopenai.app' || window.location.pathname !== '/miniapp/xianxia-world-boss') {
-                window.alert('请在青元子的官方验证页使用此脚本。');
+            const activities = {
+                '/miniapp/xianxia-world-boss': {name:'青元子', action:'qyz_world_boss_begin'},
+                '/miniapp/xianxia-nangongque-boss': {name:'南宫阙', action:'nangongque_world_boss_start'}
+            };
+            const activity = activities[window.location.pathname];
+            if (window.location.origin !== 'https://asc.aiopenai.app' || !activity) {
+                window.alert('请在青元子或南宫阙的官方验证页使用此脚本。');
                 return;
             }
             const query = new URLSearchParams(window.location.search);
@@ -4824,7 +4836,8 @@
             const returnOrigin = hash.get('qyz_turnstile_return_origin') || query.get('qyz_turnstile_return_origin') || '';
             const config = window.__QYZ_TURNSTILE_CONFIG__ || {};
             const sitekey = String(config.siteKey || '0x4AAAAAAEmIsCuTGsikqRH9');
-            const action = String(config.action || 'qyz_world_boss_begin');
+            const action = String(config.action || activity.action);
+            if (action !== activity.action) { window.alert('验证配置与当前副本不一致，请刷新页面。'); return; }
             const old = document.getElementById('__qyz_manual_turnstile');
             if (old) {
                 try { if (old.dataset.widgetId && window.turnstile) window.turnstile.remove(old.dataset.widgetId); } catch (_) {}
@@ -4834,7 +4847,7 @@
             wrap.id = '__qyz_manual_turnstile';
             wrap.style.cssText = 'position:fixed;z-index:2147483647;left:50%;top:50%;transform:translate(-50%,-50%);width:min(94vw,430px);padding:18px;border:1px solid #d7b66a;background:#0b120f;color:#f6edd6;box-shadow:0 14px 46px rgba(0,0,0,.68);font:14px system-ui,sans-serif;text-align:center';
             const title = document.createElement('div');
-            title.textContent = requestId ? '青元子安全验证（完成后自动回传）' : '青元子安全验证（完成后复制令牌）';
+            title.textContent = activity.name + (requestId ? '安全验证（完成后自动回传）' : '安全验证（完成后复制令牌）');
             title.style.cssText = 'margin-bottom:10px;font-weight:700';
             const widget = document.createElement('div');
             widget.id = '__qyz_manual_turnstile_widget';
@@ -5001,7 +5014,7 @@
             }
             box.innerHTML = worldBossTurnstileRequests.map(item => {
                 const requestId = String(item.request_id || '');
-                const label = `${item.account || '--'} · ${item.identity || '--'}`;
+                const label = `${item.activity === 'nangongque' ? '南宫阙' : '青元子'} · ${item.account || '--'} · ${item.identity || '--'}`;
                 const states = {pending:item.browser_source === 'automatic' ? '自动验证中' : '等待浏览器验证',submitted:'令牌已提交，等待取用',consumed:'令牌已取用，等待入阵结果',accepted:'入阵成功',rejected:'入阵未成功',expired:'请求已过期',cancelled:item.cancel_reason === 'turnstile_timeout' ? '等待验证超时' : '请求已结束'};
                 const state = states[item.status] || item.status || '等待验证';
                 const stages = {browser_starting:'正在启动浏览器',browser_ready:'浏览器已启动',page_ready:'验证页面已就绪',helper_ready:'浏览器已就绪',widget_ready:'控件已加载',interaction_required:'正在验证',token_generated:'已生成令牌',widget_error:'CF 验证失败',widget_timeout:'控件超时',unsupported:'浏览器不支持',expired:'令牌过期',script_error:'脚本加载失败',config_error:'浏览器启动或配置失败'};
@@ -5028,11 +5041,13 @@
         function openWorldBossTurnstile(requestId) {
             const clean = String(requestId || '').trim();
             const returnOrigin = encodeURIComponent(window.location.origin);
-            const url = `https://asc.aiopenai.app/miniapp/xianxia-world-boss#qyz_turnstile_request=${encodeURIComponent(clean)}&qyz_turnstile_return_origin=${returnOrigin}`;
+            const request = worldBossTurnstileRequests.find(item => item.request_id === clean);
+            const page = request?.activity === 'nangongque' ? 'xianxia-nangongque-boss' : 'xianxia-world-boss';
+            const url = `https://asc.aiopenai.app/miniapp/${page}#qyz_turnstile_request=${encodeURIComponent(clean)}&qyz_turnstile_return_origin=${returnOrigin}`;
             const popup = window.open(url, `qyz-turnstile-${clean}`, 'popup,width=520,height=760,resizable=yes,scrollbars=yes');
             if (popup && clean) worldBossTurnstilePopups.set(clean, popup);
             const status = document.getElementById('world-boss-turnstile-status');
-            if (status) status.textContent = popup ? '验证页已打开；点击收藏栏中的“青元子验证”，或执行已复制的脚本。' : '浏览器阻止了弹窗，请允许 Dashboard 打开验证页。';
+            if (status) status.textContent = popup ? '验证页已打开；点击收藏栏中的“世界 Boss 验证”，或执行已复制的脚本。' : '浏览器阻止了弹窗，请允许 Dashboard 打开验证页。';
         }
 
         async function submitWorldBossTurnstileToken(requestId, token) {
@@ -5230,11 +5245,16 @@
                 }
                 if (starGazingCustom) starGazingCustom.value = String(starGazingLeadSeconds);
                 syncStarGazingControls();
-                const identityControls = document.getElementById('world-boss-identity-controls');
-                if (identityControls) {
-                    identityControls.innerHTML = accounts.map(account => {
-                        const accountName = `world-boss-account-${account.key}`;
-                        const hasSelection = (account.identities || []).some(item => selected.has(item.key));
+                for (const [controlId, bossAccounts, bossSelected, prefix] of [
+                    ['world-boss-identity-controls', accounts, selected, 'world-boss'],
+                    ['nangongque-boss-identity-controls', automationDashboardData.nangongque_boss?.accounts || accounts,
+                        new Set(settings.nangongque_boss?.participants || []), 'nangongque-boss']
+                ]) {
+                    const identityControls = document.getElementById(controlId);
+                    if (!identityControls) continue;
+                    identityControls.innerHTML = bossAccounts.map(account => {
+                        const accountName = `${prefix}-account-${account.key}`;
+                        const hasSelection = (account.identities || []).some(item => bossSelected.has(item.key));
                         return `
                             <div class="automation-account">
                                 <div class="automation-account-name">${escapeHtml(account.name || account.key)}</div>
@@ -5245,7 +5265,7 @@
                                     </label>
                                     ${(account.identities || []).map(item => `
                                         <label class="automation-option">
-                                            <input type="radio" name="${escapeHtml(accountName)}" value="${escapeHtml(item.key)}" ${selected.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
+                                            <input type="radio" name="${escapeHtml(accountName)}" value="${escapeHtml(item.key)}" ${bossSelected.has(item.key) ? 'checked' : ''} onchange="markAutomationSettingsDirty()">
                                             ${escapeHtml(item.name)}
                                         </label>
                                     `).join('')}
@@ -5689,6 +5709,8 @@
             const participants = Array.from(document.querySelectorAll('#world-boss-identity-controls input[type="radio"]:checked'))
                 .map(input => input.value)
                 .filter(Boolean);
+            const nangongqueParticipants = Array.from(document.querySelectorAll('#nangongque-boss-identity-controls input[type="radio"]:checked'))
+                .map(input => input.value).filter(Boolean);
             const mode = document.querySelector('#mulan-support-mode-controls input[type="radio"]:checked')?.value || '';
             const starGazingChoice = document.getElementById('star-gazing-lead')?.value || '10';
             const starGazingLeadSeconds = Number(starGazingChoice === 'custom'
@@ -5785,6 +5807,7 @@
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         world_boss_participants: participants,
+                        nangongque_boss_participants: nangongqueParticipants,
                         mulan_support_mode: mode,
                         star_gazing: {lead_seconds: starGazingLeadSeconds},
                         miniapp_beast_abyss: {

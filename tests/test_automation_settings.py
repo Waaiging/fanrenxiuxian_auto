@@ -112,7 +112,7 @@ class AutomationSettingsTests(unittest.TestCase):
         self.assertEqual(value["miniapp_fishing"]["bait"], "demon_blood")
         self.assertEqual(value["miniapp_fishing"]["chum"], "none")
         self.assertEqual(value["miniapp_fishing"]["start_time"], "")
-        self.assertEqual(value["version"], 15)
+        self.assertEqual(value["version"], 16)
         self.assertTrue(value["miniapp_journey"]["enabled"])
         self.assertEqual(
             value["miniapp_journey"]["participants"],

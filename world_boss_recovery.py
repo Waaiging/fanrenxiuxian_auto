@@ -14,12 +14,14 @@ from world_boss_turnstile import _atomic_write
 
 
 class WorldBossRecoveryStore:
-    def __init__(self, directory: Path, account: str, *, clock=time.time):
+    def __init__(self, directory: Path, account: str, *, clock=time.time,
+                 stages=frozenset({"fighting", "finish_pending"})):
         self.directory = Path(directory)
         self.account = re.sub(r"[^a-z0-9_-]", "", account.lower())
         if not self.account:
             raise ValueError("invalid_world_boss_account")
         self.clock = clock
+        self.stages = frozenset(stages)
 
     def _path(self, fingerprint: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
@@ -43,7 +45,7 @@ class WorldBossRecoveryStore:
                 and float(data.get("expires_epoch") or 0) > self.clock()
                 and entry["fingerprint"] == fingerprint
                 and hashlib.sha256(entry["token"].encode("utf-8")).hexdigest() == fingerprint
-                and data.get("stage") in {"fighting", "finish_pending"}
+                and data.get("stage") in self.stages
             )
             if valid:
                 return data

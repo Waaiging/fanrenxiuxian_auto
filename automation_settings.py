@@ -554,7 +554,7 @@ def _parse_optional_nonnegative_int(value: Any, error_message: str) -> int:
 
 def default_automation_settings() -> dict[str, Any]:
     return {
-        "version": 15,
+        "version": 16,
         "meditation": {
             "identities": {
                 automation_participant_key(account, identity): {
@@ -572,6 +572,10 @@ def default_automation_settings() -> dict[str, Any]:
                 automation_participant_key(account, identity)
                 for account, identity in DEFAULT_WORLD_BOSS_PARTICIPANTS
             ],
+        },
+        "nangongque_boss": {
+            "participants": [automation_participant_key(account, "主魂")
+                             for account in ACCOUNT_IDENTITIES],
         },
         "mulan_support": {"mode": DEFAULT_MULAN_SUPPORT_MODE},
         "star_gazing": {"lead_seconds": DEFAULT_STAR_GAZING_LEAD_SECONDS},
@@ -642,21 +646,22 @@ def normalize_automation_settings(data: Any) -> dict[str, Any]:
     source = data if isinstance(data, dict) else {}
     result = default_automation_settings()
 
-    world_boss = source.get("world_boss")
-    if isinstance(world_boss, dict) and isinstance(world_boss.get("participants"), list):
-        selected_by_account: dict[str, str] = {}
-        for item in world_boss["participants"]:
-            normalized = _normalize_participant(item)
-            if normalized is None:
-                continue
-            account, identity = normalized
-            selected_by_account.setdefault(account, identity)
-        result["world_boss"]["participants"] = [
-            automation_participant_key(account, identity)
-            for account, identities in automation_account_identities().items()
-            for identity in identities
-            if selected_by_account.get(account) == identity
-        ]
+    for activity in ("world_boss", "nangongque_boss"):
+        world_boss = source.get(activity)
+        if isinstance(world_boss, dict) and isinstance(world_boss.get("participants"), list):
+            selected_by_account: dict[str, str] = {}
+            for item in world_boss["participants"]:
+                normalized = _normalize_participant(item)
+                if normalized is None:
+                    continue
+                account, identity = normalized
+                selected_by_account.setdefault(account, identity)
+            result[activity]["participants"] = [
+                automation_participant_key(account, identity)
+                for account, identities in automation_account_identities().items()
+                for identity in identities
+                if selected_by_account.get(account) == identity
+            ]
 
     mulan = source.get("mulan_support")
     if isinstance(mulan, dict):
@@ -919,6 +924,7 @@ def save_automation_settings(
     *,
     world_boss_participants: Any,
     mulan_support_mode: Any,
+    nangongque_boss_participants: Any = None,
     star_gazing_lead_seconds: Any = None,
     miniapp_fishing_enabled: Any = None,
     miniapp_fishing_pond: Any = None,
@@ -966,6 +972,16 @@ def save_automation_settings(
         raise ValueError("multiple world boss identities per account")
 
     current_settings = load_automation_settings()
+    nangongque_participants = (current_settings["nangongque_boss"]["participants"]
+                               if nangongque_boss_participants is None else nangongque_boss_participants)
+    if not isinstance(nangongque_participants, list):
+        raise ValueError("Nangongque participants must be a list")
+    nq_normalized = [_normalize_participant(item) for item in nangongque_participants]
+    if any(item is None for item in nq_normalized):
+        raise ValueError("invalid Nangongque participant")
+    nq_accounts = [item[0] for item in nq_normalized]
+    if len(nq_accounts) != len(set(nq_accounts)):
+        raise ValueError("multiple Nangongque identities per account")
     star_lead_seconds = _parse_star_gazing_lead_seconds(
         current_settings["star_gazing"]["lead_seconds"]
         if star_gazing_lead_seconds is None
@@ -1285,6 +1301,7 @@ def save_automation_settings(
     settings = normalize_automation_settings(
         {
             "world_boss": {"participants": world_boss_participants},
+            "nangongque_boss": {"participants": nangongque_participants},
             "mulan_support": {"mode": mode},
             "star_gazing": {"lead_seconds": star_lead_seconds},
             "miniapp_beast_abyss": {
@@ -1360,6 +1377,16 @@ def world_boss_identities_for_account(
         for identity in identities[account]
         if automation_participant_key(account, identity) in selected
     ]
+
+
+def nangongque_boss_identities_for_account(
+    account: str, settings: dict[str, Any] | None = None,
+) -> list[str]:
+    identities = automation_account_identities().get(str(account or "").strip(), [])
+    source = normalize_automation_settings(settings) if settings is not None else load_automation_settings()
+    selected = set(source["nangongque_boss"]["participants"])
+    return [identity for identity in identities
+            if automation_participant_key(account, identity) in selected]
 
 
 def _parse_star_gazing_lead_seconds(value: Any) -> int:
@@ -1590,6 +1617,7 @@ def set_tianxing_heqi_pill_enabled(
 def automation_dashboard_payload() -> dict[str, Any]:
     settings = load_automation_settings()
     selected = set((settings.get("world_boss") or {}).get("participants") or [])
+    nq_selected = set(settings["nangongque_boss"]["participants"])
     account_identities = automation_account_identities()
     return {
         "settings": settings,
@@ -1623,6 +1651,16 @@ def automation_dashboard_payload() -> dict[str, Any]:
                         for identity in identities
                     ],
                 }
+                for account, identities in account_identities.items()
+            ],
+        },
+        "nangongque_boss": {
+            "selected_count": len(nq_selected),
+            "accounts": [
+                {"key": account, "name": ACCOUNT_NAMES[account], "identities": [
+                    {"key": automation_participant_key(account, identity), "name": identity,
+                     "selected": automation_participant_key(account, identity) in nq_selected}
+                    for identity in identities]}
                 for account, identities in account_identities.items()
             ],
         },

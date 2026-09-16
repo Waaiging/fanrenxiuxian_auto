@@ -17,13 +17,13 @@ Telegram 修仙游戏的多账号自动化项目。当前运行模型以 Mini Ap
 | `xiuxian:2` | `cultivator_xiaohao.py` 或 `red_packet_account.py --account xiaohao` | 小号，主魂为万灵宗 |
 | `xiuxian:3` | `cultivator_waaiging.py` 或 `red_packet_account.py --account waaiging` | Waaiging，单主魂，按实时宗门运行 |
 | `xiuxian:4` | `dashboard_server.py` | FastAPI Dashboard |
-| `xiuxian:5` | `world_boss_browser.py --no-sandbox` | 四账号共用的青元子浏览器验证器 |
+| `xiuxian:5` | `world_boss_browser.py --no-sandbox` | 四账号共用的青元子 / 南宫阙浏览器验证器 |
 
 `start_all.sh` 会先创建完整的 6 个固定窗口，再启动浏览器验证器、副号、小号、Waaiging、Dashboard，最后启动负责可见性控制的主号。不要再使用“窗口 3 是 Dashboard”的旧映射。
 
 上表是 `start_all.sh` 的预期布局。运维时要注意实际进程可能漂移：2026-08-29 核查线上时，`tmux list-windows -t xiuxian` 只有 `0..3` 四个窗口，`dashboard_server.py` 以裸 `nohup python3 -X utf8 dashboard_server.py` 运行在 tmux 之外（手工重启未走 `start_all.sh` 所致）。排查 Dashboard 前先用 `pgrep -af dashboard_server.py` 确认它到底在哪里，不要假定 `xiuxian:4` 一定存在。
 
-游戏群公开或账号无群发权限时，主号的可见性控制器会在固定窗口内切换小号/Waaiging 的完整脚本与 `red_packet_account.py` 待机进程。待机进程保留红包监听、受限 Mini App 排程、青元子世界 Boss 和南陇侯侍妾保护，但不会绕过权限保护向游戏群发送指令。缺失窗口会自动重建，最终 tmux session 关闭返回非零也不会被误判为部署失败。
+游戏群公开或账号无群发权限时，主号的可见性控制器会在固定窗口内切换小号/Waaiging 的完整脚本与 `red_packet_account.py` 待机进程。待机进程保留红包监听、受限 Mini App 排程、青元子和南宫阙世界 Boss、南陇侯侍妾保护，但不会绕过权限保护向游戏群发送指令。缺失窗口会自动重建，最终 tmux session 关闭返回非零也不会被误判为部署失败。
 
 ## 项目结构
 
@@ -139,6 +139,18 @@ Mini App 不支持的有效功能仍走 Telegram 群，例如：
 群指令的 `unanswered_dot_command` 共享保护只由本账号主魂或已配置化身的实际发送触发，其他玩家的指令仅保留审计记录。超过 30 秒仍未确认机器人响应时跳过本次操作，单条未回复指令最多影响 10 分钟；普通机器人广播不算指令回执。收到匹配回复或发送后更新的有效指令回执即可恢复。回执判断结合 Telegram 发送/编辑时间、群 ID 与消息 ID，支持其他账号先收到回复，不会因重复消息、延迟历史消息或同秒消息乱序重新暂停。跳过日志同时记录待回复指令的账号、指令、群、消息编号和等待时间。
 
 ## 当前主要自动化
+
+### 南宫阙 · 月殿血誓
+
+- 四账号监听配置群中可信游戏机器人发布的 `【世界通告｜月殿血誓开启】`，校验“进入月殿战场”按钮、机器人归属及动态 `nqb_` 入口；同时处理新消息和编辑消息，启动时补查仍在集结期的公告。
+- Dashboard“自动化设置”提供独立参战身份选择，默认四个主魂，每账号至多一个；不与青元子开关联动。身份指令面板另有 `miniapp:nangongque-boss` 暂停键；关闭阻止新入场，已入场房间继续结算。
+- 入场和浏览器验证受公告起算的 **60 秒**集结期限约束。每房间最多 **20 人**，至少 **10 人**才能开战；本项目四账号之外仍需其他玩家参与。
+- 通过官方 `/start` 入场，使用 WebSocket 状态流及 HTTP 补查；按服务端位置、阶段、危险区域和冷却发送普通移动、攻击、闪避、机制按钮。剑丝阶段靠近剑阵锚点，宝镜阶段靠近 Boss，血煞阶段进入镇煞区域，最终阶段按禁制与血煞情况保护南宫婉、镇煞或断势。
+- 房间控制在独立事件循环运行；Telegram 认证和账号状态更新留在原循环。完整与受限 worker 共用账号锁。每次输入先持久化序号，超时后查询原房间，不重放未确认按钮；结算单独 `/claim` 领奖，结果不明时先核对服务端 `claimed`。
+- 恢复文件位于 `.nangongque_boss_recovery/`，权限与青元子私有队列一致，公告后 30 分钟过期并自动清理；普通 state 只记录脱敏的 `nangongque_boss_events`、阶段、请求次数和服务端结算。成功、失败和行为复核标记均如实保留。
+- 青元子与南宫阙共用一个浏览器验证队列，分别使用官方页面的对应 action；切换页面后核对路径与配置，验证成功不等同于入场成功。验证截止较早的请求优先，首次尝试仍优先于重试。
+
+协议依据、验证范围和运行字段见 [南宫阙自动化说明](docs/nangongque_boss.md)。
 
 ### 青元子世界 Boss
 

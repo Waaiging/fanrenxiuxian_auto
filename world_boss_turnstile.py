@@ -44,6 +44,10 @@ DEFAULT_REQUEST_TTL_SECONDS = 180
 STALE_RETENTION_SECONDS = 300
 BROWSER_WARMUP_SECONDS = 90
 BROWSER_ORIGIN = "https://asc.aiopenai.app"
+BROWSER_ACTIVITIES = {
+    "qingyuanzi": ("/miniapp/xianxia-world-boss", "qyz_world_boss_begin"),
+    "nangongque": ("/miniapp/xianxia-nangongque-boss", "nangongque_world_boss_start"),
+}
 BROWSER_EVENTS = frozenset({
     "browser_starting", "browser_ready", "page_ready",
     "helper_ready", "widget_ready", "interaction_required", "token_generated",
@@ -220,7 +224,8 @@ class WorldBossTurnstileBroker:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def request_warmup(self, *, event_fingerprint: str, origin: str, notice_epoch: float) -> bool:
+    def request_warmup(self, *, event_fingerprint: str, origin: str, notice_epoch: float,
+                       activity: str = "qingyuanzi") -> bool:
         """Load the official page during registration, without creating a token.
 
         The deadline belongs to the announcement, not to each caller. Four
@@ -232,7 +237,8 @@ class WorldBossTurnstileBroker:
             notice = float(notice_epoch)
         except (TypeError, ValueError):
             return False
-        if (not re.fullmatch(r"[a-f0-9]{64}", str(event_fingerprint))
+        if (activity not in BROWSER_ACTIVITIES
+                or not re.fullmatch(r"[a-f0-9]{64}", str(event_fingerprint))
                 or str(origin).rstrip("/") != BROWSER_ORIGIN
                 or not math.isfinite(notice) or not now - BROWSER_WARMUP_SECONDS < notice <= now + 5):
             return False
@@ -247,6 +253,7 @@ class WorldBossTurnstileBroker:
                 pass
             _atomic_write(self.queue_dir / "browser_warmup.json", json.dumps({
                 "event_fingerprint": event_fingerprint, "origin": BROWSER_ORIGIN,
+                "activity": activity,
                 "notice_epoch": notice, "expires_epoch": notice + BROWSER_WARMUP_SECONDS,
                 "status": "pending",
             }, separators=(",", ":")))
@@ -371,6 +378,7 @@ class WorldBossTurnstileBroker:
             "identity",
             "challenge_id",
             "origin",
+            "activity",
             "created_at",
             "created_epoch",
             "expires_at",
@@ -482,7 +490,10 @@ class WorldBossTurnstileBroker:
         challenge_id: str,
         origin: str,
         ttl_seconds: int | None = None,
+        activity: str = "qingyuanzi",
     ) -> dict[str, Any]:
+        if activity not in BROWSER_ACTIVITIES:
+            raise TurnstileRequestError("turnstile_activity_invalid")
         now = float(self.clock())
         ttl = self.request_ttl_seconds if ttl_seconds is None else max(30, min(600, int(ttl_seconds)))
         request_id = secrets.token_urlsafe(24)
@@ -498,6 +509,7 @@ class WorldBossTurnstileBroker:
             "identity": _safe_text(identity, 80),
             "challenge_id": _safe_text(challenge_id, 160),
             "origin": _safe_text(origin, 200),
+            "activity": activity,
             "created_epoch": now,
             "created_at": _time_text(now),
             "expires_epoch": now + ttl,

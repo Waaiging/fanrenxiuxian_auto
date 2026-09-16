@@ -97,6 +97,7 @@ from miniapp_beast import (
 )
 from miniapp_command_routing import install_miniapp_command_router
 from world_boss_features import install_world_boss_monitor
+from nangongque_boss import install_nangongque_boss_monitor
 from telegram_message_logging import log_addressed_message_if_needed
 from miniapp_dwelling import (
     apply_dwelling_snapshot,
@@ -5129,6 +5130,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
             logger=log,
             transport=miniapp_router.transport,
         )
+        await install_nangongque_boss_monitor(self, self.account_key, logger=log, transport=miniapp_router.transport)
 
         restricted_specs = self.restricted_account_specs()
         if restricted_specs and os.name != "nt":
