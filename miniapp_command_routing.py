@@ -577,7 +577,9 @@ class MiniAppCommandRouter:
                 self._star_palace_tasks.pop(identity, None)
 
     def _start_recovery_task(self) -> None:
-        if not self.start_background_tasks or not self.enabled:
+        # Shared-transport workers own their gameplay schedulers, but the
+        # router must still recover its own failed authentication/circuit.
+        if not self.enabled:
             return
         if self._recovery_task is not None and not self._recovery_task.done():
             return

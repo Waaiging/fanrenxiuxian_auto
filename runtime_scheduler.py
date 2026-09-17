@@ -2,6 +2,14 @@
 import asyncio
 
 
+def scheduler_due_time(state, key):
+    """Match the running task's deadline when a retry timestamp differs."""
+    value = state.get(key)
+    if key == "next_yuanying_out_time" and state.get("yuanying_out_active"):
+        value = state.get("yuanying_out_end_time") or value
+    return str(value or "").strip()
+
+
 def create_scheduler_task(actor, name, coro_factory, logger):
     """Keep one live task per name and always consume its completion result."""
     registry = getattr(actor, "_scheduler_task_registry", None)

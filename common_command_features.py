@@ -4456,6 +4456,19 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
         log = self.common_command_logger()
         prefix = f"[{identity}] " if identity != "主魂" else ""
         if not resp:
+            if state.get("yuanying_out_active"):
+                active_until = state.get("yuanying_out_end_time") or state.get("next_yuanying_out_time", "")
+                if (active_until and is_future(active_until)) or (
+                    not active_until and self.yuanying_is_retreat_command(identity)
+                ):
+                    # A manual/passive start can arrive while an older send is
+                    # waiting. Its timeout must not replace confirmed activity.
+                    state["next_yuanying_out_time"] = active_until
+                    log.info(
+                        f"{prefix}{command}: response missing; keeping confirmed active state "
+                        f"until {active_until or 'settlement reply'}."
+                    )
+                    return False
             state["next_yuanying_out_time"] = add_seconds_str(now_str(), 3600)
             log.warning(f"{prefix}{command}: response missing; retry at {state['next_yuanying_out_time']}.")
             return False

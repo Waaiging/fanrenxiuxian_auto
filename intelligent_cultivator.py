@@ -31,7 +31,10 @@ Intelligent Cultivator v8.6 (Wanling Edition)
 """
 
 import asyncio          # 异步 I/O 框架，所有游戏交互都是异步的
-from runtime_scheduler import create_scheduler_task as register_scheduler_task
+from runtime_scheduler import (
+    create_scheduler_task as register_scheduler_task,
+    scheduler_due_time,
+)
 import time             # 时间戳、sleep 等基本时间操作
 import json
 STAR_GAZING_INTERVAL_HOURS = 3
@@ -3008,7 +3011,7 @@ class Cultivator(MainBeastMixin, SurpriseRaidMixin, DuelMixin, CommonCommandMixi
         for key, command, identity in specs:
             if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
                 continue
-            value = str(self.state.get(key) or "").strip()
+            value = scheduler_due_time(self.state, key)
             if not value or is_future(value):
                 continue
             try:

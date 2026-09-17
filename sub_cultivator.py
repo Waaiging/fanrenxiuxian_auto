@@ -29,7 +29,10 @@ Sub Cultivator v1.0 (Star Palace / 星宫 Edition)
 # 标准库导入
 # ============================================================
 import asyncio        # 异步 I/O 框架，用于协程任务调度
-from runtime_scheduler import create_scheduler_task as register_scheduler_task
+from runtime_scheduler import (
+    create_scheduler_task as register_scheduler_task,
+    scheduler_due_time,
+)
 
 import functools
 def safe_bg_task(func):
@@ -3258,7 +3261,7 @@ class SubCultivator(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, ConcubineM
                 continue
             if self.state_time_command_paused(key, identity) or self.dashboard_command_paused(command, identity):
                 continue
-            value = str(self.state.get(key) or "").strip()
+            value = scheduler_due_time(self.state, key)
             if not value or is_future(value):
                 continue
             try:
