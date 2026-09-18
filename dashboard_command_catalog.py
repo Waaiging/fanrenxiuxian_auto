@@ -190,7 +190,7 @@ COMMAND_CATALOG = (
     CatalogEntry("inventory", "储物袋刷新与查询", "general", "资料与辅助", aliases=("储物袋",), channel="miniapp", trigger="查询"),
     CatalogEntry("red-packet", "红包领取", "general", "资料与辅助", aliases=("红包领取",), channel="callback", trigger="事件"),
     CatalogEntry("custom", "自定义指令", "general", "自定义", channel="local", trigger="计划"),
-    CatalogEntry("yuanying-retreat", "元婴闭关", "general", "归属待确认", (".元婴闭关",), condition="宗门与境界限制待确认", pending=True),
+    CatalogEntry("yuanying-retreat", "元婴闭关", "sect", "元婴宗", (".元婴闭关",), condition="元婴宗专属，需凝聚元婴"),
     CatalogEntry("second-soul-train", "第二元神修炼", "general", "归属待确认", (".元神修炼",), condition="解锁条件待确认", pending=True),
     CatalogEntry("second-soul-status", "第二元神状态", "general", "归属待确认", (".第二元神",), trigger="查询", condition="解锁条件待确认", pending=True),
     CatalogEntry("formation-start", "启阵", "general", "归属待确认", (".启阵",), condition="宗门限制待确认", pending=True),

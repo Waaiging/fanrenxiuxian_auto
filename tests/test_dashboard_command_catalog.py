@@ -30,6 +30,7 @@ class CommandClassificationTests(unittest.TestCase):
             (".元婴出窍", "realm", "元婴及以上"),
             (".双修 温养", "sect", "合欢宗"),
             (".问道", "sect", "元婴宗"),
+            (".元婴闭关", "sect", "元婴宗"),
             (".改换星移 @someone", "sect", "星宫"),
             (".化功为煞 10000", "sect", "阴罗宗"),
             ("miniapp:spirit-beast:xiaohao", "sect", "万灵宗"),
@@ -43,7 +44,7 @@ class CommandClassificationTests(unittest.TestCase):
                 self.assertFalse(result["pending"])
 
     def test_unknown_limits_and_similar_commands_remain_pending(self):
-        for command in (".元婴闭关", ".元神修炼", ".第二元神", ".启阵", ".助阵", ".双修 其他", ".观星测试"):
+        for command in (".元神修炼", ".第二元神", ".启阵", ".助阵", ".双修 其他", ".观星测试"):
             with self.subTest(command=command):
                 result = classify_command(command, group="星宫")
                 self.assertEqual(result["subcategory"], "归属待确认")

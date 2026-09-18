@@ -176,6 +176,7 @@ from soul_curse_features import (
     SOUL_CURSE_SUPPRESS_COMMAND,
     SOUL_CURSE_VISIT_COMMAND,
     SOUL_CURSE_WANYING_GREETING_COMMAND,
+    read_soul_curse_shared_state,
 )
 from yinluo_features import YINLUO_APPEASE_COMMAND, YINLUO_CONVERT_COMMAND, YINLUO_IDENTITY, YINLUO_MASTER_COMMAND, YINLUO_SOUL
 
@@ -1283,6 +1284,14 @@ def time_command(
 
 def yuanying_retreat_command(state):
     """Display sub main-soul .元婴闭关, whose active reply may not include an end time."""
+    sect = str((state.get("identity_sect_names") or {}).get("主魂")
+               or state.get("miniapp_sect_name") or state.get("sect_name") or "").strip()
+    if not state.get("yuanying_out_active") and sect != "元婴宗":
+        return command_row(
+            SUB_MAIN_YUANYING_COMMAND, "元婴闭关", "宗门不符" if sect else "待同步宗门", "manual",
+            detail=f"当前宗门：{sect or '待同步'}；元婴闭关仅限元婴宗，满足条件后自动恢复",
+            group="元婴宗", schedule_type="event", actionable=False,
+        )
     raw = state.get("yuanying_out_end_time") or state.get("next_yuanying_out_time", "")
     target = parse_state_time(raw)
     if state.get("yuanying_out_active"):
@@ -2440,9 +2449,14 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂", *, roo
     commission_id = str(curse.get("commission_id") or "").strip()
     target = str(curse.get("commission_target") or "").strip()
     commission_detail = " · ".join(part for part in [f"委托 {commission_id}" if commission_id else "", target, detail] if part)
+    publish_paused = bool(account and command_control_disabled(
+        load_command_controls(), account, identity, command_control_key(SOUL_CURSE_PUBLISH_COMMAND),
+        root_state=root_state if root_state is not None else state,
+    ))
     chain_target = parse_state_time(curse.get("next_chain_time", ""))
     chain_locked = (
-        chain_target
+        not publish_paused
+        and chain_target
         and chain_target > datetime.now()
         and str(curse.get("chain_stage") or "") in {"", "done"}
     )
@@ -2485,7 +2499,7 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂", *, roo
     else:
         infer_row = time_command(
             curse,
-            "next_chain_time",
+            "next_infer_time",
             SOUL_CURSE_INFER_COMMAND,
             "封魂咒推演",
             waiting="8小时冷却",
@@ -2500,8 +2514,8 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂", *, roo
             SOUL_CURSE_PROTECT_COMMAND,
             "护持神魂",
             waiting="8小时冷却",
-            ready="链路内执行",
-            missing="链路内执行",
+            ready="可护持" if publish_paused else "链路内执行",
+            missing="可护持" if publish_paused else "链路内执行",
             detail=detail,
             group="南宫婉",
         )
@@ -2553,10 +2567,44 @@ def soul_curse_publisher_commands(state, account=None, identity="主魂", *, roo
     return soul_curse_panel_rows(rows, identity, enabled, include_switch=bool(account))
 
 
+def soul_curse_assist_display_state(state, account, identity, root_state=None):
+    """Prefer a live commission, then the latest receipt across all owners."""
+    state = state if isinstance(state, dict) else {}
+    owners = state.get("soul_curse_assists") or {}
+    candidates = [state.get("soul_curse_assist"), *(owners.values() if isinstance(owners, dict) else [])]
+    candidates = [item for item in candidates if isinstance(item, dict)]
+    terminal = {"completed", "gone", "blocked", "no_contract"}
+    aliases = command_control_identity_candidates(identity, root_state)
+    active = []
+    for owner, item in read_soul_curse_shared_state().items():
+        if not isinstance(item, dict) or not item.get("commission_id") or item.get("status") in terminal:
+            continue
+        publisher, _, publisher_identity = str(owner).partition(":")
+        if publisher == account and (publisher_identity or "主魂") in aliases:
+            continue
+        if item.get("assistant_account") and (
+            item["assistant_account"] != account or item.get("assistant_identity") not in aliases
+        ):
+            continue
+        own = next((entry for entry in candidates
+                    if entry.get("owner_account") == owner
+                    and str(entry.get("commission_id")) == str(item["commission_id"])), {})
+        active.append({**item, **own})
+    # Main/sub may also execute an account-local commission without a shared entry.
+    publisher = (root_state or {}).get("soul_curse", {})
+    if isinstance(publisher, dict) and publisher.get("commission_id") and publisher.get("commission_status") not in terminal:
+        active.extend(item for item in candidates if item.get("owner_account") == account
+                      and str(item.get("commission_id")) == str(publisher["commission_id"]))
+
+    def updated(item):
+        return max((parse_state_time(item.get(key)) or datetime.min
+                    for key in ("updated_at", "last_completed_time", "last_accept_time")))
+
+    return max(active or candidates, key=updated, default={}), bool(active)
+
+
 def soul_curse_assist_commands(state, account=None, identity=None, *, root_state=None, include_switch=True):
-    assist = state.get("soul_curse_assist", {}) if isinstance(state, dict) else {}
-    if not isinstance(assist, dict):
-        assist = {}
+    assist, active_commission = soul_curse_assist_display_state(state, account, identity, root_state)
     enabled = not identity or soul_curse_identity_enabled_for_dashboard(
         account, identity, state=root_state if root_state is not None else state, assistant=True
     )
@@ -2612,6 +2660,12 @@ def soul_curse_assist_commands(state, account=None, identity=None, *, root_state
             group="阴罗宗",
         ),
     ]
+    if not active_commission:
+        history = f"最近记录：{base_detail}" if base_detail else ""
+        for row in rows:
+            row.update(status="等待委托", tone="flow", schedule_type="event", next_seconds=None,
+                       remaining="", at="", actionable=False,
+                       detail=" · ".join(part for part in ("等待新的有效委托", history) if part))
     return soul_curse_panel_rows(
         rows, identity, enabled, group="阴罗宗", include_switch=bool(identity) and include_switch
     )
@@ -2652,6 +2706,17 @@ def force_exit_command(state, group="闭关"):
             group=group,
         )
     return command_row(".强行出关", "强行出关", "无需出关", "done", group=group, schedule_type="cooldown")
+
+
+def formation_assist_command(state):
+    row = time_command(
+        state, "next_formation_time", ".助阵", "助阵", group="阵法",
+        detail="收到配对身份的启阵邀请后自动助阵",
+    )
+    if row["tone"] != "cooldown":
+        row.update(status="等待邀请", tone="flow", schedule_type="event",
+                   next_seconds=None, remaining="", at="", actionable=False)
+    return row
 
 
 def xiaohao_star_pull_command(state):
@@ -3093,7 +3158,7 @@ def lingxiao_avatar_commands(name, state, root_state=None, account="main"):
         rows.extend(xiaohao_star_attraction_commands(state))
         star_gazing_state = root_state or state
         rows.extend([
-            time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
+            formation_assist_command(state),
             time_command(star_gazing_state, "next_star_gazing_time", ".观星", "观星", group="星宫"),
             time_command(
                 star_gazing_state,
@@ -3192,7 +3257,7 @@ def xiaohao_avatar_commands(name, state, root_state=None):
         ])
     elif is_star_palace:
         rows.extend([
-            time_command(state, "next_formation_time", ".助阵", "助阵", group="阵法"),
+            formation_assist_command(state),
         ])
         rows.extend(xiaohao_star_attraction_commands(state))
         rows.extend([
@@ -3201,7 +3266,7 @@ def xiaohao_avatar_commands(name, state, root_state=None):
         ])
     rows.extend(concubine_commands(state, include_divination=True, include_voyage=concubine_voyage_enabled("xiaohao", name)))
     rows.append(mulan_support_daily_command(state))
-    rows.extend(soul_curse_publisher_commands(state, account="xiaohao", identity=name))
+    rows.extend(soul_curse_publisher_commands(state, account="xiaohao", identity=name, root_state=root_state))
     return rows
 
 
@@ -3303,7 +3368,8 @@ def build_command_panels(account, state):
         sect = str((state.get("identity_sect_names") or {}).get(identity)
                    or identity_state.get("sect_name") or "").strip()
         panel["commands"] = [row for row in panel["commands"]
-                             if (not command_sect(row.get("command"))
+                             if (row.get("command") == SUB_MAIN_YUANYING_COMMAND
+                                 or not command_sect(row.get("command"))
                                  or (command_sect(row.get("command")) == "星宫" and sect == "星宫"))
                              and row.get("group") != "阴罗宗"
                              and not (sect == "阴罗宗" and row.get("group") == "南宫婉")]

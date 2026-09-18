@@ -2914,6 +2914,7 @@ class ParserFixtureTests(unittest.TestCase):
             return None
 
         actor = DummyRetreatTick()
+        actor.identity_sect_names = {"主魂": "元婴宗"}
         actor.sent = []
 
         with patch("common_command_features.asyncio.sleep", no_sleep):

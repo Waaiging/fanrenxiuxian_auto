@@ -3556,8 +3556,24 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
         notify_unrecognized_response(self, ".巡边归来", resp, log, "灵兽巡边归来")
         return False
 
+    async def reconcile_pending_beast_border_patrol(self):
+        """Resolve an uncertain start before sending another patrol command."""
+        response = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
+        clear = self.is_border_patrol_status_clear_response(response)
+        recorded = self.record_beast_border_patrol_status_response(response)
+        if recorded and (clear or self.state.get("beast_border_patrol_name")):
+            self.state.pop("beast_border_patrol_reconcile_pending", None)
+            self.save_state()
+            return "clear" if clear else "active"
+        self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+        return "unknown"
+
     async def run_beast_border_patrol(self, mode=BEAST_BORDER_PATROL_DEFAULT_MODE):
         mode = self.normalize_beast_border_patrol_mode(mode)
+        if self.state.get("beast_border_patrol_reconcile_pending"):
+            reconciled = await self.reconcile_pending_beast_border_patrol()
+            if reconciled != "clear":
+                return reconciled == "active"
         if str(self.state.get("beast_border_patrol_name") or "").strip():
             if not await self.finish_beast_border_patrol_if_active():
                 return False
@@ -3637,7 +3653,20 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
                     continue
             beast_name = beast.get("full_name", "")
             command = f".灵兽巡边 {beast_name} {mode}"
-            resp = await self.send_and_wait_feedback(command, timeout=60, max_retries=1)
+            # Persist before sending so a timeout or restart triggers a status
+            # query, rather than blindly spending stamina on another start.
+            self.state["beast_border_patrol_reconcile_pending"] = True
+            self.save_state()
+            resp = await self.send_and_wait_feedback(
+                command, timeout=60, max_retries=0, retry_on_timeout=False,
+            )
+            if not resp:
+                reconciled = await self.reconcile_pending_beast_border_patrol()
+                if reconciled != "active":
+                    self.schedule_beast_action_retry("next_beast_border_patrol_time", 600)
+                return reconciled == "active"
+            self.state.pop("beast_border_patrol_reconcile_pending", None)
+            self.save_state()
             last_response = resp or last_response
             if self.is_existing_border_patrol_response(resp):
                 status_resp = await self.send_and_wait_feedback(".巡边状态", timeout=45, max_retries=1)
@@ -7297,6 +7326,11 @@ class CultivatorXiaoHao(SurpriseRaidMixin, DuelMixin, CommonCommandMixin, Concub
             self.create_scheduler_task(name, factory)
 
         if miniapp_router is not None:
+            # The shared router creates this worker, but leaves scheduling to
+            # XiaoHao when start_background_tasks=False.
+            journey = getattr(miniapp_router, "tianxing_journey", None)
+            if journey is not None and journey.supported:
+                register_once("miniapp_journey", lambda: journey.run_loop())
             if callable(getattr(miniapp_router, "run_profile_sync_loop", None)):
                 register_once(
                     "miniapp_profiles",

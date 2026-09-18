@@ -320,7 +320,7 @@ class DynamicSectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(results), [False, True])
         self.assertIn(curse.read_soul_curse_shared_state()["main"]["assistant_identity"], {"甲", "乙"})
 
-    def test_dashboard_shows_only_current_sect_tasks_for_every_account(self):
+    def test_dashboard_shows_current_sect_tasks_and_explains_ineligible_retreat(self):
         for account in ("main", "sub", "xiaohao", "waaiging"):
             for identity in ("主魂", "寒续尘"):
                 for sect in ("天星宗", "阴罗宗", "凌霄宫", "万灵宗", "合欢宗"):
@@ -329,7 +329,15 @@ class DynamicSectTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(dashboard, "load_custom_commands", return_value={}), patch.object(dashboard, "load_command_controls", return_value={}):
                         panels = dashboard.build_command_panels(account, actor.state)
                     rows = next(panel["commands"] for panel in panels if panel["identity"] == identity)
-                    sects = {command_sect(row["command"]) for row in rows if command_sect(row["command"])}
+                    inactive = [row for row in rows if command_sect(row["command"])
+                                and command_sect(row["command"]) != sect]
+                    for row in inactive:
+                        self.assertEqual((account, identity, row["command"]), ("sub", "主魂", ".元婴闭关"))
+                        self.assertFalse(row["actionable"])
+                        self.assertEqual(row["status"], "宗门不符")
+                        self.assertIsNone(row.get("next_seconds"))
+                    sects = {command_sect(row["command"]) for row in rows
+                             if row not in inactive and command_sect(row["command"])}
                     self.assertEqual(sects, {sect}, (account, identity, sect))
 
     async def test_partner_editor_and_pause_toggle_preserve_each_other(self):

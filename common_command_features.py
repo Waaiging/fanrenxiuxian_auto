@@ -4724,6 +4724,11 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             self.save_state()
             return 5
 
+        if command == YUANYING_RETREAT_COMMAND and not self.sect_command_allowed(command, "主魂"):
+            # Re-read the live profile on the next tick; membership loss is
+            # not a failed cast and must not create a new server cooldown.
+            return 300
+
         if require_yuanying_level and not await self.ensure_main_yuanying_level_for_command("Yuanying out loop"):
             return 3600
 
@@ -4744,6 +4749,8 @@ class CommonCommandMixin(SectTaskMixin, MeditationModeMixin):
             self.save_state()
             log.info(f"{command}: settlement consumed trigger message; sending again to start next cycle.")
             await asyncio.sleep(5)
+            if not self.sect_command_allowed(command, "主魂"):
+                return 300
             resp = await self.send_timed_command_plan(plan, "主魂")
             self.record_yuanying_out_start_response(self.timed_command_response_text(resp))
         self.save_state()

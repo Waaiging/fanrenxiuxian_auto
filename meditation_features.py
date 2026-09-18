@@ -174,10 +174,35 @@ class MeditationModeMixin:
         seconds = self.parse_wait_time(text)
         return seconds if seconds > 0 else default
 
+    def _record_meditation_pill_cooldown(self, identity, config, available_at):
+        runtime = self._meditation_runtime(identity)
+        runtime.update(
+            pill_status="cooldown", pill_available_at=available_at,
+            last_result=f"合气丹抗药性冷却至 {available_at}",
+        )
+        count = runtime.get("success_count", 0)
+        # Retry this same opportunity only while it can still clear an active
+        # cultivation cooldown. A mode-switch pill is not a daily opportunity.
+        if (
+            config["mode"] == "daily" and count > 0 and count % 2 == 0
+            and runtime.get("prepared_mode") == "daily"
+            and runtime.get("prepared_switch_id", "") == config["switch_id"]
+            and runtime.get("last_pill_count") == count
+            and _remaining(runtime.get("next_daily_at")) > _remaining(available_at)
+        ):
+            runtime["pill_retry"] = {"at": available_at, "count": count, "switch_id": config["switch_id"]}
+        else:
+            runtime.pop("pill_retry", None)
+        self.save_state()
+
     async def _meditation_use_pill(self, identity, config):
         if getattr(self, "_restricted_miniapp_worker", None) is not None:
             self._meditation_runtime(identity)["pill_status"] = "waiting_group_permission"
             self.save_state()
+            return False
+        runtime = self._meditation_runtime(identity)
+        if _remaining(runtime.get("pill_available_at")) > 0:
+            self._record_meditation_pill_cooldown(identity, config, runtime["pill_available_at"])
             return False
         text = await self._send_meditation_command(identity, ".服用 合气丹", config)
         shortage = any(word in text for word in ("没有足够", "不足", "未拥有", "数量不够", "没有合气丹"))
@@ -192,19 +217,51 @@ class MeditationModeMixin:
                 self.common_command_logger(),
             )
         success = bool(text) and not shortage and not any(
-            word in text for word in ("失败", "无法", "不能", "冷却")
+            word in text for word in ("失败", "无法", "不能", "冷却", "抗药性", "后再服用")
         ) and any(word in text for word in (
             "成功服用", "服用成功", "已服用", "服用了", "服下", "修为增加", "执行成功",
         ))
         if success:
-            self._meditation_runtime(identity)["pill_status"] = "used"
-            self._meditation_runtime(identity)["next_daily_at"] = ""
+            runtime.update(pill_status="used", next_daily_at="", pill_available_at="")
+            runtime.pop("pill_retry", None)
             self._meditation_identity_state(identity)["next_meditation_time"] = ""
             self.save_state()
         if not success:
-            self._meditation_runtime(identity)["last_result"] = f"合气丹回复未确认：{text[:160]}"
+            wait = self.parse_wait_time(text)
+            if not shortage and wait > 0 and any(word in text for word in ("抗药性", "冷却", "后再服用")):
+                self._record_meditation_pill_cooldown(identity, config, _after(wait + 2))
+                return False
+            runtime.pop("pill_retry", None)
+            runtime.update(pill_status="shortage" if shortage else "unconfirmed",
+                           last_result=f"合气丹回复未确认：{text[:160]}")
             self.save_state()
         return success
+
+    async def _retry_meditation_pill(self, identity, config):
+        runtime = self._meditation_runtime(identity)
+        retry = runtime.get("pill_retry")
+        if not isinstance(retry, dict):
+            return False
+        if (
+            not config["use_heqi_pill"] or retry.get("switch_id") != config["switch_id"]
+            or retry.get("count") != runtime.get("success_count")
+            or retry.get("count") != runtime.get("last_pill_count")
+            or not retry.get("at") or _remaining(runtime.get("next_daily_at")) <= 0
+        ):
+            runtime.pop("pill_retry", None)
+            self.save_state()
+            return False
+        if _remaining(retry["at"]) > 0 or not self._meditation_selection_current(identity, config, ".服用 合气丹"):
+            return True
+        # Consume the retry before sending. A lost reply or restart must not
+        # repeat an operation that could already have consumed the item.
+        runtime.pop("pill_retry", None)
+        self.save_state()
+        if await self._meditation_use_pill(identity, config):
+            followup = await self._daily_meditation_once(identity, config)
+            if followup is not None:
+                self._record_daily_meditation(identity, followup)
+        return True
 
     async def _prepare_identity_meditation(self, identity, config):
         runtime = self._meditation_runtime(identity)
@@ -328,6 +385,8 @@ class MeditationModeMixin:
                     return True
                 if config["mode"] == "deep":
                     return False
+                if await self._retry_meditation_pill(identity, config):
+                    return True
                 if _remaining(runtime.get("next_daily_at")) > 0:
                     return True
                 text = await self._daily_meditation_once(identity, config)
