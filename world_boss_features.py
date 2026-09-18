@@ -7,6 +7,7 @@ from automation_command_controls import CommandControlPaused, WORLD_BOSS, requir
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import hashlib
 import http.client
 import inspect
@@ -83,7 +84,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 7
+WORLD_BOSS_DIAGNOSTIC_VERSION = 8
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it creates a short-lived Dashboard handoff and waits for a real
@@ -276,6 +277,8 @@ class _PersistentWorldBossJsonClient:
         path: str,
         payload: dict[str, Any],
         timeout: int,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         target = urllib.parse.urlsplit(
             urllib.parse.urljoin(self.origin.rstrip("/") + "/", str(path).lstrip("/"))
@@ -293,26 +296,69 @@ class _PersistentWorldBossJsonClient:
             "Connection": "keep-alive",
         }
 
+        def remaining_timeout() -> float:
+            seconds = max(1, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
+            if deadline_monotonic is not None:
+                seconds = min(seconds, deadline_monotonic - time.monotonic())
+                if seconds <= 0:
+                    raise TimeoutError("world boss read budget expired")
+            return seconds
+
         connection = None
-        with self._lock:
-            if self._closed:
-                raise MiniAppBeastError("request_failed")
-            while self._idle:
-                returned_at, candidate = self._idle.pop()
-                if time.monotonic() - returned_at < 15:
-                    connection = candidate
-                    break
-                candidate.close()
-        connection = connection or self._new_connection(timeout)
-        connection.timeout = max(1, int(timeout or WORLD_BOSS_TIMEOUT_SECONDS))
-        if connection.sock is not None:
-            connection.sock.settimeout(connection.timeout)
+        request_socket = None
+
+        def set_remaining_timeout() -> None:
+            connection.timeout = remaining_timeout()
+            if request_socket is not None:
+                request_socket.settimeout(connection.timeout)
+
+        phase = "queue"
         reusable = False
         try:
+            # A poll can spend its whole budget waiting for circuit admission or
+            # an executor. Do not start another socket wait after that deadline.
+            remaining_timeout()
+            with self._lock:
+                if self._closed:
+                    raise MiniAppBeastError("request_failed")
+                while self._idle:
+                    returned_at, candidate = self._idle.pop()
+                    if time.monotonic() - returned_at < 15:
+                        connection = candidate
+                        break
+                    candidate.close()
+            remaining_timeout()
+            connection = connection or self._new_connection(timeout)
+            request_socket = connection.sock
+            phase = "request"
+            set_remaining_timeout()
             connection.request("POST", request_path, body=body, headers=headers)
+            request_socket = connection.sock
+            phase = "headers"
+            set_remaining_timeout()
             response = connection.getresponse()
             status = int(response.status or 0)
-            response_body = response.read().decode("utf-8", errors="replace")
+            phase = "body"
+            if deadline_monotonic is None:
+                response_body = response.read().decode("utf-8", errors="replace")
+            else:
+                # read() can perform several socket waits, each with the same
+                # timeout. read1() lets every body read use the remaining budget.
+                # Keep the socket reference even when Connection: close detaches
+                # it from HTTPConnection while HTTPResponse still owns the body.
+                chunks = []
+                while not response.isclosed():
+                    set_remaining_timeout()
+                    chunk = response.read1(64 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                if response.length not in (None, 0):
+                    # Unlike read(), read1() can reach EOF without raising for
+                    # a truncated Content-Length body. Do not accept or pool it.
+                    raise http.client.IncompleteRead(b"", response.length)
+                remaining_timeout()
+                response_body = b"".join(chunks).decode("utf-8", errors="replace")
             reusable = not response.will_close
         except (OSError, http.client.HTTPException) as exc:
             # A lost response may follow a successful one-shot POST. Only the
@@ -320,7 +366,7 @@ class _PersistentWorldBossJsonClient:
             if (
                 isinstance(exc, TimeoutError)
                 and request_path.rstrip("/") == "/api/miniapp/xianxia-world-boss/window"
-                and connection.timeout < WORLD_BOSS_CHARGE_TIMEOUT_SECONDS
+                and (deadline_monotonic is not None or timeout < WORLD_BOSS_CHARGE_TIMEOUT_SECONDS)
             ):
                 error = MiniAppReadDeadlineError("boss_window_poll_timeout")
             else:
@@ -328,13 +374,16 @@ class _PersistentWorldBossJsonClient:
                     "api_timeout" if isinstance(exc, TimeoutError) else "api_unreachable"
                 )
             error.details = {"transport_error": type(exc).__name__.lower()}
+            if isinstance(error, MiniAppReadDeadlineError) and deadline_monotonic is not None:
+                error.details["deadline_phase"] = phase
             raise error from exc
         finally:
-            with self._lock:
-                if reusable and not self._closed and len(self._idle) < 32:
-                    self._idle.append((time.monotonic(), connection))
-                else:
-                    connection.close()
+            if connection is not None:
+                with self._lock:
+                    if reusable and not self._closed and len(self._idle) < 32:
+                        self._idle.append((time.monotonic(), connection))
+                    else:
+                        connection.close()
 
         try:
             data = json.loads(response_body)
@@ -354,10 +403,12 @@ class _PersistentWorldBossJsonClient:
         path: str,
         payload: dict[str, Any],
         timeout: int,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         if origin.rstrip("/") != self.origin:
             raise MiniAppBeastError("invalid_entry_url")
-        return self._post_sync(path, payload, timeout)
+        return self._post_sync(path, payload, timeout, deadline_monotonic=deadline_monotonic)
 
 
 def _now_text() -> str:
@@ -1521,6 +1572,14 @@ class WorldBossMonitor:
                 if self.post_json is None:
                     if origin not in self._json_clients:
                         self._json_clients[origin] = _PersistentWorldBossJsonClient(origin)
+                    request_sync = self._json_clients[origin].post_sync
+                    if urllib.parse.urlsplit(path).path.rstrip("/") == "/api/miniapp/xianxia-world-boss/window":
+                        read_budget = min(request_timeout, WORLD_BOSS_WINDOW_TIMEOUT_SECONDS)
+                        request_sync = partial(
+                            request_sync, deadline_monotonic=attempt_started_at + read_budget,
+                        )
+                        if trace is not None:
+                            trace["read_budget_ms"] = int(round(read_budget * 1000))
                     result = await _post_json(
                         origin,
                         path,
@@ -1528,7 +1587,7 @@ class WorldBossMonitor:
                         request_timeout,
                         time_critical=bool(time_critical),
                         executor=self._world_boss_http_executor(),
-                        request_sync=self._json_clients[origin].post_sync,
+                        request_sync=request_sync,
                         network_trace=network_trace,
                     )
                 else:
@@ -1556,6 +1615,11 @@ class WorldBossMonitor:
                     details = _error_diagnostics(exc)
                     if details:
                         attempt_trace["server_details"] = details
+                    if isinstance(exc, MiniAppReadDeadlineError) and details.get("deadline_phase") in {
+                        "queue", "request", "headers", "body",
+                    }:
+                        # Keep this local scalar through the bounded log sanitizer.
+                        attempt_trace["deadline_phase"] = details["deadline_phase"]
                     trace["attempts"].append(attempt_trace)
                     trace["total_duration_ms"] = max(
                         0,
@@ -3918,7 +3982,9 @@ class WorldBossMonitor:
                     ),
                     default=None,
                 ),
-                "log": _diagnostic_value(reveal_log),
+                # Sanitize each row separately so the list wrapper does not
+                # exhaust the depth limit at request.attempts and erase timing.
+                "log": [_diagnostic_value(row) for row in reveal_log[:20]],
             },
             "hits": [item.get("diagnostic") or {} for item in hit_results],
             "finish": {
