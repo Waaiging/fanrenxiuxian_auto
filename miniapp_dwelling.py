@@ -1009,6 +1009,7 @@ class MiniAppDwellingTransport:
         self,
         identity: str,
         mode: str = "deep",
+        log_operation: bool = True,
     ) -> dict[str, Any]:
         """Run one Mini App wild-experience action from the journey tab."""
         mode = str(mode or "").strip().casefold()
@@ -1023,6 +1024,7 @@ class MiniAppDwellingTransport:
                     {"action": "wild_experience", "mode": mode},
                     identity=identity,
                 ),
+                log_operation=log_operation,
             )
 
     async def journey_with_destiny_prefix(
@@ -1030,6 +1032,7 @@ class MiniAppDwellingTransport:
         identity: str,
         prefix_command: str = ".改命 探索",
         mode: str = "deep",
+        log_operation: bool = True,
     ) -> tuple[MiniAppCommandResponse, dict[str, Any] | None]:
         """Execute the destiny prefix and deep click as one transport transaction."""
         prefix_command = normalize_miniapp_command(prefix_command)
@@ -1047,6 +1050,7 @@ class MiniAppDwellingTransport:
                     {"command": prefix_command},
                     identity=identity,
                 ),
+                log_operation=log_operation,
             )
             prefix = MiniAppCommandResponse(
                 command_result_text(prefix_payload),
@@ -1063,6 +1067,7 @@ class MiniAppDwellingTransport:
                     identity=identity,
                     required_command=prefix_command,
                 ),
+                log_operation=log_operation,
             )
             return prefix, journey_payload
 

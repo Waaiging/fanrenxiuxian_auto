@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily wild-experience automation through the Mini App journey tab."""
+"""Mini App wild experience with server quotas and one daily result summary."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from automation_command_controls import CommandControlPaused, JOURNEY, command_p
 
 import asyncio
 from datetime import datetime, timedelta
+import math
 from typing import Any
 
 from automation_settings import (
@@ -30,27 +31,12 @@ from miniapp_dwelling import (
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-DEFAULT_JOURNEY_HOUR = 7
 DEFAULT_JOURNEY_RETRY_SECONDS = 15 * 60
-DEFAULT_ACTION_DELAY_SECONDS = 2
 DEFAULT_SETTINGS_RELOAD_SECONDS = 60
-TARGET_DAILY_ATTEMPTS = 2
+# 野外历练已改为按服务器可用次数连续执行，不再本地强制 3 小时冷却。
+JOURNEY_INTERVAL_SECONDS = 0
 JOURNEY_PREFIX_COMMAND = ".改命 探索"
 JOURNEY_MODE = "deep"
-ACCOUNT_MINUTE_OFFSETS = {
-    "main": 0,
-    "sub": 10,
-    "xiaohao": 20,
-    "waaiging": 30,
-}
-
-
-def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = int(default)
-    return max(minimum, min(maximum, parsed))
 
 
 def _nonnegative_int(value: Any, default: int = 0) -> int:
@@ -89,7 +75,7 @@ def _seconds_until_timestamp(value: Any, now: datetime | None = None) -> int:
         if numeric > 10_000_000_000:
             numeric /= 1000.0
         try:
-            return max(0, int((datetime.fromtimestamp(numeric) - now).total_seconds()))
+            return max(0, math.ceil((datetime.fromtimestamp(numeric) - now).total_seconds()))
         except (OverflowError, OSError, ValueError):
             pass
     text = str(value or "").strip()
@@ -100,20 +86,18 @@ def _seconds_until_timestamp(value: Any, now: datetime | None = None) -> int:
             parsed = datetime.fromisoformat(candidate)
             if parsed.tzinfo is not None:
                 parsed = parsed.astimezone().replace(tzinfo=None)
-            return max(0, int((parsed - now).total_seconds()))
+            return max(0, math.ceil((parsed - now).total_seconds()))
         except ValueError:
             continue
     return 0
 
 
 def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]:
-    """Normalize the server-authoritative daily counter and cooldown."""
+    """Read server cooldowns and optional quotas without imposing a daily cap."""
     raw = wild_experience_state(payload)
     server_limit = _nonnegative_int(
         raw.get("dailyLimit") if raw.get("dailyLimit") is not None else raw.get("limit"),
-        TARGET_DAILY_ATTEMPTS,
-    ) or TARGET_DAILY_ATTEMPTS
-    limit = min(TARGET_DAILY_ATTEMPTS, server_limit)
+    )
     count_value = raw.get("dailyCount")
     if count_value is None:
         count_value = raw.get("used")
@@ -124,10 +108,12 @@ def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]
         server_count = max(0, server_limit - _nonnegative_int(remaining_value))
     else:
         server_count = _nonnegative_int(count_value)
-    count = min(limit, server_count)
-    remaining = max(0, limit - count)
+    remaining = max(0, server_limit - server_count) if server_limit else None
     if remaining_value is not None:
-        remaining = min(remaining, _nonnegative_int(remaining_value))
+        remaining = (
+            min(remaining, _nonnegative_int(remaining_value))
+            if remaining is not None else _nonnegative_int(remaining_value)
+        )
     remaining_seconds = _nonnegative_int(raw.get("remainingSeconds"))
     if remaining_seconds <= 0:
         remaining_seconds = _seconds_until_timestamp(raw.get("readyAt"), now=now)
@@ -135,16 +121,16 @@ def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]
     available = (
         bool(available_value)
         if available_value is not None
-        else remaining > 0 and remaining_seconds <= 0
+        else remaining != 0 and remaining_seconds <= 0
     )
-    if remaining <= 0:
+    if remaining == 0 or remaining_seconds > 0:
         available = False
     return {
         "raw": raw,
         "present": bool(raw),
         "available": available,
-        "daily_count": count,
-        "daily_limit": limit,
+        "daily_count": server_count,
+        "daily_limit": server_limit,
         "daily_remaining": remaining,
         "remaining_seconds": remaining_seconds,
         "ready_at": str(raw.get("readyAt") or ""),
@@ -152,8 +138,32 @@ def journey_counter(payload: Any, now: datetime | None = None) -> dict[str, Any]
     }
 
 
+def journey_rounds_summary(batch: dict[str, Any]) -> str:
+    """Format the results actually captured, including gaps in server history."""
+    records = batch.get("records") or []
+    if not records:
+        return ""
+    count = max(len(records), _nonnegative_int(batch.get("daily_count")))
+    limit = _nonnegative_int(batch.get("daily_limit"))
+    progress = f"今日完成 {count}/{limit} 次" if limit else f"已完成 {count} 次"
+    if not batch.get("complete"):
+        progress += "，跨日汇总"
+    lines = [f"野外历练汇总（深入 · {batch['date']} · {progress}）"]
+    if count > len(records):
+        lines.append(f"本条记录 {len(records)} 次；其余 {count - len(records)} 次无本地明细。")
+    for index, record in enumerate(records, 1):
+        time_text = str(record.get("completed_at") or "").partition(" ")[2]
+        result = " ".join(str(record.get("result") or "历练已完成，服务端未返回明细").split())
+        line = f"{index}. {time_text} {result}"
+        prefix = " ".join(str(record.get("prefix_result") or "").split())
+        if prefix:
+            line += f"（改命探索：{prefix}）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 class MiniAppTianxingJourney:
-    """Use both daily journey attempts for Dashboard-selected identities."""
+    """Follow each identity's server quota and persist results until summary."""
 
     def __init__(self, actor: Any, transport: Any, account: str, logger: Any) -> None:
         self.actor = actor
@@ -164,27 +174,12 @@ class MiniAppTianxingJourney:
         if not isinstance(settings, dict):
             settings = {}
         self.supported = self.account in MINIAPP_JOURNEY_SUPPORTED_ACCOUNTS
+        # Retain the existing enable switch; the old daily start hour is obsolete.
         self.enabled = self.supported and bool(settings.get("journey_daily_enabled", True))
-        self.hour = _bounded_int(
-            settings.get("journey_daily_hour"),
-            DEFAULT_JOURNEY_HOUR,
-            0,
-            23,
-        )
-        self.minute = _bounded_int(
-            settings.get("journey_daily_minute"),
-            ACCOUNT_MINUTE_OFFSETS.get(self.account, 0),
-            0,
-            59,
-        )
         self.retry_seconds = max(
             60,
             int(settings.get("journey_retry_seconds") or DEFAULT_JOURNEY_RETRY_SECONDS),
         )
-        delay_value = settings.get("journey_action_delay_seconds")
-        if delay_value is None:
-            delay_value = DEFAULT_ACTION_DELAY_SECONDS
-        self.action_delay_seconds = max(0, int(delay_value))
         self.settings_reload_seconds = max(
             15,
             int(
@@ -211,6 +206,82 @@ class MiniAppTianxingJourney:
         if isinstance(state, dict):
             state.update(updates)
             self._save()
+
+    def _emit_daily_summary(self, identity: str, now: datetime) -> bool:
+        batch = _mapping(self._state(identity).get("miniapp_journey_summary"))
+        if not batch.get("records") or batch.get("emitted"):
+            return False
+        if not batch.get("complete") and str(batch.get("date") or "") >= now.strftime("%Y-%m-%d"):
+            return False
+        summary = journey_rounds_summary(batch)
+        self.log.info("IN [Mini App | %s]:\n%s", identity, summary)
+        self._record(
+            identity,
+            miniapp_journey_summary={**batch, "emitted": True},
+            miniapp_journey_last_daily_summary=summary,
+            miniapp_journey_last_daily_summary_time=now.strftime(TIME_FORMAT),
+        )
+        return True
+
+    def _summary_after_success(
+        self,
+        identity: str,
+        result: str,
+        prefix_result: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        started_at: datetime,
+        completed_at: datetime,
+    ) -> dict[str, Any]:
+        # Flush an interrupted previous day before replacing its journal.
+        self._emit_daily_summary(identity, completed_at)
+        date = completed_at.strftime("%Y-%m-%d")
+        batch = _mapping(self._state(identity).get("miniapp_journey_summary"))
+        if batch.get("date") != date:
+            batch = {"date": date, "records": [], "emitted": False}
+        records = list(batch.get("records") or [])
+        # A confirmed action consumes one attempt even when its response omits
+        # the updated counter. Never carry yesterday's quota over midnight.
+        same_day = started_at.date() == completed_at.date()
+        count = max(
+            len(records) + 1,
+            _nonnegative_int(after.get("daily_count")),
+            _nonnegative_int(batch.get("daily_count")) + 1,
+            _nonnegative_int(before.get("daily_count")) + 1 if same_day else 0,
+        )
+        limit = _nonnegative_int(after.get("daily_limit")) or (
+            _nonnegative_int(before.get("daily_limit")) if same_day else 0
+        )
+        records.append({
+            "completed_at": completed_at.strftime(TIME_FORMAT),
+            "result": result,
+            "prefix_result": prefix_result,
+        })
+        return {
+            **batch,
+            "records": records,
+            "daily_count": count,
+            "daily_limit": limit,
+            "complete": bool(
+                after.get("present") and after.get("daily_remaining") == 0
+                or same_day and before.get("daily_remaining") == 1
+                or limit and count >= limit
+            ),
+        }
+
+    def _observe_summary_counter(self, identity: str, counter: dict[str, Any], now: datetime) -> None:
+        batch = _mapping(self._state(identity).get("miniapp_journey_summary"))
+        if batch.get("date") == now.strftime("%Y-%m-%d") and batch.get("records"):
+            self._record(identity, miniapp_journey_summary={
+                **batch,
+                "daily_count": max(
+                    _nonnegative_int(batch.get("daily_count")),
+                    _nonnegative_int(counter.get("daily_count")),
+                ),
+                "daily_limit": _nonnegative_int(counter.get("daily_limit")) or batch.get("daily_limit", 0),
+                "complete": bool(batch.get("complete") or counter.get("daily_remaining") == 0),
+            })
+        self._emit_daily_summary(identity, now)
 
     def _identity_sect(self, identity: str) -> str:
         state = self._state(identity)
@@ -270,8 +341,8 @@ class MiniAppTianxingJourney:
         values = {
             "miniapp_journey_last_sync_time": now_text,
             "miniapp_journey_daily_count": int(counter.get("daily_count") or 0),
-            "miniapp_journey_daily_limit": int(counter.get("daily_limit") or TARGET_DAILY_ATTEMPTS),
-            "miniapp_journey_daily_remaining": int(counter.get("daily_remaining") or 0),
+            "miniapp_journey_daily_limit": int(counter.get("daily_limit") or 0),
+            "miniapp_journey_daily_remaining": counter.get("daily_remaining"),
             "miniapp_journey_available": bool(counter.get("available")),
             "miniapp_journey_remaining_seconds": int(counter.get("remaining_seconds") or 0),
             "miniapp_journey_ready_at": str(counter.get("ready_at") or ""),
@@ -290,20 +361,66 @@ class MiniAppTianxingJourney:
         )
 
     def _record_next_schedule(self, target: datetime, identities: list[str]) -> None:
-        value = target.strftime(TIME_FORMAT)
-        state = getattr(self.actor, "state", None)
-        if isinstance(state, dict):
-            state["miniapp_journey_next_run_time"] = value
-            state["miniapp_journey_identities"] = list(identities)
-        for identity in identities:
-            self._state(identity)["miniapp_journey_next_run_time"] = value
-        self._save()
+        # The root is also the main soul's state. Never overwrite its own
+        # cooldown with the earliest avatar's wake-up time.
+        self._record_root(
+            miniapp_journey_next_cycle_time=target.strftime(TIME_FORMAT),
+            miniapp_journey_identities=list(identities),
+        )
+
+    def _local_cooldown(self, identity: str, now: datetime) -> int:
+        last = self._state(identity).get("miniapp_journey_last_time")
+        try:
+            target = datetime.strptime(str(last), TIME_FORMAT) + timedelta(
+                seconds=JOURNEY_INTERVAL_SECONDS
+            )
+        except (TypeError, ValueError):
+            return 0
+        return max(0, math.ceil((target - now).total_seconds()))
+
+    def _migrate_schedule(self, identity: str, now: datetime) -> None:
+        state = self._state(identity)
+        if state.get("miniapp_journey_interval_seconds") == JOURNEY_INTERVAL_SECONDS:
+            return
+        # Old next_run_time / last_date represented tomorrow's daily batch.
+        # Rebuild only from the last action and an observed server cooldown.
+        wait = max(
+            self._local_cooldown(identity, now),
+            _seconds_until_timestamp(state.get("miniapp_journey_ready_at"), now),
+        )
+        self._record(
+            identity,
+            miniapp_journey_interval_seconds=JOURNEY_INTERVAL_SECONDS,
+            miniapp_journey_next_run_time=(now + timedelta(seconds=wait)).strftime(TIME_FORMAT),
+        )
+
+    def _schedule(self, identity: str, seconds: int, now: datetime | None = None) -> int:
+        now = now or datetime.now()
+        wait = max(5, int(seconds), self._local_cooldown(identity, now))
+        self._record(
+            identity,
+            miniapp_journey_next_run_time=(now + timedelta(seconds=wait)).strftime(TIME_FORMAT),
+        )
+        return wait
+
+    def _counter_wait(self, counter: dict[str, Any], now: datetime) -> int:
+        wait = int(counter.get("remaining_seconds") or 0)
+        if counter.get("daily_remaining") == 0:
+            # Some servers may still report an explicit quota. Respect it,
+            # but never invent a two-per-day quota when those fields are absent.
+            reset = _seconds_until_timestamp(counter.get("reset_at"), now)
+            if not reset:
+                midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                reset = math.ceil((midnight - now).total_seconds())
+            wait = max(wait, reset)
+        return max(5, wait or self.retry_seconds)
 
     async def _refresh_counter(self, identity: str, now: datetime) -> dict[str, Any]:
         payload = await self.transport.journey_snapshot(identity)
         apply_dwelling_snapshot(self.actor, identity, payload)
         counter = journey_counter(payload, now=now)
         self._record_counter(identity, counter)
+        self._observe_summary_counter(identity, counter, now)
         return counter
 
     async def run_identity(
@@ -311,137 +428,107 @@ class MiniAppTianxingJourney:
         identity: str,
         now: datetime | None = None,
     ) -> tuple[bool, int]:
-        """Use all currently available attempts; return (daily_complete, retry_seconds)."""
+        """Run at most one due action; return (performed, next_wait_seconds)."""
+        now = now or datetime.now()
+        self._emit_daily_summary(identity, now)
         if command_paused(self.actor, JOURNEY, identity):
             return False, 60
-        now = now or datetime.now()
-        today = now.strftime("%Y-%m-%d")
+        self._migrate_schedule(identity, now)
+        wait = _seconds_until_timestamp(
+            self._state(identity).get("miniapp_journey_next_run_time"),
+            now,
+        )
+        if wait > 0:
+            return False, wait
+        pause_seconds = self._identity_pause_seconds(identity)
+        if pause_seconds > 0:
+            return False, max(60, pause_seconds)
+        pause = getattr(self.actor, "pause_event", None)
+        if pause is not None:
+            await pause.wait()
+        if command_paused(self.actor, JOURNEY, identity):
+            return False, 60
+
         counter = await self._refresh_counter(identity, now)
         if not counter.get("present"):
             raise MiniAppBeastError("wild_experience_state_missing")
-        use_destiny_prefix = self._identity_sect(identity) == "天星宗"
-        if counter["daily_remaining"] <= 0:
-            self._record_counter(
-                identity,
-                counter,
-                miniapp_journey_last_date=today,
-                miniapp_journey_last_error="",
-                miniapp_journey_last_result=(
-                    self._state(identity).get("miniapp_journey_last_result")
-                    or f"今日已完成 {counter['daily_count']}/{counter['daily_limit']} 次"
-                ),
-            )
-            return True, 0
-
-        safety_limit = max(1, int(counter["daily_limit"]))
-        attempts = 0
-        while counter["daily_remaining"] > 0 and attempts < safety_limit:
-            if command_paused(self.actor, JOURNEY, identity):
-                return False, 60
-            pause_seconds = self._identity_pause_seconds(identity)
-            if pause_seconds > 0:
-                return False, max(60, pause_seconds)
-            pause = getattr(self.actor, "pause_event", None)
-            if pause is not None:
-                await pause.wait()
-
-            if not counter["available"]:
-                remaining_seconds = int(counter.get("remaining_seconds") or 0)
-                if remaining_seconds <= 0:
-                    self._record_error(identity, "wild_experience_unavailable")
-                    self.log.error(
-                        "Mini App journey is unavailable for %s without a server cooldown",
-                        identity,
-                    )
-                wait = max(5, remaining_seconds or self.retry_seconds)
-                return False, wait
-
-            if use_destiny_prefix:
-                ensure_destiny = getattr(
-                    self.actor, "ensure_tianxing_destiny_for_action", None
-                )
-                if callable(ensure_destiny) and not await ensure_destiny(
-                    identity, "exploration"
-                ):
-                    self._record_error(identity, "tianxing_destiny_failed")
-                    return False, self.retry_seconds
-
-                combined = getattr(self.transport, "journey_with_destiny_prefix", None)
-                if callable(combined):
-                    prefix, payload = await combined(
-                        identity,
-                        prefix_command=JOURNEY_PREFIX_COMMAND,
-                        mode=JOURNEY_MODE,
-                    )
-                else:
-                    prefix = await self.transport.command(JOURNEY_PREFIX_COMMAND, identity=identity)
-                    payload = None
-                if not command_result_ok(prefix.payload):
-                    detail = command_result_text(prefix.payload) or prefix.text or "改命探索前置失败"
-                    self._record_error(identity, "journey_destiny_prefix_failed", detail)
-                    self.log.error(
-                        "Mini App journey prefix failed for %s; deep action was blocked",
-                        identity,
-                    )
-                    return False, self.retry_seconds
-                if payload is None:
-                    payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE)
+        if not counter["available"]:
+            wait = self._counter_wait(counter, now)
+            if counter.get("daily_remaining") != 0 and not counter.get("remaining_seconds"):
+                self._record_error(identity, "wild_experience_unavailable")
             else:
-                payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE)
-            if not command_result_ok(payload):
-                raise MiniAppBeastError("wild_experience_failed")
-            apply_dwelling_snapshot(self.actor, identity, payload)
-            result_text = miniapp_operation_result_text(payload)
-            action_time = datetime.now().strftime(TIME_FORMAT)
-            attempts += 1
+                self._record(identity, miniapp_journey_last_error="")
+            return False, self._schedule(identity, wait, now)
 
-            counter = await self._refresh_counter(identity, datetime.now())
-            self._record_counter(
-                identity,
-                counter,
-                miniapp_journey_last_time=action_time,
-                miniapp_journey_last_result=result_text,
-                miniapp_journey_last_error="",
-                miniapp_journey_last_prefix=(JOURNEY_PREFIX_COMMAND if use_destiny_prefix else ""),
-                miniapp_journey_last_mode=JOURNEY_MODE,
-            )
-            recorder = getattr(self.actor, "record_daily_reward_event", None)
-            if callable(recorder) and result_text:
-                try:
-                    recorder(
-                        identity,
-                        ".游历 深入",
-                        result_text,
-                        source="Mini App 游历·深入",
-                        final=True,
-                    )
-                except Exception:
-                    self.log.warning(
-                        "Mini App journey reward recording failed for %s",
-                        identity,
-                        exc_info=True,
-                    )
-
-            if counter["daily_remaining"] <= 0:
-                self._record(
-                    identity,
-                    miniapp_journey_last_date=today,
-                    miniapp_journey_last_error="",
+        prefix_result = ""
+        use_destiny_prefix = self._identity_sect(identity) == "天星宗"
+        if use_destiny_prefix:
+            ensure_destiny = getattr(self.actor, "ensure_tianxing_destiny_for_action", None)
+            if callable(ensure_destiny) and not await ensure_destiny(identity, "exploration"):
+                self._record_error(identity, "tianxing_destiny_failed")
+                return False, self._schedule(identity, self.retry_seconds)
+            combined = getattr(self.transport, "journey_with_destiny_prefix", None)
+            if callable(combined):
+                prefix, payload = await combined(
+                    identity, prefix_command=JOURNEY_PREFIX_COMMAND, mode=JOURNEY_MODE,
+                    log_operation=False,
                 )
-                return True, 0
-            if not counter["available"]:
-                wait = max(5, int(counter.get("remaining_seconds") or self.retry_seconds))
-                return False, wait
-            if self.action_delay_seconds:
-                await asyncio.sleep(self.action_delay_seconds)
+            else:
+                prefix = await self.transport.command(
+                    JOURNEY_PREFIX_COMMAND, identity=identity, log_operation=False,
+                )
+                payload = None
+            if not command_result_ok(prefix.payload):
+                detail = command_result_text(prefix.payload) or prefix.text or "改命探索前置失败"
+                self._record_error(identity, "journey_destiny_prefix_failed", detail)
+                self.log.error("Mini App journey prefix failed for %s; deep action was blocked: %s", identity, detail)
+                return False, self._schedule(identity, self.retry_seconds)
+            prefix_result = command_result_text(prefix.payload) or prefix.text
+            if payload is None:
+                payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE, log_operation=False)
+        else:
+            payload = await self.transport.journey_action(identity, mode=JOURNEY_MODE, log_operation=False)
+        if not command_result_ok(payload):
+            detail = miniapp_operation_result_text(payload) or "历练未完成"
+            self._record_error(identity, "wild_experience_failed", detail)
+            self.log.error("Mini App journey failed for %s: %s", identity, detail)
+            return False, self._schedule(identity, self.retry_seconds)
 
-        complete = counter["daily_remaining"] <= 0
-        return complete, 0 if complete else self.retry_seconds
+        apply_dwelling_snapshot(self.actor, identity, payload)
+        result_text = miniapp_operation_result_text(payload)
+        action_now = datetime.now()
+        # Persist the result with success BEFORE the follow-up read, so a
+        # failed read or restart cannot lose a confirmed result in the batch.
+        self._record(
+            identity,
+            miniapp_journey_last_time=action_now.strftime(TIME_FORMAT),
+            miniapp_journey_next_run_time=action_now.strftime(TIME_FORMAT),
+            miniapp_journey_last_date=action_now.strftime("%Y-%m-%d"),
+            miniapp_journey_last_result=result_text,
+            miniapp_journey_last_error="",
+            miniapp_journey_last_prefix=JOURNEY_PREFIX_COMMAND if use_destiny_prefix else "",
+            miniapp_journey_last_mode=JOURNEY_MODE,
+            miniapp_journey_summary=self._summary_after_success(
+                identity, result_text, prefix_result, counter,
+                journey_counter(payload, now=action_now), now, action_now,
+            ),
+        )
+        self._emit_daily_summary(identity, action_now)
+        recorder = getattr(self.actor, "record_daily_reward_event", None)
+        if callable(recorder) and result_text:
+            try:
+                recorder(identity, ".游历 深入", result_text, source="Mini App 游历·深入", final=True)
+            except Exception:
+                self.log.warning("Mini App journey reward recording failed for %s", identity, exc_info=True)
 
-    async def run_daily_once(
-        self,
-        now: datetime | None = None,
-    ) -> tuple[bool, int]:
+        counter = await self._refresh_counter(identity, datetime.now())
+        wait = self._local_cooldown(identity, datetime.now())
+        if counter.get("present") and not counter["available"]:
+            wait = max(wait, self._counter_wait(counter, datetime.now()))
+        return True, self._schedule(identity, wait)
+
+    async def run_once(self, now: datetime | None = None) -> tuple[bool, int]:
+        """Check each selected identity independently against its server deadline."""
         if not self.runtime_enabled():
             return False, self.settings_reload_seconds
         circuit_error = miniapp_circuit_preflight(getattr(self.transport, "origin", ""))
@@ -458,88 +545,43 @@ class MiniAppTianxingJourney:
             )
             return False, self.retry_seconds
 
-        complete = True
-        retry_after = 0
+        performed = False
+        waits = []
         for identity in identities:
             try:
-                identity_complete, identity_retry = await self.run_identity(identity, now=now)
-                complete = complete and identity_complete
-                if not identity_complete:
-                    retry_after = identity_retry if retry_after <= 0 else min(retry_after, identity_retry)
+                did_run, wait = await self.run_identity(identity, now=now)
+                performed = performed or did_run
             except asyncio.CancelledError:
                 raise
             except CommandControlPaused:
-                complete = False
-                retry_after = min(retry_after, 60) if retry_after else 60
+                wait = 60
             except MiniAppCircuitOpenError:
-                # One shared upstream circuit covers every identity. Stop the
-                # current batch so the scheduler emits one pause record rather
-                # than repeating the same event for all remaining identities.
                 raise
-            except MiniAppBeastError as exc:
-                if exc.code == "wild_experience_daily_limit":
-                    counter = await self._refresh_counter(identity, datetime.now())
-                    self._record_counter(
-                        identity,
-                        counter,
-                        miniapp_journey_last_date=now.strftime("%Y-%m-%d"),
-                        miniapp_journey_last_error="",
-                    )
-                    continue
-                if exc.code == "wild_experience_unavailable":
+            except Exception as exc:
+                code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
+                recovered = False
+                wait = self.retry_seconds
+                if code in {"wild_experience_daily_limit", "wild_experience_unavailable", "wild_experience_cooldown"}:
                     try:
                         counter = await self._refresh_counter(identity, datetime.now())
-                        if counter.get("present") and counter.get("daily_remaining", 0) > 0:
-                            wait = max(
-                                5,
-                                int(counter.get("remaining_seconds") or self.retry_seconds),
-                            )
-                            complete = False
-                            retry_after = wait if retry_after <= 0 else min(retry_after, wait)
-                            self._record_counter(
-                                identity,
-                                counter,
-                                miniapp_journey_last_error="",
-                            )
-                            continue
-                    except asyncio.CancelledError:
-                        raise
-                    except MiniAppCircuitOpenError:
+                        if counter.get("present") and not counter["available"]:
+                            wait = self._counter_wait(counter, datetime.now())
+                            self._record(identity, miniapp_journey_last_error="")
+                            recovered = True
+                    except (asyncio.CancelledError, MiniAppCircuitOpenError):
                         raise
                     except Exception:
                         pass
-                complete = False
-                retry_after = retry_after or self.retry_seconds
-                self._record_error(identity, exc.code)
-                self.log.error(
-                    "Mini App journey failed for %s: %s",
-                    identity,
-                    exc.code,
-                    exc_info=True,
-                )
-            except Exception as exc:
-                complete = False
-                retry_after = retry_after or self.retry_seconds
-                code = type(exc).__name__.lower()
-                self._record_error(identity, code)
-                self.log.error(
-                    "Mini App journey failed for %s: %s",
-                    identity,
-                    code,
-                    exc_info=True,
-                )
-        root_updates = {
-            "miniapp_journey_last_cycle_time": datetime.now().strftime(TIME_FORMAT),
-            "miniapp_journey_identities": identities,
-        }
-        if complete:
-            root_updates["miniapp_journey_last_error"] = ""
-        self._record_root(**root_updates)
-        return complete, 0 if complete else (retry_after or self.retry_seconds)
-
-    @staticmethod
-    def _target_datetime(now: datetime, hour: int, minute: int) -> datetime:
-        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if not recovered:
+                    self._record_error(identity, code)
+                    self.log.error("Mini App journey failed for %s: %s", identity, code, exc_info=True)
+                wait = self._schedule(identity, wait)
+            waits.append(max(5, int(wait)))
+        self._record_root(
+            miniapp_journey_last_cycle_time=datetime.now().strftime(TIME_FORMAT),
+            miniapp_journey_identities=identities,
+        )
+        return performed, min(waits) if waits else self.retry_seconds
 
     async def run_loop(self) -> None:
         if not self.supported:
@@ -548,58 +590,32 @@ class MiniAppTianxingJourney:
         if startup is not None:
             await startup.wait()
         while getattr(self.actor, "is_running", True):
-            now = datetime.now()
+            identities = []
             if not self.runtime_enabled() or not self.configured_identities():
-                identities = []
                 wait = self.settings_reload_seconds
-                next_target = now + timedelta(seconds=wait)
-                self._record_root(
-                    miniapp_journey_last_error="",
-                    miniapp_journey_identities=[],
-                )
-                self._record_next_schedule(next_target, identities)
-                await asyncio.sleep(wait)
-                continue
-            target = self._target_datetime(now, self.hour, self.minute)
-            identities = self.identities()
-            if now < target:
-                next_target = target
-                wait = max(5, int((next_target - now).total_seconds()))
+                self._record_root(miniapp_journey_last_error="", miniapp_journey_identities=[])
             else:
-                pause = getattr(self.actor, "pause_event", None)
-                if pause is not None:
-                    await pause.wait()
                 try:
-                    complete, retry_after = await self.run_daily_once(now=now)
+                    _, wait = await self.run_once()
+                    identities = self.identities()
                 except asyncio.CancelledError:
                     raise
                 except MiniAppCircuitOpenError as exc:
-                    complete, retry_after = False, miniapp_circuit_wait_seconds(exc, self.retry_seconds)
+                    wait = miniapp_circuit_wait_seconds(exc, self.retry_seconds)
                     self._record_root(
                         miniapp_journey_last_error=exc.code,
                         miniapp_journey_last_error_time=datetime.now().strftime(TIME_FORMAT),
                     )
-                    self.log.info(
-                        "Mini App journey daily cycle paused by upstream circuit until %s",
-                        exc.retry_at or f"in {retry_after}s",
-                    )
+                    self.log.info("Mini App journey cycle paused by upstream circuit until %s", exc.retry_at or f"in {wait}s")
                 except Exception as exc:
                     code = exc.code if isinstance(exc, MiniAppBeastError) else type(exc).__name__.lower()
                     self._record_root(
                         miniapp_journey_last_error=code,
                         miniapp_journey_last_error_time=datetime.now().strftime(TIME_FORMAT),
                     )
-                    self.log.error(
-                        "Mini App journey daily cycle failed: %s",
-                        code,
-                        exc_info=True,
-                    )
-                    complete, retry_after = False, self.retry_seconds
-                if complete:
-                    next_target = target + timedelta(days=1)
-                    wait = max(5, int((next_target - datetime.now()).total_seconds()))
-                else:
-                    wait = max(5, int(retry_after or self.retry_seconds))
-                    next_target = datetime.now() + timedelta(seconds=wait)
-            self._record_next_schedule(next_target, identities)
-            await asyncio.sleep(wait)
+                    self.log.error("Mini App journey cycle failed: %s", code, exc_info=True)
+                    wait = self.retry_seconds
+            self._record_next_schedule(datetime.now() + timedelta(seconds=wait), identities)
+            # Re-read participation and pause switches promptly. run_identity
+            # consults its persisted cooldown before any network request.
+            await asyncio.sleep(min(max(5, wait), self.settings_reload_seconds))

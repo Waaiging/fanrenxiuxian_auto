@@ -1,12 +1,14 @@
 import asyncio
+import copy
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from dashboard_server import build_command_panels
 from miniapp_dwelling import MiniAppCommandResponse, MiniAppDwellingTransport
-from miniapp_journey import MiniAppTianxingJourney, journey_counter
+from miniapp_journey import JOURNEY_INTERVAL_SECONDS, MiniAppTianxingJourney, journey_counter
+from miniapp_beast import MiniAppBeastError
 from restricted_miniapp_worker import RestrictedMiniAppWorker
 
 
@@ -33,7 +35,7 @@ START = {
 }
 
 
-def journey_payload(count=0, *, available=True, remaining_seconds=0, message=""):
+def journey_payload(count=0, *, available=True, remaining_seconds=0, message="", daily_limit=None):
     payload = {
         "ok": True,
         "account": {
@@ -41,14 +43,16 @@ def journey_payload(count=0, *, available=True, remaining_seconds=0, message="")
                 "wildExperience": {
                     "available": available,
                     "dailyCount": count,
-                    "dailyLimit": 2,
-                    "dailyRemaining": max(0, 2 - count),
                     "remainingSeconds": remaining_seconds,
                     "modes": [{"key": "deep", "label": "深入"}],
                 }
             }
         },
     }
+    if daily_limit is not None:
+        payload["account"]["journey"]["wildExperience"].update(
+            dailyLimit=daily_limit, dailyRemaining=max(0, daily_limit - count),
+        )
     if message:
         payload["actionResult"] = {"ok": True, "rawMessage": message}
     return payload
@@ -57,6 +61,7 @@ def journey_payload(count=0, *, available=True, remaining_seconds=0, message="")
 class FakeLogger:
     def __init__(self):
         self.info_messages = []
+        self.error_messages = []
 
     def info(self, message, *args, **kwargs):
         self.info_messages.append(message % args if args else message)
@@ -64,8 +69,8 @@ class FakeLogger:
     def warning(self, *args, **kwargs):
         pass
 
-    def error(self, *args, **kwargs):
-        pass
+    def error(self, message, *args, **kwargs):
+        self.error_messages.append(message % args if args else message)
 
     def critical(self, *args, **kwargs):
         pass
@@ -98,6 +103,7 @@ class FakeActor:
 
     def save_state(self):
         self.saved += 1
+        self.saved_state = copy.deepcopy(self.state)
 
     def identity_pause_seconds(self, identity):
         return 0
@@ -108,13 +114,16 @@ class FakeActor:
 
 
 class SequenceTransport:
-    def __init__(self, count=0, *, prefix_ok=True, available=True, remaining_seconds=0):
+    def __init__(self, count=0, *, prefix_ok=True, available=True, remaining_seconds=0, daily_limit=None):
         self.identity_player_ids = {"无咎子": -201, "主魂": 100}
         self.count = count
         self.prefix_ok = prefix_ok
         self.available = available
         self.remaining_seconds = remaining_seconds
+        self.daily_limit = daily_limit
         self.calls = []
+        self.log_operations = []
+        self.counts = {}
 
     async def initialize(self):
         self.calls.append(("initialize",))
@@ -122,15 +131,17 @@ class SequenceTransport:
 
     async def journey_snapshot(self, identity):
         self.calls.append(("snapshot", identity))
-        available = self.available and self.count < 2
+        available = self.available
         return journey_payload(
-            self.count,
+            self.counts.get(identity, self.count),
             available=available,
             remaining_seconds=self.remaining_seconds,
+            daily_limit=self.daily_limit,
         )
 
-    async def command(self, command, identity="主魂"):
+    async def command(self, command, identity="主魂", log_operation=True):
         self.calls.append(("command", identity, command))
+        self.log_operations.append(log_operation)
         payload = {
             "ok": True,
             "actionResult": {
@@ -140,13 +151,16 @@ class SequenceTransport:
         }
         return MiniAppCommandResponse(payload["actionResult"]["rawMessage"], payload)
 
-    async def journey_action(self, identity, mode="deep"):
+    async def journey_action(self, identity, mode="deep", log_operation=True):
         self.calls.append(("journey", identity, mode))
-        self.count += 1
+        self.log_operations.append(log_operation)
+        count = self.counts.get(identity, self.count) + 1
+        self.counts[identity] = count
         return journey_payload(
-            self.count,
-            available=self.count < 2,
-            message=f"深入历练完成，第 {self.count} 次奖励",
+            count,
+            available=self.available,
+            message=f"深入历练完成，第 {count} 次奖励",
+            daily_limit=self.daily_limit,
         )
 
     async def journey_with_destiny_prefix(
@@ -154,23 +168,38 @@ class SequenceTransport:
         identity,
         prefix_command=".改命 探索",
         mode="deep",
+        log_operation=True,
     ):
-        prefix = await self.command(prefix_command, identity=identity)
+        prefix = await self.command(prefix_command, identity=identity, log_operation=log_operation)
         if not self.prefix_ok:
             return prefix, None
-        return prefix, await self.journey_action(identity, mode=mode)
+        return prefix, await self.journey_action(identity, mode=mode, log_operation=log_operation)
 
 
 class MiniAppJourneyTests(unittest.TestCase):
-    def test_counter_caps_execution_at_two_even_if_server_limit_is_higher(self):
+    def setUp(self):
+        self.now = datetime(2026, 9, 17, 0, 30)
+        clock_patch = patch("miniapp_journey.datetime", wraps=datetime)
+        self.clock = clock_patch.start()
+        self.clock.now.return_value = self.now
+        self.addCleanup(clock_patch.stop)
+
+    def runner(self, **transport_options):
+        actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
+        transport = SequenceTransport(**transport_options)
+        runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+        runner.configured_identities = lambda: ["无咎子"]
+        return actor, transport, runner
+
+    def test_counter_uses_server_limit_without_a_local_two_attempt_cap(self):
         payload = journey_payload(0)
         wild = payload["account"]["journey"]["wildExperience"]
         wild.update({"dailyLimit": 3, "dailyRemaining": 3})
 
         counter = journey_counter(payload)
 
-        self.assertEqual(counter["daily_limit"], 2)
-        self.assertEqual(counter["daily_remaining"], 2)
+        self.assertEqual(counter["daily_limit"], 3)
+        self.assertEqual(counter["daily_remaining"], 3)
 
     def test_transport_uses_journey_endpoint_and_deep_mode(self):
         calls = []
@@ -181,7 +210,7 @@ class MiniAppJourneyTests(unittest.TestCase):
             if path.endswith("/start"):
                 return START
             if path.endswith("/details"):
-                return journey_payload(0)
+                return journey_payload(0, daily_limit=2)
             if path.endswith("/command-center"):
                 return {
                     "ok": True,
@@ -269,33 +298,39 @@ class MiniAppJourneyTests(unittest.TestCase):
             return_value=["厚土"],
         ):
             complete, retry = asyncio.run(
-                runner.run_daily_once(datetime(2026, 7, 29, 7, 10, 1))
+                runner.run_once(self.now)
             )
 
         self.assertTrue(complete)
-        self.assertEqual(retry, 0)
+        self.assertEqual(retry, 5)
         self.assertEqual(
             [call for call in transport.calls if call[0] in {"command", "journey"}],
             [
-                ("journey", "厚土", "deep"),
                 ("journey", "厚土", "deep"),
             ],
         )
         state = actor.state["avatars"]["厚土"]
         self.assertEqual(state["miniapp_journey_last_prefix"], "")
 
-    def test_two_attempts_each_have_a_confirmed_destiny_prefix(self):
+    def test_consecutive_attempts_each_have_a_confirmed_destiny_prefix(self):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
         transport = SequenceTransport(count=0)
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
         runner.configured_identities = lambda: ["无咎子"]
 
         complete, retry = asyncio.run(
-            runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
+            runner.run_once(self.now)
         )
 
         self.assertTrue(complete)
-        self.assertEqual(retry, 0)
+        self.assertEqual(retry, 5)
+        # A premature retry performs neither the prefix nor the action.
+        first_calls = list(transport.calls)
+        self.clock.now.return_value = self.now + timedelta(seconds=2)
+        self.assertEqual(asyncio.run(runner.run_identity("无咎子")), (False, 3))
+        self.assertEqual(transport.calls, first_calls)
+        self.clock.now.return_value = self.now + timedelta(seconds=5)
+        self.assertEqual(asyncio.run(runner.run_once()), (True, 5))
         actions = [call for call in transport.calls if call[0] in {"command", "journey"}]
         self.assertEqual(
             actions,
@@ -308,17 +343,17 @@ class MiniAppJourneyTests(unittest.TestCase):
         )
         state = actor.state["avatars"]["无咎子"]
         self.assertEqual(state["miniapp_journey_daily_count"], 2)
-        self.assertEqual(state["miniapp_journey_last_date"], "2026-07-29")
+        self.assertEqual(state["miniapp_journey_last_date"], "2026-09-17")
         self.assertEqual(len(actor.rewards), 2)
 
-    def test_restart_with_one_used_attempt_only_runs_the_remaining_one(self):
+    def test_used_daily_counter_does_not_prevent_a_due_action(self):
         actor = FakeActor("main", avatars=["无咎子"], sects={"无咎子": "天星宗"})
-        transport = SequenceTransport(count=1)
+        transport = SequenceTransport(count=5)
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
         runner.configured_identities = lambda: ["无咎子"]
 
         complete, _ = asyncio.run(
-            runner.run_daily_once(datetime(2026, 7, 29, 8, 0, 1))
+            runner.run_once(self.now)
         )
 
         self.assertTrue(complete)
@@ -334,7 +369,7 @@ class MiniAppJourneyTests(unittest.TestCase):
         runner.configured_identities = lambda: ["无咎子"]
 
         complete, retry = asyncio.run(
-            runner.run_daily_once(datetime(2026, 7, 29, 7, 0, 1))
+            runner.run_once(self.now)
         )
 
         self.assertFalse(complete)
@@ -351,12 +386,120 @@ class MiniAppJourneyTests(unittest.TestCase):
         runner = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
 
         complete, retry = asyncio.run(
-            runner.run_daily_once(datetime(2026, 7, 29, 8, 0, 1))
+            runner.run_once(self.now)
         )
 
         self.assertFalse(complete)
         self.assertEqual(retry, 1234)
         self.assertFalse(any(call[0] in {"command", "journey"} for call in transport.calls))
+
+    def test_server_cooldown_without_daily_quota_supports_repeated_actions(self):
+        counter = journey_counter(journey_payload(9))
+        self.assertTrue(counter["available"])
+        self.assertIsNone(counter["daily_remaining"])
+        self.assertEqual(counter["daily_count"], 9)
+        self.assertEqual(counter["daily_limit"], 0)
+
+
+    def test_ready_at_without_remaining_seconds_is_respected(self):
+        payload = journey_payload(4)
+        payload["account"]["journey"]["wildExperience"]["readyAt"] = (
+            self.now + timedelta(seconds=1234, milliseconds=100)
+        ).isoformat()
+        counter = journey_counter(payload, now=self.now)
+        self.assertFalse(counter["available"])
+        self.assertEqual(counter["remaining_seconds"], 1235)
+
+    def test_old_daily_completion_and_tomorrow_schedule_are_migrated(self):
+        actor, transport, runner = self.runner(count=2)
+        state = actor.state["avatars"]["无咎子"]
+        state.update(
+            miniapp_journey_last_date="2026-09-17",
+            miniapp_journey_daily_count=2,
+            miniapp_journey_daily_limit=2,
+            miniapp_journey_last_time="2026-09-16 21:00:00",
+            miniapp_journey_next_run_time="2026-09-18 07:00:00",
+        )
+        self.assertEqual(asyncio.run(runner.run_once()), (True, 5))
+        self.assertEqual([call for call in transport.calls if call[0] == "journey"], [("journey", "无咎子", "deep")])
+        self.assertEqual(state["miniapp_journey_next_run_time"], "2026-09-17 00:30:05")
+
+    def test_migration_discards_the_obsolete_three_hour_cooldown(self):
+        actor, transport, runner = self.runner()
+        state = actor.state["avatars"]["无咎子"]
+        state.update(miniapp_journey_last_time="2026-09-16 23:30:00", miniapp_journey_next_run_time="2026-09-17 07:00:00")
+        self.assertEqual(asyncio.run(runner.run_once()), (True, 5))
+        self.assertEqual(state["miniapp_journey_next_run_time"], "2026-09-17 00:30:05")
+        self.assertEqual(len([call for call in transport.calls if call[0] == "journey"]), 1)
+
+    def test_restart_preserves_a_server_cooldown(self):
+        actor, transport, runner = self.runner(available=False, remaining_seconds=1234)
+        self.assertEqual(asyncio.run(runner.run_once()), (False, 1234))
+        due = actor.state["avatars"]["无咎子"]["miniapp_journey_next_run_time"]
+        restored = MiniAppTianxingJourney(actor, transport, "main", FakeLogger())
+        restored.configured_identities = runner.configured_identities
+        transport.calls.clear()
+        self.clock.now.return_value = self.now + timedelta(seconds=100)
+        self.assertEqual(asyncio.run(restored.run_once()), (False, 1134))
+        self.assertEqual(actor.state["avatars"]["无咎子"]["miniapp_journey_next_run_time"], due)
+        self.assertFalse(any(call[0] == "snapshot" for call in transport.calls))
+
+    def test_success_is_persisted_even_when_followup_snapshot_fails(self):
+        actor, transport, runner = self.runner()
+        transport.journey_snapshot = AsyncMock(side_effect=[journey_payload(), MiniAppBeastError("read_failed")])
+        _, retry = asyncio.run(runner.run_once())
+        self.assertEqual(retry, runner.retry_seconds)
+        state = actor.saved_state["avatars"]["无咎子"]
+        self.assertEqual(state["miniapp_journey_next_run_time"], "2026-09-17 00:45:00")
+        self.assertEqual(state["miniapp_journey_last_time"], "2026-09-17 00:30:00")
+        self.assertEqual(state["miniapp_journey_summary"]["records"][0]["result"], "深入历练完成，第 1 次奖励")
+        self.clock.now.return_value = self.now + timedelta(minutes=14)
+        self.assertEqual(asyncio.run(runner.run_identity("无咎子")), (False, 60))
+        self.assertEqual(len([call for call in transport.calls if call[0] == "journey"]), 1)
+
+    def test_success_uses_longer_server_cooldown(self):
+        actor, transport, runner = self.runner()
+        transport.journey_snapshot = AsyncMock(side_effect=[journey_payload(), journey_payload(1, available=False, remaining_seconds=14400)])
+        self.assertEqual(asyncio.run(runner.run_once()), (True, 14400))
+        self.assertEqual(actor.state["avatars"]["无咎子"]["miniapp_journey_next_run_time"], "2026-09-17 04:30:00")
+
+    def test_explicit_server_quota_waits_for_reset(self):
+        actor, transport, runner = self.runner()
+        payload = journey_payload(3, daily_limit=3)
+        payload["account"]["journey"]["wildExperience"]["resetAt"] = "2026-09-17 02:00:00"
+        transport.journey_snapshot = AsyncMock(return_value=payload)
+        self.assertEqual(asyncio.run(runner.run_once()), (False, 5400))
+        self.assertFalse(any(call[0] == "journey" for call in transport.calls))
+
+    def test_race_at_action_reads_server_cooldown_instead_of_retrying_action(self):
+        actor, transport, runner = self.runner()
+        transport.journey_action = AsyncMock(side_effect=MiniAppBeastError("wild_experience_unavailable"))
+        transport.journey_snapshot = AsyncMock(side_effect=[journey_payload(), journey_payload(1, available=False, remaining_seconds=321)])
+        self.assertEqual(asyncio.run(runner.run_once()), (False, 321))
+        transport.journey_action.assert_awaited_once()
+        self.assertEqual(actor.state["avatars"]["无咎子"]["miniapp_journey_last_error"], "")
+
+    def test_main_and_avatar_keep_separate_deadlines(self):
+        actor, transport, runner = self.runner()
+        runner.configured_identities = lambda: ["主魂", "无咎子"]
+        actor.state.update(miniapp_journey_ready_at="2026-09-17 02:00:00")
+        actor.state["avatars"]["无咎子"]["miniapp_journey_ready_at"] = "2026-09-17 01:00:00"
+        self.assertEqual(asyncio.run(runner.run_once()), (False, 1800))
+        runner._record_next_schedule(self.now + timedelta(seconds=1800), runner.identities())
+        self.assertEqual(actor.state["miniapp_journey_next_run_time"], "2026-09-17 02:00:00")
+        self.assertEqual(actor.state["avatars"]["无咎子"]["miniapp_journey_next_run_time"], "2026-09-17 01:00:00")
+        self.assertEqual(actor.state["miniapp_journey_next_cycle_time"], "2026-09-17 01:00:00")
+
+    def test_loop_runs_overnight_and_reloads_selection_before_cooldown_expires(self):
+        actor, transport, runner = self.runner()
+        runner.run_once = AsyncMock(return_value=(True, JOURNEY_INTERVAL_SECONDS))
+        async def stop_after_sleep(seconds):
+            self.assertLessEqual(seconds, 60)
+            actor.is_running = False
+        with patch("miniapp_journey.asyncio.sleep", side_effect=stop_after_sleep):
+            asyncio.run(runner.run_loop())
+        runner.run_once.assert_awaited_once()
+
 
     def test_dashboard_adds_journey_to_all_three_scoped_panels(self):
         main_state = {
