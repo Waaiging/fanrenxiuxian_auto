@@ -959,59 +959,45 @@ class SoulCurseMixin:
             identity=identity)
         return False
 
-    def record_soul_curse_infer_response(self, text, identity="主魂"):
-        parsed = parse_soul_curse_infer(text)
+    def _record_soul_curse_personal_response(self, action, text, identity, *, advance_chain):
+        parser, label, success_detail, next_stage = {
+            "infer": (parse_soul_curse_infer, "推演", "封魂咒推演完成", "protect"),
+            "protect": (parse_soul_curse_protect, "护持", "护持神魂完成", "publish"),
+        }[action]
+        parsed = parser(text)
+        status = parsed.get("status") or "unknown"
         state = self.get_soul_curse_state(identity)
         now = now_str()
-        if parsed.get("status") == "success":
-            state["last_infer_time"] = now
-            state["next_infer_time"] = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
-            state["chain_stage"] = "protect"
-            state["next_action_at"] = ""
-            self.soul_curse_set_publisher_status("infer_success", "封魂咒推演完成，准备护持神魂", 3, text, identity=identity)
-            return "success"
-        if parsed.get("status") == "cooldown":
+        if status == "success":
+            state[f"last_{action}_time"] = now
+            wait = SOUL_CURSE_CHAIN_SECONDS
+            detail = success_detail
+            if advance_chain:
+                detail += "，准备护持神魂" if action == "infer" else "，准备发布委托"
+        elif status in {"cooldown", "blocked"}:
             wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
-            state["next_infer_time"] = add_seconds_str(now, wait)
-            state["chain_stage"] = "infer"
-            self.soul_curse_set_publisher_status("infer_cooldown", f"推演冷却 {wait}秒", wait, text, identity=identity)
-            return "cooldown"
-        if parsed.get("status") == "blocked":
-            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
-            state["chain_stage"] = "infer"
-            self.soul_curse_set_publisher_status("infer_blocked", "推演暂不可用", wait, text, identity=identity)
-            return "blocked"
-        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
-        state["chain_stage"] = "infer"
-        self.soul_curse_set_publisher_status("infer_unknown", "推演回执未识别" if text else "推演无回执", wait, text, identity=identity)
-        return "unknown"
+            detail = f"{label}冷却 {wait}秒" if status == "cooldown" else f"{label}暂不可用"
+        else:
+            status = "unknown"
+            wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
+            detail = f"{label}回执未识别" if text else f"{label}无回执"
+        # Every outcome needs its own persisted deadline. In independent mode,
+        # neither a success nor a failure may change the commission lifecycle.
+        state[f"next_{action}_time"] = add_seconds_str(now, wait)
+        next_seconds = None
+        if advance_chain:
+            state["chain_stage"] = next_stage if status == "success" else action
+            next_seconds = 3 if status == "success" else wait
+        self.soul_curse_set_publisher_status(
+            f"{action}_{status}", detail, next_seconds, text, identity=identity,
+        )
+        return status
 
-    def record_soul_curse_protect_response(self, text, identity="主魂"):
-        parsed = parse_soul_curse_protect(text)
-        state = self.get_soul_curse_state(identity)
-        now = now_str()
-        if parsed.get("status") == "success":
-            state["last_protect_time"] = now
-            state["next_protect_time"] = add_seconds_str(now, SOUL_CURSE_CHAIN_SECONDS)
-            state["chain_stage"] = "publish"
-            state["next_action_at"] = ""
-            self.soul_curse_set_publisher_status("protect_success", "护持神魂完成，准备发布委托", 3, text, identity=identity)
-            return "success"
-        if parsed.get("status") == "cooldown":
-            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
-            state["next_protect_time"] = add_seconds_str(now, wait)
-            state["chain_stage"] = "protect"
-            self.soul_curse_set_publisher_status("protect_cooldown", f"护持冷却 {wait}秒", wait, text, identity=identity)
-            return "cooldown"
-        if parsed.get("status") == "blocked":
-            wait = max(60, int(parsed.get("cooldown_seconds") or SOUL_CURSE_UNKNOWN_RETRY_SECONDS))
-            state["chain_stage"] = "protect"
-            self.soul_curse_set_publisher_status("protect_blocked", "护持暂不可用", wait, text, identity=identity)
-            return "blocked"
-        wait = SOUL_CURSE_RETRY_SECONDS if not text else SOUL_CURSE_UNKNOWN_RETRY_SECONDS
-        state["chain_stage"] = "protect"
-        self.soul_curse_set_publisher_status("protect_unknown", "护持回执未识别" if text else "护持无回执", wait, text, identity=identity)
-        return "unknown"
+    def record_soul_curse_infer_response(self, text, identity="主魂", *, advance_chain=True):
+        return self._record_soul_curse_personal_response("infer", text, identity, advance_chain=advance_chain)
+
+    def record_soul_curse_protect_response(self, text, identity="主魂", *, advance_chain=True):
+        return self._record_soul_curse_personal_response("protect", text, identity, advance_chain=advance_chain)
 
     def record_soul_curse_co_study_response(self, text, identity="主魂"):
         parsed = parse_soul_curse_co_study(text)
@@ -1383,7 +1369,49 @@ class SoulCurseMixin:
             self.record_soul_curse_visit_response(self.soul_curse_response_text(resp), profile)
         return 5
 
+    async def soul_curse_run_personal_actions(self, identity="主魂"):
+        """Run one due personal action while commission publication is paused."""
+        identity = self.soul_curse_resolve_identity(identity)
+        if not self.soul_curse_identity_enabled(identity=identity) or self.identity_pause_seconds(identity) > 0:
+            return 300
+        async with self.soul_curse_atomic_task(f"SoulCursePersonal-{identity}"):
+            # Settings, names and cooldowns can change while another task owns
+            # the identity lock. Re-read them before selecting an action.
+            identity = self.soul_curse_resolve_identity(identity)
+            if not self.soul_curse_identity_enabled(identity=identity) or self.identity_pause_seconds(identity) > 0:
+                return 300
+            if not self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, identity):
+                return 5
+            state = self.get_soul_curse_state(identity)
+            waits = [300]
+            for command, deadline, recorder in (
+                (SOUL_CURSE_INFER_COMMAND, "next_infer_time", self.record_soul_curse_infer_response),
+                (SOUL_CURSE_PROTECT_COMMAND, "next_protect_time", self.record_soul_curse_protect_response),
+            ):
+                if self.soul_curse_command_paused(command, identity):
+                    continue
+                if is_future(state.get(deadline, "")):
+                    waits.append(seconds_until(state[deadline]))
+                    continue
+                try:
+                    if identity == "主魂":
+                        response = await self.soul_curse_send_main(command, timeout=70)
+                    else:
+                        response = await self.soul_curse_send_identity(identity, command, timeout=70)
+                except Exception:
+                    recorder("", identity=identity, advance_chain=False)
+                    self.soul_curse_logger().error(
+                        "Soul curse personal action [%s] %s failed; retry scheduled.",
+                        identity, command, exc_info=True,
+                    )
+                    return 5
+                recorder(self.soul_curse_response_text(response), identity=identity, advance_chain=False)
+                return 5
+            return max(5, min(waits))
+
     async def soul_curse_run_publisher_chain(self, profile):
+        if self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, "主魂"):
+            return await self.soul_curse_run_personal_actions()
         state = self.get_soul_curse_state()
         if is_future(state.get("next_action_at", "")):
             return seconds_until(state.get("next_action_at", ""))
@@ -1771,6 +1799,9 @@ class SoulCurseMixin:
 
     async def soul_curse_run_avatar_publisher_chain(self, chain_profile, identity):
         """化身链状态机：infer→protect→publish（与主魂链同构，状态存 avatar state）。"""
+        identity = self.soul_curse_resolve_identity(identity)
+        if self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, identity):
+            return await self.soul_curse_run_personal_actions(identity)
         state = self.get_soul_curse_state(identity)
         if is_future(state.get("next_action_at", "")):
             return seconds_until(state.get("next_action_at", ""))
@@ -1883,7 +1914,7 @@ class SoulCurseMixin:
                     # The publisher is waiting on the commission lifecycle,
                     # but the assistant must still be allowed to claim it in
                     # this same scheduler tick.
-                    publisher_short_wait = True
+                    publisher_short_wait = not self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, "主魂")
 
             if not publisher_short_wait and not local_commission_pending:
                 chain_wait = await self.soul_curse_run_publisher_chain(publisher)
@@ -1950,10 +1981,15 @@ class SoulCurseMixin:
             return self.record_soul_curse_wanying_greeting_response(text, publisher)
         if cmd == SOUL_CURSE_MOON_MEDITATION_COMMAND and identity == "主魂" and publisher:
             return self.record_soul_curse_moon_meditation_response(text, publisher)
-        if cmd == SOUL_CURSE_INFER_COMMAND and identity == "主魂" and publisher:
-            return self.record_soul_curse_infer_response(text) in {"success", "cooldown", "blocked"}
-        if cmd == SOUL_CURSE_PROTECT_COMMAND and identity == "主魂" and publisher:
-            return self.record_soul_curse_protect_response(text) in {"success", "cooldown", "blocked"}
+        if cmd in {SOUL_CURSE_INFER_COMMAND, SOUL_CURSE_PROTECT_COMMAND}:
+            personal_profile = publisher if identity == "主魂" else self.soul_curse_avatar_publisher_profile(identity)
+            if personal_profile:
+                recorder = (self.record_soul_curse_infer_response if cmd == SOUL_CURSE_INFER_COMMAND
+                            else self.record_soul_curse_protect_response)
+                return recorder(
+                    text, identity=identity,
+                    advance_chain=not self.soul_curse_command_paused(SOUL_CURSE_PUBLISH_COMMAND, identity),
+                ) in {"success", "cooldown", "blocked"}
         if cmd == SOUL_CURSE_CO_STUDY_COMMAND and identity == "主魂" and publisher:
             return self.record_soul_curse_co_study_response(text) in {"success", "cooldown", "blocked"}
         if cmd.startswith(".发布解咒委托") and identity == "主魂" and publisher:
